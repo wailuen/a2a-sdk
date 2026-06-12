@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ agent_name }} · Agent console</title>
+  <!--
+    Strict-CSP shell (DESIGN.md §7): zero inline scripts, zero style=
+    attributes, no external CDNs. All behavior lives in /admin/static/
+    ES modules; all styling in /admin/static/console.css. The page itself
+    holds no data — every API call is bearer-authenticated by the JS.
+  -->
+  <link rel="stylesheet" href="/admin/static/console.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-name">{{ agent_name }}</span>
+        <span class="brand-version">v{{ agent_version }}</span>
+        <span class="brand-sub">agent-sdk console</span>
+      </div>
+      <nav class="nav" id="nav" aria-label="Console sections"></nav>
+      <div class="sidebar-foot">
+        <div class="auth-status" id="auth-status"></div>
+        <button type="button" class="btn btn-ghost btn-sm" id="btn-signout" hidden>Sign out</button>
+      </div>
+    </aside>
+    <main class="main" id="main" tabindex="-1"></main>
+  </div>
+
+  <!-- First-run / auth gate: shown by console.js when GET /admin/api/keys
+       returns 401. Bearer is kept in sessionStorage only — never cookies. -->
+  <dialog class="auth-gate" id="auth-gate">
+    <div class="auth-gate-inner">
+      <h1 class="auth-gate-title">{{ agent_name }} console</h1>
+      <p class="auth-gate-sub">This console needs an admin API key. The key is kept in
+        sessionStorage for this tab only and sent as a Bearer header.</p>
+
+      <form id="auth-key-form" class="auth-form">
+        <label class="field-label" for="auth-key-input">Admin API key</label>
+        <input type="password" id="auth-key-input" class="input mono"
+               placeholder="ak_…" autocomplete="off" spellcheck="false">
+        <button type="submit" class="btn btn-primary">Use this key</button>
+        <p class="form-error" id="auth-key-error" hidden></p>
+      </form>
+
+      <div class="auth-divider"><span>first run?</span></div>
+
+      <form id="auth-bootstrap-form" class="auth-form">
+        <label class="field-label" for="auth-bootstrap-input">Bootstrap token</label>
+        <p class="field-help">Printed to the server's stdout at startup whenever the key
+          store is empty (valid 15 minutes, single use). It mints the first admin key.</p>
+        <input type="password" id="auth-bootstrap-input" class="input mono"
+               placeholder="bootstrap token from server stdout" autocomplete="off" spellcheck="false">
+        <label class="field-label" for="auth-bootstrap-label">Key label</label>
+        <input type="text" id="auth-bootstrap-label" class="input" value="console-admin"
+               autocomplete="off" spellcheck="false">
+        <button type="submit" class="btn btn-primary">Mint first admin key</button>
+        <p class="form-error" id="auth-bootstrap-error" hidden></p>
+      </form>
+
+      <div class="key-reveal" id="auth-minted" hidden>
+        <p class="key-reveal-title">Admin key minted — copy it now; it is shown exactly once.</p>
+        <code class="key-reveal-value mono" id="auth-minted-value"></code>
+        <button type="button" class="btn" id="auth-minted-continue">Continue to console</button>
+      </div>
+    </div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <script type="module" src="/admin/static/console.js"></script>
+</body>
+</html>

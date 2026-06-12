@@ -1,0 +1,8 @@
+{
+  "name": "agent-sdk-harness",
+  "version": "0.2.0",
+  "description": "Claude Code harness for building agent-sdk agents. /new-agent scaffolds a template repo; /add-tool and /add-source wire extension points; /agent-verify runs conformance and OAuth-chain probes; /scenario generates JTBD usage scenarios into workspace/scenarios/; /codify captures learnings into workspace/learning/; /analyze creates and audits PRD/ADR docs in workspace/; the sdk-advisor agent reasons about SDK conventions and invariants. Reuses the agent-interop check kit (agent-stack-check + a2a/a2ui/ag-ui/mcp advisors).",
+  "author": {
+    "name": "agent-sdk"
+  }
+}

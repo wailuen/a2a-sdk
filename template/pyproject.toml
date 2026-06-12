@@ -1,0 +1,22 @@
+[project]
+name = "{{AGENT_NAME}}"
+version = "0.1.0"
+description = "{{AGENT_NAME}} agent (A2A / AG-UI / MCP) built on agent-sdk"
+requires-python = ">=3.12"
+dependencies = [
+    # Pinned by commit SHA (tags are mutable; SHAs aren't). Tag: {{SDK_TAG}}
+    "agent-sdk @ git+ssh://{{SDK_GIT_URL}}@{{SDK_SHA}}",
+    # The template owns exact pins; the SDK declares lower bounds only.
+    "uvicorn[standard]==0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.25.2",
+    "httpx==0.28.1",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

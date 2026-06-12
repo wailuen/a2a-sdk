@@ -1,0 +1,95 @@
+"""Typed loop events — the seam between the agent loop and protocol routes.
+
+The loop yields these; each route owns a translator to its wire format
+(DESIGN.md §2). The loop knows nothing about protocols; translators never
+reach into the loop. ``TurnStartedEvent`` is first-class so the AG-UI STEP
+translator never parses progress text for turn boundaries.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass(slots=True)
+class LoopEvent:
+    pass
+
+
+@dataclass(slots=True)
+class TurnStartedEvent(LoopEvent):
+    turn: int  # 1-based
+    max_turns: int
+
+
+@dataclass(slots=True)
+class ProgressEvent(LoopEvent):
+    message: str
+
+
+@dataclass(slots=True)
+class NoteEvent(LoopEvent):
+    """Agent-side caveat surfaced to the consumer (AG-UI AGENT_NOTE)."""
+
+    note: str
+
+
+@dataclass(slots=True)
+class ToolCallEvent(LoopEvent):
+    tool_call_id: str
+    tool_name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(slots=True)
+class ToolResultEvent(LoopEvent):
+    tool_call_id: str
+    tool_name: str
+    ok: bool
+    result: Any = None
+    error: str | None = None  # human-safe message; never an AgentError object
+
+
+@dataclass(slots=True)
+class TextEvent(LoopEvent):
+    """A completed assistant text segment (Bedrock Converse is non-streaming)."""
+
+    text: str
+
+
+@dataclass(slots=True)
+class ArtifactEvent(LoopEvent):
+    """A structured artifact produced by a tool.
+
+    ``model`` is a content-type model instance (Standard Profile or registered
+    domain type); ``data_type`` is its snake_case identifier.
+    """
+
+    data_type: str
+    tool_name: str
+    model: Any
+
+
+@dataclass(slots=True)
+class UsageEvent(LoopEvent):
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass(slots=True)
+class InterruptEvent(LoopEvent):
+    """Loop pauses for input (action_gate). Routes map this to
+    input-required (A2A) / RUN_FINISHED interrupt outcome (AG-UI)."""
+
+    interrupt_id: str
+    reason: str
+    message: str
+    response_schema: dict[str, Any] = field(default_factory=dict)
+    tool_call_id: str | None = None
+
+
+@dataclass(slots=True)
+class DoneEvent(LoopEvent):
+    ok: bool = True
+    error: str | None = None  # human-safe message; never an AgentError object
