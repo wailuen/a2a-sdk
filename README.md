@@ -143,6 +143,7 @@ Skills live in the seeded `.claude/skills/` of every generated agent repo.
 | `/changelog` | ops | categorised SDK diff between two SHAs (BREAKING / Protocol / Security / Feature) |
 | `/diagnose` | ops | classify runtime failure L1–L7 → concrete probe → root-cause prescription |
 | `/migrate` | ops | source analysis → migration PRD → `/wave` per wave → `/agent-verify` |
+| `/sdk-issue` | ops | classify finding → if SDK-level, file structured GitHub issue on `wailuen/a2a-sdk`; agent-domain findings redirected to `/codify` |
 | `/analyze` | planning | create/update PRD or ADR |
 | `/todos` | planning | vertical-slice wave plan from PRD |
 | `/scenario` | planning | generate JTBD usage scenarios |
@@ -154,7 +155,8 @@ Skills live in the seeded `.claude/skills/` of every generated agent repo.
 
 > `/new-agent`, `/upgrade`, `/changelog`, `/provision`, `/diagnose`, and
 > `/migrate` are in the harness plugin only (not seeded). Run them from the
-> `a2a-sdk` Claude Code context.
+> `a2a-sdk` Claude Code context. `/sdk-issue` is seeded into every agent repo
+> so SDK bugs can be reported from the agent context.
 
 ---
 

@@ -21,6 +21,7 @@ author to remember them.
 | `/changelog` | operations | categorised SDK git changelog between two SHAs (BREAKING / Protocol / Security / Feature / Fix) |
 | `/diagnose` | operations | classify runtime failure to L1-L7 → probe the exact layer → root cause + fix prescription |
 | `/migrate` | operations | source analysis → migration PRD → `/new-agent --no-run` → `/wave` per wave → `/agent-verify` |
+| `/sdk-issue` | operations | classify finding (SDK-level vs agent-domain) → file structured GitHub issue on `wailuen/a2a-sdk`; agent-domain findings redirected to `/codify` |
 | `/scenario` | planning | generate JTBD usage scenarios → `workspace/scenarios/` |
 | `/codify` | knowledge | capture a learning (bug/fix/pattern) → `workspace/learning/LRN-NNN-*.md` |
 | `/analyze` | planning | create/update PRD, ADR, todos → `workspace/prd/` / `workspace/adr/` |

@@ -136,6 +136,7 @@ directory **two levels up** from this `SKILL.md`
 - `skills/redteam/`, `skills/debug/`
 - `skills/upgrade/`, `skills/changelog/`
 - `skills/provision/`, `skills/diagnose/`, `skills/migrate/`
+- `skills/sdk-issue/`
 
 → all to `<name>/.claude/skills/`
 
@@ -214,7 +215,7 @@ MASTER_KEY:  generated → .env (not shown; rotate via python -m agent_sdk rotat
 Tests:       <pass/fail summary>
 Dev boot:    <ok @ :8000 | skipped (--no-run)>
 Seeded:      .claude/skills/{add-tool,add-source,agent-verify,scenario,codify,analyze,todos,implement,wave,redteam,debug}
-             .claude/skills/{upgrade,changelog,provision,diagnose,migrate}
+             .claude/skills/{upgrade,changelog,provision,diagnose,migrate,sdk-issue}
              .claude/agents/core/{redteam,analyst,planner,codify,debug}.md
              .claude/agents/project/{sdk-advisor,python-implementer}.md
              .claude/workflows/wave-cycle.js
