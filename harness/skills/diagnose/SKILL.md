@@ -79,6 +79,10 @@ Examples:
    - **422:** compare the request shape against the SDK's `MessageSendParams` schema;
      run `curl -X POST <agent-url>/v1/message:send -H "..." -d '{}' --verbose` to
      see the FastAPI validation error detail.
+   - **SI-5 check (proactive):**
+     `grep -rn 'include_router\|APIRouter' src/routes/ src/main.py 2>/dev/null` —
+     confirm every router mounts with `Depends(require_identity)`; a missing
+     dependency is an SI-5 violation (auth bypass).
 
    **L6 Upstream:**
    - Read the adapter's `allowed_hosts`. Confirm the upstream host is listed.

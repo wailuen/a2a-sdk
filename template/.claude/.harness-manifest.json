@@ -1,0 +1,33 @@
+{
+  "sdk_sha": "{{SDK_SHA}}",
+  "files": {
+    ".claude/skills/add-tool/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/add-source/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/agent-verify/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/analyze/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/changelog/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/codify/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/debug/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/diagnose/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/implement/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/migrate/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/provision/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/redteam/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/scenario/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/sdk-issue/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/setup/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/todos/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/upgrade/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/wave/SKILL.md": "{{SDK_SHA}}",
+    ".claude/agents/core/redteam.md": "{{SDK_SHA}}",
+    ".claude/agents/core/analyst.md": "{{SDK_SHA}}",
+    ".claude/agents/core/planner.md": "{{SDK_SHA}}",
+    ".claude/agents/core/codify.md": "{{SDK_SHA}}",
+    ".claude/agents/core/debug.md": "{{SDK_SHA}}",
+    ".claude/agents/project/sdk-advisor.md": "{{SDK_SHA}}",
+    ".claude/agents/project/python-implementer.md": "{{SDK_SHA}}",
+    ".claude/workflows/wave-cycle.js": "{{SDK_SHA}}",
+    ".claude/reference/sdk-security-invariants.md": "{{SDK_SHA}}",
+    ".claude/settings.json": "{{SDK_SHA}}"
+  }
+}

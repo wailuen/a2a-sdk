@@ -1,0 +1,50 @@
+{
+  "permissions": {
+    "allow": [
+      "Agent(*)",
+      "Read(**)",
+      "Bash(find . *)",
+      "Bash(git *)",
+      "Bash(grep *)",
+      "Bash(ls *)",
+      "Bash(wc *)",
+      "Bash(python *)",
+      "Bash(python3 *)",
+      "Bash(python3.12 *)",
+      "Bash(.venv/bin/uvicorn *)",
+      "Bash(.venv/bin/python *)",
+      "Bash(uv *)",
+      "Bash(VIRTUAL_ENV=* uv pip install *)",
+      "Bash(pytest *)",
+      "Bash(ruff *)",
+      "Bash(mypy *)",
+      "Bash(curl *)",
+      "Bash(ssh *)",
+      "Bash(lsof *)",
+      "Bash(gh *)",
+      "Bash(cat pyproject.toml)",
+      "Bash(cat *requirements*.txt)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Read(.env.local)",
+      "Read(*/.env)",
+      "Read(*/.env.local)",
+      "Read(*.db)",
+      "Read(*.sqlite)",
+      "Read(.data/*)",
+      "Bash(cat .env)",
+      "Bash(cat .env.local)",
+      "Bash(cat */.env)",
+      "Bash(cat */.env.local)",
+      "Bash(grep * .env)",
+      "Bash(grep * .env.local)",
+      "Bash(*MASTER_KEY*)",
+      "Bash(*master_key*)",
+      "Bash(*API_KEY*)",
+      "Bash(*api_key*)",
+      "Bash(*SECRET=*)",
+      "Bash(*PASSWORD=*)"
+    ]
+  }
+}

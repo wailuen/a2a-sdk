@@ -2,15 +2,22 @@
 
 An A2A / AG-UI / MCP agent built on `agent-sdk`.
 
-> **Using this template?** Run `/new-agent <name> --from-github` from the SDK
-> harness, or `/new-agent <name>` (local). The skill substitutes all placeholders,
-> generates a strong `MASTER_KEY` into `.env`, seeds `.claude/` with the full
-> build harness, and walks you through first run.
+> **Using this template?** Two paths — both substitute all placeholders and
+> generate a strong `MASTER_KEY`:
 >
-> Template placeholders: `{{AGENT_NAME}}` (kebab-case agent name),
-> `{{AGENT_MODULE}}` (python-safe snake_case), `{{SDK_GIT_URL}}`,
-> `{{SDK_SHA}}` (commit SHA), `{{SDK_TAG}}` (tag, comment only).
-> Never substitute these by hand — humans never invent keys.
+> **Path A — self-contained (no SDK repo needed):**
+> Clone this repo, open in Claude Code, run `/setup`.
+> It interviews you, resolves the SDK SHA via `git ls-remote`, substitutes
+> all `{{placeholders}}`, writes `MASTER_KEY` to `.env`, and walks first run.
+> Then: `/analyze` → `/todos` → `/wave`.
+>
+> **Path B — SDK context:**
+> Run `/new-agent <name> --from-github` (or `/new-agent <name>`) from the
+> `a2a-sdk` harness. The SDK repo must be a local sibling.
+>
+> Template placeholders: `{{AGENT_NAME}}` (kebab-case), `{{AGENT_MODULE}}`
+> (snake_case), `{{SDK_GIT_URL}}`, `{{SDK_SHA}}`, `{{SDK_TAG}}`.
+> Never substitute these by hand.
 
 ## Run locally
 

@@ -44,7 +44,7 @@ Example: `/sdk-release 1.3.0`
    git rev-parse --abbrev-ref HEAD
    ```
    Warn if not `main` or `release/*`, but do not stop — the user may be releasing
-   from a named branch intentionally. This branch name is used in step 11's push.
+   from a named branch intentionally. This branch name is used in step 12's push.
 
 ### Phase 1 — Version bump
 
@@ -70,20 +70,29 @@ Example: `/sdk-release 1.3.0`
    section at the top of `CHANGELOG.md` (below the `# Changelog` header), before
    the previous `## [...]` entry.
 
-   Format:
+   Format (same 7 categories as `/changelog`):
    ```markdown
    ## [1.3.0] — 2026-06-12
 
-   ### Breaking changes
+   ### 🔴 Breaking changes
    - <sha7> <subject>
 
-   ### Protocol surface changes
+   ### 🟡 Protocol surface changes
    - ...
 
-   ### Features
+   ### 🟠 Security
    - ...
 
-   ### Fixes
+   ### ✅ Features
+   - ...
+
+   ### 🔧 Fixes
+   - ...
+
+   ### 🧪 Test / CI
+   - ...
+
+   ### — Other
    - ...
    ```
    Omit empty sections.
@@ -141,7 +150,7 @@ Next:
 - **Never skip `/sdk-test`.** The test gate is the only thing standing between
   a broken SDK and pinned agents that can't upgrade.
 - **Never force-push main or a tag.**
-- If the user cancels at step 10, the commit and tag exist locally but are not
+- If the user cancels at step 11, the commit and tag exist locally but are not
   pushed. They can push manually or run `/sdk-release` again with the same
   version (step 5 will fail gracefully — bump check catches the already-matching
   version and offers to push the existing tag).

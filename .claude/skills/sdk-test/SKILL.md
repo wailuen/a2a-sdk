@@ -68,9 +68,7 @@ and a live conformance check against the bundled example agent.
    `GET http://localhost:9001/health` for 200 (30 s timeout). On failure, cat the
    temp file and stop.
 
-6. Invoke `/agent-verify` with the example URL. Pass `--url http://localhost:9001`
-   to the skill (or set the target URL via the skill's URL parameter — check
-   `/agent-verify`'s usage for the correct flag). Surface the full report.
+6. Invoke `/agent-verify --port 9001`. Surface the full report.
 
 7. Tear down the example uvicorn process.
 

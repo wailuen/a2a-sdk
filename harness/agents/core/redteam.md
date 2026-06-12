@@ -114,6 +114,46 @@ permanent learnings via auto-codify.
 - Verify every `Reuses: C-NNN` in completed todos imports the named component
   in landed code. Mismatch = **high**.
 
+## Structured output modes
+
+Wave-cycle.js calls you in two modes. Return structured output exactly as specified.
+
+### Mode 1 — Unit or phase redteam (`RT_SCHEMA`)
+
+Called with labels `rt:unit:*` and `rt:phase:*`. Return:
+
+```json
+{
+  "findingsCount": 2,
+  "findings": [
+    {
+      "id": "RT-001",
+      "severity": "critical",
+      "file": "src/tools/fetch.py",
+      "description": "one-sentence description",
+      "fix": "what to change",
+      "codify": "one-sentence lesson (required for critical/high)"
+    }
+  ]
+}
+```
+
+### Mode 2 — Todos redteam (`PLAN_RT_SCHEMA`)
+
+Called with label `rt:todos` (before implementation starts). Scope: review the wave plan only — do not re-audit cross-wave ordering. Return:
+
+```json
+{
+  "issuesFound": true,
+  "reuseAnnotations": [{ "todoId": "P1-01", "componentId": "C-001", "note": "use existing helper" }],
+  "siAnnotations":    [{ "todoId": "P1-02", "siId": "SI-4",  "note": "reads credential directly" }],
+  "sliceIssues":      [{ "todoId": "P1-03", "issue": "horizontal layer, not end-to-end" }],
+  "newCandidates":    [{ "name": "SafeUrlBuilder", "location": "src/utils/url.py", "description": "..." }]
+}
+```
+
+Set `issuesFound: true` when any array is non-empty. Set `issuesFound: false` (all arrays empty) when the plan is clean.
+
 ## Output Format
 
 ```markdown
@@ -134,8 +174,8 @@ permanent learnings via auto-codify.
 
 ## Rules
 
-- Severity: **critical** (security invariant / data leak / blocks deploy),
-  **high** (spec violation / SI-3 through SI-7 gap), **medium** (drift /
+- Severity: **critical** (security invariant / data leak / blocks deploy / SI-1, SI-2, SI-5, SI-6),
+  **high** (spec violation / SI-3, SI-4, SI-7 gap), **medium** (drift /
   missing edge case), **low** (code quality)
 - Every finding: what's wrong, why it matters, how to fix
 - No praise or softeners — adversarial review

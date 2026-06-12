@@ -52,7 +52,7 @@ cd a2a-sdk
 
 Run `/new-agent` in Claude Code. It interviews you, preflights your SSH
 access to this repo, renders the template, generates a strong `MASTER_KEY`
-into `.env`, seeds the new repo's `.claude/` with all 16 harness skills, and
+into `.env`, seeds the new repo's `.claude/` with all 17 harness skills, and
 walks the first boot.
 
 ```text
@@ -66,9 +66,13 @@ Optional flags:
 /new-agent my-agent --no-run         # scaffold only (used internally by /migrate)
 ```
 
-Alternatively, use the GitHub template directly — click **Use this template**
-on [`wailuen/agent-template`](https://github.com/wailuen/agent-template),
-clone your new repo, open in Claude Code, and the `.claude/` is already seeded.
+**Path A — template clone (no SDK repo needed):**
+Clone [`wailuen/agent-template`](https://github.com/wailuen/agent-template) (or
+click **Use this template** on GitHub), open in Claude Code, and run `/setup`.
+The `.claude/` is pre-seeded; `/setup` interviews you, resolves the SDK SHA via
+`git ls-remote`, substitutes all `{{placeholders}}`, generates `MASTER_KEY` into
+`.env`, and walks first boot — no local SDK repo required. After that the full
+development lifecycle is available: `/analyze` → `/todos` → `/wave`.
 
 ### 4 — Provision credentials
 
@@ -85,25 +89,38 @@ optional live tool call. No secrets are echoed or written to files beyond
 
 ### 5 — Develop
 
-Add tools and source adapters with the extend skills, then execute each
-implementation wave:
+Define the agent's domain with `/analyze`, then let `/wave` plan and build everything:
 
 ```text
-/add-tool         # pydantic input model + @tool fn + test + console sample
-/add-source       # SourceAdapter subclass + CredentialFields + health_check + test
-/analyze          # create or update a PRD / ADR
-/todos            # generate a vertical-slice wave plan
-/wave w001        # implement → redteam → protocol audit → codify → archive
+/analyze    # create a PRD (FRs + NFRs) and ADRs; redteam confirms before writing
+/wave       # plan all waves from PRD, then execute each end-to-end
 ```
 
-The `/wave` skill runs `wave-cycle.js` — a 7-phase deterministic Workflow:
+`/wave` without a wave ID is the primary entry point — it plans and executes in one command:
 
 ```text
-Parse → Implement → Unit Redteam → Phase Redteam → Protocol Audit → Codify → Archive
+Plan step (once):  Read PRD → planner agent → plan.md + wave files → auto-redteam loop → confirm
+Per-wave cycle:    Todos Redteam (SI annotations, C-NNN reuse) →
+                   Implement (parallel groups, test-first) →
+                   Unit Redteam (zero-tolerance; debug at r3+) →
+                   Phase Redteam (zero-tolerance; debug at r3+) →
+                   Protocol Audit (A2A/AG-UI/A2UI/MCP conformance) →
+                   Codify (LRNs + C-NNN registration) →
+                   Archive → auto-continue to next wave
 ```
 
-Every redteam gate is zero-tolerance. No finding leaves a wave. The debug
-agent fires automatically at round 3+ when findings stall.
+Every redteam gate is zero-tolerance — no finding leaves a wave. The debug agent fires
+automatically at round 3+ when findings stall. At every junction where there's a
+learning, it's codified automatically.
+
+Add tools and source adapters with:
+
+```text
+/add-tool     # pydantic input model + @tool fn + test + console sample
+/add-source   # SourceAdapter subclass + CredentialFields + health_check + test
+```
+
+Use `/todos` to review or edit the wave plan before running `/wave`.
 
 ### 6 — Verify
 
@@ -153,10 +170,10 @@ Skills live in the seeded `.claude/skills/` of every generated agent repo.
 | `/debug` | quality | fresh-lens root-cause, cold read → diagnose → fix |
 | `/codify` | knowledge | capture a learning → `workspace/learning/LRN-NNN-*.md` |
 
-> `/new-agent`, `/upgrade`, `/changelog`, `/provision`, `/diagnose`, and
-> `/migrate` are in the harness plugin only (not seeded). Run them from the
-> `a2a-sdk` Claude Code context. `/sdk-issue` is seeded into every agent repo
-> so SDK bugs can be reported from the agent context.
+> `/new-agent` is in the harness plugin only (not seeded — it runs once, from
+> the `a2a-sdk` Claude Code context). All other skills including `/upgrade`,
+> `/changelog`, `/provision`, `/diagnose`, `/migrate`, and `/sdk-issue` are
+> seeded into every generated agent repo.
 
 ---
 

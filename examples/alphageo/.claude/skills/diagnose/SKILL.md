@@ -52,9 +52,11 @@ Examples:
      it raises, the traceback names the exact missing/invalid field.
 
    **L2 SDK boot:**
-   - Run: `DEV_MODE=true .venv/bin/python -c "from src.main import app"` — captures
-     import-time errors without starting uvicorn.
-   - If that passes: boot uvicorn for 5 s, capture stdout/stderr, kill.
+   - Run from the agent root (cwd matters for relative imports):
+     `cd <agent-root> && DEV_MODE=true .venv/bin/python -c "from src.main import app"`
+     — captures import-time errors without starting uvicorn.
+   - If that passes: boot uvicorn for 5 s (stdout/stderr to a temp file), kill,
+     report what was printed.
 
    **L3 Domain wiring:**
    - Read `src/main.py`. List: every `toolsets=[...]` entry, every
@@ -67,9 +69,20 @@ Examples:
    - If 5xx: upstream unreachable — escalate to L6.
 
    **L5 Protocol surface:**
-   - Run targeted curl probes for the reported endpoint (401: check `require_identity`
-     wiring; 404: check router is `include_router`-ed post-build; 422: check request
-     shape against the SDK's expected schema).
+   - **401:** `curl -I <agent-url>/v1/agent.json` — confirm `WWW-Authenticate: Bearer
+     realm=...` is present (spec requirement). Then:
+     `curl -H "Authorization: Bearer <admin-key>" <agent-url>/v1/agent.json` — if
+     200, the key is valid and the caller is sending the wrong credential; if still
+     401, check that `require_identity` is applied to the route in `src/main.py`.
+   - **404:** confirm the router is `include_router`-ed via `grep -n "include_router"
+     src/main.py`; a missing include_router = L3, not L5.
+   - **422:** compare the request shape against the SDK's `MessageSendParams` schema;
+     run `curl -X POST <agent-url>/v1/message:send -H "..." -d '{}' --verbose` to
+     see the FastAPI validation error detail.
+   - **SI-5 check (proactive):**
+     `grep -rn 'include_router\|APIRouter' src/routes/ src/main.py 2>/dev/null` —
+     confirm every router mounts with `Depends(require_identity)`; a missing
+     dependency is an SI-5 violation (auth bypass).
 
    **L6 Upstream:**
    - Read the adapter's `allowed_hosts`. Confirm the upstream host is listed.
@@ -117,6 +130,7 @@ Next: apply fix → pytest -q tests/ → /agent-verify
 - If the symptom is ambiguous across two layers, probe both and report which
   layer the evidence supports.
 - If the agent isn't running, offer to boot it for the duration of the triage
-  (`DEV_MODE=true`) and kill it when done.
+  (`DEV_MODE=true`) and kill it when done. Before booting, check the port is free:
+  `lsof -i :<port> -t` — if a PID is returned, ask whether to use it instead.
 - Never echo credential values, tokens, or `MASTER_KEY` — reference by field name
   and presence/absence only.

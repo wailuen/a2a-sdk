@@ -34,8 +34,11 @@ tokens, or raw user inputs. Raise `AgentError(category, "generic message",
 source=…)`. Never call `str(exc)` on exceptions that wrap external-API
 responses and then propagate that string to callers or logs.
 
-**Check:** `grep -rn "f\".*{.*token\|key\|secret\|password\|cred" src/`
-→ zero matches expected.
+**Check (f-string interpolation, both quote styles):**
+`grep -rn "f[\"'].*{.*\(token\|key\|secret\|password\|cred\)" src/` → zero matches.
+
+**Check (log calls with interpolated values):**
+`grep -rn "log\.\(info\|error\|warn\|debug\).*{" src/` → review each match; no match should forward a credential or raw user input.
 
 **Prevention:** When planning error-handling todos, require generic messages.
 The SDK's `AgentError` already redacts and maps categories onto each protocol.
@@ -101,12 +104,11 @@ Upstream API keys (e.g. AlphaGeo `api_key`, third-party tokens) live only
 in the `EncryptedSqliteStore` under the adapter's namespace. They must never
 appear in `.env`, CLI arguments (`sys.argv`), or any log statement.
 
-**Check:** `grep -rn "ALPHAGEO\|UPSTREAM\|VENDOR" .env src/` → any match
+**Check:** `grep -rn "UPSTREAM\|VENDOR\|_API_KEY\s*=" .env src/` → any match
 containing an actual key value (not a placeholder) is a violation.
 
-**Prevention:** Provisioning docs must use `scripts/set_upstream_credential.py`
-or equivalent. ADR 0001 (credential architecture) documents this for the
-alphageo example.
+**Prevention:** Provisioning uses `scripts/set_upstream_credential.py` or the
+admin console credential form — never writes vendor keys to `.env` or code.
 
 ---
 

@@ -94,7 +94,7 @@ contrib use, say it's experimental.
 
 ## Security invariants (Critical findings if violated)
 
-1. **No raw `httpx`/`requests` in tools.** All outbound HTTP goes through a
+1. **No raw `httpx`/`aiohttp`/`requests` in tools.** All outbound HTTP goes through a
    `SourceAdapter`. A new host ⇒ a new/updated adapter, not an ad-hoc client.
 2. **No secrets or user-input values in errors or logs, ever.** Raise
    `AgentError(category, message, source=…)` with a generic message; never f-string a

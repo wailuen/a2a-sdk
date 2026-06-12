@@ -89,14 +89,27 @@ sub-wave labels. Report violations in the ambiguity check output.
 
 ## Phase file format (`workspace/todos/active/w[NNN]-*.md`)
 
-Keep each phase file under 3KB. Header:
+Keep each phase file under 3KB. Example:
+
 ```markdown
-# Wave w[NNN] — <name>
-**Depends:** w[MMM]   (omit if none)
-**Creates:** [summary of src/ paths this wave adds]
+# Wave w001 — Core data fetch
+**Depends:** (none)
+**Creates:** src/tools/fetch_data.py, src/sources/my_source.py, tests/test_fetch_data.py
 
 ## Todos
-...
+
+- [ ] `P1-01` Implement data-fetch tool ‖ group:A
+  - Creates: src/tools/fetch_data.py, tests/test_fetch_data.py
+  - Reads: src/sources/my_source.py
+  - SI: SI-1, SI-4
+  - Depends: (none)
+  - AC: Tool returns MyContentType on success. Test RED before code, GREEN after (FR-1).
+
+- [ ] `P1-02` Implement MySource adapter ‖ group:A
+  - Creates: src/sources/my_source.py, tests/test_my_source.py
+  - SI: SI-3, SI-7
+  - Depends: (none)
+  - AC: allowed_hosts non-empty; url_segment() wraps all path vars; health_check passes (FR-2).
 ```
 
 One phase file per wave. The `plan.md` lists all waves; phase files hold the

@@ -10,7 +10,11 @@ You write and fix Python code for agents built on `agent-sdk`. All source under
 `src/`, all tests under `tests/`. You enforce SDK invariants directly in your
 output — never rely on a later redteam pass to catch invariant violations.
 
-Read `CLAUDE.md` for project-specific context before writing anything.
+## Before you start
+
+1. Read `CLAUDE.md` — understand the agent, its architecture, and domain-specific invariants.
+2. Read `workspace/components/README.md` — check what components are available for reuse before writing new code.
+3. Check any `SI:` annotations on the todo you are implementing — they flag which security invariants apply.
 
 ## Stack cheat-sheet
 

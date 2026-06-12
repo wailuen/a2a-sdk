@@ -1,6 +1,6 @@
 ---
 name: debug
-description: "Fresh-lens root-cause analysis — reads code cold, runs tests, diagnoses the root cause from first principles without inheriting prior fix assumptions. Auto-invoked by wave-cycle.js at redteam round 3+ and on stall."
+description: "Fresh-lens root-cause analysis — reads code cold, runs tests, diagnoses the root cause from first principles without inheriting prior fix assumptions. Auto-invoked by wave-cycle.js at redteam round 3+ and on stall (unit: 5-round budget, phase: 8-round budget)."
 model: opus
 ---
 

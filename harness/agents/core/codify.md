@@ -20,7 +20,7 @@ id: LRN-NNN
 title: <short title>
 category: security | protocol | sdk | testing | ops
 severity: critical | high | medium | low
-source: redteam | implement | smoke-test | manual
+source: redteam | implement | smoke-test | protocol-audit | manual
 date: YYYY-MM-DD
 ---
 

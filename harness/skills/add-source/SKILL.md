@@ -114,6 +114,8 @@ never hit the live upstream in tests.
   cache plaintext; never log a credential.
 - **No secrets or input values in errors.** Map upstream failures to
   `AgentError(category, message, source=source_name)` with a generic message.
+- **Upstream vendor keys in credential store only (SI-6).** Never write an upstream
+  API key to `.env`, pass it as a CLI arg, or emit it in any log line.
 - **Path params via `url_segment()`**, identifiers via `safe_id()`. Never f-string
   raw input into a URL.
 - **Tools never import `httpx`.** If a tool wants a new host, it's a new/updated

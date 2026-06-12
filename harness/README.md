@@ -13,6 +13,7 @@ author to remember them.
 | Skill | Category | Function |
 |---|---|---|
 | `/new-agent` | bootstrap | interview → preflight git access → render `template/` (or `gh repo create --template`) → generate `MASTER_KEY` → first run → seed `.claude/` + `workspace/` |
+| `/setup` | bootstrap | bootstrap a cloned `agent-template` repo: interview → preflight SDK via `git ls-remote` → substitute `{{placeholders}}` → generate `MASTER_KEY` → write manifest → first run. Run once, no SDK repo required. |
 | `/add-tool` | extend | pydantic input + `@tools.tool` fn + test + console `sample` → wires `emits` and `tier` |
 | `/add-source` | extend | `SourceAdapter` subclass + `CredentialField`s + `allowed_hosts` + `health_check` + test |
 | `/agent-verify` | verify | boot agent → `/agent-stack-check` → OAuth-chain curl probes → optional Playwright console smoke → one report |
@@ -24,10 +25,10 @@ author to remember them.
 | `/sdk-issue` | operations | classify finding (SDK-level vs agent-domain) → file structured GitHub issue on `wailuen/a2a-sdk`; agent-domain findings redirected to `/codify` |
 | `/scenario` | planning | generate JTBD usage scenarios → `workspace/scenarios/` |
 | `/codify` | knowledge | capture a learning (bug/fix/pattern) → `workspace/learning/LRN-NNN-*.md` |
-| `/analyze` | planning | create/update PRD, ADR, todos → `workspace/prd/` / `workspace/adr/` |
-| `/todos` | planning | vertical-slice implementation plan with auto-redteam → `workspace/todos/` |
-| `/implement` | execution | model-driven autonomous executor — runs all waves in dependency order without user gating |
-| `/wave` | execution | single-wave executor via `wave-cycle.js` Workflow → implement → redteam → protocol audit → codify → archive |
+| `/analyze` | planning | create/update PRD, ADR → `workspace/prd/` / `workspace/adr/` |
+| `/todos` | planning | plan-only: generate + redteam wave plan without executing; use when you want to review the plan before `/wave` |
+| `/implement` | execution | fully-unattended executor — all waves via model-driven Agent calls (no Workflow fan-out) |
+| `/wave` | execution | **primary entry point**: plan all waves from PRD + execute each via `wave-cycle.js` (todos-redteam → implement → unit/phase redteam → protocol audit → codify + C-NNN registration → archive); or `/wave w001` to resume a specific wave |
 | `/redteam` | quality | adversarial review across 8 dimensions; fail-closed on SI-1…SI-7; auto-codify |
 | `/debug` | quality | fresh-lens debug at round 3+; read cold → diagnose root cause → fix |
 
@@ -47,7 +48,7 @@ author to remember them.
 
 | Workflow | Function |
 |---|---|
-| `wave-cycle.js` | Deterministic 7-phase fan-out: Parse → Implement → Unit Redteam → Phase Redteam → Protocol Audit → Codify → Archive |
+| `wave-cycle.js` | Deterministic 8-phase fan-out: Parse → Todos Redteam → Implement → Unit Redteam → Phase Redteam → Protocol Audit → Codify → Archive |
 
 ### Reference
 
@@ -87,6 +88,7 @@ scenarios — lives there, grouped so Claude Code can access it across sessions.
     │   ├── changelog/      ← operations
     │   ├── diagnose/       ← operations
     │   ├── migrate/        ← operations
+    │   ├── sdk-issue/      ← operations
     │   ├── scenario/       ← planning
     │   ├── codify/         ← knowledge
     │   ├── analyze/        ← planning
@@ -100,7 +102,8 @@ scenarios — lives there, grouped so Claude Code can access it across sessions.
     │   │   ├── redteam.md
     │   │   ├── analyst.md
     │   │   ├── planner.md
-    │   │   └── codify.md
+    │   │   ├── codify.md
+    │   │   └── debug.md
     │   └── project/
     │       ├── sdk-advisor.md
     │       └── python-implementer.md
@@ -125,12 +128,12 @@ install. `new-agent` itself is not copied (you only run it once, from outside).
 harness/                         # this plugin (repo-level, not shipped in the wheel)
 ├── .claude-plugin/plugin.json
 ├── settings.json                # template settings (secret denylist)
-├── skills/                      # 17 skills
+├── skills/                      # 19 skills
 ├── agents/
 │   ├── core/                    # portable: redteam, analyst, planner, codify, debug
 │   └── project/                 # domain: sdk-advisor, python-implementer
 ├── workflows/
-│   └── wave-cycle.js            # 7-phase deterministic orchestration
+│   └── wave-cycle.js            # 8-phase deterministic orchestration
 ├── reference/
 │   └── sdk-security-invariants.md
 └── workspace/                   # template workspace (seeded into each new agent)
@@ -143,7 +146,7 @@ harness/                         # this plugin (repo-level, not shipped in the w
 
 {agent}/.claude/                 # seeded by /new-agent into each generated repo
 ├── settings.json
-├── skills/                      # 16 skills (not new-agent)
+├── skills/                      # 17 skills (not new-agent)
 ├── agents/
 │   ├── core/                    # redteam, analyst, planner, codify, debug
 │   └── project/                 # sdk-advisor, python-implementer
@@ -166,23 +169,31 @@ harness/                         # this plugin (repo-level, not shipped in the w
 ## Execution model
 
 ```
-/todos ──► generates plan.md + w[NNN]-*.md wave files
+/analyze ──► PRD + ADRs in workspace/prd/ / workspace/adr/
+   │          redteam confirms before writing
    │
    ▼
-/wave w001 ──► wave-cycle.js (Workflow)
-   │               ├── Parse
-   │               ├── Implement  (python-implementer, parallel groups)
-   │               ├── Unit Redteam  (redteam, zero-tolerance; debug fires at r3+ and on stall)
-   │               ├── Phase Redteam  (redteam, zero-tolerance; debug fires at r3+ and on stall)
-   │               ├── Protocol Audit  (a2a/ag-ui/a2ui advisors + seam check)
-   │               ├── Codify  (LRN captures, learning/README update)
-   │               └── Archive  (move wave, tick plan.md, backfill FRs)
+/wave ──────► Planning step (runs once; identical to /todos)
+   │               ├── Read PRD + learnings + components registry
+   │               ├── planner agent → plan.md + w[NNN]-*.md wave files
+   │               ├── auto-redteam loop (zero critiques) + codify learnings
+   │               └── confirm: "N waves. Proceed?"
    │
-   ▼
-review → /wave w002 → ...
+   ▼    (for each wave in plan order)
+   ├── wave-cycle.js (Workflow, one per wave)
+   │       ├── Parse              (extract groups, creates paths, LRN baseline)
+   │       ├── Todos Redteam      (SI annotations, Reuses: C-NNN, new candidates — written back to wave file)
+   │       ├── Implement          (python-implementer, parallel groups, test-first)
+   │       ├── Unit Redteam       (zero-tolerance per group; debug at r3+ and stall)
+   │       ├── Phase Redteam      (zero-tolerance full wave; debug at r3+ and stall)
+   │       ├── Protocol Audit     (a2a/ag-ui/a2ui advisors + seam check)
+   │       ├── Codify             (parallel LRN captures; sequential C-NNN registration)
+   │       └── Archive            (move wave, tick plan.md, backfill FR Implementation: fields)
    │
-   ▼
-/implement  (all remaining waves, unattended)
+   └── auto-continue to next wave ──► (loop until all waves done or 🔴 block)
+
+/todos       (plan-only; same planning logic as /wave; use to review plan before executing)
+/implement   (all remaining waves, fully unattended, model-driven Agent calls)
 ```
 
 ## SDK Security Invariants
@@ -192,7 +203,7 @@ Checked at every redteam gate (fail-closed). Full reference in
 
 | ID | Invariant | Severity |
 |----|-----------|----------|
-| SI-1 | No raw HTTP in `src/tools/` | Critical |
+| SI-1 | No raw `httpx`/`aiohttp`/`requests` in `src/tools/` | Critical |
 | SI-2 | No secrets/user-inputs in errors or logs | Critical |
 | SI-3 | URL path params through `url_segment()`/`safe_id()` | High |
 | SI-4 | Credentials via `self.credential()` only | High |
@@ -203,11 +214,12 @@ Checked at every redteam gate (fail-closed). Full reference in
 ## GitHub template repo
 
 `template/` in this repo is published as `github.com/wailuen/agent-template`
-and marked as a GitHub Template Repository. Developers have two ways to start a
+and marked as a GitHub Template Repository. There are three ways to start a
 new agent:
 
 | Mode | Command | When to use |
 |------|---------|-------------|
+| Template clone | clone `wailuen/agent-template` + `/setup` | no SDK repo needed; full harness in the template |
 | Local copy | `/new-agent <name>` | SDK repo is a local sibling |
 | GitHub template | `/new-agent <name> --from-github` | want a GitHub-hosted repo from day one |
 
@@ -219,8 +231,24 @@ then fills in all placeholders and generates `MASTER_KEY` into `.env`, exactly
 as the local path does. The resulting repo is already on GitHub — the user just
 needs to push once they're happy with the first commit.
 
-To keep the template up to date: any change to `template/` should be pushed to
-the `agent-template` GitHub repo so new agents get the latest scaffold.
+`template/` ships with `.claude/` pre-seeded so that cloning the template
+directly (Path A above) gives the full harness immediately — no SDK repo or
+plugin install needed. Run `/setup` from inside the clone.
+
+```
+template/.claude/
+├── settings.json
+├── .harness-manifest.json      ← {{SDK_SHA}} placeholder; filled by /setup
+├── skills/                     ← 18 skills: 17 seeded + /setup
+├── agents/core/                ← redteam, analyst, planner, codify, debug
+├── agents/project/             ← sdk-advisor, python-implementer
+├── workflows/wave-cycle.js
+└── reference/sdk-security-invariants.md
+```
+
+To keep the template up to date: any change to `template/` or `harness/` should
+be reflected in `wailuen/agent-template` so new clones get the latest scaffold
+and skill set.
 
 ## SDK-dev harness
 

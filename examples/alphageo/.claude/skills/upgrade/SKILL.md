@@ -19,7 +19,7 @@ sync harness files in `.claude/` — showing every diff before writing anything.
 - `(no args)` — upgrade to the latest commit on the SDK remote's default branch
 - `--sha <sha>` — pin to a specific SHA instead of latest
 - `--dry-run` — show changelog + harness diff preview without writing anything
-- `--skip-harness` — skip Phase 8 (harness sync); only bump the pip package
+- `--skip-harness` — skip step 10 (harness sync); only bump the pip package
 
 ## Steps
 
@@ -256,7 +256,7 @@ Next:      review any kept conflicts manually; commit when satisfied
 
 - Calls `/changelog` (step 4) — requires git access to the SDK repo.
 - Calls `/agent-verify` (step 9) — needs `BEDROCK_MODEL_ARN` or equivalent in `.env`.
-- Phase 8 requires git access to the SDK repo. Use `--skip-harness` if network
+- Step 10 requires git access to the SDK repo. Use `--skip-harness` if network
   access is unavailable.
-- `/new-agent` writes the initial `.claude/.harness-manifest.json` on seed (Phase 4).
+- `/new-agent` writes the initial `.claude/.harness-manifest.json` on seed (see /new-agent Phase 4).
   Agents seeded before this feature existed get a one-time warning in step 10a.

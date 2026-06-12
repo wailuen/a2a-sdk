@@ -14,10 +14,16 @@
       "Bash(.venv/bin/uvicorn *)",
       "Bash(.venv/bin/python *)",
       "Bash(uv *)",
+      "Bash(VIRTUAL_ENV=* uv pip install *)",
       "Bash(pytest *)",
       "Bash(ruff *)",
       "Bash(mypy *)",
-      "Bash(curl *)"
+      "Bash(curl *)",
+      "Bash(ssh *)",
+      "Bash(lsof *)",
+      "Bash(gh *)",
+      "Bash(cat pyproject.toml)",
+      "Bash(cat *requirements*.txt)"
     ],
     "deny": [
       "Read(.env*)",
@@ -34,10 +40,7 @@
       "Bash(*SECRET*)",
       "Bash(*secret*)",
       "Bash(*PASSWORD*)",
-      "Bash(*password*)",
-      "Bash(*AZURE_OPENAI*)",
-      "Bash(*ALPHAGEO*)",
-      "Bash(*alphageo_key*)"
+      "Bash(*password*)"
     ]
   }
 }

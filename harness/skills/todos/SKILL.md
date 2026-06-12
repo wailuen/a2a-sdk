@@ -1,13 +1,17 @@
 ---
 name: todos
 category: core
-description: "Create vertical-slice-driven todos under workspace/todos/active/. Auto-redteams the plan until zero critiques. Uses Opus."
+description: "Plan-only: generate and redteam a vertical-slice wave plan from the PRD, without executing. /wave (no args) subsumes this for the normal flow — use /todos when you want to review or edit the plan before running /wave."
 ---
 
-# /todos — Implementation Planning
+# /todos — Plan-Only Mode
 
-Generate a vertical-slice implementation plan designed for parallel
-multi-agent execution via `/wave` or `/implement`.
+Generate and redteam a vertical-slice wave plan from the PRD. Does not
+execute anything — use `/wave` (no args) to plan **and** execute in one
+command.
+
+Use `/todos` when you want to inspect or edit the plan before committing to
+execution, or when you need to regenerate a superseded plan independently.
 
 ## Usage
 

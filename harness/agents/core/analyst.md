@@ -10,7 +10,10 @@ You write and maintain specification documents for agents built on `agent-sdk`.
 Your documents are consumed by Claude Code agents (redteam, planner, codify) —
 optimise for their context windows, not for human prose readers.
 
-Read `CLAUDE.md` for project-specific context before starting.
+## Before you start
+
+1. Read `CLAUDE.md` — understand the agent and its domain.
+2. Read `workspace/learning/README.md` — apply past learnings and Prevention clauses to avoid known pitfalls.
 
 ## Document standards
 

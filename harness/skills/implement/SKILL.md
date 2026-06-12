@@ -38,6 +38,7 @@ Discover project agents from `.claude/agents/project/`. Match work type:
 - `analyst` — spec edits, PRD/ADR updates
 - `redteam` — adversarial review
 - `codify` — capture learnings
+- `debug` — fresh-lens root-cause analysis for stalled fix loops
 - `Explore` — read-only search
 
 ## Launch unit
@@ -88,11 +89,17 @@ redteam at zero findings before the next unit launches.
    `src/models/content_types`), run parallel conformance advisors
    (`a2a-advisor`, `ag-ui-advisor`, `a2ui-advisor`) + seam check. Critical
    protocol findings: one fix round + recheck — if still critical, archive is
-   blocked; wave moves to `workspace/todos/deferred/`.
-8. **Archive** — `mv active/<wave>.md completed/`; update `plan.md` (`[x]` +
+   blocked; write a deferred note to `workspace/todos/deferred/<wave>-protocol-blocked.md`
+   and continue to the next wave (the blocked wave stays in `active/`).
+8. **Codify** — deduplicate accumulated critical/high findings across all fix rounds
+   and protocol audit. For each unique finding with a `codify:` line, assign the next
+   LRN number and write `workspace/learning/LRN-NNN-<slug>.md`. Rewrite
+   `workspace/learning/README.md`. Register any new C-NNN component candidates in
+   `workspace/components/README.md`.
+9. **Archive** — `mv active/<wave>.md completed/`; update `plan.md` (`[x]` +
    ✅ date); backfill FR `Implementation:` fields in `workspace/prd/`.
-9. **Continue** — if more incomplete waves remain whose deps are met, loop to 1.
-10. **Final report** — phases archived, total findings closed, LRN entries
+10. **Continue** — if more incomplete waves remain whose deps are met, loop to 1.
+11. **Final report** — phases archived, total findings closed, LRN entries
     captured, deferrals + reasons.
 
 ## Rules

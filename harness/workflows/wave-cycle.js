@@ -1,13 +1,14 @@
 export const meta = {
   name: 'wave-cycle',
-  description: 'Execute one wave: fan-out implement per group → unit zero-tolerance redteam (debug at r3+ and on stall) → phase zero-tolerance redteam (debug at r3+ and on stall) → protocol audit → codify LRNs → archive',
+  description: 'Execute one wave: todos plan redteam (SI annotations + registry reuse) → fan-out implement per group → unit zero-tolerance redteam (debug at r3+ and on stall) → phase zero-tolerance redteam (debug at r3+ and on stall) → protocol audit → codify LRNs + register new C-NNN components → archive',
   phases: [
     { title: 'Parse',          detail: 'Read wave file; extract groups, creates paths, LRN baseline' },
+    { title: 'Todos Redteam',  detail: 'Redteam the wave plan: SI risk annotation, registry reuse (Reuses: C-NNN), new component candidate flagging — annotated wave file written back before implement' },
     { title: 'Implement',      detail: 'Fan out todos per group in dependency order; smoke test each' },
     { title: 'Unit Redteam',   detail: 'Per-group zero-tolerance fix loop (max 5 rounds/group; debug fires at r3+ and on stall)' },
     { title: 'Phase Redteam',  detail: 'Full-wave zero-tolerance fix loop (max 8 rounds; debug fires at r3+ and on stall)' },
     { title: 'Protocol Audit', detail: 'A2A/MCP/AG-UI/A2UI conformance — parallel advisors + seam check (protocol-surface waves only)' },
-    { title: 'Codify',         detail: 'Parallel LRN capture for critical/high findings' },
+    { title: 'Codify',         detail: 'Parallel LRN capture for critical/high findings; sequential C-NNN registration for new component candidates' },
     { title: 'Archive',        detail: 'Move wave file to completed/, update plan.md, backfill FR Implementation: fields' },
   ],
 }
@@ -112,6 +113,66 @@ const PROTO_SCHEMA = {
   },
 }
 
+const PLAN_RT_SCHEMA = {
+  type: 'object',
+  required: ['issuesFound', 'reuseAnnotations', 'siAnnotations', 'sliceIssues', 'newCandidates'],
+  additionalProperties: false,
+  properties: {
+    issuesFound: { type: 'boolean' },
+    reuseAnnotations: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['todoId', 'componentId', 'note'],
+        additionalProperties: false,
+        properties: {
+          todoId:      { type: 'string' },
+          componentId: { type: 'string' },
+          note:        { type: 'string' },
+        },
+      },
+    },
+    siAnnotations: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['todoId', 'siId', 'note'],
+        additionalProperties: false,
+        properties: {
+          todoId: { type: 'string' },
+          siId:   { type: 'string' },
+          note:   { type: 'string' },
+        },
+      },
+    },
+    sliceIssues: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['todoId', 'issue'],
+        additionalProperties: false,
+        properties: {
+          todoId: { type: 'string' },
+          issue:  { type: 'string' },
+        },
+      },
+    },
+    newCandidates: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['name', 'location', 'description'],
+        additionalProperties: false,
+        properties: {
+          name:        { type: 'string' },
+          location:    { type: 'string' },
+          description: { type: 'string' },
+        },
+      },
+    },
+  },
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 // Stall detection uses description (not id) because agents re-derive ids each round.
@@ -124,6 +185,9 @@ function sigsEqual(a, b) {
   for (const k of a) { if (!b.has(k)) return false }
   return true
 }
+
+// ─── state ────────────────────────────────────────────────────────────────────
+let registryCandidates = []   // new C-NNN candidates from Todos Redteam → registered in Codify
 
 // ─── phase 0: parse wave file ─────────────────────────────────────────────────
 phase('Parse')
@@ -158,7 +222,74 @@ const allHighFindings  = []   // accumulates critical/high for codify phase
 let   protocolBlocked  = false
 let   totalTodos       = 0
 
-// ─── phase 1: implement ───────────────────────────────────────────────────────
+// ─── phase 1: todos redteam ───────────────────────────────────────────────────
+phase('Todos Redteam')
+
+const planRt = await agent(
+  'Review the todo plan for wave ' + wave.waveId + ' BEFORE implementation starts.\n\n' +
+  'Wave file: ' + WAVE_FILE + '\n' +
+  'Also read:\n' +
+  '  - workspace/components/README.md  (C-NNN registry)\n' +
+  '  - workspace/learning/README.md    (past learnings + Prevention clauses)\n' +
+  '  - .claude/reference/sdk-security-invariants.md  (SI-1…SI-7)\n\n' +
+  'Check ONLY these four things (do not re-audit cross-wave ordering):\n' +
+  '1. REGISTRY REUSE — does a C-NNN component already cover this todo\'s capability?\n' +
+  '   If yes, add to reuseAnnotations. Implementers will use the annotation to\n' +
+  '   reuse the component rather than rebuild it.\n' +
+  '2. SI RISK — does this todo\'s Creates: path touch SI-1..SI-7 territory?\n' +
+  '   If yes and SI: field is absent, add to siAnnotations.\n' +
+  '3. VERTICAL SLICE — is this todo a horizontal layer instead of an end-to-end\n' +
+  '   deliverable? Add to sliceIssues only if genuinely non-vertical.\n' +
+  '4. NEW COMPONENT CANDIDATES — would any planned code be reusable across\n' +
+  '   multiple agents or waves? Add name/location/description to newCandidates.\n\n' +
+  'If the plan is already clean, issuesFound=false and all arrays empty.\n' +
+  'Do NOT re-derive issues the plan-level redteam already confirmed.\n\n' +
+  'Return structured output.',
+  { schema: PLAN_RT_SCHEMA, label: 'rt:todos', phase: 'Todos Redteam', agentType: 'redteam' }
+)
+
+if (planRt) {
+  registryCandidates = planRt.newCandidates || []
+
+  if (!planRt.issuesFound) {
+    log('Todos plan clean — proceeding directly to implementation')
+  } else {
+    const hasAnnotations = (planRt.reuseAnnotations && planRt.reuseAnnotations.length > 0) ||
+                           (planRt.siAnnotations    && planRt.siAnnotations.length > 0)
+    const hasSliceIssues = planRt.sliceIssues && planRt.sliceIssues.length > 0
+
+    if (hasSliceIssues) {
+      log('Todos Redteam: ' + planRt.sliceIssues.length + ' slice issue(s) — logged (not blocking)')
+      planRt.sliceIssues.forEach(function(s) { log('  [slice] ' + s.todoId + ': ' + s.issue) })
+    }
+
+    if (registryCandidates.length > 0) {
+      log('Todos Redteam: ' + registryCandidates.length + ' new component candidate(s) flagged')
+    }
+
+    if (hasAnnotations) {
+      log('Todos Redteam: writing SI and registry annotations back to wave file before implement')
+      await agent(
+        'Annotate the wave file ' + WAVE_FILE + ' with these additions.\n\n' +
+        'Registry reuse (add `Reuses: <componentId>` to the matching todo body):\n' +
+        JSON.stringify(planRt.reuseAnnotations, null, 2) + '\n\n' +
+        'SI risk (add `SI: <siId>  # <note>` to the matching todo body):\n' +
+        JSON.stringify(planRt.siAnnotations, null, 2) + '\n\n' +
+        'Rules:\n' +
+        '- Match todo by its backtick-wrapped ID on the checkbox line (e.g. `- [ ] `P1-01` description`)\n' +
+        '- Append annotation lines immediately after the last indented field of that todo block,\n' +
+        '  before the next `- [ ]` line or section header\n' +
+        '- Preserve all whitespace and structure\n\n' +
+        'Report: which todos were annotated.',
+        { label: 'rt:todos:annotate', phase: 'Todos Redteam' }
+      )
+    }
+  }
+} else {
+  log('Todos Redteam agent returned null — proceeding to implementation')
+}
+
+// ─── phase 2: implement ───────────────────────────────────────────────────────
 phase('Implement')
 
 for (const group of wave.groups) {
@@ -189,7 +320,11 @@ for (const group of wave.groups) {
       return function() {
         return agent(
           'Implement this todo. Read CLAUDE.md and workspace/components/README.md first.\n\n' +
-          'CLAUDE.md security invariants (SI-1…SI-7) apply — enforce them in your output.\n' +
+          'CLAUDE.md security invariants (SI-1…SI-7) apply — enforce them in your output:\n' +
+          'SI-1: no raw httpx in src/tools/; SI-2: no secrets in error messages;\n' +
+          'SI-3: url_segment()/safe_id() for URL path vars in adapters;\n' +
+          'SI-4: self.credential() only for creds; SI-5: auth on all endpoints;\n' +
+          'SI-6: vendor keys in credential store only; SI-7: non-empty allowed_hosts.\n\n' +
           'Test-first for correctness-bearing code (RED then GREEN then refactor).\n\n' +
           'Todo:\n' + todo.body + '\n\n' +
           'Run: pytest -q tests/ after implementing. Report: files created/modified, test count.',
@@ -200,7 +335,7 @@ for (const group of wave.groups) {
   }
 }
 
-// ─── phase 2: unit redteam (per group, zero-tolerance) ───────────────────────
+// ─── phase 3: unit redteam (per group, zero-tolerance) ───────────────────────
 phase('Unit Redteam')
 
 for (const group of wave.groups) {
@@ -260,7 +395,7 @@ for (const group of wave.groups) {
     prevSigs = curSigs
 
     // Bucket by file and dispatch fix specialists in parallel.
-    // Codify accumulates in allHighFindings for the dedicated phase 5 LRN pass.
+    // Codify accumulates in allHighFindings for the dedicated phase 6 LRN pass.
     const byFile = {}
     for (const f of rt.findings) {
       if (!byFile[f.file]) byFile[f.file] = []
@@ -287,7 +422,7 @@ for (const group of wave.groups) {
   }
 }
 
-// ─── phase 3: phase redteam (whole wave, zero-tolerance) ─────────────────────
+// ─── phase 4: phase redteam (whole wave, zero-tolerance) ─────────────────────
 phase('Phase Redteam')
 
 let pRound   = 0
@@ -320,7 +455,6 @@ while (true) {
   // Budget-exit check before debug — avoids wasting a debug agent call that's immediately abandoned.
   if (pRound >= 8) {
     log('Phase round budget exhausted — continuing to Protocol Audit')
-    prevSigs = curSigs
     break
   }
 
@@ -361,7 +495,7 @@ while (true) {
   await parallel(fixTasks)
 }
 
-// ─── phase 4: protocol audit ──────────────────────────────────────────────────
+// ─── phase 5: protocol audit ──────────────────────────────────────────────────
 phase('Protocol Audit')
 
 const runA2A  = wave.allCreates.some(function(p) {
@@ -379,6 +513,10 @@ if (!runProtocol) {
   log('Protocol audit skipped — no protocol surfaces in creates list')
 } else {
   log('Protocol audit triggered (A2A=' + runA2A + ' AG-UI=' + runAGUI + ' A2UI=' + runA2UI + ')')
+  // AD-001: advisor agents are external (check kit). If the kit is absent they fall back to
+  // the default agent and results will be incomplete — log what we expect so the user can verify.
+  log('Protocol audit: requires a2a-advisor / ag-ui-advisor / a2ui-advisor from the check kit. ' +
+      'If the kit is absent, advisor legs return partial or empty results — NOT a green pass.')
 
   const advisorTasks = []
 
@@ -432,7 +570,8 @@ if (!runProtocol) {
     })
   }
 
-  // Seam check always runs when any protocol surface is touched.
+  // Seam check: no specialist agentType — it reads multiple protocol surfaces together,
+  // so no single advisor owns it. Uses the default agent with full cross-surface context.
   advisorTasks.push(function() {
     return agent(
       'Cross-protocol seam audit — consistency ACROSS A2A, MCP, AG-UI, A2UI surfaces.\n\n' +
@@ -518,7 +657,7 @@ if (!runProtocol) {
         )
       })
     }
-    // Seam recheck always included (seam findings triggered the fix, must verify seam too)
+    // Seam recheck: no specialist agentType for the same reason as the initial seam check.
     recheckTasks.push(function() {
       return agent(
         'Cross-protocol seam re-audit after preceding fix.\n' +
@@ -544,7 +683,7 @@ if (!runProtocol) {
   }
 }
 
-// ─── phase 5: codify ──────────────────────────────────────────────────────────
+// ─── phase 6: codify ──────────────────────────────────────────────────────────
 phase('Codify')
 
 const seenKeys  = new Set()
@@ -599,11 +738,28 @@ if (toCodeify.length > 0) {
     '|-----|-------------|------|\n' +
     '| LRN-NNN | <title from frontmatter> | [LRN-NNN](LRN-NNN-slug.md) |\n\n' +
     'One row per file, ordered by number.',
-    { label: 'codify:readme', phase: 'Codify' }
+    { label: 'codify:readme', phase: 'Codify', agentType: 'codify' }
   )
 }
 
-// ─── phase 6: archive ─────────────────────────────────────────────────────────
+// Register new C-NNN components identified during Todos Redteam — sequential after parallel LRN agents
+if (registryCandidates.length > 0) {
+  log('Registering ' + registryCandidates.length + ' new component candidate(s) in workspace/components/README.md')
+  await agent(
+    'Register new reusable components discovered during wave ' + wave.waveId + '.\n\n' +
+    'Read workspace/components/README.md to find the highest existing C-NNN ID.\n\n' +
+    'New candidates:\n' + JSON.stringify(registryCandidates, null, 2) + '\n\n' +
+    'For each candidate:\n' +
+    '1. Assign the next C-NNN ID (increment from highest existing)\n' +
+    '2. Determine status: if the location file already exists → "present"; else → "planned"\n' +
+    '3. Append ONE new row to the README.md table:\n' +
+    '   | C-NNN | <name> | <location> | <status> |\n\n' +
+    'Do NOT modify existing rows. Append only. Report: IDs assigned and their locations.',
+    { label: 'registry:register', phase: 'Codify' }
+  )
+}
+
+// ─── phase 7: archive ─────────────────────────────────────────────────────────
 phase('Archive')
 
 if (protocolBlocked) {
@@ -631,6 +787,7 @@ return {
   waveId:             wave.waveId,
   totalTodos:         totalTodos,
   lrnsCaptured:       toCodeify.length,
+  cNnnRegistered:     registryCandidates.length,
   groupsExecuted:     wave.groups.length,
   phaseRedteamRounds: pRound,
   exhausted:          pRound >= 8,

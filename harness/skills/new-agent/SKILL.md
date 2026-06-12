@@ -101,6 +101,9 @@ to the local-copy path.
    the dependency line's scheme in `pyproject.toml` from `git+ssh://` to `git+https://`
    (the template defaults to SSH, DESIGN §10.1). Sanity-check the rendered line is a
    valid pip VCS URL — exactly one scheme, the SHA after `@` — before installing.
+   **If `obo` was selected in Phase 0**, insert `[obo]` between the package name and
+   `@` so the line reads `"agent-sdk[obo] @ git+ssh://{{SDK_GIT_URL}}@{{SDK_SHA}}"`.
+   This installs the MSAL extra required by `contrib.obo`.
 3. Rename source stubs to match the interview: one `src/sources/<source>.py` per
    declared source (start from `sample_api.py`), and wire each into `src/main.py`'s
    `register_source(...)` + `toolsets=[...]`. Drop the sample widget tool/source if
@@ -110,12 +113,17 @@ to the local-copy path.
 
 ## Phase 3 — Generate MASTER_KEY (never invented, never echoed)
 
-1. Generate a strong key:
-   `python -c "import secrets; print(secrets.token_urlsafe(48))"` (≥32 chars,
-   CSPRNG — satisfies the SDK's strength check, DESIGN §6).
-2. Copy `.env.example` → `.env` and write the key into the `MASTER_KEY=` line.
-   **Write it to the file only.** Never print the key to the chat, a log, or a
-   command that would land it in shell history (no `echo $KEY`). Tell the user:
+1. Generate and write the key atomically — never send it to stdout (≥32 chars,
+   CSPRNG — satisfies the SDK's strength check, DESIGN §6):
+   ```bash
+   python - <<'EOF'
+   import secrets, pathlib
+   key = secrets.token_urlsafe(48)
+   content = pathlib.Path('.env.example').read_text()
+   pathlib.Path('.env').write_text(content.replace('MASTER_KEY=\n', f'MASTER_KEY={key}\n', 1))
+   EOF
+   ```
+2. The key is now in `.env`. **Never print it to chat, a log, or shell history.** Tell the user:
    "`MASTER_KEY` generated and written to `.env` (git-ignored). Rotate later with
    `python -m agent_sdk rotate-master-key` — offline only."
 3. Leave `PUBLIC_URL` empty and `DEV_MODE=false` as shipped; the walkthrough runs
@@ -129,7 +137,9 @@ team can extend the agent from inside its own repo. The plugin root is the
 directory **two levels up** from this `SKILL.md`
 (`<plugin>/skills/new-agent/../..` = `<plugin>/`).
 
-**Skills** (do **not** copy `new-agent` — run-once, from outside):
+**Skills** (do **not** copy `new-agent` or `setup` — `new-agent` is run-once
+from outside the agent repo; `setup` is template-only and would be a no-op in
+a `/new-agent`-scaffolded repo since all placeholders are already filled):
 - `skills/add-tool/`, `skills/add-source/`, `skills/agent-verify/`
 - `skills/scenario/`, `skills/codify/`, `skills/analyze/`
 - `skills/todos/`, `skills/implement/`, `skills/wave/`
@@ -159,7 +169,7 @@ directory **two levels up** from this `SKILL.md`
 
 **Harness manifest** (written after all files are copied):
 Create `<name>/.claude/.harness-manifest.json` recording the SDK SHA each file
-was seeded from. This is the base used by `/upgrade` Phase 8 to distinguish
+was seeded from. This is the base used by `/upgrade` step 10 to distinguish
 "SDK changed this file" (clean update) from "you customised this file" (conflict):
 ```json
 {
@@ -211,7 +221,7 @@ working documentation lives — PRDs, ADRs, todos, learnings, components, and sc
 4. Generate `MASTER_KEY` into `.env` (Phase 3) — never echoed.
 5. Seed `.claude/` + `workspace/` (Phase 4).
 6. First run + console walkthrough (Phase 5) unless `--no-run`.
-7. Hand off: "next, `/provision` (credential setup + first boot), `/add-source` to
+7. Hand off: "next, `/provision` (seed credentials + run health checks), `/add-source` to
    flesh out each upstream, `/add-tool` to add tools, then `/agent-verify`. Use
    `/analyze` for PRDs/ADRs, `/todos` for the implementation plan, `/wave` for
    each wave, `/scenario` for usage scenarios, `/codify` for learnings. When the

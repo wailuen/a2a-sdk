@@ -2,7 +2,7 @@
 
 Working documentation for the agent-sdk harness plugin and its generated
 agents. This directory is the template workspace seeded into every new agent
-repo by `/new-agent`.
+repo by `/new-agent` (SDK context) or `/setup` (template-clone path).
 
 | Directory | Contents |
 |-----------|----------|

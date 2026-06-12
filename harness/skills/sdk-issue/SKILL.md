@@ -95,6 +95,10 @@ Examples:
    | `harness/template` | `template/` scaffold files |
    | `security` | SI violation in the SDK itself |
 
+   *If a finding spans both `security` and a `protocol/*` label (for example, an
+   OAuth endpoint that leaks a token), prefer `protocol/<surface>`. Use `security`
+   only for SI violations the SDK itself causes — not protocol-surface deviations.*
+
 6. Determine **severity**:
    - Critical — data loss, secret exposure, auth bypass, agent crash on boot
    - High — protocol non-conformance, broken skill, wrong LRN output
