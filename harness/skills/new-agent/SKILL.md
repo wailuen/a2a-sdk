@@ -157,6 +157,21 @@ directory **two levels up** from this `SKILL.md`
 - `settings.json` → `<name>/.claude/settings.json`
   (the allowlist + secret denylist; review the deny rules before seeding)
 
+**Harness manifest** (written after all files are copied):
+Create `<name>/.claude/.harness-manifest.json` recording the SDK SHA each file
+was seeded from. This is the base used by `/upgrade` Phase 8 to distinguish
+"SDK changed this file" (clean update) from "you customised this file" (conflict):
+```json
+{
+  "sdk_sha": "<current_sha>",
+  "files": {
+    ".claude/skills/redteam/SKILL.md": "<current_sha>",
+    ".claude/workflows/wave-cycle.js": "<current_sha>",
+    ...one entry per seeded file...
+  }
+}
+```
+
 `/agent-verify` and the Protocol Audit phase of `wave-cycle.js` additionally
 rely on the globally-installed check kit (`agent-stack-check` + the four protocol
 advisors); note that in the handoff if the kit isn't present.
@@ -221,6 +236,7 @@ Seeded:      .claude/skills/{add-tool,add-source,agent-verify,scenario,codify,an
              .claude/workflows/wave-cycle.js
              .claude/reference/sdk-security-invariants.md
              .claude/settings.json
+             .claude/.harness-manifest.json
              workspace/{prd,adr,learning,components,scenarios}/README.md
              workspace/todos/{README.md,active/README.md,completed/README.md,deferred/README.md,superseded/README.md}
 GitHub:      <created as private repo wailuen/<name> | local-only>
