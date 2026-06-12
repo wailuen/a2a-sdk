@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Bash(python3.12 *)",
+      "Bash(python -c *)",
+      "Bash(.venv/bin/python *)",
+      "Bash(.venv/bin/pytest *)",
+      "Bash(.venv/bin/mypy *)",
+      "Bash(.venv/bin/uvicorn *)",
+      "Bash(VIRTUAL_ENV=.venv uv pip install *)",
+      "Bash(curl *)",
+      "Bash(grep *)",
+      "Bash(find *)",
+      "Bash(ls *)",
+      "Bash(cat CHANGELOG.md)",
+      "Bash(cat pyproject.toml)"
+    ],
+    "deny": [
+      "Bash(cat */.env*)",
+      "Bash(echo *KEY*)",
+      "Bash(echo *SECRET*)",
+      "Bash(echo *TOKEN*)",
+      "Bash(echo *PASSWORD*)",
+      "Bash(echo *key*)",
+      "Bash(echo *secret*)",
+      "Bash(echo *token*)",
+      "Bash(echo *password*)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(rm -rf *)",
+      "Read(*.db)",
+      "Read(*.sqlite)",
+      "Read(.data/*)"
+    ]
+  }
+}

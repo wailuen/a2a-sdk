@@ -12,10 +12,15 @@ author to remember them.
 
 | Skill | Category | Function |
 |---|---|---|
-| `/new-agent` | bootstrap | interview → preflight git access → render `template/` → generate `MASTER_KEY` → first run + console walkthrough → seed the repo's `.claude/` + `workspace/` |
+| `/new-agent` | bootstrap | interview → preflight git access → render `template/` (or `gh repo create --template`) → generate `MASTER_KEY` → first run → seed `.claude/` + `workspace/` |
 | `/add-tool` | extend | pydantic input + `@tools.tool` fn + test + console `sample` → wires `emits` and `tier` |
 | `/add-source` | extend | `SourceAdapter` subclass + `CredentialField`s + `allowed_hosts` + `health_check` + test |
 | `/agent-verify` | verify | boot agent → `/agent-stack-check` → OAuth-chain curl probes → optional Playwright console smoke → one report |
+| `/provision` | operations | zero-to-running: verify `.env` → boot → bootstrap token → seed credentials → health-check sources → live tool call |
+| `/upgrade` | operations | read pyproject.toml SHA → fetch latest → `/changelog` → confirm → update pin → reinstall → pytest → `/agent-verify` |
+| `/changelog` | operations | categorised SDK git changelog between two SHAs (BREAKING / Protocol / Security / Feature / Fix) |
+| `/diagnose` | operations | classify runtime failure to L1-L7 → probe the exact layer → root cause + fix prescription |
+| `/migrate` | operations | source analysis → migration PRD → `/new-agent --no-run` → `/wave` per wave → `/agent-verify` |
 | `/scenario` | planning | generate JTBD usage scenarios → `workspace/scenarios/` |
 | `/codify` | knowledge | capture a learning (bug/fix/pattern) → `workspace/learning/LRN-NNN-*.md` |
 | `/analyze` | planning | create/update PRD, ADR, todos → `workspace/prd/` / `workspace/adr/` |
@@ -76,6 +81,11 @@ scenarios — lives there, grouped so Claude Code can access it across sessions.
     │   ├── add-tool/       ← extend
     │   ├── add-source/     ← extend
     │   ├── agent-verify/   ← verify
+    │   ├── provision/      ← operations
+    │   ├── upgrade/        ← operations
+    │   ├── changelog/      ← operations
+    │   ├── diagnose/       ← operations
+    │   ├── migrate/        ← operations
     │   ├── scenario/       ← planning
     │   ├── codify/         ← knowledge
     │   ├── analyze/        ← planning
@@ -114,7 +124,7 @@ install. `new-agent` itself is not copied (you only run it once, from outside).
 harness/                         # this plugin (repo-level, not shipped in the wheel)
 ├── .claude-plugin/plugin.json
 ├── settings.json                # template settings (secret denylist)
-├── skills/                      # 12 skills
+├── skills/                      # 17 skills
 ├── agents/
 │   ├── core/                    # portable: redteam, analyst, planner, codify, debug
 │   └── project/                 # domain: sdk-advisor, python-implementer
@@ -124,9 +134,15 @@ harness/                         # this plugin (repo-level, not shipped in the w
 │   └── sdk-security-invariants.md
 └── workspace/                   # template workspace (seeded into each new agent)
 
+.claude/                         # sdk-dev harness (for SDK contributors)
+├── settings.json
+└── skills/
+    ├── sdk-test/                # full test gate (unit + mypy + example stack-check)
+    └── sdk-release/             # cut release: version bump + changelog + tag + push
+
 {agent}/.claude/                 # seeded by /new-agent into each generated repo
 ├── settings.json
-├── skills/                      # 11 skills (not new-agent)
+├── skills/                      # 16 skills (not new-agent)
 ├── agents/
 │   ├── core/                    # redteam, analyst, planner, codify, debug
 │   └── project/                 # sdk-advisor, python-implementer
@@ -182,6 +198,41 @@ Checked at every redteam gate (fail-closed). Full reference in
 | SI-5 | Auth on all A2A/MCP/AG-UI endpoints | Critical |
 | SI-6 | Upstream vendor keys in credential store only | Critical |
 | SI-7 | Non-empty `allowed_hosts` on every SourceAdapter | High |
+
+## GitHub template repo
+
+`template/` in this repo is published as `github.com/wailuen/agent-template`
+and marked as a GitHub Template Repository. Developers have two ways to start a
+new agent:
+
+| Mode | Command | When to use |
+|------|---------|-------------|
+| Local copy | `/new-agent <name>` | SDK repo is a local sibling |
+| GitHub template | `/new-agent <name> --from-github` | want a GitHub-hosted repo from day one |
+
+The `--from-github` path runs:
+```bash
+gh repo create <name> --template wailuen/agent-template --private --clone
+```
+then fills in all placeholders and generates `MASTER_KEY` into `.env`, exactly
+as the local path does. The resulting repo is already on GitHub — the user just
+needs to push once they're happy with the first commit.
+
+To keep the template up to date: any change to `template/` should be pushed to
+the `agent-template` GitHub repo so new agents get the latest scaffold.
+
+## SDK-dev harness
+
+The `.claude/` directory at the SDK root provides skills for **SDK contributors**
+(people working on `agent-sdk` itself, not people using it to build agents):
+
+| Skill | Function |
+|-------|----------|
+| `/sdk-test` | Full test gate: pytest (unit + integration) + mypy + alphageo example stack-check |
+| `/sdk-release` | Cut a release: version bump + categorised changelog + commit + tag + push |
+
+These skills live in `.claude/skills/` at the repo root and are loaded when
+Claude Code is opened in the `a2a-sdk` directory.
 
 ## Dependencies (reused, not reimplemented)
 

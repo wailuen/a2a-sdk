@@ -18,11 +18,12 @@ there, not shown.
 ## Usage
 
 ```
-/new-agent [name] [--dir <parent>] [--sdk-ref <tag-or-sha>] [--no-run]
+/new-agent [name] [--dir <parent>] [--sdk-ref <tag-or-sha>] [--from-github] [--no-run]
 ```
 - `name` — kebab-case agent name (prompted if omitted).
 - `--dir` — parent directory for the new repo (default: cwd's parent of the SDK, i.e. a sibling of the SDK repo).
 - `--sdk-ref` — pin the SDK at this tag/SHA (default: the current `HEAD` of the SDK repo, resolved to a tag + SHA).
+- `--from-github` — create the repo on GitHub from `wailuen/agent-template` via `gh repo create`, then clone it locally and fill in the placeholders. Requires `gh` CLI authenticated.
 - `--no-run` — scaffold only; skip the first-run/console walkthrough.
 
 ## Phase 0 — Interview (one pass, confirm before writing)
@@ -78,8 +79,20 @@ week one isn't auth plumbing.
 
 ## Phase 2 — Render the template
 
+**If `--from-github`:** instead of copying `template/` locally, create the repo
+on GitHub and clone it:
+```bash
+gh repo create <name> --template wailuen/agent-template --private --clone
+```
+This creates a private GitHub repo owned by the authenticated user and clones it
+to `./<name>/`. Skip if `gh` is unauthenticated — surface the error and fall back
+to the local-copy path.
+
+**Otherwise (default):**
 1. Copy `template/` → `<parent>/<name>/` (the ~10-file repo in DESIGN §10.2). Do
    not copy `__pycache__`, `.pytest_cache`, or any `.env` (only `.env.example`).
+
+**In both paths:**
 2. Substitute **every** placeholder across all files (they appear in `.env.example`,
    `CLAUDE.md`, `Dockerfile`, `pyproject.toml`, `README.md`, and `src/`):
    `{{AGENT_NAME}}`, `{{AGENT_MODULE}}`, `{{SDK_GIT_URL}}`, `{{SDK_SHA}}`,
@@ -121,6 +134,8 @@ directory **two levels up** from this `SKILL.md`
 - `skills/scenario/`, `skills/codify/`, `skills/analyze/`
 - `skills/todos/`, `skills/implement/`, `skills/wave/`
 - `skills/redteam/`, `skills/debug/`
+- `skills/upgrade/`, `skills/changelog/`
+- `skills/provision/`, `skills/diagnose/`, `skills/migrate/`
 
 → all to `<name>/.claude/skills/`
 
@@ -180,10 +195,12 @@ working documentation lives — PRDs, ADRs, todos, learnings, components, and sc
 4. Generate `MASTER_KEY` into `.env` (Phase 3) — never echoed.
 5. Seed `.claude/` + `workspace/` (Phase 4).
 6. First run + console walkthrough (Phase 5) unless `--no-run`.
-7. Hand off: "next, `/add-source` to flesh out each upstream, `/add-tool` to add
-   tools, then `/agent-verify`. Use `/analyze` to document PRDs and ADRs,
-   `/todos` to generate the implementation plan, `/wave` to execute each wave,
-   `/scenario` to generate usage scenarios, and `/codify` to capture learnings."
+7. Hand off: "next, `/provision` (credential setup + first boot), `/add-source` to
+   flesh out each upstream, `/add-tool` to add tools, then `/agent-verify`. Use
+   `/analyze` for PRDs/ADRs, `/todos` for the implementation plan, `/wave` for
+   each wave, `/scenario` for usage scenarios, `/codify` for learnings. When the
+   SDK is updated, `/upgrade` bumps the pin and `/changelog` shows what changed.
+   Use `/diagnose` for runtime triage and `/migrate` to bring in existing agents."
    Remind: no git commit was made.
 
 ## Report format
@@ -197,6 +214,7 @@ MASTER_KEY:  generated → .env (not shown; rotate via python -m agent_sdk rotat
 Tests:       <pass/fail summary>
 Dev boot:    <ok @ :8000 | skipped (--no-run)>
 Seeded:      .claude/skills/{add-tool,add-source,agent-verify,scenario,codify,analyze,todos,implement,wave,redteam,debug}
+             .claude/skills/{upgrade,changelog,provision,diagnose,migrate}
              .claude/agents/core/{redteam,analyst,planner,codify,debug}.md
              .claude/agents/project/{sdk-advisor,python-implementer}.md
              .claude/workflows/wave-cycle.js
@@ -204,7 +222,8 @@ Seeded:      .claude/skills/{add-tool,add-source,agent-verify,scenario,codify,an
              .claude/settings.json
              workspace/{prd,adr,learning,components,scenarios}/README.md
              workspace/todos/{README.md,active/README.md,completed/README.md,deferred/README.md,superseded/README.md}
-Next:        /add-source · /add-tool · /agent-verify · /scenario · /analyze   (no commit made)
+GitHub:      <created as private repo wailuen/<name> | local-only>
+Next:        /add-source · /add-tool · /provision · /agent-verify · /scenario   (no commit made)
 ```
 
 ## Notes

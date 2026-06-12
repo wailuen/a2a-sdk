@@ -2,11 +2,15 @@
 
 An A2A / AG-UI / MCP agent built on `agent-sdk`.
 
+> **Using this template?** Run `/new-agent <name> --from-github` from the SDK
+> harness, or `/new-agent <name>` (local). The skill substitutes all placeholders,
+> generates a strong `MASTER_KEY` into `.env`, seeds `.claude/` with the full
+> build harness, and walks you through first run.
+>
 > Template placeholders: `{{AGENT_NAME}}` (kebab-case agent name),
 > `{{AGENT_MODULE}}` (python-safe snake_case), `{{SDK_GIT_URL}}`,
 > `{{SDK_SHA}}` (commit SHA), `{{SDK_TAG}}` (tag, comment only).
-> The `/new-agent` harness skill substitutes all of them and generates
-> `MASTER_KEY` into `.env` — humans never invent keys.
+> Never substitute these by hand — humans never invent keys.
 
 ## Run locally
 
