@@ -45,7 +45,7 @@ Examples:
      items against actual code presence.
 4. Produce the document(s) following the format specs below.
 5. Write to the appropriate subdirectory using the naming convention. Every new
-   file is under 4 KB; if content would exceed that, split into numbered parts.
+   file is under 3 KB; if content would exceed that, split into numbered parts.
 6. Update the subdirectory `README.md` index (append rows; do not rewrite
    existing rows unless they are factually wrong).
 7. For `audit`: read all workspace files; report findings as `[STALE]`,

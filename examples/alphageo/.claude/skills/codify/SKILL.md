@@ -30,7 +30,7 @@ Examples:
 
 1. Parse `$ARGUMENTS` for the learning description.
 2. Ensure `workspace/learning/README.md` exists. If missing, create it with the
-   standard header (see `harness/workspace/learning/README.md` as template).
+   standard header (see `workspace/learning/README.md` as template).
 3. Read `workspace/learning/README.md` to check for duplicates by scanning the
    description column. If a similar learning exists, offer to update it instead
    of creating a new entry.
@@ -50,19 +50,24 @@ Examples:
 ```markdown
 ---
 id: LRN-NNN
+title: <short title — one sentence>
 category: security | protocol | sdk | testing | ops
 severity: critical | high | medium | low
+source: redteam | implement | smoke-test | manual
+date: YYYY-MM-DD
 ---
 
-**Invariant:** one-sentence statement of what must be true
+## What happened
+<2-3 sentences>
 
-**Why:** what went wrong or what surprising thing was validated
+## Root cause
+<1-2 sentences>
 
-**Check:** specific, verifiable condition to assert when touching related code
-  (e.g. "grep for X / run test Y / curl Z and assert response field W")
+## Check
+<specific grep or test to verify — e.g. "grep for X in src/" or "run test Y">
 
-**Prevention:** what to do differently: naming convention, test pattern,
-  config check, or code review point
+## Prevention
+<actionable planner constraint — "When planning..., ensure...">
 ```
 
 ## Convention for callers

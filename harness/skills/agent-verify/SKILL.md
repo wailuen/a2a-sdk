@@ -106,7 +106,9 @@ the run.
 2. Run `/agent-stack-check --live` (Phase 2) unless skipped; capture its verdict.
 3. Run the OAuth-chain curl probes (Phase 3); record pass/fail per probe.
 4. Console smoke (Phase 4) if a browser exists; else mark SKIPPED.
-5. Synthesize the report (Phase 5); **tear down the agent**; hand findings to the
+5. **Codify** — for each critical/high finding, invoke `/codify <finding-summary>`
+   so the root cause becomes a permanent LRN check wired into future redteam runs.
+6. Synthesize the report (Phase 5); **tear down the agent**; hand findings to the
    user. **Do not fix** — point each finding at `/add-tool`, `/add-source`,
    `sdk-advisor`, or the owning `/<p>-check` for remediation.
 

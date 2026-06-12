@@ -104,10 +104,16 @@ contrib use, say it's experimental.
    not sanitize path params — the adapter is the only enforcement point.
 4. **Credentials are resolved, never read.** `self.credential(...)` only; no env reads
    in adapters, no plaintext caching.
-5. **Adapters own retries; tools call once.**
-6. **Interrupts, not blocking.** A tool needing user input raises
-   `ToolInterrupt(reason, message, response_schema=…, resume_handler=…)`; it never
-   blocks the loop waiting.
+5. **All A2A/MCP/AG-UI endpoints require auth.** Every FastAPI router mounted on
+   `build_app()`'s app uses `Depends(agent_sdk.auth.require_identity)` except
+   `/.well-known/` and `/health`. Routes added post-build are **not** covered
+   automatically — flag any that lack `Depends(require_identity)`.
+6. **Upstream vendor keys never in `.env`, argv, or logs.** AlphaGeo keys, third-party
+   tokens, and similar upstream secrets live only in the `EncryptedSqliteStore` under
+   the adapter's namespace. Any env-var, arg, or log reference is a Critical finding.
+7. **Every `SourceAdapter` declares non-empty `allowed_hosts`.** An empty list or
+   wildcard disables the SDK's SSRF guard. Check: `grep -A 3 "class.*SourceAdapter"
+   src/sources/*.py` — every subclass must declare a non-empty, non-wildcard list.
 
 ## How to respond
 

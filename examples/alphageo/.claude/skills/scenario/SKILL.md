@@ -34,7 +34,7 @@ Examples:
 
 1. Parse `$ARGUMENTS` for an optional persona/theme and a count (default ~6).
 2. Ensure `workspace/scenarios/README.md` exists. If missing, create it with the
-   standard header + an empty table (see `harness/workspace/scenarios/README.md`
+   standard header + an empty table (see `workspace/scenarios/README.md`
    as template).
 3. Read existing scenario files to find the highest SCN-NNN so far. New batch
    continues from there.

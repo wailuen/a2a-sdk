@@ -1,7 +1,7 @@
 {
   "name": "agent-sdk-harness",
-  "version": "0.2.0",
-  "description": "Claude Code harness for building agent-sdk agents. /new-agent scaffolds a template repo; /add-tool and /add-source wire extension points; /agent-verify runs conformance and OAuth-chain probes; /scenario generates JTBD usage scenarios into workspace/scenarios/; /codify captures learnings into workspace/learning/; /analyze creates and audits PRD/ADR docs in workspace/; the sdk-advisor agent reasons about SDK conventions and invariants. Reuses the agent-interop check kit (agent-stack-check + a2a/a2ui/ag-ui/mcp advisors).",
+  "version": "0.3.0",
+  "description": "Claude Code harness for building agent-sdk agents. /new-agent scaffolds a template repo; /add-tool and /add-source wire extension points; /agent-verify runs conformance and OAuth-chain probes; /scenario generates JTBD scenarios; /codify captures LRN learnings; /analyze manages PRD/ADR docs; /todos generates vertical-slice wave plans; /wave executes one wave end-to-end (implement → zero-tolerance redteam → protocol audit → codify → archive); /implement runs all waves unattended; /redteam adversarially reviews against SI-1..SI-7; /debug fresh-lens root-cause analysis. Core agents: redteam, analyst, planner, codify. Project agents: sdk-advisor, python-implementer. Workflow: wave-cycle.js (7-phase deterministic). Reuses agent-interop check kit (agent-stack-check + a2a/a2ui/ag-ui/mcp advisors).",
   "author": {
     "name": "agent-sdk"
   }

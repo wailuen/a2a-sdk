@@ -112,18 +112,38 @@ week one isn't auth plumbing.
 ## Phase 4 — Seed the repo's .claude/ (harness, per-repo)
 
 Copy the in-repo harness subset from this plugin into `<name>/.claude/` so the
-team can extend the agent from inside its own repo:
+team can extend the agent from inside its own repo. The plugin root is the
+directory **two levels up** from this `SKILL.md`
+(`<plugin>/skills/new-agent/../..` = `<plugin>/`).
 
-- `skills/add-tool/`, `skills/add-source/`, `skills/agent-verify/`  → `<name>/.claude/skills/`
-- `agents/sdk-advisor.md` → `<name>/.claude/agents/sdk-advisor.md`
-- `skills/scenario/`, `skills/codify/`, `skills/analyze/` → `<name>/.claude/skills/`
+**Skills** (do **not** copy `new-agent` — run-once, from outside):
+- `skills/add-tool/`, `skills/add-source/`, `skills/agent-verify/`
+- `skills/scenario/`, `skills/codify/`, `skills/analyze/`
+- `skills/todos/`, `skills/implement/`, `skills/wave/`
+- `skills/redteam/`, `skills/debug/`
 
-Do **not** copy `new-agent` (run-once, from outside). The plugin root is the
-directory **two levels up** from this `SKILL.md` (i.e. `<plugin>/skills/new-agent/../..`
-= `<plugin>/`; going only one level up gives `<plugin>/skills/`, not the root).
-`/agent-verify` additionally relies on the globally-installed check kit
-(`agent-stack-check` + the four protocol advisors); note that in the handoff if
-the kit isn't present.
+→ all to `<name>/.claude/skills/`
+
+**Agents**:
+- `agents/core/redteam.md`, `agents/core/analyst.md`,
+  `agents/core/planner.md`, `agents/core/codify.md`, `agents/core/debug.md`
+  → `<name>/.claude/agents/core/`
+- `agents/project/sdk-advisor.md`, `agents/project/python-implementer.md`
+  → `<name>/.claude/agents/project/`
+
+**Workflow**:
+- `workflows/wave-cycle.js` → `<name>/.claude/workflows/wave-cycle.js`
+
+**Reference**:
+- `reference/sdk-security-invariants.md` → `<name>/.claude/reference/`
+
+**Settings**:
+- `settings.json` → `<name>/.claude/settings.json`
+  (the allowlist + secret denylist; review the deny rules before seeding)
+
+`/agent-verify` and the Protocol Audit phase of `wave-cycle.js` additionally
+rely on the globally-installed check kit (`agent-stack-check` + the four protocol
+advisors); note that in the handoff if the kit isn't present.
 
 Also seed the workspace template: copy `harness/workspace/` → `<name>/workspace/`
 (all subdirectory `README.md` files, no content files). The workspace is where all
@@ -161,8 +181,9 @@ working documentation lives — PRDs, ADRs, todos, learnings, components, and sc
 5. Seed `.claude/` + `workspace/` (Phase 4).
 6. First run + console walkthrough (Phase 5) unless `--no-run`.
 7. Hand off: "next, `/add-source` to flesh out each upstream, `/add-tool` to add
-   tools, then `/agent-verify`. Use `/scenario` to generate usage scenarios,
-   `/codify` to capture learnings, and `/analyze` to document PRDs and ADRs."
+   tools, then `/agent-verify`. Use `/analyze` to document PRDs and ADRs,
+   `/todos` to generate the implementation plan, `/wave` to execute each wave,
+   `/scenario` to generate usage scenarios, and `/codify` to capture learnings."
    Remind: no git commit was made.
 
 ## Report format
@@ -175,8 +196,14 @@ Contrib:     <none | list>  (EXPERIMENTAL)
 MASTER_KEY:  generated → .env (not shown; rotate via python -m agent_sdk rotate-master-key)
 Tests:       <pass/fail summary>
 Dev boot:    <ok @ :8000 | skipped (--no-run)>
-Seeded:      .claude/skills/{add-tool,add-source,agent-verify,scenario,codify,analyze} + agents/sdk-advisor.md
-             workspace/{prd,adr,todos,learning,components,scenarios}/README.md
+Seeded:      .claude/skills/{add-tool,add-source,agent-verify,scenario,codify,analyze,todos,implement,wave,redteam,debug}
+             .claude/agents/core/{redteam,analyst,planner,codify,debug}.md
+             .claude/agents/project/{sdk-advisor,python-implementer}.md
+             .claude/workflows/wave-cycle.js
+             .claude/reference/sdk-security-invariants.md
+             .claude/settings.json
+             workspace/{prd,adr,learning,components,scenarios}/README.md
+             workspace/todos/{README.md,active/README.md,completed/README.md,deferred/README.md,superseded/README.md}
 Next:        /add-source · /add-tool · /agent-verify · /scenario · /analyze   (no commit made)
 ```
 
