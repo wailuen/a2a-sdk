@@ -53,8 +53,8 @@ not return until all scenarios pass or the round budget is exhausted.
    `DEV_MODE=true .venv/bin/uvicorn src.main:app --port <port> --workers 1`
    then re-run `/acceptance`."
 
-3. **Read agent context.** Read `src/persona.py` (or equivalent) for the
-   agent name and description. Read all `@tools.tool` decorated functions in
+3. **Read agent context.** Read `src/artifacts/system.md` (or `src/persona.py`
+   if present) for the agent name and description. Read all `@tools.tool` decorated functions in
    `src/tools/` — capture name, `emits=` type, and docstring for each.
    This becomes `agentContext` passed to the workflow.
 

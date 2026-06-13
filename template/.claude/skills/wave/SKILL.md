@@ -68,7 +68,7 @@ For each wave whose `Depends:` items are all in `completed/`:
    - **Implement** — parallel groups, test-first, SI-enforcing.
    - **Unit Redteam** — zero-tolerance per group (debug fires at r3+ and stall).
    - **Phase Redteam** — zero-tolerance full wave (debug fires at r3+ and stall).
-   - **Protocol Audit** — A2A/MCP/AG-UI/A2UI advisors + seam check (protocol surfaces only).
+   - **Protocol Audit** — one dedicated advisor per detected protocol (A2A → `a2a-advisor`, MCP → `mcp-advisor`, AG-UI → `ag-ui-advisor`, A2UI → `a2ui-advisor`) in parallel + seam check (protocol surfaces only).
    - **Codify** — parallel LRN capture for critical/high findings; sequential C-NNN
      registration for new component candidates.
    - **Archive** — wave file moved to `completed/`; `plan.md` and FR `Implementation:`

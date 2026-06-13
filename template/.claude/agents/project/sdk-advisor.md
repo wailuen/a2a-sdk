@@ -31,7 +31,7 @@ scaffold). Make NO assumptions about the agent's name or domain — read its `sr
 ## The contracts you enforce
 
 **Agent assembly (DESIGN §4.1).** Registration is explicit and import-side-effect-free:
-`Agent(settings=make_settings(), persona=…, skills_dir=…, toolsets=[…])` then
+`Agent(settings=make_settings(), artifacts_dir=Path(__file__).parent / 'artifacts', skills_dir=…, toolsets=[…])` then
 `agent.register_source(Cls, credentials=[…])`, then `app = agent.build_app()`. A
 forgotten wire-up must fail loudly at `build_app()`, never silently at call time.
 `build_app()` validates at boot: every adapter annotation resolves to a registered
@@ -61,11 +61,12 @@ required. `CredentialField(type="url")` values are SDK-validated (https-only,
 public-IP-only — no RFC1918/link-local/metadata). Known accepted residual: url-cred
 validation is save-time, not per-resolution (rebinding TOCTOU) — don't "fix" per-adapter.
 
-**Content types (DESIGN §4.3).** 14 FROZEN Standard Profile types ship as wire-
-isomorphic models (Core: KpiCard, TimeSeriesChart, ComparisonTable, BarChart,
-EntityList, MarketBriefing; Extended: WaterfallChart, MultiCategoryChart,
-FundPerformance, EmailList, CalendarEvents, UserProfile, UserList, DocumentList). The
-4 RESERVED types are name-only — never `emits` them. Domain cards live in the agent
+**Content types (DESIGN §4.3).** 18 Standard Profile types total: **14 FROZEN** —
+wire-isomorphic models (Core 6: KpiCard, TimeSeriesChart, ComparisonTable, BarChart,
+EntityList, MarketBriefing; Extended 8: WaterfallChart, MultiCategoryChart,
+FundPerformance, EmailList, CalendarEvents, UserProfile, UserList, DocumentList) —
+plus **4 RESERVED** (TradeActivity, CompanyInfo, DealList, InvestorProfile): name-only,
+no field contract yet — never `emits` them. Domain cards live in the agent
 repo: subclass `ContentModel`, set `data_type`/`component`/`catalog_id` (a domain
 `urn:…` — the Profile catalog is frozen/closed), implement `to_plain_text()` (the
 REQUIRED A2A text fallback — the only thing a non-supporting client sees), and

@@ -7,7 +7,7 @@ export const meta = {
     { title: 'Implement',      detail: 'Fan out todos per group in dependency order; smoke test each' },
     { title: 'Unit Redteam',   detail: 'Per-group zero-tolerance fix loop (max 5 rounds/group; debug fires at r3+ and on stall)' },
     { title: 'Phase Redteam',  detail: 'Full-wave zero-tolerance fix loop (max 8 rounds; debug fires at r3+ and on stall)' },
-    { title: 'Protocol Audit', detail: 'A2A/MCP/AG-UI/A2UI conformance — parallel advisors + seam check (protocol-surface waves only)' },
+    { title: 'Protocol Audit', detail: 'A2A + MCP + AG-UI + A2UI conformance — one dedicated advisor per protocol in parallel + seam check (protocol-surface waves only)' },
     { title: 'Codify',         detail: 'Parallel LRN capture for critical/high findings; sequential C-NNN registration for new component candidates' },
     { title: 'Archive',        detail: 'Move wave file to completed/, update plan.md, backfill FR Implementation: fields' },
   ],
@@ -20,8 +20,8 @@ const WAVE_FILE = args.waveFile
 const TODAY     = args.today || '(see context date)'
 
 // ─── protocol surface paths (trigger the Protocol Audit phase) ─────────────────
-const A2A_SURFACE  = ['src/routes/a2a', 'src/routes/mcp', 'src/routes/oauth',
-                      'src/routes/agent_card', 'src/models/a2a']
+const A2A_SURFACE  = ['src/routes/a2a', 'src/routes/agent_card', 'src/models/a2a']
+const MCP_SURFACE  = ['src/routes/mcp', 'src/routes/oauth']
 const AGUI_SURFACE = ['src/routes/ag_ui']
 const A2UI_SURFACE = ['src/a2ui/', 'src/models/content_types']
 
@@ -501,38 +501,54 @@ phase('Protocol Audit')
 const runA2A  = wave.allCreates.some(function(p) {
   return A2A_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
 })
+const runMCP  = wave.allCreates.some(function(p) {
+  return MCP_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
+})
 const runAGUI = wave.allCreates.some(function(p) {
   return AGUI_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
 })
 const runA2UI = wave.allCreates.some(function(p) {
   return A2UI_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
 })
-const runProtocol = runA2A || runAGUI || runA2UI
+const runProtocol = runA2A || runMCP || runAGUI || runA2UI
 
 if (!runProtocol) {
   log('Protocol audit skipped — no protocol surfaces in creates list')
 } else {
-  log('Protocol audit triggered (A2A=' + runA2A + ' AG-UI=' + runAGUI + ' A2UI=' + runA2UI + ')')
-  // AD-001: advisor agents are external (check kit). If the kit is absent they fall back to
-  // the default agent and results will be incomplete — log what we expect so the user can verify.
-  log('Protocol audit: requires a2a-advisor / ag-ui-advisor / a2ui-advisor from the check kit. ' +
-      'If the kit is absent, advisor legs return partial or empty results — NOT a green pass.')
+  log('Protocol audit triggered (A2A=' + runA2A + ' MCP=' + runMCP + ' AG-UI=' + runAGUI + ' A2UI=' + runA2UI + ')')
+  log('Protocol audit: dispatches a2a-advisor / mcp-advisor / ag-ui-advisor / a2ui-advisor — each protocol gets its own advisor (no single-advisor collapse).')
 
   const advisorTasks = []
 
   if (runA2A) {
     advisorTasks.push(function() {
       return agent(
-        'A2A v0.3.0 + MCP conformance audit.\n\n' +
+        'A2A v0.3.0 conformance audit.\n\n' +
         'Files to audit:\n' +
         wave.allCreates.filter(function(p) {
           return A2A_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
         }).join('\n') + '\n\n' +
         'Check: agent card shape, task/message/part/artifact shapes, streaming,\n' +
-        'error codes (-32001 through -32007 → correct HTTP status), auth,\n' +
-        'MCP Streamable-HTTP transport, OAuth 2.1 routes.\n\n' +
-        'Return structured findings. Set protocol="A2A" or "MCP" per finding.',
+        'error codes (-32001 through -32007 → correct HTTP status), auth surface.\n\n' +
+        'Return structured findings. Set protocol="A2A" per finding.',
         { schema: PROTO_SCHEMA, agentType: 'a2a-advisor', label: 'proto:a2a', phase: 'Protocol Audit' }
+      )
+    })
+  }
+
+  if (runMCP) {
+    advisorTasks.push(function() {
+      return agent(
+        'MCP server + Claude.ai connector conformance audit.\n\n' +
+        'Files to audit:\n' +
+        wave.allCreates.filter(function(p) {
+          return MCP_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
+        }).join('\n') + '\n\n' +
+        'Check: Streamable-HTTP transport, OAuth 2.1 discovery chain (PRM + AS metadata),\n' +
+        'PKCE S256, token aud binding, CORS (claude.ai origin + WWW-Authenticate exposure),\n' +
+        'initialize echo, tools/list shape, isError vs JSON-RPC error split.\n\n' +
+        'Return structured findings. Set protocol="MCP" per finding.',
+        { schema: PROTO_SCHEMA, agentType: 'mcp-advisor', label: 'proto:mcp', phase: 'Protocol Audit' }
       )
     })
   }
@@ -630,10 +646,20 @@ if (!runProtocol) {
     if (runA2A) {
       recheckTasks.push(function() {
         return agent(
-          'A2A v0.3.0 + MCP re-audit after preceding fix. Check same surfaces.\n' +
+          'A2A v0.3.0 re-audit after preceding fix. Check same surfaces.\n' +
           'Creates paths:\n' + wave.allCreates.join('\n') + '\n' +
           'Focus on previously-critical findings. Return structured findings.',
           { schema: PROTO_SCHEMA, agentType: 'a2a-advisor', label: 'proto:recheck:a2a', phase: 'Protocol Audit' }
+        )
+      })
+    }
+    if (runMCP) {
+      recheckTasks.push(function() {
+        return agent(
+          'MCP server re-audit after preceding fix. Check same surfaces.\n' +
+          'Creates paths:\n' + wave.allCreates.join('\n') + '\n' +
+          'Focus on previously-critical findings. Return structured findings.',
+          { schema: PROTO_SCHEMA, agentType: 'mcp-advisor', label: 'proto:recheck:mcp', phase: 'Protocol Audit' }
         )
       })
     }

@@ -97,8 +97,8 @@ sync harness files in `.claude/` — showing every diff before writing anything.
     developer made.
 
     **10a. Resolve the seeded SHA (the base for conflict detection).**
-    Read `.claude/.harness-manifest.json`. This file is written by `/new-agent`
-    on first seed and updated by `/upgrade` after each successful sync. It maps
+    Read `.claude/.harness-manifest.json`. This file is written by the SDK
+    provisioning tool at first seed and updated by `/upgrade` after each successful sync. It maps
     every seeded file to the SDK SHA it was seeded from:
     ```json
     {
@@ -258,5 +258,5 @@ Next:      review any kept conflicts manually; commit when satisfied
 - Calls `/agent-verify` (step 9) — needs `BEDROCK_MODEL_ARN` or equivalent in `.env`.
 - Step 10 requires git access to the SDK repo. Use `--skip-harness` if network
   access is unavailable.
-- `/new-agent` writes the initial `.claude/.harness-manifest.json` on seed (see /new-agent Phase 4).
+- The SDK provisioning tool writes the initial `.claude/.harness-manifest.json` at first seed.
   Agents seeded before this feature existed get a one-time warning in step 10a.

@@ -27,6 +27,8 @@
     ".claude/agents/project/sdk-advisor.md": "{{SDK_SHA}}",
     ".claude/agents/project/python-implementer.md": "{{SDK_SHA}}",
     ".claude/skills/acceptance/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/add-artifact/SKILL.md": "{{SDK_SHA}}",
+    ".claude/.harness-manifest.json": "{{SDK_SHA}}",
     ".claude/workflows/wave-cycle.js": "{{SDK_SHA}}",
     ".claude/workflows/acceptance-api.js": "{{SDK_SHA}}",
     ".claude/reference/sdk-security-invariants.md": "{{SDK_SHA}}",
