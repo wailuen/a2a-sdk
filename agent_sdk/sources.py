@@ -46,6 +46,10 @@ class SourceAdapter:
         self._resolve_credential = credential_resolver
         self._client: httpx.AsyncClient | None = None
         self._lock = asyncio.Lock()
+        # Set by build_app() after __init__ via _bind_credential_store().
+        # Adapters that need write access to the store (e.g. MsalTokenCache in
+        # GraphSource) override _bind_credential_store to act on it.
+        self._store: Any = None
 
     # ── credentials ──
     def credential(self, field: str) -> str:
@@ -174,6 +178,15 @@ class SourceAdapter:
                 source=self.source_name,
             )
         return resp
+
+    # ── SDK-internal store hook ──
+    def _bind_credential_store(self, store: Any) -> None:
+        """SDK-internal: called by build_app() after __init__.
+
+        Gives adapters that need write access to the credential store a chance
+        to act (e.g. GraphSource creates MsalTokenCache here). Do not call from
+        user code. Override in subclasses; always call super()."""
+        self._store = store
 
     # ── lifecycle ──
     async def health_check(self) -> bool:  # pragma: no cover - subclass hook

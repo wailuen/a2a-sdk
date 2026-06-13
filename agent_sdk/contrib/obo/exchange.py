@@ -58,7 +58,7 @@ _RETRYABLE_SUBSTRINGS = (
     "connection",
 )
 
-_DEFAULT_EXPIRY_BUFFER_SECONDS = 300  # canonical OBO buffer (DESIGN §9)
+_DEFAULT_EXPIRY_BUFFER_SECONDS = 30  # canonical OBO buffer (DESIGN §9); m365-validated
 
 
 def _sanitize_msal_desc(desc: str) -> str:

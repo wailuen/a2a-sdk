@@ -9,6 +9,9 @@ Layers:
                    contextvar propagation into a detached worker snapshot.
   4. source      — GraphSource: no-assertion fails closed, host pinning, auth
                    header injection, JSON decode.
+  5. cache       — MsalTokenCache: load from store, flush on state change,
+                   ephemeral mode (no store), GraphSource wiring via
+                   _bind_credential_store.
 """
 
 from __future__ import annotations
@@ -21,10 +24,13 @@ import time
 import httpx
 import pytest
 
+from unittest.mock import patch
+
 from agent_sdk.models.errors import AgentError, ErrorCategory
 from agent_sdk.contrib.obo import (
     GRAPH_CREDENTIAL_FIELDS,
     GraphSource,
+    MsalTokenCache,
     OboAssertionMiddleware,
     OboCredentials,
     OboExchanger,
@@ -527,3 +533,200 @@ def test_graph_credential_fields_are_lowercase_and_secret_flagged():
     assert set(by_name) == {"azure_tenant_id", "azure_client_id", "azure_client_secret"}
     assert by_name["azure_client_secret"].secret is True
     assert by_name["azure_tenant_id"].secret is False  # IDs are not secrets
+
+
+# ── 2b. exchange — default buffer ──
+def test_default_expiry_buffer_is_30s():
+    """m365-validated value: 30 s, not 300 s."""
+    ex = OboExchanger(
+        credentials_provider=lambda: _CREDS,
+        scopes=["https://graph.microsoft.com/User.Read"],
+        app_factory=lambda c: FakeMsalApp(),
+    )
+    assert ex._buffer == 30
+
+
+# ── 5. MsalTokenCache ──────────────────────────────────────────────────────────
+
+class FakeSerializableCache:
+    """Duck-typed stand-in for msal.SerializableTokenCache."""
+
+    def __init__(self) -> None:
+        self._state: str = ""
+        self._changed: bool = False
+        self.add_calls: list = []
+        self.remove_rt_calls: list = []
+        self.remove_at_calls: list = []
+
+    @property
+    def has_state_changed(self) -> bool:
+        return self._changed
+
+    def serialize(self) -> str:
+        self._changed = False  # MSAL contract: serialize resets the flag
+        return self._state
+
+    def deserialize(self, state: str) -> None:
+        self._state = state
+
+    def find(self, credential_type, **kwargs):
+        return []
+
+    def search(self, credential_type, **kwargs):
+        return []
+
+    def add(self, event, now=None):
+        self.add_calls.append(event)
+        self._state = f"state-after-add-{len(self.add_calls)}"
+        self._changed = True
+
+    def remove_rt(self, rt_item):
+        self.remove_rt_calls.append(rt_item)
+        self._changed = True
+
+    def remove_at(self, at_item):
+        self.remove_at_calls.append(at_item)
+        self._changed = True
+
+    def modify(self, credential_type, old, new):
+        self._changed = True
+
+    def update_rt(self, rt_item, new_rt):
+        self._changed = True
+
+    def remove_account(self, account):
+        self._changed = True
+
+    def remove_idt(self, idt_item):
+        self._changed = True
+
+
+class FakeStore:
+    """Minimal CredentialStore for cache tests."""
+
+    def __init__(self, initial: dict | None = None) -> None:
+        self.data: dict[tuple, str] = dict(initial or {})
+        self.set_calls: list[tuple] = []
+
+    def get(self, namespace: str, field: str) -> str | None:
+        return self.data.get((namespace, field))
+
+    def set(self, namespace: str, field: str, value: str) -> None:
+        self.set_calls.append((namespace, field, value))
+        self.data[(namespace, field)] = value
+
+    def delete(self, namespace, field):
+        self.data.pop((namespace, field), None)
+
+    def list_fields(self, namespace):
+        return [f for n, f in self.data if n == namespace]
+
+    def close(self):
+        pass
+
+
+def _make_cache(store=None, namespace="graph") -> MsalTokenCache:
+    """Construct a MsalTokenCache with a FakeSerializableCache patched in."""
+    fake_inner = FakeSerializableCache()
+    with patch("agent_sdk.contrib.obo.cache._make_msal_cache", return_value=fake_inner):
+        cache = MsalTokenCache(store, namespace)
+    cache._cache = fake_inner  # keep a direct reference for assertions
+    return cache
+
+
+def test_cache_ephemeral_when_no_store():
+    cache = _make_cache(store=None)
+    assert cache._store is None
+    # add() should not raise and flush is a no-op
+    cache.add({"type": "AccessToken"})
+    # no store.set() called — would have raised if attempted
+
+
+def test_cache_loads_blob_from_store_on_construction():
+    store = FakeStore(initial={("graph", "msal_token_cache"): "existing-blob"})
+    fake_inner = FakeSerializableCache()
+    with patch("agent_sdk.contrib.obo.cache._make_msal_cache", return_value=fake_inner):
+        MsalTokenCache(store, "graph")
+    assert fake_inner._state == "existing-blob"
+
+
+def test_cache_skips_load_when_no_blob_in_store():
+    store = FakeStore()  # empty
+    fake_inner = FakeSerializableCache()
+    with patch("agent_sdk.contrib.obo.cache._make_msal_cache", return_value=fake_inner):
+        MsalTokenCache(store, "graph")
+    assert fake_inner._state == ""  # deserialize never called
+
+
+def test_cache_add_flushes_to_store():
+    store = FakeStore()
+    cache = _make_cache(store=store)
+    cache.add({"type": "AccessToken", "secret": "tok"})
+    # flush should have called store.set once
+    assert len(store.set_calls) == 1
+    ns, field, blob = store.set_calls[0]
+    assert ns == "graph"
+    assert field == "msal_token_cache"
+    assert "state-after-add-1" in blob
+
+
+def test_cache_flush_noop_when_no_state_change():
+    store = FakeStore()
+    cache = _make_cache(store=store)
+    # has_state_changed is False by default — _flush should be a no-op
+    cache._flush()
+    assert store.set_calls == []
+
+
+def test_cache_flush_noop_when_no_store():
+    cache = _make_cache(store=None)
+    cache._cache._changed = True
+    cache._flush()  # must not raise
+
+
+def test_cache_namespace_is_used_as_store_key():
+    store = FakeStore()
+    cache = _make_cache(store=store, namespace="my_graph")
+    cache._cache._changed = True
+    cache._cache._state = "blob"
+    cache._flush()
+    assert store.set_calls[0][0] == "my_graph"
+
+
+def test_graphsource_bind_credential_store_creates_cache():
+    store = FakeStore()
+    fake_inner = FakeSerializableCache()
+    src = GraphSource(object(), _resolver({}), exchanger=StubExchanger())
+    assert src._token_cache is None
+    with patch("agent_sdk.contrib.obo.cache._make_msal_cache", return_value=fake_inner):
+        src._bind_credential_store(store)
+    assert src._token_cache is not None
+    assert src._token_cache._namespace == "graph"
+    assert src._store is store
+
+
+def test_graphsource_get_exchanger_uses_token_cache():
+    """When _bind_credential_store has been called, the lazily-built exchanger
+    receives the MsalTokenCache so MSAL's in-memory cache is persistent."""
+    store = FakeStore()
+    fake_inner = FakeSerializableCache()
+    src = GraphSource(object(), _resolver({
+        "azure_tenant_id": "t.onmicrosoft.com",
+        "azure_client_id": "cid",
+        "azure_client_secret": "sec",
+    }))
+    with patch("agent_sdk.contrib.obo.cache._make_msal_cache", return_value=fake_inner):
+        src._bind_credential_store(store)
+    # The exchanger is built lazily on first access; intercept the factory call.
+    built_with: dict = {}
+
+    original_init = OboExchanger.__init__
+
+    def capturing_init(self_inner, **kwargs):
+        built_with.update(kwargs)
+        original_init(self_inner, **kwargs)
+
+    with patch.object(OboExchanger, "__init__", capturing_init):
+        src._get_exchanger()
+
+    assert built_with.get("token_cache") is src._token_cache

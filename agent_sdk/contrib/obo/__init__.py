@@ -10,9 +10,14 @@ Three cooperating pieces, mapping to the DESIGN §9 contract:
 - **assertion extraction / threading** — :class:`OboAssertionMiddleware` binds the
   inbound JWT Bearer into a request-scoped contextvar; the detached agent worker
   inherits it; a source reads it via :func:`current_assertion`.
-- **token exchange (cached, 300s buffer)** — :class:`OboExchanger` wraps an MSAL
+- **token exchange (cached, 30s buffer)** — :class:`OboExchanger` wraps an MSAL
   confidential-client app; MSAL caches the access token, the buffer refuses an
-  assertion near its own expiry.
+  assertion within 30 s of its own expiry so the worker doesn't mint a token
+  that dies mid-flight.
+- **persistent token cache** — :class:`MsalTokenCache` backs MSAL's
+  ``SerializableTokenCache`` against the SDK encrypted credential store so
+  access/refresh tokens survive restarts. Created automatically by
+  ``GraphSource`` when ``build_app()`` calls ``_bind_credential_store``.
 - **auth-context threading to adapters** — :class:`GraphSource` (a SourceAdapter)
   exchanges at tool time and calls host-pinned Graph with the delegated bearer.
 
@@ -46,6 +51,7 @@ reach an error detail.
 
 from __future__ import annotations
 
+from .cache import MsalTokenCache
 from .context import (
     OboAssertionMiddleware,
     bind_assertion,
@@ -64,6 +70,8 @@ from .scopes import (
 from .source import GRAPH_CREDENTIAL_FIELDS, GraphSource
 
 __all__ = [
+    # cache
+    "MsalTokenCache",
     # exchange
     "OboExchanger",
     "OboCredentials",

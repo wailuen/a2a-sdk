@@ -216,7 +216,9 @@ class Agent:
             adapters: dict[type[SourceAdapter], SourceAdapter] = {}
             for cls, reg in sources.items():
                 resolver = resolver_for_source(credential_store, cls.source_name)
-                adapters[cls] = cls(settings, resolver, **reg.init_kwargs)
+                adapter = cls(settings, resolver, **reg.init_kwargs)
+                adapter._bind_credential_store(credential_store)
+                adapters[cls] = adapter
             app.state.adapters = adapters
 
             async def _sweeper() -> None:

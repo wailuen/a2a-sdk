@@ -77,7 +77,7 @@ class GraphSource(SourceAdapter):
         credential_resolver: CredentialResolver,
         *,
         scopes: list[str] | None = None,
-        expiry_buffer_seconds: int = 300,
+        expiry_buffer_seconds: int = 30,
         api_base: str = GRAPH_API_V1,
         exchanger: OboExchanger | None = None,
         expected_audiences: list[str] | None = None,
@@ -91,8 +91,18 @@ class GraphSource(SourceAdapter):
         # None → OboExchanger defaults to {client_id, api://client_id}. Pass a
         # custom App ID URI here when the app registration uses one.
         self._expected_audiences = expected_audiences
+        # Set by _bind_credential_store() after __init__; the exchanger is built
+        # lazily so the cache is always ready before the first exchange.
+        self._token_cache: Any = None
 
     # ── OBO plumbing ──
+    def _bind_credential_store(self, store: Any) -> None:
+        """Create the persistent MSAL token cache from the SDK credential store.
+        Called by build_app() after __init__; do not call from user code."""
+        super()._bind_credential_store(store)
+        from .cache import MsalTokenCache
+        self._token_cache = MsalTokenCache(store, self.source_name)
+
     def _credentials_provider(self) -> OboCredentials | None:
         tenant = self.credential_or_none("azure_tenant_id")
         client = self.credential_or_none("azure_client_id")
@@ -108,6 +118,7 @@ class GraphSource(SourceAdapter):
                 scopes=self._scopes,
                 expiry_buffer_seconds=self._expiry_buffer,
                 expected_audiences=self._expected_audiences,
+                token_cache=self._token_cache,  # None when used without build_app (tests)
             )
         return self._exchanger
 
