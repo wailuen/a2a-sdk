@@ -15,6 +15,7 @@ import json
 import uuid
 from typing import Any, Callable
 
+from ..models.content_types import A2UI_EXTENSION_URI as _A2UI_EXT_URI
 from ..models.content_types import A2UI_VERSION as _A2UI_VERSION
 from ..models.content_types import CATALOG_ID as _STANDARD_CATALOG
 from ..validation.validators import safe_id
@@ -206,9 +207,18 @@ class ChatDriver:
         if context_id:
             body["message"]["contextId"] = context_id
 
-        r = await self._client.post("/v1/message:send", json=body)
+        # H3 (D7.11): request the A2UI extension so the server activates it
+        r = await self._client.post(
+            "/v1/message:send",
+            json=body,
+            headers={"X-A2A-Extensions": _A2UI_EXT_URI},
+        )
         self._raise_a2a_error(emit, r)
-        task = r.json()
+        result = r.json()
+        # H1 (D7.5): message/send can return Message OR Task — discriminate on kind
+        if result.get("kind") == "message":
+            return result
+        task = result
         # Validate server-assigned task ID before interpolating into URL (SI-3)
         task_id = safe_id(str(task["id"]), what="task id")
 
@@ -222,6 +232,10 @@ class ChatDriver:
             self._fire(emit, "tool_done")  # re-used as poll tick
             if st in ("completed", "failed", "canceled", "rejected"):
                 break
+            # H2 (D7.8): surface interrupt states instead of polling to timeout
+            if st in ("input-required", "auth-required"):
+                self._fire(emit, "interrupt", task)
+                raise A2AError(None, f"task {task_id} requires input in state {st!r}")
             if asyncio.get_running_loop().time() > deadline:
                 self._fire(emit, "error", f"task {task_id} timed out in state {st!r}")
                 return task
@@ -246,13 +260,16 @@ class ChatDriver:
 
     @staticmethod
     def extract_a2ui(task: dict[str, Any]) -> list[list[dict[str, Any]]]:
-        """A2UI message-list sequences from task artifacts (one list per artifact)."""
+        """A2UI message-list sequences from task artifacts (one list per artifact).
+
+        Dispatches on DataPart.metadata.mimeType per A2UI §A5 (the canonical
+        render-hint location); not on the artifact-level mimeType shortcut.
+        """
         result = []
         for art in task.get("artifacts") or []:
-            meta = art.get("metadata") or {}
-            if meta.get("mimeType") != A2UI_MIME:
-                continue
             for p in art.get("parts") or []:
-                if p.get("kind") == "data" and isinstance(p.get("data"), list):
-                    result.append(p["data"])
+                part_mime = (p.get("metadata") or {}).get("mimeType")
+                if p.get("kind") == "data" and part_mime == A2UI_MIME:
+                    if isinstance(p.get("data"), list):
+                        result.append(p["data"])
         return result
