@@ -1,10 +1,10 @@
 [project]
 name = "{{AGENT_NAME}}"
-version = "0.2.0"
+version = "0.3.0"
 description = "{{AGENT_NAME}} agent (A2A / AG-UI / MCP) built on agent-sdk"
 requires-python = ">=3.12"
 dependencies = [
-    # Pinned by commit SHA (tags are mutable; SHAs aren't). Tag: v0.3.0
+    # Pinned by commit SHA (tags are mutable; SHAs aren't). Tag: v0.4.0
     # Latest: see sdk CHANGELOG or `git ls-remote --tags origin` on a2a-sdk.
     # To upgrade: replace the SHA with the new commit SHA from the sdk CHANGELOG.
     "agent-sdk @ git+ssh://{{SDK_GIT_URL}}@{{SDK_SHA}}",

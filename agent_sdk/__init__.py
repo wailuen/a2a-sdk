@@ -16,7 +16,7 @@ from .credentials.fields import CredentialField
 from .models.errors import AgentError, ErrorCategory
 from .sources import SourceAdapter
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "Agent",

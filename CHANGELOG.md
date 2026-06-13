@@ -4,7 +4,23 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
-## [0.3.0] — unreleased
+## [0.4.0] — unreleased
+
+---
+
+## [0.3.0] — 2026-06-13
+
+### Changed
+
+- **Credential store clarity** — `SourceAdapter.credential()` docstring now
+  explains the full lifecycle (admin console → encrypted store → decrypt on
+  call). `BaseAgentSettings` comments clarify that `MASTER_KEY` encrypts the
+  store (not an upstream API key) and that Bedrock uses IAM (no key in `.env`).
+  `.env.example` gains a prominent box listing what belongs and what does not.
+  `CLAUDE.md` credential model table adds a "How to access it" column plus
+  four labeled anti-pattern examples. SI-4 reference adds a step-by-step
+  store lifecycle and common anti-patterns; SI-6 reference lists what does
+  belong in `.env` to contrast with upstream keys.
 
 ---
 
