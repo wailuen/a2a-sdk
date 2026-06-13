@@ -15,6 +15,128 @@
 import { el, clear, fmtJson, postSse, readSse, uuid } from "./api.js";
 import { renderA2ui } from "./a2ui.js";
 
+/**
+ * Minimal Markdown → DOM nodes renderer (no external deps, CSP-safe).
+ * Handles: headings, bold, italic, inline-code, fenced code blocks,
+ * unordered lists, ordered lists, blockquotes, horizontal rules, blank
+ * line → paragraph breaks. All text goes through createTextNode — no
+ * innerHTML.
+ */
+function renderMd(markdown) {
+  const frag = document.createDocumentFragment();
+  const lines = (markdown || "").split("\n");
+  let i = 0;
+
+  function parseInline(text) {
+    // Returns an array of DOM nodes for bold/italic/code/plain text.
+    const nodes = [];
+    const re = /(`+)([\s\S]*?)\1|(\*\*|__)([\s\S]*?)\3|(\*|_)([\s\S]*?)\5/g;
+    let last = 0, m;
+    while ((m = re.exec(text)) !== null) {
+      if (m.index > last) nodes.push(document.createTextNode(text.slice(last, m.index)));
+      if (m[1]) { // inline code
+        const c = el("code", null); c.textContent = m[2]; nodes.push(c);
+      } else if (m[3]) { // bold
+        const b = el("strong", null); b.appendChild(document.createTextNode(m[4])); nodes.push(b);
+      } else if (m[5]) { // italic
+        const em = el("em", null); em.appendChild(document.createTextNode(m[6])); nodes.push(em);
+      }
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) nodes.push(document.createTextNode(text.slice(last)));
+    return nodes;
+  }
+
+  function appendInline(parent, text) {
+    parseInline(text).forEach((n) => parent.appendChild(n));
+  }
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // fenced code block
+    if (/^```/.test(line)) {
+      const lang = line.slice(3).trim();
+      const pre = el("pre", { class: "md-code" + (lang ? ` lang-${lang}` : "") });
+      const code = el("code"); pre.appendChild(code);
+      const codeLines = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i])) { codeLines.push(lines[i]); i++; }
+      code.textContent = codeLines.join("\n");
+      frag.appendChild(pre);
+      i++; continue;
+    }
+
+    // heading
+    const hm = line.match(/^(#{1,6})\s+(.*)/);
+    if (hm) {
+      const level = hm[1].length;
+      const h = el(`h${level}`, { class: `md-h md-h${level}` });
+      appendInline(h, hm[2]);
+      frag.appendChild(h);
+      i++; continue;
+    }
+
+    // horizontal rule
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) {
+      frag.appendChild(el("hr", { class: "md-hr" }));
+      i++; continue;
+    }
+
+    // blockquote
+    if (/^>\s?/.test(line)) {
+      const bq = el("blockquote", { class: "md-bq" });
+      while (i < lines.length && /^>\s?/.test(lines[i])) {
+        const p = el("p"); appendInline(p, lines[i].replace(/^>\s?/, "")); bq.appendChild(p);
+        i++;
+      }
+      frag.appendChild(bq);
+      continue;
+    }
+
+    // unordered list
+    if (/^[-*+]\s/.test(line)) {
+      const ul = el("ul", { class: "md-ul" });
+      while (i < lines.length && /^[-*+]\s/.test(lines[i])) {
+        const li = el("li"); appendInline(li, lines[i].replace(/^[-*+]\s/, "")); ul.appendChild(li);
+        i++;
+      }
+      frag.appendChild(ul);
+      continue;
+    }
+
+    // ordered list
+    if (/^\d+\.\s/.test(line)) {
+      const ol = el("ol", { class: "md-ol" });
+      while (i < lines.length && /^\d+\.\s/.test(lines[i])) {
+        const li = el("li"); appendInline(li, lines[i].replace(/^\d+\.\s/, "")); ol.appendChild(li);
+        i++;
+      }
+      frag.appendChild(ol);
+      continue;
+    }
+
+    // blank line — paragraph break (skip)
+    if (line.trim() === "") { i++; continue; }
+
+    // paragraph: collect consecutive non-blank, non-special lines
+    const pLines = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() !== "" &&
+      !/^(#{1,6}\s|```|[-*+]\s|\d+\.\s|>\s?|(-{3,}|\*{3,}|_{3,})$)/.test(lines[i])
+    ) {
+      pLines.push(lines[i]);
+      i++;
+    }
+    const p = el("p", { class: "md-p" });
+    appendInline(p, pLines.join("\n"));
+    frag.appendChild(p);
+  }
+
+  return frag;
+}
+
 /* session state survives tab switches */
 const state = {
   mode: "a2a",
@@ -28,6 +150,7 @@ const state = {
 };
 
 export function render(pane, ctx) {
+  pane.classList.add("pane--chat");
   pane.appendChild(
     el(
       "div",
@@ -100,18 +223,48 @@ export function render(pane, ctx) {
   );
   pane.appendChild(el("div", { class: "chat-composer" }, input, sendBtn));
 
-  /* ── transcript helpers (text nodes only) ── */
+  /* ── transcript helpers ── */
 
   function bubble(role, textContent) {
+    const body = el("div", { class: "chat-msg-body" });
+    if (textContent) {
+      if (role === "agent") {
+        body.appendChild(renderMd(textContent));
+      } else {
+        body.appendChild(document.createTextNode(textContent));
+      }
+    }
     const node = el(
       "div",
       { class: `chat-msg ${role}` },
       el("div", { class: "chat-msg-role" }, role),
-      el("div", { class: "chat-msg-body" }, textContent || "")
+      body
     );
     transcript.appendChild(node);
     transcript.scrollTop = transcript.scrollHeight;
-    return node.querySelector(".chat-msg-body");
+    return body;
+  }
+
+  /** Create an agent bubble that re-renders its accumulated markdown on each delta. */
+  function streamingBubble() {
+    const body = el("div", { class: "chat-msg-body" });
+    const node = el(
+      "div",
+      { class: "chat-msg agent" },
+      el("div", { class: "chat-msg-role" }, "agent"),
+      body
+    );
+    transcript.appendChild(node);
+    let accumulated = "";
+    return {
+      append(delta) {
+        accumulated += delta;
+        while (body.firstChild) body.removeChild(body.firstChild);
+        body.appendChild(renderMd(accumulated));
+        transcript.scrollTop = transcript.scrollHeight;
+      },
+      text() { return accumulated; },
+    };
   }
 
   function systemLine(text) {
@@ -159,7 +312,7 @@ export function render(pane, ctx) {
     }
 
     let sawFinal = false;
-    let agentBody = null;
+    let agentStream = null; // streaming bubble for A2A status-update text parts
 
     await readSse(resp, ({ event, json, data }) => {
       traceFrame(event || "data", json !== null ? json : data);
@@ -180,8 +333,8 @@ export function render(pane, ctx) {
         if (msg && Array.isArray(msg.parts)) {
           for (const part of msg.parts) {
             if (part.kind === "text" && part.text) {
-              if (!agentBody) agentBody = bubble("agent", "");
-              agentBody.appendChild(document.createTextNode(part.text));
+              if (!agentStream) agentStream = streamingBubble();
+              agentStream.append(part.text);
             }
           }
         }
@@ -236,7 +389,7 @@ export function render(pane, ctx) {
       return;
     }
 
-    const textBuffers = new Map(); // messageId -> {node, content}
+    const textBuffers = new Map(); // messageId -> streamingBubble
     let terminal = false;
 
     await readSse(resp, ({ json, data }) => {
@@ -247,22 +400,18 @@ export function render(pane, ctx) {
           systemLine(`run ${json.runId || ""} started`);
           break;
         case "TEXT_MESSAGE_START":
-          textBuffers.set(json.messageId, { node: bubble("agent", ""), content: "" });
+          textBuffers.set(json.messageId, streamingBubble());
           break;
         case "TEXT_MESSAGE_CONTENT": {
           const buf = textBuffers.get(json.messageId);
-          if (buf && json.delta) {
-            buf.content += json.delta;
-            buf.node.appendChild(document.createTextNode(json.delta));
-            transcript.scrollTop = transcript.scrollHeight;
-          }
+          if (buf && json.delta) buf.append(json.delta);
           break;
         }
         case "TEXT_MESSAGE_END": {
           const buf = textBuffers.get(json.messageId);
           if (buf) {
             // client owns history: fold the assistant turn back in
-            state.aguiMessages.push({ id: json.messageId, role: "assistant", content: buf.content });
+            state.aguiMessages.push({ id: json.messageId, role: "assistant", content: buf.text() });
           }
           break;
         }
