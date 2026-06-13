@@ -15,13 +15,24 @@ OAuth-chain curl probes the umbrella doesn't own, and an optional console smoke.
 ## Usage
 
 ```
-/agent-verify [--port 8000] [--prod] [--no-console] [--no-stack-check]
+/agent-verify [--port <n>] [--prod] [--no-console] [--no-stack-check]
 ```
-- `--port` — local port to boot on (default 8000).
+- `--port` — local port to boot on (default: read `AGENT_PORT` from `.env`,
+  then fall back to 8000).
 - `--prod` — boot with a real `PUBLIC_URL` + `MASTER_KEY` (production fidelity: the
   card/OAuth checks need real advertised URLs). Default is `DEV_MODE=true` local.
 - `--no-console` — skip the Playwright console leg.
 - `--no-stack-check` — skip the conformance umbrella (e.g. when the check kit isn't installed).
+
+## Phase 0 — Resolve port
+
+Before booting, resolve the port:
+- If `--port` was given, use that value.
+- Otherwise: read `AGENT_PORT` from `.env` (`grep -E '^AGENT_PORT=' .env | cut -d= -f2`).
+  If blank or absent, default to 8000 and warn: "`AGENT_PORT` not set in `.env` —
+  using 8000. Run `/setup` to assign a persistent port, or pass `--port <n>`."
+
+All subsequent `<port>` references in this skill use this resolved value.
 
 ## Phase 1 — Boot the agent
 

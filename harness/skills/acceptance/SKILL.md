@@ -214,18 +214,22 @@ Round N:
 
 After any code change:
 ```bash
+# Resolve port from .env (same source as /provision used)
+PORT=$(grep -E '^AGENT_PORT=' .env | cut -d= -f2)
+PORT=${PORT:-8000}
+
 # Kill the running server
-lsof -i :<port> -t | xargs kill -9 2>/dev/null
+lsof -i :$PORT -t | xargs kill -9 2>/dev/null
 
 # Wait for port free
 sleep 2
 
 # Restart
 tmplog=$(mktemp /tmp/acc-restart-XXXXXX.log)
-DEV_MODE=true .venv/bin/uvicorn src.main:app --port <port> --workers 1 \
+DEV_MODE=true .venv/bin/uvicorn src.main:app --port $PORT --workers 1 \
   > "$tmplog" 2>&1 &
 
-# Wait for health
+# Wait for health (base_url from ADR-000)
 until curl -sf <base_url>/health > /dev/null; do sleep 1; done
 rm -f "$tmplog"
 ```

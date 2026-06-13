@@ -71,6 +71,24 @@ Collect, then echo back a summary for confirmation before touching any file:
    SemVer). `obo` requires the `[obo]` extra (MSAL); this will modify the
    dependency line in `pyproject.toml`.
 
+7. **Dev port** — scan ports 8000–8020 for availability and present the options:
+   ```bash
+   python3 -c "
+   import socket
+   free = []
+   for p in range(8000, 8021):
+       try:
+           s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+           s.bind(('', p)); s.close(); free.append(str(p))
+           if len(free) >= 5: break
+       except OSError: pass
+   print(' '.join(free) if free else '(none free in 8000-8020)')
+   "
+   ```
+   Present: "Available ports: `<list>`. Use `<first>` (recommended) or enter another:"
+   Wait for the user's choice (Enter = accept first suggestion). This becomes
+   `AGENT_PORT` in `.env`. If all 8000–8020 are taken, let the user enter any port.
+
 Echo the full summary. Wait for explicit confirmation before proceeding.
 
 ## Phase 1 — Preflight git access
@@ -203,8 +221,8 @@ __pycache__
        env.write_text(content.replace('MASTER_KEY=\n', f'MASTER_KEY={key}\n', 1))
    EOF
    ```
-2. **If `.env` did not exist:** the script above creates it from `.env.example` with the key already set. Also write the model backend vars collected in Phase 0 (e.g. `BEDROCK_MODEL_ARN=`, `BEDROCK_REGION=`) into the new `.env`.
-   **If `.env` already exists (re-run):** the script updates only the `MASTER_KEY=` line in-place. Warn: "Existing `.env` preserved — only `MASTER_KEY` regenerated. Verify `BEDROCK_MODEL_ARN` and `BEDROCK_REGION` are still set if required."
+2. **If `.env` did not exist:** the script above creates it from `.env.example` with the key already set. Also write the model backend vars collected in Phase 0 (e.g. `BEDROCK_MODEL_ARN=`, `BEDROCK_REGION=`) and the chosen port (`AGENT_PORT=<port>`) into the new `.env`.
+   **If `.env` already exists (re-run):** the script updates only the `MASTER_KEY=` line in-place. Update `AGENT_PORT=` only if it is currently blank. Warn: "Existing `.env` preserved — only `MASTER_KEY` regenerated. Verify `BEDROCK_MODEL_ARN`, `BEDROCK_REGION`, and `AGENT_PORT` are still set if required."
 3. **The key never leaves the file.** Never print or echo it to chat, a log, or shell history. Tell the user:
    "`MASTER_KEY` generated and written to `.env` (git-ignored). Rotate later with
    `python -m agent_sdk rotate-master-key` — offline only."
@@ -247,21 +265,27 @@ Then go directly to the Handoff.
    ```
    Confirm a green baseline before adding anything.
 
-3. **Check the port is free before booting:**
+3. **Read the chosen port:**
    ```bash
-   lsof -i :8000 -t
+   PORT=$(grep -E '^AGENT_PORT=' .env | cut -d= -f2)
+   PORT=${PORT:-8000}
    ```
-   If a PID is returned: "Port 8000 is in use (PID `<pid>`). Kill it, choose a
-   different port (`--port`), or abort?" Never kill silently.
+   **Check the port is free:**
+   ```bash
+   lsof -i :$PORT -t
+   ```
+   If a PID is returned: "Port `$PORT` is in use (PID `<pid>`). Kill it,
+   pick a different port (update `AGENT_PORT` in `.env`), or abort?"
+   Never kill silently.
 
 4. Boot:
    ```bash
-   DEV_MODE=true .venv/bin/uvicorn src.main:app --port 8000 --workers 1
+   DEV_MODE=true .venv/bin/uvicorn src.main:app --port $PORT --workers 1
    ```
    One worker is mandatory (task store / SSE / rate-limiter are process-local).
    Run in background, redirect stdout to a temp file.
 
-5. Walk the console: open `http://localhost:8000/admin`. The first run prints a
+5. Walk the console: open `http://localhost:$PORT/admin`. The first run prints a
    single-use **bootstrap token to stdout** — grep the temp file for it and paste
    into the console to mint the first admin API key. Delete the temp log file
    immediately after capturing the token. Then: add each source's credentials
@@ -291,8 +315,9 @@ SDK:         <tag> @ <sha7>
 Sources:     <n> stub(s): <names>
 Contrib:     <none | list>  (EXPERIMENTAL)
 MASTER_KEY:  generated → .env (not shown)
+AGENT_PORT:  <port> → .env
 Tests:       <pass/fail>
-Dev boot:    <ok @ :8000 | skipped (--no-run)>
+Dev boot:    <ok @ :<port> | skipped (--no-run)>
 Manifest:    .claude/.harness-manifest.json ✓
 
 ## Development lifecycle

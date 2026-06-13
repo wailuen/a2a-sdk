@@ -12,10 +12,11 @@ scaffold) to a fully-operational, credential-loaded, live-verified instance.
 ## Usage
 
 ```
-/provision [--port 8000] [--env dev|prod] [--skip-tool-call]
+/provision [--port <n>] [--env dev|prod] [--skip-tool-call]
 ```
 
-- `--port` — local port to boot on (default 8000)
+- `--port` — local port to boot on (default: read `AGENT_PORT` from `.env`,
+  then fall back to 8000)
 - `--env` — target environment: `dev` (default) or `prod`; controls which
   ADR-000 credentials file is written (`ADR-000-dev-credentials.md` or
   `ADR-000-prod-credentials.md`)
@@ -23,6 +24,16 @@ scaffold) to a fully-operational, credential-loaded, live-verified instance.
   credentials are real but no upstream quota is available yet)
 
 ## Steps
+
+### Phase 0 — Resolve port
+
+Before any other step, resolve the port to use:
+- If `--port` was given, use that value.
+- Otherwise: read `AGENT_PORT` from `.env` (`grep -E '^AGENT_PORT=' .env | cut -d= -f2`).
+  If blank or absent, default to 8000 and warn: "`AGENT_PORT` not set in `.env` —
+  using 8000. Run `/setup` to assign a persistent port, or pass `--port <n>`."
+
+All subsequent references to `<port>` in this skill use this resolved value.
 
 ### Phase 1 — Pre-flight checks
 
