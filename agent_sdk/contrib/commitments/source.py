@@ -52,8 +52,8 @@ class CommitmentsSource(SourceAdapter):
     """Tool-facing durable-scheduling source backed by :class:`CommitmentStore`."""
 
     source_name = "commitments"
-    # Non-HTTP: no outbound calls, so the SSRF host-pin list stays empty and the
-    # inherited httpx client is never instantiated.
+    _no_http = True  # non-HTTP adapter; never makes outbound requests (SI-7 opt-out)
+    # SSRF host-pin list stays empty and the inherited httpx client is never instantiated.
 
     def __init__(
         self,

@@ -59,9 +59,9 @@ async def test_tool_and_custom_events(client, fake_model):
 
     customs = {f["name"]: f["value"] for f in frames if f["type"] == "CUSTOM"}
     assert set(customs) == {"AGENT_ARTIFACT", "A2UI_UPDATE"}
-    assert customs["AGENT_ARTIFACT"]["data_type"] == "kpi_card"
-    assert customs["AGENT_ARTIFACT"]["tool_name"] == "demo_kpis"
-    verbs = [next(k for k in m if k != "version") for m in customs["A2UI_UPDATE"]]
+    assert customs["AGENT_ARTIFACT"]["dataType"] == "kpi_card"
+    assert customs["AGENT_ARTIFACT"]["toolName"] == "demo_kpis"
+    verbs = [next(k for k in m if k != "version") for m in customs["A2UI_UPDATE"]["messages"]]
     assert verbs == ["createSurface", "updateComponents", "updateDataModel", "deleteSurface"]
 
 

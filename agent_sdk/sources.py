@@ -9,6 +9,8 @@ keyword-only parameters annotated with the adapter class (exact-class match).
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import socket
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -22,6 +24,10 @@ CredentialResolver = Callable[[str, str], str | None]  # (source_name, field) ->
 class SourceAdapter:
     source_name: str = ""
     allowed_hosts: list[str] = []
+    # Set _no_http = True on adapters that never make outbound HTTP requests
+    # (e.g. CommitmentsSource). Exempts them from the build-time allowed_hosts
+    # non-empty check while keeping the SSRF guard intact for HTTP adapters.
+    _no_http: bool = False
     # Redirect-following is disabled and pinned (SSRF bypass via allowed-host
     # redirect). Subclasses that opt in must set follow_redirects=True AND
     # every hop is re-checked by the event hook below.
@@ -31,6 +37,11 @@ class SourceAdapter:
     def __init__(self, settings: Any, credential_resolver: CredentialResolver) -> None:
         if not self.source_name:
             raise ValueError(f"{type(self).__name__} must declare source_name")
+        if not self.allowed_hosts and not self._no_http:
+            raise ValueError(
+                f"{type(self).__name__} must declare non-empty allowed_hosts "
+                f"or set _no_http = True for non-HTTP adapters (SI-7)"
+            )
         self.settings = settings
         self._resolve_credential = credential_resolver
         self._client: httpx.AsyncClient | None = None
@@ -65,6 +76,36 @@ class SourceAdapter:
     async def _on_request(self, request: httpx.Request) -> None:
         # Re-checks every hop, including opted-in redirects.
         self._check_host(request.url)
+        # DNS-rebinding guard: re-verify the resolved IP is public at request
+        # time. validate_credential_url does this at save time; this closes the
+        # TOCTOU window where a hostname could be rebounded to a private IP.
+        # Skipped in DEV_MODE (localhost targets are valid in development).
+        if not getattr(self.settings, "DEV_MODE", False):
+            host = urlparse(str(request.url)).hostname or ""
+            try:
+                loop = asyncio.get_running_loop()
+                infos = await loop.getaddrinfo(host, None)
+            except socket.gaierror:
+                raise AgentError(
+                    ErrorCategory.VALIDATION,
+                    f"cannot resolve host for source '{self.source_name}'",
+                    source=self.source_name,
+                )
+            for info in infos:
+                ip = ipaddress.ip_address(info[4][0])
+                if (
+                    ip.is_private
+                    or ip.is_loopback
+                    or ip.is_link_local
+                    or ip.is_reserved
+                    or ip.is_multicast
+                    or ip.is_unspecified
+                ):
+                    raise AgentError(
+                        ErrorCategory.VALIDATION,
+                        f"upstream '{self.source_name}' host resolves to a non-public address",
+                        source=self.source_name,
+                    )
 
     @property
     def client(self) -> httpx.AsyncClient:

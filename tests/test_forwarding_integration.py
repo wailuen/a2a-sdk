@@ -27,6 +27,7 @@ probe_tools = ToolSet()
 
 class ProbeSource(SourceAdapter):
     source_name = "probe"
+    _no_http = True  # non-HTTP adapter; credentials resolved in-process only (SI-7 opt-out)
     allowed_hosts: list[str] = []
 
     def __init__(self, settings: Any, resolver: Any, **_kw: Any) -> None:

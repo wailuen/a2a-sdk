@@ -28,6 +28,7 @@ from ..agent.runner import new_task, run_task_worker
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
 from ..common.sse import SSE_HEADERS, sse_data
+from ..credentials import forwarding
 from ..models.content_types import ContentModel
 from ..tasks.store import StreamTerminated, TaskRecord
 from ..agent.events import (
@@ -48,6 +49,7 @@ router = APIRouter()
 
 MAX_HISTORY_MESSAGES = 50
 MAX_MESSAGE_CHARS = 4000
+_MAX_BODY_BYTES = 1 * 1024 * 1024  # 1 MB — mirrors MCP/OAuth caps
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
@@ -236,13 +238,15 @@ class _RunMapper:
             frames = [
                 self._custom(
                     "AGENT_ARTIFACT",
-                    {"data_type": event.data_type, "tool_name": event.tool_name, "data": data},
+                    {"dataType": event.data_type, "toolName": event.tool_name, "data": data},
                 )
             ]
             if isinstance(payload, ContentModel):
                 a2ui_messages = translate(payload, capabilities=self.capabilities)
                 if a2ui_messages is not None:
-                    frames.append(self._custom("A2UI_UPDATE", a2ui_messages))
+                    # Named envelope so consumers can key on value.messages
+                    # (spec: CUSTOM.value carries the A2UI message array).
+                    frames.append(self._custom("A2UI_UPDATE", {"messages": a2ui_messages}))
             return frames
 
         if isinstance(event, InterruptEvent):
@@ -285,6 +289,9 @@ def _start_worker(request: Request, record: TaskRecord, capabilities: A2uiCapabi
     import asyncio
 
     state = request.app.state
+    # Bind per-call forwarded credentials BEFORE create_task so the worker
+    # snapshots them via contextvars (mirrors the A2A route pattern).
+    forwarding.bind(forwarding.parse_header(request.headers.get(forwarding.HEADER_NAME)))
     record.worker = asyncio.get_running_loop().create_task(
         run_task_worker(
             store=state.task_store,
@@ -304,11 +311,15 @@ def _start_worker(request: Request, record: TaskRecord, capabilities: A2uiCapabi
 async def ag_ui_run(
     request: Request, identity: Identity = Depends(require_identity)
 ) -> StreamingResponse:
+    raw = await request.body()
+    if len(raw) > _MAX_BODY_BYTES:
+        from fastapi.responses import Response as _Response
+        return _Response(status_code=413, content=b"request body too large")
     try:
-        body = await request.json()
+        body = json.loads(raw)
         if not isinstance(body, dict):
             body = {}
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, ValueError):
         body = {}
 
     # threadId/runId echo back on every frame; synthesize when absent so we

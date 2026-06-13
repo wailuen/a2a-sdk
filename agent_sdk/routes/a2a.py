@@ -45,6 +45,7 @@ from ..tasks.store import StreamTerminated, TaskRecord
 router = APIRouter()
 
 _SUPPORTED_MODES = {"text", "text/plain", "application/json", A2UI_MIME_TYPE}
+_MAX_BODY_BYTES = 1 * 1024 * 1024  # 1 MB — consistent with AG-UI cap
 
 
 def _now_iso() -> str:
@@ -94,9 +95,12 @@ def _config_error(params: MessageSendParams) -> JSONResponse | None:
 
 
 async def _parse_send(request: Request) -> MessageSendParams | JSONResponse:
+    raw = await request.body()
+    if len(raw) > _MAX_BODY_BYTES:
+        return a2a_invalid_params("request body too large")
     try:
-        body = await request.json()
-    except json.JSONDecodeError:
+        body = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
         return a2a_invalid_params("request body is not valid JSON")
     try:
         params = MessageSendParams.model_validate(body)
