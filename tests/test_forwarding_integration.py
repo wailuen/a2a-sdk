@@ -184,8 +184,9 @@ async def test_initialize_surfaces_credential_instructions(probe_app):
     instructions = result["instructions"]
     assert "X-Agent-Credentials" in instructions
     assert "probe: api_key" in instructions
-    # serverInfo stays name/version only (Claude.ai schema strictness, LRN-087)
-    assert set(result["serverInfo"]) == {"name", "version"}
+    # serverInfo: name + version + title (2025-06-18 optional field, safe to add);
+    # icons is the field Claude.ai rejects (LRN-087), not title.
+    assert {"name", "version", "title"} <= set(result["serverInfo"])
 
 
 async def test_no_credential_sources_omits_surfaces(tmp_path):

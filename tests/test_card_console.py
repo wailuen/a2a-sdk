@@ -19,8 +19,10 @@ async def test_card_shape(client):
     assert card["capabilities"]["pushNotifications"] is False
     assert card["supportsAuthenticatedExtendedCard"] is False
     exts = [e["uri"] for e in card["capabilities"]["extensions"]]
-    assert exts == ["https://a2ui.org/a2a-extension/a2ui/v0.9.1"]
-    params = card["capabilities"]["extensions"][0]["params"]
+    assert "https://a2ui.org/a2a-extension/a2ui/v0.9.1" in exts
+    assert "urn:agui:run:v1" in exts
+    a2ui_ext = next(e for e in card["capabilities"]["extensions"] if e["uri"] == "https://a2ui.org/a2a-extension/a2ui/v0.9.1")
+    params = a2ui_ext["params"]
     assert "urn:a2ui-profile:standard:v1" in params["supportedCatalogIds"]
     assert params["acceptsInlineCatalogs"] is False
     # skills carry only spec fields + x-sdk
