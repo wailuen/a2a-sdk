@@ -15,6 +15,7 @@
     ".claude/skills/redteam/SKILL.md": "{{SDK_SHA}}",
     ".claude/skills/scenario/SKILL.md": "{{SDK_SHA}}",
     ".claude/skills/sdk-issue/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/sdk-issue-scan/SKILL.md": "{{SDK_SHA}}",
     ".claude/skills/setup/SKILL.md": "{{SDK_SHA}}",
     ".claude/skills/todos/SKILL.md": "{{SDK_SHA}}",
     ".claude/skills/upgrade/SKILL.md": "{{SDK_SHA}}",

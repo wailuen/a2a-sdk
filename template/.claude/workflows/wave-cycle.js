@@ -8,7 +8,7 @@ export const meta = {
     { title: 'Unit Redteam',   detail: 'Per-group zero-tolerance fix loop (max 5 rounds/group; debug fires at r3+ and on stall)' },
     { title: 'Phase Redteam',  detail: 'Full-wave zero-tolerance fix loop (max 8 rounds; debug fires at r3+ and on stall)' },
     { title: 'Protocol Audit', detail: 'A2A + MCP + AG-UI + A2UI conformance — one dedicated advisor per protocol in parallel + seam check (protocol-surface waves only)' },
-    { title: 'Codify',         detail: 'Parallel LRN capture for critical/high findings; sequential C-NNN registration for new component candidates' },
+    { title: 'Codify',         detail: 'Parallel LRN capture for critical/high findings; sequential C-NNN registration; SDK issue scan writes workspace/sdk-candidates.md for /sdk-issue-scan' },
     { title: 'Archive',        detail: 'Move wave file to completed/, update plan.md, backfill FR Implementation: fields' },
   ],
 }
@@ -167,6 +167,30 @@ const PLAN_RT_SCHEMA = {
           name:        { type: 'string' },
           location:    { type: 'string' },
           description: { type: 'string' },
+        },
+      },
+    },
+  },
+}
+
+// SDK issue scan schema — classifies findings as SDK-level vs agent-domain
+const SDK_SCAN_SCHEMA = {
+  type: 'object',
+  required: ['sdkCandidates'],
+  additionalProperties: false,
+  properties: {
+    sdkCandidates: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['description', 'severity', 'component', 'rationale'],
+        additionalProperties: false,
+        properties: {
+          description: { type: 'string' },
+          severity:    { type: 'string' },
+          component:   { type: 'string' },
+          rationale:   { type: 'string' },
+          file:        { type: 'string' },
         },
       },
     },
@@ -783,6 +807,55 @@ if (registryCandidates.length > 0) {
     'Do NOT modify existing rows. Append only. Report: IDs assigned and their locations.',
     { label: 'registry:register', phase: 'Codify' }
   )
+}
+
+// ─── SDK issue scan (end of Codify) ──────────────────────────────────────────
+// Classify critical/high findings as SDK-level vs agent-domain.
+// SDK-level ones are written to workspace/sdk-candidates.md for /sdk-issue-scan.
+if (toCodeify.length > 0) {
+  const sdkScan = await agent(
+    'Classify each finding as SDK-level or agent-domain.\n\n' +
+    'SDK-LEVEL (include in output):\n' +
+    '- Harness: wrong step in a SKILL.md, wrong agent instruction, wave-cycle.js logic error\n' +
+    '- SDK internals: build_app(), Agent, ToolSet, SourceAdapter base class, credential store, loop\n' +
+    '- Protocol surface: wrong HTTP status, missing handler, wrong shape in src/routes/\n' +
+    '- Template scaffold: wrong pattern shown in template/, wrong SDK API in an example\n' +
+    '- Security: an SI violation that the SDK itself causes (not domain code)\n\n' +
+    'AGENT-DOMAIN (exclude):\n' +
+    '- src/tools/, src/sources/, src/config.py, src/persona.py\n' +
+    '- Agent-specific credential setup, domain test failures\n' +
+    '- An SI violation in the agent\'s domain code (fix the code, not the SDK)\n\n' +
+    'For each SDK-level finding, assign a component:\n' +
+    'harness/skill | harness/workflow | harness/agent | harness/template |\n' +
+    'sdk/build | sdk/loop | sdk/credentials | sdk/console |\n' +
+    'protocol/a2a | protocol/mcp | protocol/ag-ui | protocol/a2ui | protocol/oauth | security\n\n' +
+    'Findings to classify:\n' + JSON.stringify(toCodeify, null, 2),
+    { schema: SDK_SCAN_SCHEMA, label: 'sdk:scan', phase: 'Codify' }
+  )
+
+  if (sdkScan && sdkScan.sdkCandidates.length > 0) {
+    const candidateLines = sdkScan.sdkCandidates.map(function(c, i) {
+      return '## Candidate ' + (i + 1) + ': ' + c.description + '\n' +
+             '- Severity: ' + c.severity + '\n' +
+             '- Component: ' + c.component + '\n' +
+             '- File: ' + (c.file || 'n/a') + '\n' +
+             '- Rationale: ' + c.rationale
+    }).join('\n\n')
+
+    await agent(
+      'Write the file workspace/sdk-candidates.md with exactly this content:\n\n' +
+      '# SDK issue candidates — ' + wave.waveId + ' (' + TODAY + ')\n\n' +
+      'These critical/high findings from wave ' + wave.waveId + ' are classified as\n' +
+      'SDK-level. Run `/sdk-issue-scan` to review and file them as GitHub issues\n' +
+      'on `wailuen/a2a-sdk`. One confirmation per filing — nothing is filed automatically.\n\n' +
+      candidateLines,
+      { label: 'sdk:candidates', phase: 'Codify' }
+    )
+    log('SDK issue candidates: ' + sdkScan.sdkCandidates.length + ' finding(s) written to workspace/sdk-candidates.md')
+    log('Run /sdk-issue-scan to file them as GitHub issues on wailuen/a2a-sdk')
+  } else {
+    log('SDK issue scan: no SDK-level findings in this wave')
+  }
 }
 
 // ─── phase 7: archive ─────────────────────────────────────────────────────────

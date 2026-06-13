@@ -154,6 +154,23 @@ Called with label `rt:todos` (before implementation starts). Scope: review the w
 
 Set `issuesFound: true` when any array is non-empty. Set `issuesFound: false` (all arrays empty) when the plan is clean.
 
+## SDK issue classification
+
+After scoring all 8 dimensions, classify each Critical/High finding as **SDK-level**
+or **agent-domain**:
+
+- **SDK-level [SDK]**: harness bug (wrong SKILL.md step, wave-cycle.js logic error,
+  wrong agent instruction), SDK internals bug (`build_app()`, `Agent`, `ToolSet`,
+  `SourceAdapter` base, credential store, loop), template scaffold error, protocol
+  surface bug caused by SDK behavior (not agent-specific code).
+- **Agent-domain**: bug in `src/tools/`, `src/sources/`, `src/config.py`, domain
+  test failures, agent-specific SI violation (fix the code, not the SDK).
+
+Tag SDK-level findings with `[SDK]` in the finding ID: `**[RT-001][SDK]**`.
+
+Add a "SDK issue candidates" footer listing every `[SDK]`-tagged finding. The developer
+runs `/sdk-issue-scan` to file them as GitHub issues.
+
 ## Output Format
 
 ```markdown
@@ -161,15 +178,24 @@ Set `issuesFound: true` when any array is non-empty. Set `issuesFound: false` (a
 **Date:** YYYY-MM-DD | **Findings:** N critical, N high, N medium, N low
 
 ### Critical
-- **[RT-001]** <title> — `file:line`
+- **[RT-001][SDK]** <title> — `file:line`
   <what's wrong, why it matters, how to fix>
   **Codify:** <one-sentence lesson for LRN>
+
+- **[RT-002]** <title> — `file:line`   ← agent-domain, no [SDK] tag
+  ...
 
 ### High / Medium / Low
 ...
 
 ### Clean
 <Dimensions that passed with no findings>
+
+### SDK issue candidates
+<!-- Omit this section entirely if no [SDK] findings -->
+Run `/sdk-issue-scan` to file these as GitHub issues on `wailuen/a2a-sdk`:
+- [RT-001][SDK] <title> — component: harness/skill
+- [RT-003][SDK] <title> — component: sdk/build
 ```
 
 ## Rules
@@ -180,4 +206,5 @@ Set `issuesFound: true` when any array is non-empty. Set `issuesFound: false` (a
 - Every finding: what's wrong, why it matters, how to fix
 - No praise or softeners — adversarial review
 - For every critical/high finding, include a `Codify:` line
+- Tag SDK-level findings with `[SDK]`; add a "SDK issue candidates" footer if any exist
 - Re-read files rather than relying on memory

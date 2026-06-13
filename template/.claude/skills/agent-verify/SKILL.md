@@ -111,6 +111,12 @@ Consolidate the three legs into one advisory report; then **tear the booted agen
 down** (kill the uvicorn process) and remove any throwaway key/data dir created for
 the run.
 
+**SDK issue hook**: for each Critical or High finding in the consolidated report,
+classify it as SDK-level or agent-domain (same criteria as `/sdk-issue-scan`). List
+any SDK-level findings in a "SDK issue candidates" section at the bottom of the report.
+These should be filed via `/sdk-issue-scan` after the run — `agent-verify` never
+files them automatically.
+
 ## Steps
 
 1. Boot (Phase 1); fail fast with the boot error if `/health` never 200s.
@@ -129,6 +135,7 @@ the run.
 ## Agent verification — <agent> @ <BASE>   Mode: <dev|prod>
 Boot:            <ok | failed: …>
 Stack-check:     <verbatim OVERALL verdict | SKIPPED (--no-stack-check)>
+SDK candidates:  <N SDK-level findings → run /sdk-issue-scan | none>
 OAuth-chain probes:
   401 + WWW-Authenticate
     (resource_metadata present) PASS|FAIL (…)
