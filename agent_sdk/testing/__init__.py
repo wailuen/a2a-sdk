@@ -8,7 +8,7 @@ behavior is tested end-to-end without Bedrock.
 Used by ``python -m agent_sdk test-chat`` and available for integration tests.
 """
 
-from .chat import ChatDriver
+from .chat import A2AError, ChatDriver
 from .fake_model import FakeModelClient, reply, tool_call
 
-__all__ = ["ChatDriver", "FakeModelClient", "reply", "tool_call"]
+__all__ = ["A2AError", "ChatDriver", "FakeModelClient", "reply", "tool_call"]

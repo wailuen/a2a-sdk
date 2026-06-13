@@ -16,11 +16,10 @@ import uuid
 from typing import Any, Callable
 
 from ..models.content_types import A2UI_EXTENSION_URI as _A2UI_EXT_URI
+from ..models.content_types import A2UI_MIME_TYPE as A2UI_MIME
 from ..models.content_types import A2UI_VERSION as _A2UI_VERSION
 from ..models.content_types import CATALOG_ID as _STANDARD_CATALOG
 from ..validation.validators import safe_id
-
-A2UI_MIME = "application/a2ui+json"
 
 
 class A2AError(Exception):
@@ -47,6 +46,8 @@ class ChatDriver:
         ``a2ui(messages: list)``      — A2UI 4-message lifecycle sequence
         ``text(delta: str)``          — streaming text delta (AG-UI only)
         ``error(message: str)``       — run or request error
+        ``interrupt(task: dict)``     — A2A task paused in input-required/auth-required;
+                                        passes the full task dict (may contain history)
 
     Example::
 
@@ -77,6 +78,7 @@ class ChatDriver:
         self._poll_interval = poll_interval
         self._timeout = timeout
         self._card: dict[str, Any] | None = None
+        self._a2ui_active: bool = False
 
     def _raise_a2a_error(self, emit: dict[str, Callable] | None, response: Any) -> None:
         """Parse A2A error envelope and raise A2AError on non-2xx (§11.2 D7.10)."""
@@ -214,6 +216,9 @@ class ChatDriver:
             headers={"X-A2A-Extensions": _A2UI_EXT_URI},
         )
         self._raise_a2a_error(emit, r)
+        # D7.11: confirm A2UI extension was activated by reading the response echo
+        activated = [u.strip() for u in r.headers.get("x-a2a-extensions", "").split(",") if u.strip()]
+        self._a2ui_active = _A2UI_EXT_URI in activated
         result = r.json()
         # H1 (D7.5): message/send can return Message OR Task — discriminate on kind
         if result.get("kind") == "message":
