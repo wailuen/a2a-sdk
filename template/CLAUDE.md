@@ -20,6 +20,20 @@ No features the PRD doesn't mention. When in doubt, read the code.
 | `codify` | After any non-obvious root cause — capture the LRN |
 | `sdk-advisor` | Questions about SDK conventions, extension points, invariants |
 | `python-implementer` | Writing or fixing Python source files |
+| `a2a-advisor` | A2A v0.3.0 conformance questions, design, and remediation |
+| `mcp-advisor` | MCP server build advice and Claude.ai connector conformance |
+| `a2ui-advisor` | A2UI protocol + Standard Profile v1 spec and conformance |
+| `ag-ui-advisor` | AG-UI event catalog, SSE transport, GenUI mode wiring |
+
+**Compliance skills (protocol conformance audits):**
+
+| Skill | When to use |
+|---|---|
+| `/agent-stack-check` | Full-stack interop audit — MCP + A2A + AG-UI + A2UI in one pass |
+| `/a2a-check` | A2A v0.3.0 conformance sweep (server + consumer roles) |
+| `/mcp-check` | MCP server + Claude.ai connector conformance |
+| `/ag-ui-check` | AG-UI event and transport conformance |
+| `/a2ui-check` | A2UI protocol v0.9.1 + Standard Profile v1 conformance |
 
 **Core disciplines:**
 
@@ -108,8 +122,11 @@ Run after adding tools, sources, or settings:
 # Boot check
 DEV_MODE=true uvicorn src.main:app --port 8000 --workers 1
 
-# Protocol smoke
+# Protocol smoke (boots agent, runs full-stack conformance + OAuth-chain probes)
 /agent-verify
+
+# Conformance-only (no boot — static + optional live)
+/agent-stack-check
 
 # Full wave
 /wave w001

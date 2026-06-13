@@ -22,7 +22,7 @@ OAuth-chain curl probes the umbrella doesn't own, and an optional console smoke.
 - `--prod` — boot with a real `PUBLIC_URL` + `MASTER_KEY` (production fidelity: the
   card/OAuth checks need real advertised URLs). Default is `DEV_MODE=true` local.
 - `--no-console` — skip the Playwright console leg.
-- `--no-stack-check` — skip the conformance umbrella (e.g. when the check kit isn't installed).
+- `--no-stack-check` — skip the conformance umbrella (use for targeted surface-only runs).
 
 ## Phase 0 — Resolve port
 
@@ -64,7 +64,7 @@ It detects roles per protocol and dispatches `a2a-advisor`, `a2ui-advisor`,
 `ag-ui-advisor`, `mcp-advisor` (each applying its `/<p>-check` methodology) plus
 the S1–S6 cross-protocol seam audits, returning one deduped, severity-ranked
 verdict. **Do not restate protocol rules here** — capture its report verbatim into
-this skill's output. If the kit isn't installed, skip this leg and **say so loudly**
+this skill's output. If `--no-stack-check` was given, skip this leg and **say so loudly**
 in the report (never let a skipped umbrella read as a pass).
 
 ## Phase 3 — OAuth-chain curl probes (this skill owns these)
@@ -128,7 +128,7 @@ the run.
 ```
 ## Agent verification — <agent> @ <BASE>   Mode: <dev|prod>
 Boot:            <ok | failed: …>
-Stack-check:     <verbatim OVERALL verdict | SKIPPED (kit not installed)>
+Stack-check:     <verbatim OVERALL verdict | SKIPPED (--no-stack-check)>
 OAuth-chain probes:
   401 + WWW-Authenticate
     (resource_metadata present) PASS|FAIL (…)
@@ -149,9 +149,9 @@ Next:             <which skill/advisor owns each open finding>   (no commit made
 - **Composition, not duplication.** Conformance lives in the check kit; this skill
   owns boot + the curl OAuth chain + console. If a protocol rule seems wrong, fix it
   in that protocol's pair, not here.
-- **Graceful degradation is intentional.** A missing browser or a missing check kit
-  reduces coverage — the report says exactly which legs ran, so reduced coverage
-  never masquerades as a clean pass.
+- **Graceful degradation is intentional.** A missing browser reduces coverage — the
+  report says exactly which legs ran, so reduced coverage never masquerades as a clean
+  pass.
 - **No secrets in the report.** Bootstrap tokens, minted keys, and credential values
   are referenced by location/result, never printed.
 - **A `DEV_MODE` local boot proves structure, not Claude.ai connectivity.** It confirms

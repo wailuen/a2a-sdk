@@ -30,6 +30,18 @@
     ".claude/workflows/wave-cycle.js": "{{SDK_SHA}}",
     ".claude/workflows/acceptance-api.js": "{{SDK_SHA}}",
     ".claude/reference/sdk-security-invariants.md": "{{SDK_SHA}}",
+    ".claude/reference/a2a-protocol-0_3_0.md": "{{SDK_SHA}}",
+    ".claude/reference/mcp-protocol.md": "{{SDK_SHA}}",
+    ".claude/reference/mcp-claude-platforms.md": "{{SDK_SHA}}",
+    ".claude/agents/a2a-advisor.md": "{{SDK_SHA}}",
+    ".claude/agents/mcp-advisor.md": "{{SDK_SHA}}",
+    ".claude/agents/a2ui-advisor.md": "{{SDK_SHA}}",
+    ".claude/agents/ag-ui-advisor.md": "{{SDK_SHA}}",
+    ".claude/skills/a2a-check/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/mcp-check/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/ag-ui-check/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/a2ui-check/SKILL.md": "{{SDK_SHA}}",
+    ".claude/skills/agent-stack-check/SKILL.md": "{{SDK_SHA}}",
     ".claude/settings.json": "{{SDK_SHA}}"
   }
 }
