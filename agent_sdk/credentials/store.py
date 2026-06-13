@@ -18,9 +18,13 @@ NS_API_KEYS = "__api_keys__"
 NS_OAUTH_CLIENTS = "__oauth_clients__"
 NS_OAUTH_REFRESH = "__oauth_refresh__"
 NS_BEDROCK = "__bedrock__"
+# LLM model-backend API keys (OpenAI, Azure OpenAI, Anthropic). Seeded via
+# /admin → Model Backend. The agent reads from this namespace at startup to
+# construct the model client — no key ever lives in .env.
+NS_MODEL = "__model__"
 
 RESERVED_NAMESPACES = frozenset(
-    {NS_API_KEYS, NS_OAUTH_CLIENTS, NS_OAUTH_REFRESH, NS_BEDROCK}
+    {NS_API_KEYS, NS_OAUTH_CLIENTS, NS_OAUTH_REFRESH, NS_BEDROCK, NS_MODEL}
 )
 
 

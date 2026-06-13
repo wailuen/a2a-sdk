@@ -116,6 +116,33 @@ function renderMd(markdown) {
       continue;
     }
 
+    // markdown table: header row followed by a separator row (|---|---|)
+    if (/^\|/.test(line) && i + 1 < lines.length && /^\|[\s:|-]+\|/.test(lines[i + 1])) {
+      const table = el("table", { class: "md-table" });
+      // header
+      const thead = el("thead");
+      const htr = el("tr");
+      line.split("|").slice(1, -1).forEach(cell => {
+        const th = el("th"); appendInline(th, cell.trim()); htr.appendChild(th);
+      });
+      thead.appendChild(htr);
+      table.appendChild(thead);
+      i += 2; // skip header + separator
+      // body
+      const tbody = el("tbody");
+      while (i < lines.length && /^\|/.test(lines[i])) {
+        const btr = el("tr");
+        lines[i].split("|").slice(1, -1).forEach(cell => {
+          const td = el("td"); appendInline(td, cell.trim()); btr.appendChild(td);
+        });
+        tbody.appendChild(btr);
+        i++;
+      }
+      table.appendChild(tbody);
+      frag.appendChild(table);
+      continue;
+    }
+
     // blank line — paragraph break (skip)
     if (line.trim() === "") { i++; continue; }
 
@@ -124,7 +151,7 @@ function renderMd(markdown) {
     while (
       i < lines.length &&
       lines[i].trim() !== "" &&
-      !/^(#{1,6}\s|```|[-*+]\s|\d+\.\s|>\s?|(-{3,}|\*{3,}|_{3,})$)/.test(lines[i])
+      !/^(#{1,6}\s|```|[-*+]\s|\d+\.\s|>\s?|(-{3,}|\*{3,}|_{3,})$|\|)/.test(lines[i])
     ) {
       pLines.push(lines[i]);
       i++;

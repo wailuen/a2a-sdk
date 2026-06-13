@@ -6,6 +6,31 @@ internals, `contrib/`) may change in minors with notice here.
 
 ## [0.4.0] — unreleased
 
+### Added
+
+- **`NS_MODEL` namespace + model-backend credential store** — LLM API keys
+  (OpenAI, Azure OpenAI, Anthropic) are now stored in the encrypted credential
+  store under the reserved `__model__` namespace, never in `.env`. The admin
+  console gains a "Model Backend" section (`GET/PUT /admin/api/credentials/__model__/*`)
+  with fields for `openai_api_key`, `azure_openai_api_key`, and `anthropic_api_key`.
+  `NS_MODEL` exported from `agent_sdk`.
+
+- **OpenAI / Azure OpenAI as built-in model backends** — set `OPENAI_MODEL`
+  (or `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`) in `.env` (non-secret
+  operational vars) and seed the API key once via `/admin → Model Backend`. No
+  `model_client=` plumbing in `main.py` required; `Agent.build_app()` resolves
+  the key from the credential store automatically.
+
+### Changed
+
+- **`BaseAgentSettings`** — gains five non-secret fields for OpenAI/Azure backends:
+  `OPENAI_MODEL`, `OPENAI_BASE_URL`, `AZURE_OPENAI_ENDPOINT`, `AZURE_API_VERSION`,
+  `AZURE_OPENAI_DEPLOYMENT`. Removed guidance to put API keys in `.env`
+  via `SecretStr` subclass fields — that is now an SI-6 violation.
+- **`Agent._build_model_client()`** — accepts `credential_store` and resolves OpenAI
+  key from `__model__/openai_api_key` (or `azure_openai_api_key`) automatically.
+  Bedrock path unchanged.
+
 ---
 
 ## [0.3.0] — 2026-06-13

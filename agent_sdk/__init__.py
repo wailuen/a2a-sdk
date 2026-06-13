@@ -13,6 +13,7 @@ from .agent.registry import ToolSet
 from .app import Agent
 from .config import BaseAgentSettings
 from .credentials.fields import CredentialField
+from .credentials.store import NS_MODEL
 from .models.errors import AgentError, ErrorCategory
 from .sources import SourceAdapter
 
@@ -24,6 +25,7 @@ __all__ = [
     "ArtifactLoader",
     "BaseAgentSettings",
     "CredentialField",
+    "NS_MODEL",
     "ErrorCategory",
     "LoopPolicies",
     "ModelClient",

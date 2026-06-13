@@ -47,13 +47,19 @@ class BaseAgentSettings(BaseSettings):
     master_key: SecretStr | None = Field(default=None, alias="MASTER_KEY")
 
     # ── Bedrock (default model backend) ──
-    # Bedrock authenticates via the EC2/ECS IAM role — no API key required.
-    # For Azure OpenAI or direct OpenAI, add a SecretStr field to your Settings
-    # subclass (e.g. azure_openai_api_key: SecretStr). The SDK reads it from
-    # .env automatically via Pydantic-settings. This is the ONLY case where a
-    # key-like value belongs in .env; upstream vendor keys never do.
+    # Authenticates via EC2/ECS IAM role — no API key required.
     bedrock_region: str = Field(default="us-east-1", alias="BEDROCK_REGION")
     bedrock_model_arn: str | None = Field(default=None, alias="BEDROCK_MODEL_ARN")
+
+    # ── OpenAI / Azure OpenAI model backend (alternative to Bedrock) ──
+    # Non-secret operational vars only — the API key is NEVER in .env.
+    # Seed it once via /admin → Model Backend (stored in the encrypted credential
+    # store under the __model__ namespace). The SDK reads it from there at boot.
+    openai_model: str | None = Field(default=None, alias="OPENAI_MODEL")
+    openai_base_url: str | None = Field(default=None, alias="OPENAI_BASE_URL")
+    azure_openai_endpoint: str | None = Field(default=None, alias="AZURE_OPENAI_ENDPOINT")
+    azure_api_version: str | None = Field(default=None, alias="AZURE_API_VERSION")
+    azure_openai_deployment: str | None = Field(default=None, alias="AZURE_OPENAI_DEPLOYMENT")
 
     # ── CORS: explicit list, never wildcard ──
     cors_origins: list[str] = Field(

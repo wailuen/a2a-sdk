@@ -113,19 +113,21 @@ Full grep checks in `.claude/reference/sdk-security-invariants.md`.
 - Tests: use `agent_sdk.testing` (`FakeModelClient`, `reply`, `tool_call`)
   against an isolated `Agent` instance. Never call the live model backend in tests.
 
-## Credential model (two-key)
+## Credential model
 
 | Key | Where it lives | How to access it | Auth to |
 |-----|---------------|-----------------|---------|
 | SDK API key | Minted in admin console (`/admin`) | Sent by callers as `Authorization: Bearer` — you never read this | This agent |
-| Upstream/vendor key | Encrypted credential store (AES-256-GCM, keyed by MASTER_KEY) | `self.credential("field_name")` inside a `SourceAdapter` | Upstream APIs (CRM, financial data, graph, etc.) |
-| Model backend | Bedrock: IAM role — no key. Azure/OpenAI: `SecretStr` field in `Settings` loaded from `.env` | SDK reads it automatically via Pydantic-settings | LLM backend |
+| Upstream/vendor key | Encrypted credential store (AES-256-GCM, keyed by MASTER_KEY) | `self.credential("field_name")` inside a `SourceAdapter` | Upstream APIs (CRM, financial data, Graph, etc.) |
+| LLM API key | Encrypted credential store (`__model__` namespace) | SDK reads it at boot from `/admin → Model Backend`; never in `.env` | LLM backend |
+| Model backend config | `.env` — non-secret operational vars only (`BEDROCK_MODEL_ARN`, `OPENAI_MODEL`, `AZURE_OPENAI_ENDPOINT`, etc.) | `Settings` fields; no secrets here | routing only |
 
 **Common mistakes (all caught by `/redteam` — fail-closed):**
 
 - ❌ `os.environ["MY_API_KEY"]` in a tool or adapter → SI-4 violation. Use `self.credential("my_api_key")`.
 - ❌ `MY_VENDOR_KEY=...` in `.env` → SI-6 violation. Set it once via `/admin → Credentials`.
-- ❌ Looking for an "LLM API key" in `.env` — Bedrock uses IAM; no API key exists. For Azure/OpenAI, add the `SecretStr` field to your `Settings` subclass; the SDK loads it from `.env` automatically.
+- ❌ `OPENAI_API_KEY=sk-...` in `.env` → SI-6 violation. Seed it once via `/provision` or `/admin → Model Backend`.
+- ❌ `azure_openai_api_key: SecretStr` in `Settings` → SI-6 violation. The key goes in the credential store, not settings.
 - ❌ `settings.some_api_key` in a `SourceAdapter` → SI-4 violation. Settings fields are for *operational* config (URLs, timeouts, feature flags), not credentials.
 
 Never put upstream keys in `.env`. Never log either key.

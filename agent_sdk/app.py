@@ -33,7 +33,7 @@ from .common.cors import CorsMiddleware
 from .common.limits import RateLimiter
 from .config import BaseAgentSettings
 from .credentials.fields import CredentialField
-from .credentials.store import CredentialStore, resolver_for_source
+from .credentials.store import NS_MODEL, CredentialStore, resolver_for_source
 from .credentials.encrypted_sqlite import EncryptedSqliteStore
 from .models.content_types import ContentModel, content_type_for
 from .observability import configure_logging, request_id_middleware
@@ -131,16 +131,36 @@ class Agent:
                     "BaseModel subclass"
                 )
 
-    def _build_model_client(self) -> ModelClient:
+    def _build_model_client(self, credential_store: CredentialStore) -> ModelClient:
         if self._model_client is not None:
             return self._model_client
-        if not self.settings.bedrock_model_arn:
+        s = self.settings
+        # OpenAI / Azure OpenAI backend: non-secret vars in .env; API key from store.
+        if s.openai_model or s.azure_openai_endpoint:
+            from .agent.openai_client import OpenAIModelClient
+
+            api_key = (
+                credential_store.get(NS_MODEL, "openai_api_key")
+                or credential_store.get(NS_MODEL, "azure_openai_api_key")
+            )
+            return OpenAIModelClient(
+                model=s.openai_model or "",
+                api_key=api_key,  # None when not yet seeded — fails at first LLM call
+                base_url=s.openai_base_url,
+                azure_endpoint=s.azure_openai_endpoint,
+                azure_api_version=s.azure_api_version,
+                azure_deployment=s.azure_openai_deployment,
+            )
+        # Default: Bedrock (IAM — no API key)
+        if not s.bedrock_model_arn:
             raise ValueError(
-                "BEDROCK_MODEL_ARN is required (or pass model_client= to Agent)"
+                "No model backend configured. Set BEDROCK_MODEL_ARN for Bedrock (IAM), "
+                "or OPENAI_MODEL / AZURE_OPENAI_ENDPOINT for OpenAI "
+                "(then seed the API key once via /admin → Model Backend)."
             )
         return BedrockModelClient(
-            region=self.settings.bedrock_region,
-            model_arn=self.settings.bedrock_model_arn,
+            region=s.bedrock_region,
+            model_arn=s.bedrock_model_arn,
         )
 
     def _build_credential_store(self) -> CredentialStore:
@@ -184,7 +204,7 @@ class Agent:
             max_interrupted=settings.max_interrupted_tasks,
         )
         skills = SkillsRegistry(self.skills_dir)
-        model_client = self._build_model_client()
+        model_client = self._build_model_client(credential_store)
         policies = LoopPolicies(
             max_turns=settings.max_turns,
             deadline_seconds=float(settings.task_deadline_seconds),

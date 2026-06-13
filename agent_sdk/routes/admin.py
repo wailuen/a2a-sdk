@@ -38,7 +38,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..auth.middleware import AuthRuntime, require_admin, unauth_rate_limit
 from ..credentials.fields import CredentialField, validate_credential_url
-from ..credentials.store import NS_BEDROCK, RESERVED_NAMESPACES, CredentialStore
+from ..credentials.store import NS_BEDROCK, NS_MODEL, RESERVED_NAMESPACES, CredentialStore
 from ..models.errors import AgentError, ErrorCategory
 from ..sources import SourceAdapter
 
@@ -78,8 +78,33 @@ _HEALTH_CHECK_TIMEOUT = 5.0
 # Per-tool execution timeouts (§8): tier 1 = 130s, tier 2 = 180s.
 _TRY_TIMEOUTS = {1: 130.0, 2: 180.0}
 
-# Dedicated Bedrock credential form (§6 reserved namespace; the only
-# reserved namespace the credentials API may touch).
+# Dedicated model-backend credential form (§6 reserved namespace). LLM API keys
+# are never stored in .env — they live here, seeded once via /admin → Model Backend.
+_MODEL_FIELDS: tuple[CredentialField, ...] = (
+    CredentialField(
+        name="openai_api_key",
+        label="OpenAI API key",
+        secret=True,
+        required=False,
+        help_text="API key for openai.com or a compatible endpoint. Requires OPENAI_MODEL in .env.",
+    ),
+    CredentialField(
+        name="azure_openai_api_key",
+        label="Azure OpenAI API key",
+        secret=True,
+        required=False,
+        help_text="API key for Azure OpenAI. Requires AZURE_OPENAI_ENDPOINT in .env.",
+    ),
+    CredentialField(
+        name="anthropic_api_key",
+        label="Anthropic / Claude API key",
+        secret=True,
+        required=False,
+        help_text="API key for api.anthropic.com. Reserved for future Anthropic model-backend support.",
+    ),
+)
+
+# Dedicated Bedrock credential form (§6 reserved namespace).
 _BEDROCK_FIELDS: tuple[CredentialField, ...] = (
     CredentialField(
         name="bearer_token",
@@ -352,12 +377,17 @@ def _resolve_credential_field(
     request: Request, source: str, field_name: str
 ) -> tuple[str, CredentialField]:
     """Map (source, field) to a declared CredentialField or raise. Reserved
-    namespaces other than Bedrock are never reachable (§6)."""
+    namespaces other than Bedrock and __model__ are never reachable (§6)."""
     if source == NS_BEDROCK:
         for field in _BEDROCK_FIELDS:
             if field.name == field_name:
                 return NS_BEDROCK, field
         raise HTTPException(status_code=404, detail="unknown Bedrock credential field")
+    if source == NS_MODEL:
+        for field in _MODEL_FIELDS:
+            if field.name == field_name:
+                return NS_MODEL, field
+        raise HTTPException(status_code=404, detail="unknown model backend credential field")
     if source in RESERVED_NAMESPACES:
         raise HTTPException(status_code=400, detail="reserved namespace")
     for adapter in _adapters(request).values():
@@ -385,6 +415,10 @@ async def list_credentials(request: Request) -> dict[str, Any]:
     ]
     return {
         "sources": sources,
+        "model": {
+            "source_name": NS_MODEL,
+            "fields": [_field_summary(store, NS_MODEL, f) for f in _MODEL_FIELDS],
+        },
         "bedrock": {
             "source_name": NS_BEDROCK,
             "fields": [_field_summary(store, NS_BEDROCK, f) for f in _BEDROCK_FIELDS],

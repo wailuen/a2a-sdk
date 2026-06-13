@@ -61,11 +61,16 @@ Collect, then echo back a summary for confirmation before touching any file:
    console) and/or the built-in OAuth 2.1 chain for MCP. Note: a Claude.ai MCP
    connector uses DCR-based OAuth automatically — static bearer tokens are not
    supported on that surface.
-5. **Model backend** — Bedrock (default) or another `ModelClient`. Collect:
-   - Bedrock: `BEDROCK_REGION` (e.g. `us-east-1`) and `BEDROCK_MODEL_ARN` (the
-     full `arn:aws:bedrock:…` string). Both required even in `DEV_MODE`.
-   - Azure OpenAI / OpenAI: collect the relevant endpoint and key env var names.
-   - Other: note the env vars needed.
+5. **Model backend** — Bedrock (default), OpenAI, or Azure OpenAI. Collect
+   non-secret operational vars only — the API key is NEVER in `.env`:
+   - Bedrock: `BEDROCK_REGION` (e.g. `us-east-1`) and `BEDROCK_MODEL_ARN`
+     (full `arn:aws:bedrock:…` string). IAM auth — no API key needed.
+   - OpenAI: `OPENAI_MODEL` (e.g. `gpt-4o`) and optionally `OPENAI_BASE_URL`.
+     The API key is seeded later via `/provision → Model Backend`; do NOT
+     collect it here.
+   - Azure OpenAI: `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, and
+     `AZURE_API_VERSION`. The API key is seeded via `/provision → Model Backend`.
+   - Other: note the env vars needed (non-secret routing config only).
 6. **Contrib modules** — any of `action_gate`, `obo`, `commitments`, `webhooks`.
    **Warn that contrib is EXPERIMENTAL** (may change in minors, excluded from
    SemVer). `obo` requires the `[obo]` extra (MSAL); this will modify the
@@ -221,8 +226,18 @@ __pycache__
        env.write_text(content.replace('MASTER_KEY=\n', f'MASTER_KEY={key}\n', 1))
    EOF
    ```
-2. **If `.env` did not exist:** the script above creates it from `.env.example` with the key already set. Also write the model backend vars collected in Phase 0 (e.g. `BEDROCK_MODEL_ARN=`, `BEDROCK_REGION=`) and the chosen port (`AGENT_PORT=<port>`) into the new `.env`.
-   **If `.env` already exists (re-run):** the script updates only the `MASTER_KEY=` line in-place. Update `AGENT_PORT=` only if it is currently blank. Warn: "Existing `.env` preserved — only `MASTER_KEY` regenerated. Verify `BEDROCK_MODEL_ARN`, `BEDROCK_REGION`, and `AGENT_PORT` are still set if required."
+2. **If `.env` did not exist:** the script above creates it from `.env.example`
+   with the key already set. Also write the **non-secret** model backend vars
+   collected in Phase 0 (e.g. `BEDROCK_MODEL_ARN=`, `BEDROCK_REGION=`,
+   `OPENAI_MODEL=`, `AZURE_OPENAI_ENDPOINT=`, `AZURE_OPENAI_DEPLOYMENT=`,
+   `AZURE_API_VERSION=`) and the chosen port (`AGENT_PORT=<port>`) into the
+   new `.env`. **Never write any API key to `.env`** (SI-6 violation). If
+   OpenAI / Azure was selected, note in the output:
+   "LLM API key will be seeded into the encrypted store via `/provision`."
+   **If `.env` already exists (re-run):** the script updates only the
+   `MASTER_KEY=` line in-place. Update `AGENT_PORT=` only if it is currently
+   blank. Warn: "Existing `.env` preserved — only `MASTER_KEY` regenerated.
+   Verify model backend vars and `AGENT_PORT` are still set if required."
 3. **The key never leaves the file.** Never print or echo it to chat, a log, or shell history. Tell the user:
    "`MASTER_KEY` generated and written to `.env` (git-ignored). Rotate later with
    `python -m agent_sdk rotate-master-key` — offline only."
@@ -344,8 +359,10 @@ Manifest:    .claude/.harness-manifest.json ✓
 
 ## Rules
 
-- **Never invent or display a key.** `MASTER_KEY`, bootstrap tokens, and minted
-  API keys are CSPRNG-generated and only ever land in `.env` or the console.
+- **Never invent or display a key.** `MASTER_KEY`, bootstrap tokens, minted
+  API keys, and LLM API keys are never echoed. `MASTER_KEY` lands only in
+  `.env`; LLM API keys land only in the encrypted credential store (via
+  `/provision`), never in `.env`.
 - **No commit is made.** The user reviews, then commits when ready.
 - **`.env` preservation on re-run.** Only update the `MASTER_KEY=` line; never
   overwrite the entire `.env` file on a re-run. User-set values must be preserved.
