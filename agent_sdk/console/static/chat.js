@@ -144,7 +144,7 @@ export function render(pane, ctx) {
       role: "user",
       parts: [{ kind: "text", text }],
       messageId: uuid(),
-      metadata: { a2uiClientCapabilities: { tier: "core+extended" } },
+      metadata: { a2uiClientCapabilities: { version: "v0.9.1", catalogs: ["urn:a2ui-profile:standard:v1"], tier: "core+extended" } },
     };
     if (state.contextId) message.contextId = state.contextId;
 
@@ -225,7 +225,7 @@ export function render(pane, ctx) {
       state: {},
       tools: [],
       context: [],
-      forwardedProps: { a2uiClientCapabilities: { tier: "core+extended" } },
+      forwardedProps: { a2uiClientCapabilities: { version: "v0.9.1", catalogs: ["urn:a2ui-profile:standard:v1"], tier: "core+extended" } },
     };
 
     const resp = await postSse(`${state.base}/ag-ui/run`, body);

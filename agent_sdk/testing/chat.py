@@ -20,6 +20,15 @@ from ..models.content_types import CATALOG_ID as _STANDARD_CATALOG
 A2UI_MIME = "application/a2ui+json"
 
 
+class A2AError(Exception):
+    """Raised by ChatDriver when the server returns an A2A error (§11.2 D7.10)."""
+
+    def __init__(self, code: int | None, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
 class ChatDriver:
     """Protocol driver for live turn-by-turn chat against a booted agent.
 
@@ -58,11 +67,21 @@ class ChatDriver:
     ) -> None:
         self._client = client
         self._caps: dict[str, Any] = {
+            "version": "v0.9.1",
             "tier": "core+extended",
             "catalogs": [_STANDARD_CATALOG] + list(extra_catalogs or []),
         }
         self._poll_interval = poll_interval
         self._timeout = timeout
+        self._card: dict[str, Any] | None = None
+
+    async def _discover_card(self) -> dict[str, Any]:
+        """Fetch and cache the agent card (A2A §11.2.1 card discovery)."""
+        if self._card is None:
+            r = await self._client.get("/.well-known/agent-card.json")
+            r.raise_for_status()
+            self._card = r.json()
+        return self._card
 
     def _fire(self, emit: dict[str, Callable] | None, key: str, *args: Any) -> None:
         if emit:
@@ -154,6 +173,12 @@ class ChatDriver:
             ``tool_done()`` — fired on each poll tick (progress signal)
             ``error(message)`` — fired on timeout or non-completed terminal state
         """
+        # A2A §11.2.1 — discover card before first request; select transport
+        card = await self._discover_card()
+        transport = card.get("preferredTransport", "HTTP+JSON")
+        if transport not in ("HTTP+JSON", "JSONRPC"):
+            raise ValueError(f"unsupported A2A transport: {transport!r}")
+
         body: dict[str, Any] = {
             "message": {
                 "kind": "message",
@@ -167,7 +192,15 @@ class ChatDriver:
             body["message"]["contextId"] = context_id
 
         r = await self._client.post("/v1/message:send", json=body)
-        r.raise_for_status()
+        # A2A §11.2 D7.10 — parse error body and discriminate on error code
+        if not r.is_success:
+            try:
+                err = r.json().get("error", {})
+                code, msg = err.get("code"), err.get("message", f"HTTP {r.status_code}")
+            except Exception:
+                code, msg = None, f"HTTP {r.status_code}"
+            self._fire(emit, "error", f"A2A error code={code}: {msg}")
+            raise A2AError(code, msg)
         task = r.json()
         task_id = task["id"]
 
@@ -175,7 +208,14 @@ class ChatDriver:
         while True:
             await asyncio.sleep(self._poll_interval)
             g = await self._client.get(f"/v1/tasks/{task_id}")
-            g.raise_for_status()
+            if not g.is_success:
+                try:
+                    err = g.json().get("error", {})
+                    code, msg = err.get("code"), err.get("message", f"HTTP {g.status_code}")
+                except Exception:
+                    code, msg = None, f"HTTP {g.status_code}"
+                self._fire(emit, "error", f"A2A error code={code}: {msg}")
+                raise A2AError(code, msg)
             task = g.json()
             st = task["status"]["state"]
             self._fire(emit, "tool_done")  # re-used as poll tick
