@@ -52,6 +52,14 @@ class FilePart(_Wire):
     file: FileWithBytes | FileWithUri
     metadata: dict[str, Any] | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _file_xor(cls, values: Any) -> Any:
+        f = values.get("file") if isinstance(values, dict) else None
+        if isinstance(f, dict) and "bytes" in f and "uri" in f:
+            raise ValueError("FilePart.file must have bytes XOR uri, not both")
+        return values
+
 
 class DataPart(_Wire):
     kind: Literal["data"] = "data"
@@ -148,6 +156,7 @@ class TaskArtifactUpdateEvent(_Wire):
 
 
 class PushNotificationConfig(_Wire):
+    id: str | None = None
     url: str
     token: str | None = None
     authentication: dict[str, Any] | None = None
@@ -191,6 +200,7 @@ class AgentExtension(_Wire):
 class AgentCapabilities(_Wire):
     streaming: bool = True
     push_notifications: bool = Field(default=False, alias="pushNotifications")
+    state_transition_history: bool = Field(default=False, alias="stateTransitionHistory")
     extensions: list[AgentExtension] | None = None
 
 

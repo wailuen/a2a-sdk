@@ -71,6 +71,8 @@ def translate(
     *,
     capabilities: A2uiCapabilities | None = None,
     surface_id: str | None = None,
+    send_data_model: bool = False,
+    theme: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]] | None:
     """Full four-message sequence for one artifact, or None when the type
     is gated off for this client."""
@@ -83,10 +85,18 @@ def translate(
     value: Any = (
         payload.to_markdown() if isinstance(payload, MarketBriefing) else payload.wire()
     )
+    create_surface_params: dict[str, Any] = {
+        "surfaceId": sid,
+        "catalogId": cls.catalog_id,
+    }
+    if send_data_model:
+        create_surface_params["sendDataModel"] = True
+    if theme is not None:
+        create_surface_params["theme"] = theme
     return [
         {
             "version": A2UI_VERSION,
-            "createSurface": {"surfaceId": sid, "catalogId": cls.catalog_id},
+            "createSurface": create_surface_params,
         },
         {
             "version": A2UI_VERSION,

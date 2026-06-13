@@ -154,16 +154,19 @@ class TimeSeriesChart(ContentModel):
     x_label: str | None = None
     y_label: str | None = None
     data: list[TimeSeriesDataPoint]
-    total_count: int | None = None  # producer-computed; filled below
+    total_count: int = 0  # set by model_validator below
     summary: TimeSeriesSummary | None = None
     metadata: dict[str, Any] | None = None
     series: list[SeriesMeta] | None = None
 
-    @model_validator(mode="after")
-    def _fill_total_count(self) -> "TimeSeriesChart":
-        if self.total_count is None:
-            self.total_count = len(self.data)
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_total_count(cls, values: Any) -> Any:
+        if isinstance(values, dict) and "total_count" not in values and "data" in values:
+            data = values.get("data") or []
+            values = dict(values)
+            values["total_count"] = len(data) if isinstance(data, list) else 0
+        return values
 
     def to_plain_text(self) -> str:
         lines = [self.title]
@@ -474,7 +477,7 @@ class EmailMessage(_Wire):
     subject: str
     preview: str
     from_: NameEmail = Field(alias="from")
-    to_recipients: list[NameEmail] = Field(default_factory=list)
+    to_recipients: list[NameEmail]
     received_at: str  # ISO 8601 UTC, trailing Z
     is_read: bool
     has_attachments: bool = False

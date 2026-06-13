@@ -567,28 +567,14 @@ async def oauth_token(request: Request) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/oauth/revoke")
+@router.post("/oauth/revoke", dependencies=[Depends(unauth_rate_limit)])
 async def oauth_revoke(request: Request) -> JSONResponse:
-    """Authenticated revocation: api_key identities may revoke any token;
-    oauth-kind callers self-revoke their own client's tokens only. Always 200
-    for an authenticated caller with a well-formed request — token existence
-    and ownership are never disclosed (RFC 7009 §2.2)."""
+    """RFC 7009 revocation — authenticated and public-client paths.
+    api_key callers may revoke any token; oauth-kind callers self-revoke;
+    public clients (no Bearer) authenticate via client_id in the body.
+    Always 200 for a well-formed request — existence never disclosed."""
     runtime = _runtime(request)
-    try:
-        identity = await require_identity(request)
-    except HTTPException as exc:
-        # require_identity only decorates /mcp* 401s with the PRM challenge;
-        # this surface carries it too (§5.5).
-        if exc.status_code == 401:
-            headers = dict(exc.headers or {})
-            headers.setdefault(
-                "WWW-Authenticate", f'Bearer resource_metadata="{runtime.prm_url}"'
-            )
-            raise HTTPException(
-                status_code=401, detail=exc.detail, headers=headers
-            ) from None
-        raise
-
+    store = _oauth(request)
     try:
         form = await _parse_form(request)
     except HTTPException:
@@ -598,12 +584,32 @@ async def oauth_revoke(request: Request) -> JSONResponse:
         )
     token = form.get("token", "")
     if not token:
-        # RFC 7009 §2.1: token is required — a missing param is a protocol
-        # error, not an unknown-token case.
         return JSONResponse(
             status_code=400,
             content={"error": "invalid_request", "error_description": "token is required"},
         )
-    # token_type_hint accepted but unneeded — lookup is hash-keyed either way.
-    _oauth(request).revoke_by_value(token, caller=identity)
+    # Try Bearer auth first (api_key or oauth-kind callers).
+    presented = _bearer(request)
+    if presented is not None:
+        identity = runtime.api_keys.verify(presented)
+        if identity is None:
+            identity = store.verify(presented)
+        if identity is None:
+            # Bad Bearer — reject; do NOT fall through to client_id path.
+            raise HTTPException(
+                status_code=401,
+                detail="invalid credentials",
+                headers={"WWW-Authenticate": f'Bearer resource_metadata="{runtime.prm_url}"'},
+            )
+        store.revoke_by_value(token, caller=identity)
+        return JSONResponse(content={})
+    # No Bearer — try public-client path: client_id in body.
+    client_id = form.get("client_id", "")
+    if not client_id:
+        raise HTTPException(
+            status_code=401,
+            detail="missing bearer credentials",
+            headers={"WWW-Authenticate": f'Bearer resource_metadata="{runtime.prm_url}"'},
+        )
+    store.revoke_by_client_id(token, client_id=client_id)
     return JSONResponse(content={})

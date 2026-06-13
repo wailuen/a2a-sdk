@@ -218,6 +218,7 @@ def _handle_initialize(app: Any, params: dict[str, Any]) -> dict[str, Any]:
         "capabilities": {"tools": {"listChanged": False}},
         "serverInfo": {
             "name": settings.agent_name,
+            "title": settings.agent_name,
             "version": settings.agent_version,
         },
     }

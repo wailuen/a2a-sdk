@@ -167,6 +167,8 @@ class _RunMapper:
             return frames
 
         if isinstance(event, TextEvent):
+            if not event.text:
+                return []
             message_id = uuid.uuid4().hex
             self.last_message_id = message_id  # parent for this turn's tool calls
             return [
@@ -240,26 +242,24 @@ class _RunMapper:
             if isinstance(payload, ContentModel):
                 a2ui_messages = translate(payload, capabilities=self.capabilities)
                 if a2ui_messages is not None:
-                    frames.append(self._custom("A2UI_UPDATE", {"messages": a2ui_messages}))
+                    frames.append(self._custom("A2UI_UPDATE", a2ui_messages))
             return frames
 
         if isinstance(event, InterruptEvent):
             # camelCase keys, consistent with the rest of the AG-UI wire and
             # with the A2A interrupt metadata (runner.py); resume reads accept
             # both casings for back-compat (§5.3).
+            interrupt: dict[str, Any] = {
+                "id": event.interrupt_id,
+                "reason": event.reason,
+                "message": event.message,
+            }
+            if event.response_schema:
+                interrupt["responseSchema"] = event.response_schema
+            if event.tool_call_id is not None:
+                interrupt["toolCallId"] = event.tool_call_id
             return self.run_finished(
-                outcome={
-                    "type": "interrupt",
-                    "interrupts": [
-                        {
-                            "id": event.interrupt_id,
-                            "reason": event.reason,
-                            "message": event.message,
-                            "responseSchema": event.response_schema,
-                            "toolCallId": event.tool_call_id,
-                        }
-                    ],
-                }
+                outcome={"type": "interrupt", "interrupts": [interrupt]}
             )
 
         if isinstance(event, DoneEvent):

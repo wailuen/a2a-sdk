@@ -425,6 +425,24 @@ class OAuthTokenStore:
                 self.revoke_family(family_id)
             logger.info("oauth refresh token + family revoked")
 
+    def revoke_by_client_id(self, token: str, *, client_id: str) -> None:
+        """RFC 7009 public-client revocation: verifies token ownership via
+        client_id binding (no Bearer auth). Silent no-op on mismatch."""
+        token_hash = _hash(token)
+        access = self._access.get(token_hash)
+        if access is not None:
+            if access.client_id == client_id:
+                self._access.pop(token_hash, None)
+                logger.info("oauth access token revoked (client_id auth)")
+            return
+        refresh = self._get_refresh(token_hash)
+        if refresh is not None and str(refresh.get("client_id") or "") == client_id:
+            family_id = str(refresh.get("family_id") or "")
+            self._store.delete(NS_OAUTH_REFRESH, token_hash)
+            if family_id:
+                self.revoke_family(family_id)
+            logger.info("oauth refresh token + family revoked (client_id auth)")
+
     # ── housekeeping ──
 
     def _prune_access(self) -> None:

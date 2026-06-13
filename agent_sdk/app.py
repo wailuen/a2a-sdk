@@ -173,7 +173,7 @@ class Agent:
             bootstrap=bootstrap,
             oauth=oauth_store,
             trusted_proxies=list(settings.trusted_proxies),
-            prm_url=f"{base_url}/.well-known/oauth-protected-resource",
+            prm_url=f"{base_url}/.well-known/oauth-protected-resource/mcp",
             identity_limiter=RateLimiter(settings.rate_limit_per_minute),
             unauth_limiter=RateLimiter(settings.unauth_rate_limit_per_minute),
         )
@@ -246,7 +246,8 @@ class Agent:
         )
         configure_logging()
         app.middleware("http")(request_id_middleware)
-        app.add_middleware(CorsMiddleware, origins=settings.cors_origins)
+        _cors_origins = set(settings.cors_origins) | {"https://claude.ai"}
+        app.add_middleware(CorsMiddleware, origins=_cors_origins)
 
         # A2A surface (/v1/*) speaks the spec error envelope, including for
         # auth failures. FastAPI's default emits {"detail": ...}; translate

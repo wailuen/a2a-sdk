@@ -335,14 +335,15 @@ async def tasks_cancel(
 
 @router.post("/v1/tasks/{task_id}:subscribe")
 async def tasks_subscribe(
-    task_id: str, request: Request, identity: Identity = Depends(require_identity)
+    task_id: str, request: Request, response: Response, identity: Identity = Depends(require_identity)
 ) -> Any:
     record = request.app.state.task_store.get(task_id, identity)
     if record is None:
         return a2a_error(A2A_TASK_NOT_FOUND, "task not found")
+    _echo_extensions(request, response)
     stream, _ = _open_stream(request, record)
     return StreamingResponse(
         stream,
         media_type="text/event-stream",
-        headers=SSE_HEADERS,
+        headers={**SSE_HEADERS, **dict(response.headers)},
     )
