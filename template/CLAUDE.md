@@ -115,11 +115,18 @@ Full grep checks in `.claude/reference/sdk-security-invariants.md`.
 
 ## Credential model (two-key)
 
-| Key | Path | Auth to |
-|-----|------|---------|
-| SDK API key | Minted in admin console, sent as `Authorization: Bearer` by callers | This agent |
-| Upstream key | Encrypted credential store (`self.credential("...")`) | Upstream APIs |
-| Model backend | `.env` as `SecretStr` (Bedrock: IAM — no key needed; Azure/OpenAI: env var) | LLM backend |
+| Key | Where it lives | How to access it | Auth to |
+|-----|---------------|-----------------|---------|
+| SDK API key | Minted in admin console (`/admin`) | Sent by callers as `Authorization: Bearer` — you never read this | This agent |
+| Upstream/vendor key | Encrypted credential store (AES-256-GCM, keyed by MASTER_KEY) | `self.credential("field_name")` inside a `SourceAdapter` | Upstream APIs (CRM, financial data, graph, etc.) |
+| Model backend | Bedrock: IAM role — no key. Azure/OpenAI: `SecretStr` field in `Settings` loaded from `.env` | SDK reads it automatically via Pydantic-settings | LLM backend |
+
+**Common mistakes (all caught by `/redteam` — fail-closed):**
+
+- ❌ `os.environ["MY_API_KEY"]` in a tool or adapter → SI-4 violation. Use `self.credential("my_api_key")`.
+- ❌ `MY_VENDOR_KEY=...` in `.env` → SI-6 violation. Set it once via `/admin → Credentials`.
+- ❌ Looking for an "LLM API key" in `.env` — Bedrock uses IAM; no API key exists. For Azure/OpenAI, add the `SecretStr` field to your `Settings` subclass; the SDK loads it from `.env` automatically.
+- ❌ `settings.some_api_key` in a `SourceAdapter` → SI-4 violation. Settings fields are for *operational* config (URLs, timeouts, feature flags), not credentials.
 
 Never put upstream keys in `.env`. Never log either key.
 

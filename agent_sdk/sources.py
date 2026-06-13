@@ -49,7 +49,18 @@ class SourceAdapter:
 
     # ── credentials ──
     def credential(self, field: str) -> str:
-        """Resolve from this source's namespace only ({source_name}/{field})."""
+        """Resolve an upstream credential from this adapter's encrypted namespace.
+
+        Storage path: ``{source_name}/{field}`` in the AES-256-GCM SQLite store.
+        Lifecycle:
+          1. Admin enters the value once via the console at ``/admin → Credentials``.
+          2. The store encrypts it with MASTER_KEY.
+          3. Every call here decrypts and returns just this adapter's field.
+
+        This is the ONLY correct way to access upstream/vendor API keys.
+        Do NOT use ``os.environ``, ``os.getenv``, or ``self.settings.*`` —
+        those are SI-4 violations caught by /redteam (fail-closed).
+        """
         value = self._resolve_credential(self.source_name, field)
         if value is None:
             raise AgentError(
@@ -60,6 +71,7 @@ class SourceAdapter:
         return value
 
     def credential_or_none(self, field: str) -> str | None:
+        """Like credential() but returns None instead of raising when not configured."""
         return self._resolve_credential(self.source_name, field)
 
     # ── HTTP ──

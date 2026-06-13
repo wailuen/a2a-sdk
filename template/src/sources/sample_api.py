@@ -23,8 +23,10 @@ class SampleApiAdapter(SourceAdapter):
         return "https://api.example.com/v1"
 
     def _headers(self) -> dict[str, str]:
-        # Resolved from this source's namespace in the encrypted store;
-        # configured via the admin console. Never read env vars here.
+        # self.credential("api_token") resolves from the encrypted store
+        # (namespace: "sample_api/api_token"). Configure via admin console at
+        # /admin → Credentials → sample_api → api_token. Never use os.environ
+        # or Settings fields for upstream keys — that is SI-4/SI-6 violations.
         return {"Authorization": f"Bearer {self.credential('api_token')}"}
 
     async def get_widget(self, widget_id: str) -> dict[str, Any]:

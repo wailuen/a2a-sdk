@@ -71,6 +71,17 @@ Adapter and tool code uses `self.credential("field_name")` only. Never
 inside `src/tools/` or `src/sources/`. The credential stays scoped to the
 adapter's namespace in the encrypted store.
 
+**How the credential store works:**
+1. Admin enters the upstream API key once via `/admin → Credentials → <source_name>`.
+2. The console writes it to the AES-256-GCM SQLite store under `{source_name}/{field}`.
+3. `self.credential("field")` decrypts and returns only this adapter's value.
+4. The key never touches `.env`, `sys.argv`, or any log.
+
+**Common anti-patterns (all violations):**
+- `os.environ.get("VENDOR_API_KEY")` — reads from env, bypasses the store.
+- `self.settings.vendor_api_key` — Settings fields are for operational config, not secrets.
+- `api_key = settings.model_extra.get("vendor_key")` — same violation via extra fields.
+
 **Check:** `grep -rn "os\.environ\|os\.getenv" src/tools/ src/sources/`
 → zero matches expected.
 
@@ -100,15 +111,20 @@ SDK auth automatically — they must add `Depends(require_identity)` explicitly.
 
 **Severity:** Critical
 
-Upstream API keys (e.g. AlphaGeo `api_key`, third-party tokens) live only
+Upstream API keys (e.g. third-party data, CRM, financial API tokens) live only
 in the `EncryptedSqliteStore` under the adapter's namespace. They must never
 appear in `.env`, CLI arguments (`sys.argv`), or any log statement.
+
+**What DOES go in `.env`:** operational vars (PORT, PUBLIC_URL, MASTER_KEY,
+BEDROCK_REGION, DEV_MODE, CORS_ORIGINS) and, if using Azure/OpenAI as the
+model backend, the `SecretStr` model backend key declared in your `Settings`
+subclass. Nothing else key-shaped belongs in `.env`.
 
 **Check:** `grep -rn "UPSTREAM\|VENDOR\|_API_KEY\s*=" .env src/` → any match
 containing an actual key value (not a placeholder) is a violation.
 
-**Prevention:** Provisioning uses `scripts/set_upstream_credential.py` or the
-admin console credential form — never writes vendor keys to `.env` or code.
+**Prevention:** Set upstream credentials exactly once via the admin console
+(`/admin → Credentials`). Never write vendor keys to `.env` or code.
 
 ---
 

@@ -41,9 +41,17 @@ class BaseAgentSettings(BaseSettings):
     data_dir: str = Field(default="./data", alias="DATA_DIR")
 
     # ── secrets / stores ──
+    # MASTER_KEY encrypts the credential store (AES-256-GCM). It is NOT an
+    # API key for any upstream service. Upstream/vendor API keys are stored IN
+    # the credential store and accessed via self.credential("field") in adapters.
     master_key: SecretStr | None = Field(default=None, alias="MASTER_KEY")
 
-    # ── Bedrock ──
+    # ── Bedrock (default model backend) ──
+    # Bedrock authenticates via the EC2/ECS IAM role — no API key required.
+    # For Azure OpenAI or direct OpenAI, add a SecretStr field to your Settings
+    # subclass (e.g. azure_openai_api_key: SecretStr). The SDK reads it from
+    # .env automatically via Pydantic-settings. This is the ONLY case where a
+    # key-like value belongs in .env; upstream vendor keys never do.
     bedrock_region: str = Field(default="us-east-1", alias="BEDROCK_REGION")
     bedrock_model_arn: str | None = Field(default=None, alias="BEDROCK_MODEL_ARN")
 
