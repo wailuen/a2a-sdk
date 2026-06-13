@@ -80,7 +80,7 @@ class SourceAdapter:
         # time. validate_credential_url does this at save time; this closes the
         # TOCTOU window where a hostname could be rebounded to a private IP.
         # Skipped in DEV_MODE (localhost targets are valid in development).
-        if not getattr(self.settings, "DEV_MODE", False):
+        if not getattr(self.settings, "dev_mode", False):
             host = urlparse(str(request.url)).hostname or ""
             try:
                 loop = asyncio.get_running_loop()

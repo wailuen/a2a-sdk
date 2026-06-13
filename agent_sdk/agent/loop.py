@@ -229,7 +229,10 @@ async def run_loop(
 
             entry = registry.get(tc.name)
             if entry is None:
-                error = f"unknown tool {tc.name!r}"
+                # Sanitize the model-supplied name before logging (SI-2: model
+                # output is untrusted; prevent log injection via newlines etc.)
+                _safe = tc.name[:64].translate({ord(c): " " for c in "\n\r\t\x00"})
+                error = f"unknown tool {_safe!r}"
                 yield ToolResultEvent(
                     tool_call_id=tc.tool_call_id, tool_name=tc.name, ok=False, error=error
                 )
