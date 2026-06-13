@@ -5,13 +5,12 @@ from pathlib import Path
 from agent_sdk import Agent, CredentialField
 
 from .config import make_settings
-from .persona import PERSONA
 from .sources.sample_api import SampleApiAdapter
 from .tools import widgets
 
 agent = Agent(
     settings=make_settings(),
-    persona=PERSONA,
+    artifacts_dir=Path(__file__).parent / "artifacts",
     skills_dir=Path(__file__).parent / "skills",
     toolsets=[widgets.tools],
 )

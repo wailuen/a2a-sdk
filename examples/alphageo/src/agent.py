@@ -13,7 +13,6 @@ from agent_sdk import Agent, CredentialField
 from agent_sdk.agent.model_client import ModelClient
 
 from .config import Settings, make_model_client, make_settings
-from .persona import PERSONA
 from .sources.alphageo import AlphaGeoSource
 from .tools import climate
 
@@ -26,7 +25,7 @@ def make_agent(
     settings = settings or make_settings()
     agent = Agent(
         settings=settings,
-        persona=PERSONA,
+        artifacts_dir=Path(__file__).parent / "artifacts",
         skills_dir=Path(__file__).parent / "skills",
         toolsets=[climate.tools],
         model_client=model_client or make_model_client(settings),

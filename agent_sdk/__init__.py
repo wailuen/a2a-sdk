@@ -6,6 +6,7 @@ importable from its submodule; ``agent_sdk.testing`` and ``agent_sdk.contrib``
 are provisional.
 """
 
+from .agent.artifacts import ArtifactLoader
 from .agent.loop import LoopPolicies, ToolInterrupt
 from .agent.model_client import ModelClient, ModelResponse, ModelToolCall
 from .agent.registry import ToolSet
@@ -15,11 +16,12 @@ from .credentials.fields import CredentialField
 from .models.errors import AgentError, ErrorCategory
 from .sources import SourceAdapter
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Agent",
     "AgentError",
+    "ArtifactLoader",
     "BaseAgentSettings",
     "CredentialField",
     "ErrorCategory",

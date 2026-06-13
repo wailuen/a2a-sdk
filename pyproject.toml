@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-sdk"
-version = "0.2.0"
+version = "0.3.0"
 description = "SDK for building A2A/AG-UI/A2UI agents with an OAuth-protected MCP server"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -36,6 +36,7 @@ artifacts = [
     "agent_sdk/console/templates/*",
     "agent_sdk/console/static/*",
     "agent_sdk/example/skills/**/*",
+    "agent_sdk/example/artifacts/**/*",
 ]
 
 [tool.pytest.ini_options]

@@ -18,11 +18,6 @@ from ..models.content_types import (
     TimeSeriesDataPoint,
 )
 
-PERSONA = (
-    "You are echo-analyst, a demonstration analyst agent. You answer briefly "
-    "and use your tools to produce structured analytics artifacts. You never "
-    "invent data: every number comes from a tool result."
-)
 
 tools = ToolSet()
 
@@ -100,7 +95,7 @@ def make_agent(settings: BaseAgentSettings | None = None, **agent_kwargs: Any) -
 
     return Agent(
         settings=settings or BaseAgentSettings(),
-        persona=PERSONA,
+        artifacts_dir=Path(__file__).parent / "artifacts",
         skills_dir=Path(__file__).parent / "skills",
         toolsets=[tools],
         **agent_kwargs,

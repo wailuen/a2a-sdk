@@ -13,7 +13,6 @@ from agent_sdk import Agent, CredentialField
 from agent_sdk.testing import FakeModelClient
 
 from src.config import Settings
-from src.persona import PERSONA
 from src.sources.sample_api import SampleApiAdapter
 from src.tools import widgets
 
@@ -32,7 +31,7 @@ def fake_model() -> FakeModelClient:
 def app(settings, fake_model):
     agent = Agent(
         settings=settings,
-        persona=PERSONA,
+        artifacts_dir=Path(__file__).parent.parent / "src" / "artifacts",
         skills_dir=Path(__file__).parent.parent / "src" / "skills",
         toolsets=[widgets.tools],
         model_client=fake_model,

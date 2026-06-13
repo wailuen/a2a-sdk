@@ -63,7 +63,9 @@ class Agent:
         self,
         *,
         settings: BaseAgentSettings,
-        persona: str,
+        persona: str | None = None,
+        artifacts_dir: Path | None = None,
+        artifact_vars: dict[str, Any] | None = None,
         skills_dir: Path | None = None,
         toolsets: list[ToolSet] | None = None,
         model_client: ModelClient | None = None,
@@ -71,8 +73,12 @@ class Agent:
         console_static_dir: Path | None = None,
         lifespan_extras: list[Callable[[FastAPI], Any]] | None = None,
     ) -> None:
+        if persona is None and artifacts_dir is None:
+            raise ValueError("Agent requires either persona= or artifacts_dir=")
         self.settings = settings
         self.persona = persona
+        self.artifacts_dir = artifacts_dir
+        self.artifact_vars = artifact_vars or {}
         self.skills_dir = skills_dir
         self.toolsets = list(toolsets or [])
         self._model_client = model_client
@@ -185,7 +191,18 @@ class Agent:
             token_budget=settings.task_token_budget,
         )
 
-        system_prompt = self.persona.strip()
+        if self.artifacts_dir is not None:
+            from .agent.artifacts import ArtifactLoader
+            persona_str = ArtifactLoader(self.artifacts_dir).render(
+                "system",
+                agent_name=settings.agent_name,
+                agent_version=settings.agent_version,
+                **self.artifact_vars,
+            )
+        else:
+            persona_str = self.persona  # type: ignore[assignment]
+
+        system_prompt = persona_str.strip()
         catalog = skills.catalog_text()
         if catalog:
             system_prompt = f"{system_prompt}\n\n{catalog}"
@@ -265,7 +282,7 @@ class Agent:
         app.state.model_client = model_client
         app.state.oauth = oauth_store
         app.state.loop_policies = policies
-        app.state.persona = self.persona
+        app.state.persona = persona_str
         app.state.system_prompt = system_prompt
         app.state.agent_card = build_agent_card(
             settings, registry, app.state.credential_fields
