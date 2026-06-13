@@ -149,7 +149,7 @@ class BootstrapManager:
             "Use it once to mint the first admin API key via the console or\n"
             "POST /admin/api/keys with header 'X-Bootstrap-Token'.\n"
             "=====================================\n",
-            file=sys.stdout,
+            file=sys.stderr,
             flush=True,
         )
 

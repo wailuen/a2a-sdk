@@ -305,12 +305,12 @@ export function render(pane, ctx) {
     const name = frame.name;
     const value = frame.value || {};
     if (name === "AGENT_ARTIFACT") {
-      // {data_type, tool_name, data}
+      // {dataType, toolName, data}
       attach(
         el(
           "div",
           { class: "card artifact-card" },
-          el("div", { class: "a2ui-card-title" }, `artifact · ${value.data_type || "?"} · ${value.tool_name || "?"}`),
+          el("div", { class: "a2ui-card-title" }, `artifact · ${value.dataType || "?"} · ${value.toolName || "?"}`),
           el("pre", { class: "code-output mono" }, fmtJson(value.data))
         )
       );

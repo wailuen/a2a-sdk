@@ -38,7 +38,7 @@ def configure_logging(level: int = logging.INFO) -> None:
     root = logging.getLogger("agent_sdk")
     if any(getattr(h, "_agent_sdk", False) for h in root.handlers):
         return
-    handler = logging.StreamHandler(sys.stdout)
+    handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(_JsonFormatter())
     handler._agent_sdk = True  # type: ignore[attr-defined]
     root.addHandler(handler)

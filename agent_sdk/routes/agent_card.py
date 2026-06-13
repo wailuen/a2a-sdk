@@ -20,7 +20,7 @@ from ..common.wire_errors import a2a_error
 from ..config import BaseAgentSettings
 from ..credentials.card import credential_forwarding_extension
 from ..credentials.fields import CredentialField
-from ..models.a2a import AgentCapabilities, AgentCard, AgentExtension, AgentSkill
+from ..models.a2a import AgentCapabilities, AgentCard, AgentSkill
 from ..models.errors import A2A_AUTHENTICATED_EXTENDED_CARD_NOT_CONFIGURED
 
 router = APIRouter()
@@ -63,12 +63,8 @@ def build_agent_card(
     base_url = settings.resolved_base_url
     extensions = [
         a2ui_extension(),
-        AgentExtension(
-            uri="urn:agui:run:v1",
-            description="AG-UI run endpoint (SSE)",
-            required=False,
-            params={"endpoint": f"{settings.resolved_base_url}/ag-ui/run"},
-        ),
+        # AG-UI is advertised via x-agui.endpoint below, not as an A2A
+        # capabilities extension (wrong slot per A2UI F2 / S1 audit).
     ]
     cred_ext = credential_forwarding_extension(credential_fields or {})
     if cred_ext is not None:
