@@ -26,7 +26,9 @@
     ".claude/agents/core/debug.md": "{{SDK_SHA}}",
     ".claude/agents/project/sdk-advisor.md": "{{SDK_SHA}}",
     ".claude/agents/project/python-implementer.md": "{{SDK_SHA}}",
+    ".claude/skills/acceptance/SKILL.md": "{{SDK_SHA}}",
     ".claude/workflows/wave-cycle.js": "{{SDK_SHA}}",
+    ".claude/workflows/acceptance-api.js": "{{SDK_SHA}}",
     ".claude/reference/sdk-security-invariants.md": "{{SDK_SHA}}",
     ".claude/settings.json": "{{SDK_SHA}}"
   }

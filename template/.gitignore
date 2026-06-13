@@ -4,3 +4,4 @@
 __pycache__
 .pytest_cache
 *.pyc
+workspace/adr/ADR-000-*-credentials.md
