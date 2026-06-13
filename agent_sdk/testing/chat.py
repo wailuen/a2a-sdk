@@ -15,7 +15,9 @@ import json
 import uuid
 from typing import Any, Callable
 
+from ..models.content_types import A2UI_VERSION as _A2UI_VERSION
 from ..models.content_types import CATALOG_ID as _STANDARD_CATALOG
+from ..validation.validators import safe_id
 
 A2UI_MIME = "application/a2ui+json"
 
@@ -67,13 +69,26 @@ class ChatDriver:
     ) -> None:
         self._client = client
         self._caps: dict[str, Any] = {
-            "version": "v0.9.1",
+            "version": _A2UI_VERSION,
             "tier": "core+extended",
             "catalogs": [_STANDARD_CATALOG] + list(extra_catalogs or []),
         }
         self._poll_interval = poll_interval
         self._timeout = timeout
         self._card: dict[str, Any] | None = None
+
+    def _raise_a2a_error(self, emit: dict[str, Callable] | None, response: Any) -> None:
+        """Parse A2A error envelope and raise A2AError on non-2xx (§11.2 D7.10)."""
+        if response.is_success:
+            return
+        try:
+            err = response.json().get("error", {})
+            code = err.get("code")
+            msg = err.get("message", f"HTTP {response.status_code}")
+        except Exception:
+            code, msg = None, f"HTTP {response.status_code}"
+        self._fire(emit, "error", f"A2A error code={code}: {msg}")
+        raise A2AError(code, msg)
 
     async def _discover_card(self) -> dict[str, Any]:
         """Fetch and cache the agent card (A2A §11.2.1 card discovery)."""
@@ -192,36 +207,22 @@ class ChatDriver:
             body["message"]["contextId"] = context_id
 
         r = await self._client.post("/v1/message:send", json=body)
-        # A2A §11.2 D7.10 — parse error body and discriminate on error code
-        if not r.is_success:
-            try:
-                err = r.json().get("error", {})
-                code, msg = err.get("code"), err.get("message", f"HTTP {r.status_code}")
-            except Exception:
-                code, msg = None, f"HTTP {r.status_code}"
-            self._fire(emit, "error", f"A2A error code={code}: {msg}")
-            raise A2AError(code, msg)
+        self._raise_a2a_error(emit, r)
         task = r.json()
-        task_id = task["id"]
+        # Validate server-assigned task ID before interpolating into URL (SI-3)
+        task_id = safe_id(str(task["id"]), what="task id")
 
-        deadline = asyncio.get_event_loop().time() + self._timeout
+        deadline = asyncio.get_running_loop().time() + self._timeout
         while True:
             await asyncio.sleep(self._poll_interval)
             g = await self._client.get(f"/v1/tasks/{task_id}")
-            if not g.is_success:
-                try:
-                    err = g.json().get("error", {})
-                    code, msg = err.get("code"), err.get("message", f"HTTP {g.status_code}")
-                except Exception:
-                    code, msg = None, f"HTTP {g.status_code}"
-                self._fire(emit, "error", f"A2A error code={code}: {msg}")
-                raise A2AError(code, msg)
+            self._raise_a2a_error(emit, g)
             task = g.json()
             st = task["status"]["state"]
             self._fire(emit, "tool_done")  # re-used as poll tick
             if st in ("completed", "failed", "canceled", "rejected"):
                 break
-            if asyncio.get_event_loop().time() > deadline:
+            if asyncio.get_running_loop().time() > deadline:
                 self._fire(emit, "error", f"task {task_id} timed out in state {st!r}")
                 return task
 
