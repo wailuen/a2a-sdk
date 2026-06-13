@@ -155,7 +155,8 @@ Skills live in the seeded `.claude/skills/` of every generated agent repo.
 | `/add-tool` | extend | pydantic input + `@tool` fn + test + `sample` |
 | `/add-source` | extend | `SourceAdapter` + `CredentialField`s + `health_check` + test |
 | `/agent-verify` | verify | boot → `agent-stack-check` → OAuth-chain probes → one report |
-| `/provision` | ops | zero-to-running: `.env` → boot → bootstrap → seed credentials → health-check |
+| `/acceptance` | verify | 30+ scenario seed files → parallel AG-UI conversations → judge-score each turn 1–10 → self-healing fix loop → 100% pass; `--ux` adds Playwright rendering fidelity scoring |
+| `/provision` | ops | zero-to-running: `.env` → boot → bootstrap → seed credentials → write ADR-000 key → health-check |
 | `/upgrade` | ops | read SHA → `/changelog` → confirm → update pin → reinstall → verify |
 | `/changelog` | ops | categorised SDK diff between two SHAs (BREAKING / Protocol / Security / Feature) |
 | `/diagnose` | ops | classify runtime failure L1–L7 → concrete probe → root-cause prescription |
@@ -171,9 +172,9 @@ Skills live in the seeded `.claude/skills/` of every generated agent repo.
 | `/codify` | knowledge | capture a learning → `workspace/learning/LRN-NNN-*.md` |
 
 > `/new-agent` is in the harness plugin only (not seeded — it runs once, from
-> the `a2a-sdk` Claude Code context). All other skills including `/upgrade`,
-> `/changelog`, `/provision`, `/diagnose`, `/migrate`, and `/sdk-issue` are
-> seeded into every generated agent repo.
+> the `a2a-sdk` Claude Code context). All other skills including `/acceptance`,
+> `/upgrade`, `/changelog`, `/provision`, `/diagnose`, `/migrate`, and
+> `/sdk-issue` are seeded into every generated agent repo.
 
 ---
 
