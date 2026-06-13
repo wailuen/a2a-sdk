@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "{{AGENT_NAME}} agent (A2A / AG-UI / MCP) built on agent-sdk"
 requires-python = ">=3.12"
 dependencies = [
-    # Pinned by commit SHA (tags are mutable; SHAs aren't). Tag: {{SDK_TAG}}
+    # Pinned by commit SHA (tags are mutable; SHAs aren't). Tag: v0.2.0
+    # Latest: 384cabb02828e48388db92bcafac384f1e475316
+    # To upgrade: replace the SHA with the new commit SHA from the sdk CHANGELOG.
     "agent-sdk @ git+ssh://{{SDK_GIT_URL}}@{{SDK_SHA}}",
     # The template owns exact pins; the SDK declares lower bounds only.
     "uvicorn[standard]==0.34.0",

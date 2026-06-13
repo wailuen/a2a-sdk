@@ -4,9 +4,20 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
-## [0.2.0] — unreleased
+## [0.3.0] — unreleased
+
+---
+
+## [0.2.0] — 2026-06-13
 
 ### Added
+
+- **`ArtifactLoader`** — prompts live in `src/artifacts/*.md` as Jinja2
+  templates (StrictUndefined, frontmatter-aware, compiled once at init).
+  `Agent` gains `artifacts_dir=` and `artifact_vars=`; `persona=` remains
+  supported for backward compat. `ArtifactLoader` exported from
+  `agent_sdk`. Template and AlphaGeo example migrated.
+  Harness gains `/add-artifact` opt-in migration skill.
 
 - **`/acceptance` skill** — autonomous acceptance gate, the final step in
   the agent development lifecycle (after `/provision` + `/agent-verify`).
@@ -45,6 +56,67 @@ internals, `contrib/`) may change in minors with notice here.
   on future runs without re-bootstrapping. On 409 (already bootstrapped),
   checks for an existing ADR-000 before halting. Auto-adds the credentials
   glob to `.gitignore` if absent.
+
+- **`A2AError`** exported from `agent_sdk.testing` — typed exception
+  carrying `code` and `message`; raised by `ChatDriver` on A2A error
+  responses and interrupt states. Now part of `testing.__all__`.
+
+- **Chat console markdown rendering** — agent replies in the test console
+  are rendered as Markdown (bold, italic, inline/fenced code, headings,
+  lists, blockquotes). `streamingBubble` re-renders incrementally so
+  formatting resolves live while the model is typing, not only at end of
+  stream. No external deps; all model output via DOM text nodes (XSS-safe,
+  strict CSP compliant).
+
+- **Chat console responsive full-height layout** — transcript and SSE
+  trace panels fill the full viewport height with composer pinned at the
+  bottom. Responsive breakpoints: ≤900 px single-column stacked panels,
+  ≤600 px trace panel hidden.
+
+### Fixed
+
+- **A2A / AG-UI / A2UI / MCP full-stack conformance** — 17 findings from
+  `/agent-stack-check` + 8 iterative `/redteam` cycles resolved to zero
+  Critical/High across all four protocol layers and six seams:
+  - Body size caps (1 MB) on `message/send` and `ag-ui/run` (MCP-consistent).
+  - DNS-rebinding guard in `SourceAdapter._on_request`; reads `dev_mode`
+    Pydantic attribute (was incorrectly `DEV_MODE` env-var name).
+  - SI-7 build-time check: `SourceAdapter.__init__` requires non-empty
+    `allowed_hosts` or `_no_http = True` opt-out for non-HTTP adapters.
+  - `CommitmentsSource._no_http = True` to pass the SI-7 check.
+  - Bootstrap token written to `stderr` (was `stdout` — leaked to captured
+    output).
+  - Log handler changed to `stderr` to prevent log lines in captured output.
+  - SI-2: unknown tool name in loop sanitized before log interpolation
+    (truncate to 64 chars, replace control chars).
+  - AG-UI `AGENT_ARTIFACT` wire uses camelCase `{dataType, toolName, data}`
+    (was snake_case; AG-UI camelCase invariant).
+  - AG-UI `A2UI_UPDATE` envelope wraps message array: `{messages: [...]}`.
+  - Agent card removes `urn:agui:run:v1` from `capabilities.extensions[]`;
+    AG-UI is advertised via `x-agui.endpoint` only (wrong slot per A2UI F2).
+  - `forwarding.bind()` called in `ag_ui_run` before creating the worker
+    task so credentials are bound in the correct context.
+  - `serverInfo` in MCP `initialize` response includes `title` field
+    (MCP 2025-06-18).
+  - `register_content_type` enforces global component-name uniqueness.
+  - Console `chat.js` AGENT_ARTIFACT consumer reads camelCase keys
+    (`dataType`, `toolName`).
+  - `a2uiClientCapabilities` in console includes `version`, `catalogs`,
+    `tier` on both A2A and AG-UI paths.
+
+- **`ChatDriver` A2A consumer conformance** (D7 hard-MUST floor):
+  - Card discovery: fetches and caches `/.well-known/agent-card.json`
+    before first request; selects transport from `preferredTransport`.
+  - Message/Task discrimination: checks `result.get("kind") == "message"`
+    before accessing `task["id"]`.
+  - `X-A2A-Extensions` header sent on `message:send`; response echo read
+    to confirm activation (`_a2ui_active` flag).
+  - Interrupt states (`input-required`, `auth-required`) fire `"interrupt"`
+    emit and raise `A2AError` instead of polling to timeout.
+  - `extract_a2ui` dispatches on `DataPart.metadata.mimeType`
+    (`"application/a2ui+json"`) at the part level, not artifact level.
+  - `A2UI_MIME` sourced from `A2UI_MIME_TYPE` constant in
+    `models/content_types` (removes local duplicate).
 
 ---
 
