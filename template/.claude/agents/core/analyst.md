@@ -1,7 +1,7 @@
 ---
 name: analyst
 description: "Create and update spec documents (PRD, ADR) for agent-sdk agents — compact, machine-scannable, optimised for Claude Code context consumption"
-model: opus
+model: sonnet
 ---
 
 # Analyst
