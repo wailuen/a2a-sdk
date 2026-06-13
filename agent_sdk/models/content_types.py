@@ -20,7 +20,7 @@ from __future__ import annotations
 import abc
 from typing import Annotated, Any, ClassVar, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 CATALOG_ID = "urn:a2ui-profile:standard:v1"
 A2UI_VERSION = "v0.9.1"
@@ -92,6 +92,42 @@ class MetricItem(_Wire):
     unit: str | None = None
     trend: Literal["up", "down", "flat"] | KpiTrend | None = None
     change_pct: float | None = None
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _reject_non_scalar(cls, v: Any) -> Any:
+        if isinstance(v, bool):
+            raise ValueError(
+                "MetricItem.value does not accept bool (would silently coerce to 0/1). "
+                "Use from_any() to skip non-scalar values gracefully."
+            )
+        if not isinstance(v, (int, float, str)):
+            raise ValueError(
+                f"MetricItem.value must be int, float, or str; got {type(v).__name__}. "
+                "Use from_any() to skip non-scalar values gracefully."
+            )
+        return v
+
+    @classmethod
+    def from_any(
+        cls,
+        label: str,
+        value: Any,
+        *,
+        unit: str | None = None,
+        trend: Any = None,
+        change_pct: float | None = None,
+    ) -> "MetricItem | None":
+        """Return None instead of raising when value is non-scalar or bool.
+
+        Replaces the repetitive ``isinstance(v, (int, float, str)) and not
+        isinstance(v, bool)`` guard that domain ``wire()`` methods would otherwise
+        need at every projection site.
+        """
+        try:
+            return cls(label=label, value=value, unit=unit, trend=trend, change_pct=change_pct)
+        except (ValueError, Exception):
+            return None
 
 
 class KpiCard(ContentModel):

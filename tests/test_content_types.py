@@ -7,10 +7,13 @@ from typing import ClassVar
 
 import pytest
 
+from pydantic import ValidationError
+
 from agent_sdk.models.content_types import (
     PROFILE_TYPES,
     ContentModel,
     KpiCard,
+    MetricItem,
     _REGISTRY,
     register_content_type,
 )
@@ -107,3 +110,55 @@ def test_same_class_reregistration_is_noop():
         assert _REGISTRY["test_recard"] is ReCard
     finally:
         _REGISTRY.pop("test_recard", None)
+
+
+# ── MetricItem scalar validation (issue #1) ──────────────────────────────────
+
+def test_metric_item_rejects_bool():
+    """bool must not silently coerce to 0/1 — raises ValidationError."""
+    with pytest.raises((ValueError, ValidationError)):
+        MetricItem(label="flag", value=True)
+    with pytest.raises((ValueError, ValidationError)):
+        MetricItem(label="flag", value=False)
+
+
+def test_metric_item_rejects_dict():
+    """Nested dict must raise rather than crash the whole task."""
+    with pytest.raises((ValueError, ValidationError)):
+        MetricItem(label="gni", value={"structured_value": 42000, "currency": "USD"})
+
+
+def test_metric_item_rejects_list():
+    with pytest.raises((ValueError, ValidationError)):
+        MetricItem(label="tags", value=["a", "b"])
+
+
+def test_metric_item_accepts_scalars():
+    assert MetricItem(label="price", value=42.5).value == 42.5
+    assert MetricItem(label="count", value=7).value == 7
+    assert MetricItem(label="name", value="BTC").value == "BTC"
+
+
+def test_metric_item_from_any_returns_none_for_non_scalar():
+    assert MetricItem.from_any(label="gni", value={"nested": 1}) is None
+    assert MetricItem.from_any(label="flag", value=True) is None
+    assert MetricItem.from_any(label="tags", value=["a", "b"]) is None
+
+
+def test_metric_item_from_any_returns_item_for_scalars():
+    m = MetricItem.from_any(label="price", value=99.9, unit="USD")
+    assert m is not None
+    assert m.value == 99.9
+    assert m.unit == "USD"
+
+
+def test_kpi_card_from_mixed_upstream_dict():
+    """Simulates a wire() that uses from_any to project a mixed upstream API response."""
+    upstream = {"price": 42.5, "meta": {"source": "bloomberg"}, "active": True, "count": 3}
+    metrics = [
+        m for m in (MetricItem.from_any(label=k, value=v) for k, v in upstream.items())
+        if m is not None
+    ]
+    assert len(metrics) == 2
+    labels = {m.label for m in metrics}
+    assert labels == {"price", "count"}
