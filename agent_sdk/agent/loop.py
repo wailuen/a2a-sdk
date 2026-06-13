@@ -231,7 +231,7 @@ async def run_loop(
             if entry is None:
                 # Sanitize the model-supplied name before logging (SI-2: model
                 # output is untrusted; prevent log injection via newlines etc.)
-                _safe = tc.name[:64].translate({ord(c): " " for c in "\n\r\t\x00"})
+                _safe = tc.name[:64].translate(dict.fromkeys(range(0x20), " "))
                 error = f"unknown tool {_safe!r}"
                 yield ToolResultEvent(
                     tool_call_id=tc.tool_call_id, tool_name=tc.name, ok=False, error=error

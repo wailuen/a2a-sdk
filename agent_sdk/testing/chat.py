@@ -120,7 +120,7 @@ class ChatDriver:
                     _pending_tool = None
                 elif custom_name == "AGENT_ARTIFACT":
                     v = frame.get("value") or {}
-                    self._fire(emit, "artifact", v.get("data_type", ""), v.get("tool_name", ""))
+                    self._fire(emit, "artifact", v.get("dataType", ""), v.get("toolName", ""))
                 elif custom_name == "A2UI_UPDATE":
                     msgs = (frame.get("value") or {}).get("messages") or []
                     self._fire(emit, "a2ui", msgs)
