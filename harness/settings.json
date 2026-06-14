@@ -38,5 +38,18 @@
       "Bash(*SECRET=*)",
       "Bash(*PASSWORD=*)"
     ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"\nimport sys, json\ntry:\n    raw = sys.stdin.read()\n    if '/admin/api/credentials' in raw and ('PUT' in raw or 'POST' in raw):\n        print('CREDENTIAL-HOOK: A credential was just written. Immediately update workspace/adr/ADR-001-<env>-credentials.md — record the namespace + field name that was seeded (never the value). If the file does not exist yet, create it from the template in /provision Phase 3b.')\nexcept:\n    pass\n\" 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
   }
 }
