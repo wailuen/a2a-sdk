@@ -49,6 +49,61 @@ All subsequent references to `<port>` in this skill use this resolved value.
      `AZURE_OPENAI_*`, etc.) — required even in `DEV_MODE`.
    Report any gap as a blocking item with the exact fix.
 
+1b. **Credential store backend — Azure Table Storage interview.**
+   Check `.env` for `AZURE_STORAGE_CONNECTION_STRING` or `AZURE_STORAGE_ACCOUNT_NAME`.
+
+   - If **either is already set**, report the detected backend and skip the
+     rest of this step:
+     - `AZURE_STORAGE_CONNECTION_STRING` set → "Azure Table Storage (connection string)"
+     - `AZURE_STORAGE_ACCOUNT_NAME` set → "Azure Table Storage (DefaultAzureCredential, account: `<value>`)"
+     - Neither → "SQLite (local, no Azure config detected)"
+
+   - If **neither is set**, ask:
+     "Which credential store backend?
+     1. SQLite (local, default — no Azure config needed)
+     2. Azure Table Storage (production, multi-replica safe)"
+
+     If the user selects **SQLite**: skip to step 2.
+
+     If the user selects **Azure Table Storage**:
+
+     a. Ask: "Auth method?
+        1. Connection string  (contains the storage account key — stored in `.env`)
+        2. Account name + DefaultAzureCredential  (Managed Identity / Azure CLI — non-secret)"
+
+     b. **Connection string path**: prompt for the full Azure Storage connection
+        string (format: `DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;...`).
+        Write to `.env`:
+        ```
+        AZURE_STORAGE_CONNECTION_STRING=<value>
+        ```
+        The connection string contains the storage account key — treat it as a
+        secret; never echo or log it.
+
+        **Account name path**: prompt for:
+        - Storage account name (e.g. `mystorageaccount`) — write `AZURE_STORAGE_ACCOUNT_NAME=<value>` to `.env`
+        - Confirm that the executing identity (Managed Identity, Azure CLI login)
+          has the **Storage Table Data Contributor** role on the storage account.
+          This is a prerequisite — DefaultAzureCredential will fail at boot without it.
+
+     c. Ask: "Table prefix? [default: `<agent_name>`]"
+        The SDK creates a table named `{prefix}credentials` in the storage account.
+        Accept the default (agent name slug, lower-case, no hyphens — e.g. `alphageo`)
+        or let the user supply a custom prefix. Write to `.env`:
+        ```
+        AZURE_STORAGE_TABLE_PREFIX=<prefix>
+        ```
+        Confirm the resulting table name: "`<prefix>credentials`" — and note that the
+        SDK creates this table automatically on first boot if it does not exist.
+
+     d. Ensure `AZURE_STORAGE_CONNECTION_STRING` is listed in `.gitignore` (if using
+        connection string path). If it isn't, append:
+        ```
+        # Azure credential store key (never commit)
+        .env
+        ```
+        (`.env` itself should already be gitignored; if it is, no extra entry needed.)
+
 2. Read `pyproject.toml`. Report the current `agent-sdk` SHA so the operator
    knows which SDK version is running.
 
@@ -220,6 +275,7 @@ All subsequent references to `<port>` in this skill use this resolved value.
 ```
 ## Provision — <agent-name>   Port: <port>   Env: <dev|prod>
 .env:            OK
+Cred store:      SQLite (local) | Azure Table Storage — <prefix>credentials (<auth-method>)
 venv:            OK (<python version>)
 SDK:             agent-sdk @ <sha7>
 Boot:            OK
