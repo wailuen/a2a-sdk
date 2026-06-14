@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from agent_sdk.credentials.encrypted_sqlite import EncryptedSqliteStore
 from agent_sdk.credentials.rotate import RotationError, rotate_master_key
-from agent_sdk.models.errors import AgentError
+from agent_sdk.models.errors import AgentError, ErrorCategory
 
 OLD = "old-master-key-0123456789abcdefXYZ"
 NEW = "new-master-key-0123456789abcdefXYZ"
@@ -65,3 +67,47 @@ def test_rotation_refuses_live_store(tmp_path):
     finally:
         store._conn.rollback()
         store.close()
+
+
+# ── CRYPTO-001 regression guards ────────────────────────────────────────────
+
+def test_corrupt_blob_invalid_base64_raises_agent_error(tmp_path):
+    """A DB row whose value is not valid base64 must surface as
+    AgentError(INTERNAL), not a bare binascii.Error (CRYPTO-001)."""
+    db = tmp_path / "credentials.db"
+    store = EncryptedSqliteStore(db, OLD)
+    store.set("ns", "field", "real-value")
+    # Overwrite the stored blob with invalid base64 directly in the DB.
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE credentials SET value = ? WHERE namespace = 'ns' AND field = 'field'",
+        (b"not-valid-base64===!!!",),
+    )
+    conn.commit()
+    conn.close()
+    with pytest.raises(AgentError) as exc_info:
+        store.get("ns", "field")
+    assert exc_info.value.category == ErrorCategory.INTERNAL
+    store.close()
+
+
+def test_corrupt_blob_too_short_raises_agent_error(tmp_path):
+    """A blob that decodes to fewer than 12 bytes (no room for a nonce) must
+    surface as AgentError(INTERNAL), not a bare ValueError (CRYPTO-001)."""
+    db = tmp_path / "credentials.db"
+    store = EncryptedSqliteStore(db, OLD)
+    store.set("ns", "field", "real-value")
+    import base64
+    # 8 bytes — not enough for a 12-byte GCM nonce.
+    short_blob = base64.b64encode(b"\x00" * 8)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE credentials SET value = ? WHERE namespace = 'ns' AND field = 'field'",
+        (short_blob,),
+    )
+    conn.commit()
+    conn.close()
+    with pytest.raises(AgentError) as exc_info:
+        store.get("ns", "field")
+    assert exc_info.value.category == ErrorCategory.INTERNAL
+    store.close()

@@ -121,6 +121,9 @@ Full grep checks in `.claude/reference/sdk-security-invariants.md`.
 | Upstream/vendor key | Encrypted credential store (AES-256-GCM, keyed by MASTER_KEY) | `self.credential("field_name")` inside a `SourceAdapter` | Upstream APIs (CRM, financial data, Graph, etc.) |
 | LLM API key | Encrypted credential store (`__model__` namespace) | SDK reads it at boot from `/admin → Model Backend`; never in `.env` | LLM backend |
 | Model backend config | `.env` — non-secret operational vars only (`BEDROCK_MODEL_ARN`, `OPENAI_MODEL`, `AZURE_OPENAI_ENDPOINT`, etc.) | `Settings` fields; no secrets here | routing only |
+| Azure Storage connection string | `.env` — operational infra config (treat as secret; use managed identity in prod) | `AZURE_STORAGE_CONNECTION_STRING` env var (read by SDK auto-detection, not by adapter code) | Azure Table Storage |
+
+> **Note:** `AZURE_STORAGE_CONNECTION_STRING` is the one exception to the "no secrets in .env" rule — it is infrastructure plumbing, not an upstream API key. Prefer managed identity (`AZURE_STORAGE_ACCOUNT_NAME` only, no key) in production ACA deployments.
 
 **Common mistakes (all caught by `/redteam` — fail-closed):**
 

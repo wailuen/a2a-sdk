@@ -10,4 +10,13 @@ excluded from the SemVer promise (DESIGN.md §4.0, §9).
 Shipped so far: ``action_gate``, ``obo``, and ``commitments``. The rest are not
 yet implemented; importing an unshipped module raises ModuleNotFoundError — that
 is intentional, there are no silent stubs.
+
+``azure_utils`` is infrastructure for planned Azure backends
+(``AzureTableTaskStore``, ``AzureTableCommitmentStore``). It is re-exported
+here so static-analysis tools treat it as a referenced public symbol and do not
+flag :func:`~agent_sdk.contrib.azure_utils.require_azure_packages` as dead code.
 """
+
+from agent_sdk.contrib.azure_utils import require_azure_packages as require_azure_packages  # noqa: F401
+
+__all__ = ["require_azure_packages"]

@@ -205,7 +205,21 @@ sync harness files in `.claude/` — showing every diff before writing anything.
     If `--dry-run`: stop here — do not write, do not apply. This is the single
     exit point for `--dry-run` (covers both changelog and harness preview).
 
-    **10f. Apply the accepted changes:**
+    **10f. Azure migration opportunity check.**
+    After displaying the harness classification report (10e), if the upgraded SDK version
+    is >= 0.4.0 AND the agent's `.env` or `.env.example` does NOT contain
+    `AZURE_STORAGE_CONNECTION_STRING` or `AZURE_STORAGE_ACCOUNT_NAME`, emit:
+
+    > "Azure Table Storage backends are available in this SDK version. If deploying to
+    > Azure Container Apps with multiple replicas, set `AZURE_STORAGE_CONNECTION_STRING`
+    > (or use managed identity via `AZURE_STORAGE_ACCOUNT_NAME`) and run
+    > `python -m agent_sdk migrate-store` to migrate existing SQLite data. See
+    > `docs/deployment.md` for the full guide."
+
+    This is advisory only — no automatic writes are made to `.env` or any other file.
+    If either Azure variable is already present, skip this notice silently.
+
+    **10g. Apply the accepted changes:**
     - Clean updates (y or per-file y): copy `harness/file` at `target_sha` into
       `.claude/file`.
     - New files (y): copy into `.claude/`.
@@ -213,7 +227,7 @@ sync harness files in `.claude/` — showing every diff before writing anything.
     - Conflicts accepted (a): overwrite `.claude/file` with SDK version.
     - Skipped/kept files: leave untouched.
 
-    **10g. Update the harness manifest.**
+    **10h. Update the harness manifest.**
     Rewrite `.claude/.harness-manifest.json` to record `target_sha` as the new
     `sdk_sha`, and update each applied file's SHA to `target_sha`. Leave skipped
     or kept files at their previous SHA so future upgrades can still detect the

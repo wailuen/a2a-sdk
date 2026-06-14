@@ -234,6 +234,212 @@ def _cmd_test_chat(args: argparse.Namespace) -> int:
     return asyncio.run(_run_chat(args))
 
 
+# ── migrate-store ─────────────────────────────────────────────────────────────
+
+def _cmd_migrate_store(args: argparse.Namespace) -> int:
+    """Migrate SQLite stores to Azure Table Storage.
+
+    Reads AZURE_STORAGE_CONNECTION_STRING or AZURE_STORAGE_ACCOUNT_NAME from
+    env.  Migrates credentials, pending commitments, and subscriptions from
+    their respective SQLite files to Azure Table Storage.  The connection
+    string is NEVER printed to stdout or stderr (SI-6).
+    """
+    import sqlite3
+
+    data_dir = Path(args.data_dir)
+    dry_run: bool = args.dry_run
+    force: bool = args.force
+
+    # 1. Resolve Azure settings from environment
+    conn_str_raw = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+    account_name = os.environ.get("AZURE_STORAGE_ACCOUNT_NAME")
+    table_prefix = os.environ.get("AZURE_STORAGE_TABLE_PREFIX", "agent")
+
+    if not conn_str_raw and not account_name:
+        print(
+            "error: neither AZURE_STORAGE_CONNECTION_STRING nor "
+            "AZURE_STORAGE_ACCOUNT_NAME is set",
+            file=sys.stderr,
+        )
+        return 1
+
+    # ── credentials ──────────────────────────────────────────────────────────
+
+    cred_count = 0
+    cred_db = data_dir / "credentials.db"
+    if cred_db.exists():
+        master_key = os.environ.get("MASTER_KEY", "")
+        if not master_key:
+            print(
+                "error: MASTER_KEY is required to decrypt credentials.db",
+                file=sys.stderr,
+            )
+            return 1
+
+        from .credentials.encrypted_sqlite import EncryptedSqliteStore
+        from .credentials.azure_table import AzureTableCredentialStore
+        from .models.errors import AgentError
+
+        try:
+            src_store = EncryptedSqliteStore(cred_db, master_key)
+        except AgentError as err:
+            print(f"error: {err.message}", file=sys.stderr)
+            return 1
+
+        if not dry_run:
+            if conn_str_raw is not None:
+                dst_cred = AzureTableCredentialStore(
+                    master_key,
+                    connection_string=conn_str_raw,
+                    prefix=table_prefix,
+                )
+            else:
+                dst_cred = AzureTableCredentialStore(
+                    master_key,
+                    account_name=account_name,
+                    prefix=table_prefix,
+                )
+
+        # Collect all distinct namespaces from the sqlite3 file directly
+        raw_conn = sqlite3.connect(str(cred_db))
+        try:
+            raw_conn.row_factory = sqlite3.Row
+            namespaces = [
+                row[0]
+                for row in raw_conn.execute(
+                    "SELECT DISTINCT namespace FROM credentials"
+                ).fetchall()
+            ]
+        finally:
+            raw_conn.close()
+
+        for ns in namespaces:
+            fields = src_store.list_fields(ns)
+            for field in fields:
+                plaintext = src_store.get(ns, field)
+                if plaintext is None:
+                    continue
+                if dry_run:
+                    cred_count += 1
+                else:
+                    if not force:
+                        existing = dst_cred.get(ns, field)
+                        if existing is not None:
+                            continue
+                    dst_cred.set(ns, field, plaintext)
+                    cred_count += 1
+        src_store.close()
+
+    # ── commitments ──────────────────────────────────────────────────────────
+
+    commit_count = 0
+    commit_db = data_dir / "commitments.db"
+    if commit_db.exists():
+        from .contrib.commitments.store import CommitmentStore, STATUS_PENDING
+        from .contrib.commitments.azure_table import AzureTableCommitmentStore
+
+        src_commit = CommitmentStore(commit_db)
+        src_commit.initialize()
+
+        if not dry_run:
+            if conn_str_raw is not None:
+                dst_commit = AzureTableCommitmentStore(
+                    connection_string=conn_str_raw,
+                    table_prefix=table_prefix,
+                )
+            else:
+                dst_commit = AzureTableCommitmentStore(
+                    account_name=account_name,
+                    table_prefix=table_prefix,
+                )
+            dst_commit.initialize()
+
+        pending = src_commit.list(status=STATUS_PENDING, limit=10_000)
+        for c in pending:
+            if dry_run:
+                commit_count += 1
+            else:
+                if not force:
+                    existing = dst_commit.get(c.id)
+                    if existing is not None:
+                        continue
+                import json as _json
+                # Insert directly: bypass add() to preserve the original id
+                # and fire_at. We use the Azure store's table client directly.
+                from azure.data.tables import UpdateMode as _UpdateMode
+                entity = {
+                    "PartitionKey": AzureTableCommitmentStore.PARTITION_KEY,
+                    "RowKey": c.id,
+                    "tool": c.tool,
+                    "args_json": _json.dumps(c.args),
+                    "fire_at": c.fire_at,
+                    "status": c.status,
+                    "created_at": c.created_at,
+                    "identity_binding": c.identity_binding,
+                    "auth_context_json": _json.dumps(c.auth_context or {}),
+                    "claimed_at": None,
+                    "attempts": c.attempts,
+                    "last_error": None,
+                }
+                dst_commit._table.upsert_entity(entity=entity, mode=_UpdateMode.REPLACE)
+                commit_count += 1
+        src_commit.close()
+
+    # ── subscriptions ─────────────────────────────────────────────────────────
+
+    sub_count = 0
+    sub_db = data_dir / "webhook_subscriptions.db"
+    if sub_db.exists():
+        from .contrib.webhooks.subscriptions import SubscriptionStore
+        from .contrib.webhooks.azure_table import AzureTableSubscriptionStore
+
+        src_sub = SubscriptionStore(sub_db)
+        src_sub.initialize()
+
+        if not dry_run:
+            if conn_str_raw is not None:
+                dst_sub = AzureTableSubscriptionStore(
+                    connection_string=conn_str_raw,
+                    table_prefix=table_prefix,
+                )
+            else:
+                dst_sub = AzureTableSubscriptionStore(
+                    account_name=account_name,
+                    table_prefix=table_prefix,
+                )
+            dst_sub.initialize()
+
+        all_subs = src_sub.list()
+        for sub in all_subs:
+            if dry_run:
+                sub_count += 1
+            else:
+                if not force:
+                    existing = dst_sub.get(sub["id"])
+                    if existing is not None:
+                        continue
+                dst_sub.upsert(
+                    id=sub["id"],
+                    resource=sub["resource"],
+                    change_type=sub["change_type"],
+                    notification_url=sub["notification_url"],
+                    expiration=sub["expiration"],
+                    lifecycle_url=sub.get("lifecycle_url"),
+                    client_state_ref=sub.get("client_state_ref", "default"),
+                    extra=sub.get("extra"),
+                )
+                sub_count += 1
+        src_sub.close()
+
+    # ── report ────────────────────────────────────────────────────────────────
+
+    prefix = "[dry-run] would migrate" if dry_run else "migrated"
+    print(f"credentials {prefix}: {cred_count}")
+    print(f"pending commitments {prefix}: {commit_count}")
+    print(f"subscriptions {prefix}: {sub_count}")
+    return 0
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
@@ -296,6 +502,33 @@ def main(argv: list[str] | None = None) -> int:
         help="query text; omit for interactive REPL",
     )
     chat.set_defaults(fn=_cmd_test_chat)
+
+    # migrate-store
+    migrate = sub.add_parser(
+        "migrate-store",
+        help=(
+            "migrate SQLite credential/commitment/subscription stores to "
+            "Azure Table Storage (reads AZURE_STORAGE_CONNECTION_STRING or "
+            "AZURE_STORAGE_ACCOUNT_NAME from env)"
+        ),
+    )
+    migrate.add_argument(
+        "--data-dir",
+        default="./data",
+        metavar="DIR",
+        help="directory containing SQLite store files (default: ./data)",
+    )
+    migrate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print what would be migrated without writing to Azure",
+    )
+    migrate.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite existing Azure entities (default: skip collisions)",
+    )
+    migrate.set_defaults(fn=_cmd_migrate_store)
 
     args = parser.parse_args(argv)
     return args.fn(args)

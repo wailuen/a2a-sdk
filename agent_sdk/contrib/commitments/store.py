@@ -41,12 +41,14 @@ import json
 import sqlite3
 import threading
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from ...common.redact import _SECRET_KEY, redact, redact_value
+# Commitment is defined in backend.py (to avoid circular imports) and
+# re-exported here so store consumers have a single import point.
+from .backend import Commitment, CommitmentBackend
 
 # Lifecycle states. pending → firing → (fired | failed); pending → cancelled.
 STATUS_PENDING = "pending"
@@ -134,22 +136,7 @@ def _dump_json(obj: Any, label: str) -> str:
     return text
 
 
-@dataclass(frozen=True, slots=True)
-class Commitment:
-    """A parsed commitment row. ``args`` / ``auth_context`` are JSON-decoded."""
-
-    id: str
-    tool: str
-    args: dict[str, Any]
-    fire_at: str
-    status: str
-    created_at: str
-    identity_binding: str | None = None
-    auth_context: dict[str, Any] = field(default_factory=dict)
-    attempts: int = 0
-
-
-class CommitmentStore:
+class CommitmentStore(CommitmentBackend):
     """SQLite-backed durable store for scheduled tool commitments (DESIGN §9)."""
 
     def __init__(self, db_path: str | Path = "commitments.db") -> None:
@@ -164,6 +151,7 @@ class CommitmentStore:
 
     def initialize(self) -> None:
         """Create the table + index if absent. Idempotent."""
+        self._ensure_open()
         with self._lock:
             self._conn.execute(_DDL)
             self._conn.execute(_DDL_IDX)
@@ -265,13 +253,13 @@ class CommitmentStore:
         retry (the side effect already ran)."""
         return self._set_terminal(commitment_id, STATUS_FIRED, None)
 
-    def mark_failed(self, commitment_id: str, reason: str) -> bool:
+    def mark_failed(self, commitment_id: str, reason: str | None) -> bool:
         """Mark a claimed commitment ``failed``. The caller should pass only a
         short, non-secret string (an error category or exception type name); as
         defense-in-depth for the HARD 'no secrets in the DB' rule this sink also
         bearer-scrubs and truncates ``reason`` rather than trusting the caller.
         Returns True iff THIS call owned the transition (see :meth:`mark_fired`)."""
-        safe = redact_value(str(reason))[:_MAX_REASON_LEN] if reason else reason
+        safe = redact_value(str(reason or ""))[:_MAX_REASON_LEN]
         return self._set_terminal(commitment_id, STATUS_FAILED, safe)
 
     def cancel(self, commitment_id: str, *, identity_binding: str | None = None) -> bool:
@@ -416,7 +404,7 @@ class CommitmentStore:
 
 __all__ = [
     "CommitmentStore",
-    "Commitment",
+    "Commitment",  # Re-exported from backend for store consumers; canonical definition in backend.py
     "STATUS_PENDING",
     "STATUS_FIRING",
     "STATUS_FIRED",

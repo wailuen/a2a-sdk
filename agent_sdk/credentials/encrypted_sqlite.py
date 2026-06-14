@@ -12,22 +12,21 @@
 
 from __future__ import annotations
 
-import base64
 import os
 import sqlite3
 import threading
 import time
 from pathlib import Path
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from ..models.errors import AgentError, ErrorCategory
+from .crypto import PBKDF2_ITERATIONS, decrypt, derive_key, encrypt
 from .store import CredentialStore
 
-PBKDF2_ITERATIONS = 600_000
+# Re-export so rotate.py can keep its existing import path.
+__all__ = ["EncryptedSqliteStore", "PBKDF2_ITERATIONS"]
+
 _CHECK_FIELD = "__check__"
 _CHECK_VALUE = "agent-sdk-store-check"
 
@@ -49,12 +48,12 @@ class EncryptedSqliteStore(CredentialStore):
             " updated_at REAL NOT NULL, PRIMARY KEY (namespace, field))"
         )
         self._conn.commit()
-        self._aes = AESGCM(self._derive_key(master_key))
+        self._aes = AESGCM(self._load_or_create_key(master_key))
         self._verify_master_key()
 
     # ── key handling ──
 
-    def _derive_key(self, master_key: str) -> bytes:
+    def _load_or_create_key(self, master_key: str) -> bytes:
         row = self._conn.execute("SELECT value FROM meta WHERE key='salt'").fetchone()
         if row is None:
             salt = os.urandom(16)
@@ -65,10 +64,7 @@ class EncryptedSqliteStore(CredentialStore):
                 self._conn.commit()
         else:
             salt = row[0]
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(), length=32, salt=salt, iterations=PBKDF2_ITERATIONS
-        )
-        return kdf.derive(master_key.encode())
+        return derive_key(master_key, salt)
 
     def _verify_master_key(self) -> None:
         row = self._conn.execute("SELECT value FROM meta WHERE key='check'").fetchone()
@@ -89,24 +85,13 @@ class EncryptedSqliteStore(CredentialStore):
                 f"({self._path}); restore the original key or wipe the store",
             ) from err
 
-    # ── crypto ──
+    # ── crypto (delegates to crypto.py) ──
 
     def _encrypt(self, namespace: str, field: str, value: str) -> bytes:
-        nonce = os.urandom(12)
-        aad = f"{namespace}/{field}".encode()
-        ct = self._aes.encrypt(nonce, value.encode(), aad)
-        return base64.b64encode(nonce + ct)
+        return encrypt(self._aes, namespace, field, value)
 
     def _decrypt(self, namespace: str, field: str, blob: bytes) -> str:
-        raw = base64.b64decode(blob)
-        nonce, ct = raw[:12], raw[12:]
-        aad = f"{namespace}/{field}".encode()
-        try:
-            return self._aes.decrypt(nonce, ct, aad).decode()
-        except InvalidTag as exc:
-            raise AgentError(
-                ErrorCategory.INTERNAL, "credential store decryption failed"
-            ) from exc
+        return decrypt(self._aes, namespace, field, blob)
 
     # ── CredentialStore ──
 

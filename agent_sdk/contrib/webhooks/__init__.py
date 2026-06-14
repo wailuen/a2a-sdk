@@ -102,6 +102,8 @@ from .models import (
     ParsedBatch,
     parse_batch,
 )
+from .backend import SubscriptionBackend
+from .azure_table import AzureTableSubscriptionStore, create_subscription_backend
 from .subscriptions import (
     LIFECYCLE_ACTIONS,
     VALID_CHANGE_TYPES,
@@ -116,6 +118,9 @@ from .subscriptions import (
 )
 
 __all__ = [
+    # azure backend
+    "AzureTableSubscriptionStore",
+    "create_subscription_backend",
     # receiver
     "WebhookDispatcher",
     "DispatchReport",
@@ -132,6 +137,7 @@ __all__ = [
     "LIFECYCLE_MISSED",
     "DEFAULT_MAX_ITEMS",
     # subscriptions
+    "SubscriptionBackend",
     "SubscriptionStore",
     "GraphSubscriptionManager",
     "webhooks_renewal_lifespan",

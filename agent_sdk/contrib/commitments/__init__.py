@@ -65,6 +65,8 @@ logs only ids, tool names, error categories, and exception type names.
 
 from __future__ import annotations
 
+from .azure_table import AzureTableCommitmentStore, create_commitment_backend
+from .backend import CommitmentBackend
 from .executor import CommitmentExecutor, FireAuth, commitments_lifespan
 from .source import CommitmentsSource
 from .store import (
@@ -78,7 +80,9 @@ from .store import (
 )
 
 __all__ = [
-    # store
+    # backend ABC
+    "CommitmentBackend",
+    # SQLite store
     "CommitmentStore",
     "Commitment",
     "STATUS_PENDING",
@@ -86,6 +90,9 @@ __all__ = [
     "STATUS_FIRED",
     "STATUS_FAILED",
     "STATUS_CANCELLED",
+    # Azure Table store + factory
+    "AzureTableCommitmentStore",
+    "create_commitment_backend",
     # executor / wiring
     "CommitmentExecutor",
     "commitments_lifespan",

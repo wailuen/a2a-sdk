@@ -169,6 +169,22 @@ class Agent:
             if self.settings.master_key
             else _DEV_MASTER_KEY
         )
+        if self.settings.azure_storage_connection_string is not None:
+            from .credentials.azure_table import AzureTableCredentialStore
+
+            return AzureTableCredentialStore(
+                master_key,
+                connection_string=self.settings.azure_storage_connection_string.get_secret_value(),
+                prefix=self.settings.azure_storage_table_prefix,
+            )
+        if self.settings.azure_storage_account_name is not None:
+            from .credentials.azure_table import AzureTableCredentialStore
+
+            return AzureTableCredentialStore(
+                master_key,
+                account_name=self.settings.azure_storage_account_name,
+                prefix=self.settings.azure_storage_table_prefix,
+            )
         db_path = Path(self.settings.data_dir) / "credentials.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
         return EncryptedSqliteStore(db_path, master_key)

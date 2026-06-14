@@ -26,6 +26,7 @@ import pytest
 from agent_sdk.models.errors import AgentError, ErrorCategory
 from agent_sdk.contrib.commitments import (
     Commitment,
+    CommitmentBackend,
     CommitmentExecutor,
     CommitmentStore,
     CommitmentsSource,
@@ -110,6 +111,23 @@ def test_claim_due_is_at_most_once(tmp_path_str):
     second = s.claim_due()  # already 'firing' → not re-claimed
     assert len(first) == 1
     assert second == []
+
+
+def test_claim_due_now_override_selects_by_injected_clock(tmp_path_str):
+    # Validates the ``now`` parameter of claim_due(): an injected UTC timestamp
+    # controls what is "due", enabling deterministic testing without wall-clock
+    # dependency.  Also proves the canonical-UTC comparison works end-to-end.
+    s = _store(tmp_path_str)
+    # fire_at is fixed in "the future" relative to real wall-clock time
+    target_fire_at = "2099-01-01T12:00:00Z"
+    cid = s.add(tool="t", args={"n": 99}, fire_at=target_fire_at)
+    # Without override: the commitment is not due yet
+    assert s.claim_due() == []
+    # With injected now beyond fire_at: the commitment becomes due
+    claimed = s.claim_due(now="2099-01-01T13:00:00Z")
+    assert [c.id for c in claimed] == [cid]
+    assert claimed[0].status == STATUS_FIRING
+    assert claimed[0].args == {"n": 99}
 
 
 def test_mark_fired_and_failed_are_terminal(tmp_path_str):
@@ -469,7 +487,7 @@ async def test_executor_safe_reap_swallows_store_error(tmp_path_str):
         def reap_stale_firing(self, lease):
             raise RuntimeError("locked")
 
-        def claim_due(self, limit):
+        def claim_due(self, now=None, limit=50):
             return []
 
     ex = CommitmentExecutor(_BoomReap(), FakeRegistry({}), {})
@@ -611,3 +629,45 @@ async def test_lifespan_executor_actually_fires(tmp_path_str):
     assert fired == 1
     assert entry.calls == [({"x": 9}, {CommitmentsSource: src})]
     await src.aclose()
+
+
+# ── 5. ABC contract ──
+
+
+def test_commitment_backend_abc_rejects_incomplete_subclass():
+    """A subclass that omits any abstract method must fail at instantiation."""
+
+    class _Incomplete(CommitmentBackend):
+        # Implements all abstract methods except `close`, which is omitted to
+        # verify that the ABC enforces the full interface contract.
+        def add(self, *, tool, args, fire_at, identity_binding=None, auth_context=None):
+            ...
+
+        def claim_due(self, now=None, limit=50):
+            ...
+
+        def mark_fired(self, commitment_id):
+            ...
+
+        def mark_failed(self, commitment_id, reason: str | None):
+            ...
+
+        def cancel(self, commitment_id, *, identity_binding=None):
+            ...
+
+        def reap_stale_firing(self, lease_seconds):
+            ...
+
+        def get(self, commitment_id, *, identity_binding=None):
+            ...
+
+        def list(self, *, identity_binding=None, status=None, limit=100):
+            ...
+
+        def initialize(self):
+            ...
+
+        # `close` intentionally omitted — must trigger TypeError
+
+    with pytest.raises(TypeError):
+        _Incomplete()

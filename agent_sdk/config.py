@@ -61,6 +61,21 @@ class BaseAgentSettings(BaseSettings):
     azure_api_version: str | None = Field(default=None, alias="AZURE_API_VERSION")
     azure_openai_deployment: str | None = Field(default=None, alias="AZURE_OPENAI_DEPLOYMENT")
 
+    # ── Azure Storage ──
+    # Use EITHER connection_string (shared-key / SAS) OR account_name (managed
+    # identity / workload identity). Setting both is an ambiguous-auth error.
+    # connection_string is SecretStr so pydantic never serialises it into
+    # repr/logs (SI-6).
+    azure_storage_connection_string: SecretStr | None = Field(
+        default=None, alias="AZURE_STORAGE_CONNECTION_STRING"
+    )
+    azure_storage_account_name: str | None = Field(
+        default=None, alias="AZURE_STORAGE_ACCOUNT_NAME"
+    )
+    azure_storage_table_prefix: str = Field(
+        default="agent", alias="AZURE_STORAGE_TABLE_PREFIX"
+    )
+
     # ── CORS: explicit list, never wildcard ──
     cors_origins: list[str] = Field(
         default_factory=lambda: ["https://claude.ai"], alias="CORS_ORIGINS"
@@ -91,6 +106,10 @@ class BaseAgentSettings(BaseSettings):
     @model_validator(mode="after")
     def _deployment_invariants(self) -> "BaseAgentSettings":
         # Best-effort guard; the template's `--workers 1` is the real control.
+        # With Azure Table Storage backends for credential/commitment/subscription
+        # stores, multi-replica deployments are supported; WEB_CONCURRENCY > 1
+        # remains unsupported within a single process (uvicorn worker model).
+        # Use Azure Container Apps replicas instead.
         if self.web_concurrency > 1:
             raise ValueError(
                 "WEB_CONCURRENCY > 1 is unsupported: the task store, SSE queues and "
@@ -111,6 +130,14 @@ class BaseAgentSettings(BaseSettings):
                     "MASTER_KEY must be at least 32 characters and randomly generated "
                     "(the template and /new-agent generate it; never invent one)."
                 )
+        if (
+            self.azure_storage_connection_string is not None
+            and self.azure_storage_account_name is not None
+        ):
+            raise ValueError(
+                "AZURE_STORAGE_CONNECTION_STRING and AZURE_STORAGE_ACCOUNT_NAME are "
+                "mutually exclusive (ambiguous auth): set one or the other, not both."
+            )
         return self
 
     @property

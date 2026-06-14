@@ -31,6 +31,7 @@ from agent_sdk.contrib.webhooks import (
     ChangeNotification,
     GraphSubscriptionManager,
     LifecycleNotification,
+    SubscriptionBackend,
     SubscriptionStore,
     WebhookDispatcher,
     build_graph_webhook_router,
@@ -633,3 +634,41 @@ def _capture_webhook_logs():
     finally:
         wlog.removeHandler(handler)
         wlog.setLevel(old_level)
+
+
+# ── 5. ABC contract ──
+
+
+def test_subscription_backend_abc_rejects_incomplete_subclass():
+    """A subclass that omits any abstract method must fail at instantiation."""
+
+    class _Incomplete(SubscriptionBackend):
+        # Implements all abstract methods except `close`, which is omitted to
+        # verify that the ABC enforces the full interface contract.
+        def initialize(self):
+            ...
+
+        def upsert(self, *, id, resource, change_type, notification_url,
+                   expiration, lifecycle_url=None, client_state_ref="default",
+                   extra=None):
+            ...
+
+        def set_expiration(self, id, expiration):
+            ...
+
+        def delete(self, id):
+            ...
+
+        def get(self, id):
+            ...
+
+        def list(self):
+            ...
+
+        def due_for_renewal(self, before_iso):
+            ...
+
+        # `close` intentionally omitted — must trigger TypeError
+
+    with pytest.raises(TypeError):
+        _Incomplete()

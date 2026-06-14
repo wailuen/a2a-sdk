@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
 from ...models.errors import AgentError
+from .backend import CommitmentBackend
 from .store import Commitment, CommitmentStore
 
 if TYPE_CHECKING:  # avoid importing FastAPI / registry types at module import
@@ -54,7 +55,7 @@ class CommitmentExecutor:
 
     def __init__(
         self,
-        store: CommitmentStore,
+        store: CommitmentBackend,
         registry: Any,  # agent.registry.ToolRegistry (duck-typed: .get(name))
         adapters: dict[type, Any],
         *,
@@ -185,9 +186,15 @@ def commitments_lifespan(
         owns_store = source is None
         if source is not None:
             store = source.store
+        elif db_path is not None:
+            # Explicit path: backward-compat SQLite
+            store = CommitmentStore(db_path)
+            store.initialize()
         else:
-            path = db_path or str(Path(settings.data_dir) / "commitments.db")
-            store = CommitmentStore(path)
+            # Auto-detect: use Azure when configured, else SQLite
+            from agent_sdk.contrib.commitments.azure_table import create_commitment_backend
+
+            store = create_commitment_backend(settings)
             store.initialize()
         app.state.commitment_store = store
 

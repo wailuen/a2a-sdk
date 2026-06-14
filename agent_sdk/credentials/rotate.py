@@ -7,16 +7,16 @@ sqlite transaction. Refuses to run while another process holds the store
 
 from __future__ import annotations
 
-import base64
 import os
 import sqlite3
 from pathlib import Path
 
-from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-from .encrypted_sqlite import PBKDF2_ITERATIONS, _CHECK_FIELD, _CHECK_VALUE
+from .crypto import decrypt as _decrypt_blob
+from .crypto import derive_key
+from .crypto import encrypt as _encrypt_blob
+from .encrypted_sqlite import _CHECK_FIELD, _CHECK_VALUE
 
 
 class RotationError(Exception):
@@ -24,21 +24,17 @@ class RotationError(Exception):
 
 
 def _derive(master_key: str, salt: bytes) -> AESGCM:
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(), length=32, salt=salt, iterations=PBKDF2_ITERATIONS
-    )
-    return AESGCM(kdf.derive(master_key.encode()))
+    return AESGCM(derive_key(master_key, salt))
 
 
 def _encrypt(aes: AESGCM, namespace: str, field: str, value: str) -> bytes:
-    nonce = os.urandom(12)
-    ct = aes.encrypt(nonce, value.encode(), f"{namespace}/{field}".encode())
-    return base64.b64encode(nonce + ct)
+    return _encrypt_blob(aes, namespace, field, value)
 
 
 def _decrypt(aes: AESGCM, namespace: str, field: str, blob: bytes) -> str:
-    raw = base64.b64decode(blob)
-    return aes.decrypt(raw[:12], raw[12:], f"{namespace}/{field}".encode()).decode()
+    # AgentError (raised by crypto.decrypt on InvalidTag) is a subclass of
+    # Exception, so the rotation's broad except handler still catches it.
+    return _decrypt_blob(aes, namespace, field, blob)
 
 
 def rotate_master_key(db_path: str | Path, old_key: str, new_key: str) -> int:
@@ -79,13 +75,13 @@ def rotate_master_key(db_path: str | Path, old_key: str, new_key: str) -> int:
         new_aes = _derive(new_key, new_salt)
 
         rows = conn.execute("SELECT namespace, field, value FROM credentials").fetchall()
-        for namespace, field, blob in rows:
+        for i, (namespace, field, blob) in enumerate(rows):
             try:
                 plaintext = _decrypt(old_aes, namespace, field, blob)
             except Exception as exc:
                 raise RotationError(
-                    f"credential {namespace}/{field} failed to decrypt; store may "
-                    "be corrupt — rotation aborted, nothing changed"
+                    f"a credential failed to decrypt (row {i + 1} of {len(rows)}); "
+                    "store may be corrupt — rotation aborted"
                 ) from exc
             conn.execute(
                 "UPDATE credentials SET value=? WHERE namespace=? AND field=?",

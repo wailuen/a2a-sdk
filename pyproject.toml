@@ -22,6 +22,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+azure = ["azure-data-tables>=12.5", "azure-identity>=1.15"]
 obo = ["msal>=1.26"]
 dev = [
     "pytest>=8.0",

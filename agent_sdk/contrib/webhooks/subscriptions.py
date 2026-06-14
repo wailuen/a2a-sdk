@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
 from ...models.errors import AgentError, ErrorCategory
+from .backend import SubscriptionBackend
 
 if TYPE_CHECKING:  # avoid importing FastAPI at module import
     from fastapi import FastAPI
@@ -158,7 +159,7 @@ _DDL_IDX = (
 )
 
 
-class SubscriptionStore:
+class SubscriptionStore(SubscriptionBackend):
     """SQLite record of live Graph subscriptions (house style). No secrets stored."""
 
     def __init__(self, db_path: str | Path = "webhook_subscriptions.db") -> None:
@@ -171,6 +172,7 @@ class SubscriptionStore:
         self._closed = False
 
     def initialize(self) -> None:
+        self._ensure_open()
         with self._lock:
             self._conn.execute(_DDL)
             self._conn.execute(_DDL_IDX)
@@ -305,7 +307,7 @@ class GraphSubscriptionManager:
     def __init__(
         self,
         graph: GraphPoster,
-        store: SubscriptionStore,
+        store: SubscriptionBackend,
         *,
         client_state: str,
         client_state_ref: str = "default",

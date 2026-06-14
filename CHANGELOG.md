@@ -4,9 +4,20 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
-## [0.4.0] — unreleased
+## [0.4.0] — 2026-06-14
 
 ### Added
+
+- **Azure Table Storage persistence backends** — `AzureTableCredentialStore`,
+  `AzureTableCommitmentStore`, `AzureTableSubscriptionStore` replace SQLite for multi-replica
+  Azure Container Apps deployments. Auto-detected from `AZURE_STORAGE_CONNECTION_STRING`
+  (connection string) or `AZURE_STORAGE_ACCOUNT_NAME` (managed identity). AES-256-GCM
+  encryption envelope preserved end-to-end. ETag optimistic concurrency preserves
+  at-most-once commitment firing across replicas. Install with `pip install agent-sdk[azure]`.
+
+- **`migrate-store` CLI** — `python -m agent_sdk migrate-store [--data-dir ./data]
+  [--dry-run] [--force]` migrates existing SQLite credential, commitment, and subscription
+  data to Azure Table Storage.
 
 - **`NS_MODEL` namespace + model-backend credential store** — LLM API keys
   (OpenAI, Azure OpenAI, Anthropic) are now stored in the encrypted credential
@@ -23,10 +34,13 @@ internals, `contrib/`) may change in minors with notice here.
 
 ### Changed
 
-- **`BaseAgentSettings`** — gains five non-secret fields for OpenAI/Azure backends:
-  `OPENAI_MODEL`, `OPENAI_BASE_URL`, `AZURE_OPENAI_ENDPOINT`, `AZURE_API_VERSION`,
-  `AZURE_OPENAI_DEPLOYMENT`. Removed guidance to put API keys in `.env`
-  via `SecretStr` subclass fields — that is now an SI-6 violation.
+- **`BaseAgentSettings`** — gains three new optional fields for Azure Storage auto-detection:
+  `AZURE_STORAGE_CONNECTION_STRING` (`SecretStr | None`), `AZURE_STORAGE_ACCOUNT_NAME`
+  (`str | None`), `AZURE_STORAGE_TABLE_PREFIX` (`str`, default `"agent"`). Also gains five
+  non-secret fields for OpenAI/Azure backends: `OPENAI_MODEL`, `OPENAI_BASE_URL`,
+  `AZURE_OPENAI_ENDPOINT`, `AZURE_API_VERSION`, `AZURE_OPENAI_DEPLOYMENT`. Removed
+  guidance to put API keys in `.env` via `SecretStr` subclass fields — that is now an
+  SI-6 violation.
 - **`Agent._build_model_client()`** — accepts `credential_store` and resolves OpenAI
   key from `__model__/openai_api_key` (or `azure_openai_api_key`) automatically.
   Bedrock path unchanged.

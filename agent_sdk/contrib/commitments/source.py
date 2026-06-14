@@ -45,7 +45,8 @@ from typing import Any
 
 from ...models.errors import AgentError, ErrorCategory
 from ...sources import CredentialResolver, SourceAdapter
-from .store import Commitment, CommitmentStore, _normalize_fire_at
+from .backend import CommitmentBackend
+from .store import Commitment, CommitmentStore
 
 
 class CommitmentsSource(SourceAdapter):
@@ -67,7 +68,7 @@ class CommitmentsSource(SourceAdapter):
         from pathlib import Path
 
         path = db_path or str(Path(settings.data_dir) / "commitments.db")
-        self.store = CommitmentStore(path)
+        self.store: CommitmentBackend = CommitmentStore(path)
         self.store.initialize()
         self._require_future = require_future
 
@@ -132,7 +133,12 @@ class CommitmentsSource(SourceAdapter):
         import datetime as _dt
 
         try:
-            norm = _normalize_fire_at(fire_at)
+            if not isinstance(fire_at, str):
+                raise ValueError("fire_at must be an ISO 8601 string")
+            parsed = _dt.datetime.fromisoformat(fire_at.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+            norm = parsed.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         except ValueError as exc:
             raise AgentError(
                 ErrorCategory.VALIDATION,
