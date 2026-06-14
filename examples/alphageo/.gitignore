@@ -1,9 +1,0 @@
-# Secrets and local state — never commit (ADR 0001).
-.env
-.data/
-*.db
-
-# Python
-__pycache__/
-*.py[cod]
-.venv/

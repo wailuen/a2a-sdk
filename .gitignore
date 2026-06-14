@@ -31,3 +31,7 @@ htmlcov/
 
 # macOS
 .DS_Store
+
+# Nested repos — tracked independently, not by a2a-sdk
+template/
+examples/
