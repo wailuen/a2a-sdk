@@ -167,6 +167,12 @@ class ChatDriver:
                     self._fire(emit, "text", delta)
                 elif t == "RUN_ERROR":
                     self._fire(emit, "error", frame.get("message") or "run failed")
+                elif t == "RUN_FINISHED":
+                    outcome = frame.get("outcome") or {}
+                    if outcome.get("type") == "interrupt":
+                        interrupts = outcome.get("interrupts") or []
+                        self._fire(emit, "interrupt", interrupts[0] if interrupts else outcome)
+                    break
 
         reply = "".join(reply_parts)
         if reply:

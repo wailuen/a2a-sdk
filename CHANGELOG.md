@@ -4,6 +4,44 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.4.2] — 2026-06-14
+
+### Fixed
+
+- **A2A `:resubscribe` path** — `POST /v1/tasks/{id}:resubscribe` was incorrectly
+  registered as `:subscribe`. Spec-compliant consumers calling `:resubscribe` now
+  receive the streaming response instead of 404.
+
+- **Bootstrap 401 carries `WWW-Authenticate`** — `admin.py` bootstrap-path rejection
+  (invalid/expired token) now includes `Bearer resource_metadata="..."` in
+  `WWW-Authenticate`, completing the P6-03 (`resource_metadata` on all 401s) fix.
+
+- **AG-UI resume: synthetic `TOOL_CALL_START/END` before orphan `TOOL_CALL_RESULT`**
+  — on interrupt-resume runs, `TOOL_CALL_RESULT` was emitted into the new SSE stream
+  with no preceding lifecycle events (those occurred in the prior interrupted stream).
+  `_RunMapper` now tracks `_seen_starts` and injects synthetic `TOOL_CALL_START` +
+  `TOOL_CALL_END` before any `TOOL_CALL_RESULT` whose START was not emitted in the
+  current stream.
+
+- **`ChatDriver.agui_turn` handles `RUN_FINISHED` interrupt outcome** — the event loop
+  now has a `RUN_FINISHED` branch: when `outcome.type == "interrupt"`, the `"interrupt"`
+  emit key fires with the first interrupt object; the loop always breaks on `RUN_FINISHED`
+  regardless of outcome type.
+
+- **`build_artifact` docstring** — corrected to describe the post-P6-02 dual-part
+  contract (TextPart + DataPart always; no "TextPart only" path for ContentModel).
+
+### Changed
+
+- **`/redteam` skill** (`harness/` and `template/`) — added pre-release scope rule
+  (LRN-002): full-scope run mandatory at release gate; wave-scoped run only covers
+  changed code and is not sufficient.
+
+- **`workspace/learning/LRN-006`** — Check section rewritten with correct
+  `A2uiCapabilities` construction (no non-existent `.a2ui_enabled` attribute).
+
+---
+
 ## [0.4.1] — 2026-06-14
 
 ### Fixed

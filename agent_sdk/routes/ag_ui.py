@@ -118,6 +118,9 @@ class _RunMapper:
         self.terminal_sent = False
         # parent for TOOL_CALL_START; reset each turn, set by assistant text
         self.last_message_id: str | None = None
+        # tool_call_ids whose TOOL_CALL_START was emitted in THIS stream;
+        # used to detect resume runs where the START occurred in a prior stream
+        self._seen_starts: set[str] = set()
 
     def _close_step(self) -> list[dict[str, Any]]:
         if self.open_step is None:
@@ -180,6 +183,7 @@ class _RunMapper:
             ]
 
         if isinstance(event, ToolCallEvent):
+            self._seen_starts.add(event.tool_call_id)
             start: dict[str, Any] = {
                 "type": "TOOL_CALL_START",
                 "toolCallId": event.tool_call_id,
@@ -210,7 +214,24 @@ class _RunMapper:
                 content = str(event.error) if event.error is not None else "tool failed"
             # _ensure_step: a resume run delivers this result with no prior
             # TurnStartedEvent, so open a synthetic step to enclose it (§5.3).
-            return self._ensure_step() + [
+            frames = self._ensure_step()
+            # On a resume run the TOOL_CALL_START/ARGS/END lifecycle occurred in
+            # the PREVIOUS interrupted stream. Strict AG-UI clients reject an
+            # orphan TOOL_CALL_RESULT with no open tool-call, so we inject
+            # synthetic START + END before the RESULT (§5.3).
+            if event.tool_call_id not in self._seen_starts:
+                synthetic_start: dict[str, Any] = {
+                    "type": "TOOL_CALL_START",
+                    "toolCallId": event.tool_call_id,
+                    "toolCallName": event.tool_name,
+                }
+                if self.last_message_id is not None:
+                    synthetic_start["parentMessageId"] = self.last_message_id
+                frames += [
+                    synthetic_start,
+                    {"type": "TOOL_CALL_END", "toolCallId": event.tool_call_id},
+                ]
+            frames.append(
                 {
                     "type": "TOOL_CALL_RESULT",
                     # spec: fresh UUID, never derived from tool_call_id (§5.3)
@@ -219,7 +240,8 @@ class _RunMapper:
                     "content": content,
                     "role": "tool",
                 }
-            ]
+            )
+            return frames
 
         if isinstance(event, ProgressEvent):
             return [self._custom("AGENT_PROGRESS", {"message": event.message})]

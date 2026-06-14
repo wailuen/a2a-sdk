@@ -244,7 +244,11 @@ async def mint_key(request: Request, body: KeyMintRequest) -> dict[str, Any]:
         logger.warning("bootstrap-path key mint attempted (label=%r)", body.label)
         if not auth.bootstrap.consume(bootstrap_token):
             logger.warning("bootstrap token rejected (expired, used, or wrong)")
-            raise HTTPException(status_code=401, detail="invalid or expired bootstrap token")
+            raise HTTPException(
+                status_code=401,
+                detail="invalid or expired bootstrap token",
+                headers={"WWW-Authenticate": f'Bearer resource_metadata="{auth.prm_url}"'},
+            )
         key_id, plaintext = auth.api_keys.mint(body.label, admin=True)
         logger.warning("bootstrap token consumed: first admin key %s minted", key_id)
         admin = True

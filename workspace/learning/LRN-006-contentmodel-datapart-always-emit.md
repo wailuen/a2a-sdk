@@ -17,7 +17,7 @@ The ContentModel branch fell through to TextPart-only when A2UI capability was a
 
 ## Check
 
-Call `build_artifact()` with a ContentModel payload and `capabilities.a2ui_enabled = False`. Result must have `len(parts) == 2` including a `DataPart`.
+Import `build_artifact` and a domain ContentModel subclass. Construct `A2uiCapabilities(tier="core", catalogs=["urn:a2ui-profile:standard:v1"])` with a domain type whose `catalog_id` differs from the standard catalog (so `caps.allows(ModelCls) == False`). Call `build_artifact(event, caps)` — result must have `len(artifact.parts) == 2` with the second part being a `DataPart` containing the raw model dump. Also verify the A2UI-enabled path: pass matching catalogs → second part is a `DataPart` with `metadata["mimeType"] == "application/a2ui+json"`.
 
 ## Prevention
 

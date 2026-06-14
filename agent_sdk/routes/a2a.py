@@ -337,7 +337,7 @@ async def tasks_cancel(
     return JSONResponse(_task_wire(record))
 
 
-@router.post("/v1/tasks/{task_id}:subscribe")
+@router.post("/v1/tasks/{task_id}:resubscribe")
 async def tasks_subscribe(
     task_id: str, request: Request, response: Response, identity: Identity = Depends(require_identity)
 ) -> Any:

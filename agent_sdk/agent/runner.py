@@ -92,10 +92,12 @@ def _set_status(
 def build_artifact(
     event: ArtifactEvent, capabilities: A2uiCapabilities
 ) -> Artifact:
-    """Dual-part structured artifact: TextPart fallback + DataPart payload
-    (§5.1). ContentModel payloads ship the A2UI message list when the client
-    capability allows the type; gated off → TextPart only (§5.4 — nothing is
-    silently dropped)."""
+    """Dual-part structured artifact: TextPart fallback + DataPart payload (§5.1).
+    ContentModel payloads always emit both parts. When the A2UI capability is
+    active the DataPart carries the A2UI message array; when inactive it carries
+    the raw model dump so plain A2A clients can extract structured data without
+    parsing the TextPart (A2A §D3). Non-ContentModel BaseModel and plain-value
+    payloads follow the same dual-part contract."""
     payload = event.model
     metadata: dict[str, Any] = {"data_type": event.data_type, "tool_name": event.tool_name}
     if isinstance(payload, ContentModel):
