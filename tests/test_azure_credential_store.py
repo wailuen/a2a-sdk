@@ -305,7 +305,12 @@ def make_azure_store(tmp_path):
         del _data[key]
 
     def _query_entities(filter_str, **kw):
-        ns = filter_str.split("'")[1]
+        ns = kw.get("parameters", {}).get("partition_key")
+        if ns is None:
+            raise AssertionError(
+                f"expected parameterized query (parameters dict missing); "
+                f"got raw filter: {filter_str!r}"
+            )
         return [
             {"PartitionKey": ns, "RowKey": rk, "Value": v}
             for (pk, rk), v in _data.items()
@@ -446,6 +451,17 @@ class TestListFieldsGuard:
         result = store.list_fields("__meta__")
         assert result == []
         table.query_entities.assert_not_called()
+
+    def test_list_fields_uses_parameterized_filter(self, store_and_table):
+        store, table = store_and_table
+        table.query_entities.return_value = []
+
+        assert store.list_fields("bad'name") == []
+
+        table.query_entities.assert_called_once_with(
+            "PartitionKey eq @partition_key",
+            parameters={"partition_key": "bad'name"},
+        )
 
 
 class TestSaltRaceCondition:

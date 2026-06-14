@@ -33,7 +33,7 @@ from .common.cors import CorsMiddleware
 from .common.limits import RateLimiter
 from .config import BaseAgentSettings
 from .credentials.fields import CredentialField
-from .credentials.store import NS_MODEL, CredentialStore, resolver_for_source
+from .credentials.store import NS_MODEL, CredentialStore, resolver_for_source, validate_namespace
 from .credentials.encrypted_sqlite import EncryptedSqliteStore
 from .models.content_types import ContentModel, content_type_for
 from .observability import configure_logging, request_id_middleware
@@ -99,6 +99,7 @@ class Agent:
             raise ValueError(f"{adapter_cls.__name__} is already registered")
         if not adapter_cls.source_name:
             raise ValueError(f"{adapter_cls.__name__} must declare source_name")
+        validate_namespace(adapter_cls.source_name)
         for reg in self._sources.values():
             if reg.adapter_cls.source_name == adapter_cls.source_name:
                 raise ValueError(

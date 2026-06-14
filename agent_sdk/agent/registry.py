@@ -77,6 +77,11 @@ class ToolSet:
                 if param.kind == inspect.Parameter.KEYWORD_ONLY:
                     if isinstance(ann, type) and issubclass(ann, SourceAdapter):
                         adapter_params[pname] = ann
+                    elif param.default is inspect.Parameter.empty:
+                        raise TypeError(
+                            f"tool {fn.__name__!r}: required keyword-only parameter "
+                            f"{pname!r} must be annotated as a SourceAdapter"
+                        )
                 elif param.kind in (
                     inspect.Parameter.POSITIONAL_ONLY,
                     inspect.Parameter.POSITIONAL_OR_KEYWORD,
@@ -92,6 +97,18 @@ class ToolSet:
                             f"tool {fn.__name__!r}: adapter params must be keyword-only "
                             f"(put {pname!r} after '*')"
                         )
+                    elif param.default is inspect.Parameter.empty:
+                        raise TypeError(
+                            f"tool {fn.__name__!r}: required positional parameter "
+                            f"{pname!r} must be a pydantic BaseModel"
+                        )
+                elif param.kind in (
+                    inspect.Parameter.VAR_POSITIONAL,
+                    inspect.Parameter.VAR_KEYWORD,
+                ):
+                    raise TypeError(
+                        f"tool {fn.__name__!r}: *args and **kwargs are not supported"
+                    )
             description = inspect.getdoc(fn) or fn.__name__.replace("_", " ")
             self.decls.append(
                 ToolDecl(

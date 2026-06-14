@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import sys
 import time
@@ -26,6 +27,7 @@ from ..models.errors import AgentError, ErrorCategory
 from .identity import Identity
 
 BOOTSTRAP_TTL_SECONDS = 15 * 60
+_API_KEY_RE = re.compile(r"^ak_([0-9a-f]{16})_[A-Za-z0-9_-]+$")
 
 
 def _hash(token: str) -> str:
@@ -90,10 +92,10 @@ class ApiKeyStore:
         return key_id, plaintext
 
     def verify(self, presented: str) -> Identity | None:
-        parts = presented.split("_")
-        candidates = (
-            [parts[1]] if len(parts) == 3 and parts[0] == "ak" else self._store.list_fields(NS_API_KEYS)
-        )
+        match = _API_KEY_RE.fullmatch(presented)
+        if match is None:
+            return None
+        candidates = [match.group(1)]
         presented_hash = _hash(presented)
         for key_id in candidates:
             record = self._record(key_id)

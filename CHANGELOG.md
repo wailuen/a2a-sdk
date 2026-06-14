@@ -4,6 +4,37 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.4.3] — 2026-06-14
+
+### Added
+
+- **Tool signature validation at registration** — `ToolSet` now rejects invalid tool
+  signatures at decoration time: required keyword-only params that are not `SourceAdapter`
+  subclasses, required positional params that are not pydantic `BaseModel` subclasses,
+  and `*args`/`**kwargs` all raise `TypeError` immediately.
+
+- **`validate_namespace()` in credential store** — `source_name` values are now validated
+  against `^[a-z_][a-z0-9_]{0,63}$` at both `register_source()` and `resolver_for_source()`
+  time. Rejects hyphens, uppercase, and digit-leading names before they can reach OData
+  filter strings.
+
+### Fixed
+
+- **API key fast-reject on format mismatch** — `ApiKeyStore.verify()` now uses
+  `^ak_([0-9a-f]{16})_[A-Za-z0-9_-]+$` regex; tokens that don't match the format
+  return `None` immediately without scanning the credential store. Eliminates the
+  timing oracle between "wrong format" and "key not found."
+
+- **OData injection in `AzureTableCredentialStore.list_fields()`** — switched from
+  string-interpolated `PartitionKey eq '{namespace}'` to parameterized
+  `PartitionKey eq @partition_key` with `parameters={"partition_key": namespace}`.
+
+- **Test mock hardened** — `_query_entities` in `test_azure_credential_store.py` now
+  raises `AssertionError` if called without a `parameters` dict, making any future
+  regression back to string interpolation loudly visible.
+
+---
+
 ## [0.4.2] — 2026-06-14
 
 ### Fixed

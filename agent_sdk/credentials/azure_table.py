@@ -243,7 +243,8 @@ class AzureTableCredentialStore(CredentialStore):
         if namespace == "__meta__":
             return []
         entities = self._table.query_entities(
-            f"PartitionKey eq '{namespace}'"
+            "PartitionKey eq @partition_key",
+            parameters={"partition_key": namespace},
         )
         return sorted(
             e["RowKey"]

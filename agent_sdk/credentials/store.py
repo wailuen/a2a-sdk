@@ -8,6 +8,7 @@ credentials) are unreachable from any adapter resolver.
 from __future__ import annotations
 
 import abc
+import re
 
 from ..sources import CredentialResolver
 from .forwarding import lookup as _forwarded_lookup
@@ -26,6 +27,14 @@ NS_MODEL = "__model__"
 RESERVED_NAMESPACES = frozenset(
     {NS_API_KEYS, NS_OAUTH_CLIENTS, NS_OAUTH_REFRESH, NS_BEDROCK, NS_MODEL, "__meta__"}
 )
+NAMESPACE_RE = re.compile(r"^[a-z_][a-z0-9_]{0,63}$")
+
+
+def validate_namespace(namespace: str) -> None:
+    if not NAMESPACE_RE.fullmatch(namespace):
+        raise ValueError(
+            "source_name must match ^[a-z_][a-z0-9_]{0,63}$"
+        )
 
 
 class CredentialStore(abc.ABC):
@@ -55,6 +64,7 @@ def resolver_for_source(store: CredentialStore, source_name: str) -> CredentialR
     :mod:`.forwarding`) takes priority over the store; an empty request context
     falls through to the stored value (non-breaking). Reserved namespaces never
     reach this layering — they raise below before any resolver is built."""
+    validate_namespace(source_name)
     if source_name in RESERVED_NAMESPACES:
         raise ValueError(f"{source_name!r} is a reserved namespace")
 
