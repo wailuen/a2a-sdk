@@ -26,7 +26,7 @@ any implementation, zero-tolerance fix loops, and auto-codify at the end.
 
 ## Mode A — Full run (`/wave` with no args)
 
-### Planning step (runs once; skipped if plan.md + active/ waves already exist)
+### Planning step (runs once; plan generation (steps 6–9) skipped if plan.md + active/ waves already exist and user confirms "use")
 
 1. Read `workspace/prd/README.md` and `workspace/adr/README.md`.
 2. Read `workspace/learning/README.md` — incorporate `Prevention:` clauses as
@@ -68,9 +68,10 @@ For each wave whose `Depends:` items are all in `completed/`:
    - **Implement** — parallel groups, test-first, SI-enforcing.
    - **Unit Redteam** — zero-tolerance per group (debug fires at r3+ and stall).
    - **Phase Redteam** — zero-tolerance full wave (debug fires at r3+ and stall).
-   - **Protocol Audit** — A2A/MCP/AG-UI/A2UI advisors + seam check (protocol surfaces only).
-   - **Codify** — parallel LRN capture for critical/high findings; sequential C-NNN
-     registration for new component candidates.
+   - **Protocol Audit** — `a2a-advisor`, `mcp-advisor`, `ag-ui-advisor`, `a2ui-advisor` + seam check (protocol surfaces only).
+   - **Codify** — SDK issue scan (sequential) → parallel LRN capture for critical/high
+     findings → README index update → sequential C-NNN registration for new component
+     candidates.
    - **Archive** — wave file moved to `completed/`; `plan.md` and FR `Implementation:`
      fields updated.
 3. After the workflow returns, log progress:
@@ -78,8 +79,9 @@ For each wave whose `Depends:` items are all in `completed/`:
    - ⚠️ deferred items remain → continue (items are in `deferred/`; re-run after fixing).
    - 🔴 protocol-blocked → stop and report. Fix protocol findings, run `/agent-verify`,
      then `/wave w<NNN>` to resume that wave.
+   - If `sdkCandidates > 0`, log: "SDK candidates: N written to `workspace/sdk-candidates.md`" and "Run /sdk-issue-scan to file them as GitHub issues on wailuen/a2a-sdk".
 4. After all waves complete, print final summary: waves archived, total LRNs, C-NNN
-   entries added, any remaining deferrals.
+   entries added, SDK candidates total, any remaining deferrals.
 
 ---
 

@@ -71,6 +71,34 @@ Adapter and tool code uses `self.credential("field_name")` only. Never
 inside `src/tools/` or `src/sources/`. The credential stays scoped to the
 adapter's namespace in the encrypted store.
 
+**Walkthrough:** When the SDK calls a tool, the adapter instance already has
+its credential namespace bound. A call to `self.credential("api_key")` looks
+up the value from the `EncryptedSqliteStore` under `<adapter.source_name>.api_key`
+at call time — it is never cached between requests, never passed as a function
+argument, and never written to a log. The adapter method receives the resolved
+string value and uses it directly (e.g. as a header value), discarding it when
+the method returns.
+
+**Anti-pattern 1 — env read in adapter init:**
+```python
+class MyAdapter(SourceAdapter):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._api_key = os.environ["MY_API_KEY"]  # VIOLATION: env read, plaintext cache
+```
+Fix: remove the field; call `self.credential("api_key")` inside each method that needs it.
+
+**Anti-pattern 2 — settings read in tool:**
+```python
+@tool
+async def fetch_data(input: FetchInput, adapter: MyAdapter) -> str:
+    key = settings.my_api_key  # VIOLATION: credential from settings, not credential store
+    return await adapter.fetch(input.id, key)
+```
+Fix: the tool must not resolve credentials at all — the adapter method owns that
+responsibility. Remove the `key` argument and call `self.credential("api_key")` inside
+the adapter method.
+
 **Check:** `grep -rn "os\.environ\|os\.getenv" src/tools/ src/sources/`
 → zero matches expected.
 
@@ -107,8 +135,8 @@ appear in `.env`, CLI arguments (`sys.argv`), or any log statement.
 **Check:** `grep -rn "UPSTREAM\|VENDOR\|_API_KEY\s*=" .env src/` → any match
 containing an actual key value (not a placeholder) is a violation.
 
-**Prevention:** Provisioning uses `scripts/set_upstream_credential.py` or the
-admin console credential form — never writes vendor keys to `.env` or code.
+**Prevention:** Provisioning uses the admin console credential form or
+the `/provision` skill — never writes vendor keys to `.env` or code.
 
 ---
 

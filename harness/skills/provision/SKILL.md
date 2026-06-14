@@ -78,20 +78,28 @@ All subsequent references to `<port>` in this skill use this resolved value.
    comes up, cat `$tmplog` to show the boot error, then delete the file and stop).
 
 6. **Bootstrap token.** After `/health` returns 200, grep `$tmplog` for the
-   bootstrap token pattern (the SDK prints a UUID or fixed-format token). Capture
-   it into a shell variable, then **immediately delete `$tmplog`** — never leave
-   the token in a file.
-   Tell the user: "Bootstrap token captured from stdout (not shown). Minting the
+   bootstrap banner (`=== agent-sdk first-run bootstrap ===`), then extract the
+   `token_urlsafe(32)` value on the following indented line. Capture it into a
+   shell variable, then **immediately delete `$tmplog`** — never leave the token
+   in a file.
+   Tell the user: "Bootstrap token captured from stderr (not shown). Minting the
    first admin API key now."
-   `POST /admin/bootstrap` with the token → receive the first API key.
+   `POST /admin/api/keys` with the token supplied as the `X-Bootstrap-Token`
+   request header → receive the first API key in the response `plaintext` field.
    Store the key as `ADMIN_KEY` for subsequent calls. Never echo either value.
 
-   **Idempotency:** if `/admin/bootstrap` returns 409 (already bootstrapped), the
-   agent was previously provisioned. Check whether
-   `workspace/adr/ADR-000-<env>-credentials.md` already exists:
-   - If it exists: the prior key is available; skip re-writing and skip
+   **Idempotency:** before attempting the bootstrap mint, check whether the agent
+   has already been provisioned. The preferred method is checking whether
+   `workspace/adr/ADR-000-<env>-credentials.md` already exists. If you want to
+   probe the server: `GET /admin/api/keys` without a bearer token returns **401**
+   regardless of whether keys exist — it cannot distinguish provisioned from
+   unprovisioned via an unauthenticated call. Use the ADR-000 file existence
+   check instead.
+   - If ADR-000 exists: the prior key is available; skip re-minting and skip
      credential seeding (Phase 3) or prompt to re-seed.
-   - If it is **missing**: warn the user — "Agent already bootstrapped but
+   - If ADR-000 is **missing** but a bootstrap attempt returns 401 ("invalid or
+     expired bootstrap token"), the agent was previously bootstrapped and the
+     token was already consumed. Warn the user — "Agent already bootstrapped but
      ADR-000 not found. To restore admin access, rotate the API key via the
      admin console and re-run `/provision`." Halt.
 
@@ -133,14 +141,61 @@ All subsequent references to `<port>` in this skill use this resolved value.
    or argv — the only safe path is the credential store.
 
 9. For each field value received:
-   `POST /admin/credentials/<source_name>/<field_name>` with `{"value": "..."}`.
-   Confirm the response is 200. Never log the value.
+   First check whether the field is already set by inspecting the `"set"` boolean
+   returned by `GET /admin/api/credentials` for that source. If `"set": true`,
+   ask: "Field `<field_name>` for `<source_name>` is already set. Overwrite? [y/n]"
+   Skip the write if the user answers `n`.
+   To write (new or overwrite):
+   `PUT /admin/api/credentials/<source_name>/<field_name>` with `{"value": "..."}`.
+   Confirm the response returns `{"set": true}`. Never log the value.
+
+9b. **Seed the `__model__` namespace (LLM API key).**
+    Check whether the LLM API key is already seeded:
+    `GET /admin/api/credentials` (with `Authorization: Bearer <ADMIN_KEY>`).
+    The endpoint always returns all namespaces — there is no `?source=` filter.
+    Inspect `response["model"]["fields"]` and look for the relevant field's
+    `"set"` boolean. If `"set": true`, report
+    `__model__: already seeded — no action needed` and continue.
+    If not set (or the source is absent), prompt the operator to supply the key
+    for the configured LLM backend. Use the exact field names from the SDK's
+    `_MODEL_FIELDS` — shorthand names like `api_key` do not resolve:
+    - OpenAI: `openai_api_key`
+    - Azure OpenAI: `azure_openai_api_key` only.
+      Note: `endpoint` and `deployment` are non-secret routing values stored as
+      env vars (`AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`) in `.env`,
+      not in the credential store.
+    - Anthropic: NOT YET IMPLEMENTED — skip; do not seed an Anthropic key
+      until the SDK adds support. (Field is reserved for future use.)
+    Seed each applicable field via `PUT /admin/api/credentials/__model__/<field_name>`
+    with `{"value": "..."}`. Confirm `{"set": true}` for each. **Never print the value.**
+
+    **Bedrock credentials** use a dedicated `__bedrock__` namespace, not `__model__`.
+    See step 9c below.
+
+9c. **Seed the `__bedrock__` namespace (AWS Bedrock only).**
+    Skip this step if the agent is not configured to use Bedrock
+    (i.e. `BEDROCK_MODEL_ARN` is not set in `.env`).
+    Check: `GET /admin/api/credentials`, then inspect `response["bedrock"]["fields"]`.
+    If the fields are already set, report `__bedrock__: already seeded — no action needed`.
+    Otherwise prompt the operator to supply:
+    - `aws_access_key_id`
+    - `aws_secret_access_key`
+    - `bearer_token` (optional — only if the deployment uses token-based auth)
+    Note: `region` is a non-secret env var (`BEDROCK_REGION`) stored in `.env`,
+    not in the credential store — do not prompt for it here.
+    Seed via `PUT /admin/api/credentials/__bedrock__/<field_name>` with
+    `{"value": "..."}`. Confirm `{"set": true}` for each. **Never print the value.**
+    This aligns with `/setup` Phase 3 step 5, Bedrock sub-bullet.
 
 10. **Health-check each source.**
-    `POST /admin/sources/<source_name>/health` — expect `{"status": "ok"}`.
-    If any source fails: report which source, the error message (but not the
-    credential value), and the remediation (re-seed that field or check the
-    upstream service).
+    Call `GET /admin/api/overview` (with `Authorization: Bearer <ADMIN_KEY>`)
+    and inspect the `adapters[].healthy` boolean for each adapter. A `false`
+    value means the adapter's `health_check()` failed.
+    If any adapter has `"healthy": false`: report the adapter name and its
+    `healthy: false` status, and advise the user to re-seed that field or
+    check the upstream service. (The overview response does not include error
+    detail; for deeper diagnostics call `GET /admin/api/tools` or consult the
+    agent's health_check logs.)
 
 ### Phase 4 — Live tool call (optional)
 
@@ -170,6 +225,8 @@ SDK:             agent-sdk @ <sha7>
 Boot:            OK
 Bootstrap:       key minted (not shown)
 ADR-000:         written to workspace/adr/ADR-000-<env>-credentials.md
+__model__:       seeded | already set | MISSING
+__bedrock__:     seeded | already set | SKIPPED (not Bedrock)
 Sources:         <N> seeded
   <source>: health OK | FAIL (<error category>)
 Live tool call:  PASS | SKIPPED | FAIL (<error category>)

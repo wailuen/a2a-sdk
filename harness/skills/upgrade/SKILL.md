@@ -33,7 +33,11 @@ sync harness files in `.claude/` — showing every diff before writing anything.
 2. **Resolve target SHA.**
    - If `--sha` given: use it verbatim.
    - Otherwise: `git ls-remote <full_url> HEAD` to get the latest SHA without a
-     local clone. Full URL = `git+ssh://<sdk_git_url>` or `git+https://...`.
+     local clone. Full URL = `ssh://<sdk_git_url>` (strip the `git+` prefix for
+     git-native commands) or `https://...`.
+     Note: `git+ssh://` is a pip VCS URL prefix only — `git ls-remote` does not
+     understand it and will fail with a URL parsing error. Always use plain
+     `ssh://` or `https://` with git-native commands.
    If the remote is unreachable with an SSH error, emit: "SSH access to
    `<sdk_git_url>` failed. Ensure the deploy or personal key is loaded:
    `ssh-add ~/.ssh/id_ed25519`. For CI, ensure the key is in `SSH_AUTH_SOCK`."
@@ -98,8 +102,9 @@ sync harness files in `.claude/` — showing every diff before writing anything.
 
     **10a. Resolve the seeded SHA (the base for conflict detection).**
     Read `.claude/.harness-manifest.json`. This file is written by `/new-agent`
-    on first seed and updated by `/upgrade` after each successful sync. It maps
-    every seeded file to the SDK SHA it was seeded from:
+    (from scratch) or initialized by `/setup` (via placeholder substitution) on
+    first seed, and updated by `/upgrade` after each successful sync. It maps every seeded
+    file to the SDK SHA it was seeded from:
     ```json
     {
       "sdk_sha": "<sha-at-seed-time>",
@@ -258,5 +263,5 @@ Next:      review any kept conflicts manually; commit when satisfied
 - Calls `/agent-verify` (step 9) — needs `BEDROCK_MODEL_ARN` or equivalent in `.env`.
 - Step 10 requires git access to the SDK repo. Use `--skip-harness` if network
   access is unavailable.
-- `/new-agent` writes the initial `.claude/.harness-manifest.json` on seed (see /new-agent Phase 4).
-  Agents seeded before this feature existed get a one-time warning in step 10a.
+- `.claude/.harness-manifest.json` is written by `/new-agent` (from scratch) or initialized by `/setup` (via placeholder substitution) on first seed, and updated by `/upgrade` after each successful sync.
+  Agents initialized before this feature existed get a one-time warning in step 10a.

@@ -61,11 +61,28 @@ Collect, then echo back a summary for confirmation before touching any file:
    console) and/or the built-in OAuth 2.1 chain for MCP. Note: a Claude.ai MCP
    connector uses DCR-based OAuth automatically — static bearer tokens are not
    supported on that surface.
-5. **Model backend** — Bedrock (default) or another `ModelClient`. Collect:
-   - Bedrock: `BEDROCK_REGION` (e.g. `us-east-1`) and `BEDROCK_MODEL_ARN` (the
-     full `arn:aws:bedrock:…` string). Both required even in `DEV_MODE`.
-   - Azure OpenAI / OpenAI: collect the relevant endpoint and key env var names.
-   - Other: note the env vars needed.
+5. **Model backend** — Bedrock (default) or another `ModelClient`. Collect the
+   routing env vars for the chosen backend (these go in `.env`; API keys never go
+   in `.env` — they are seeded via the credential store after bootstrapping):
+   - **Bedrock** (default): `BEDROCK_REGION` (e.g. `us-east-1`) and
+     `BEDROCK_MODEL_ARN` (the full `arn:aws:bedrock:…` string). Both are required
+     even in `DEV_MODE`. AWS credentials are supplied via the default credential
+     chain (IAM role / `~/.aws/`) or seeded into `__bedrock__` via the credential
+     store — never in `.env`.
+   - **OpenAI**: `OPENAI_MODEL` (e.g. `gpt-4o`) in `.env`. The API key
+     (`openai_api_key`) is seeded into the `__model__` namespace via
+     `PUT /admin/api/credentials/__model__/openai_api_key` — never in `.env`.
+   - **Azure OpenAI**: `AZURE_OPENAI_ENDPOINT` (e.g.
+     `https://<resource>.openai.azure.com/`), `AZURE_OPENAI_DEPLOYMENT`, and
+     `AZURE_API_VERSION` (e.g. `2025-01-01-preview`) in `.env`. All three are
+     required — omitting `AZURE_API_VERSION` causes every Azure API call to fail
+     with `api_version=None`. The API key (`azure_openai_api_key`) is seeded into
+     the `__model__` namespace via
+     `PUT /admin/api/credentials/__model__/azure_openai_api_key` — never in `.env`.
+   - **Anthropic**: NOT YET IMPLEMENTED — reserved for a future release. Do not
+     configure. (`ANTHROPIC_MODEL` config field and `_build_model_client` code path
+     do not exist in the current SDK.)
+   - **Other**: note the non-secret routing env vars needed.
 6. **Contrib modules** — any of `action_gate`, `obo`, `commitments`, `webhooks`.
    **Warn that contrib is EXPERIMENTAL** (may change in minors, excluded from
    SemVer). `obo` requires the `[obo]` extra (MSAL); this will modify the
@@ -146,8 +163,7 @@ remote.
 
 Substitute **every** `{{PLACEHOLDER}}` across all files in the repo. Files that
 contain them: `CLAUDE.md`, `.env.example`, `Dockerfile`, `pyproject.toml`,
-`README.md`, `src/persona.py`, `src/config.py`, `src/main.py`,
-`src/sources/sample_api.py`, and `.claude/.harness-manifest.json`.
+`README.md`, `src/config.py`, `src/main.py`, and `.claude/.harness-manifest.json`.
 
 Placeholders to substitute:
 - `{{AGENT_NAME}}` → the kebab-case name from Phase 0
@@ -221,13 +237,39 @@ __pycache__
        env.write_text(content.replace('MASTER_KEY=\n', f'MASTER_KEY={key}\n', 1))
    EOF
    ```
-2. **If `.env` did not exist:** the script above creates it from `.env.example` with the key already set. Also write the model backend vars collected in Phase 0 (e.g. `BEDROCK_MODEL_ARN=`, `BEDROCK_REGION=`) and the chosen port (`AGENT_PORT=<port>`) into the new `.env`.
-   **If `.env` already exists (re-run):** the script updates only the `MASTER_KEY=` line in-place. Update `AGENT_PORT=` only if it is currently blank. Warn: "Existing `.env` preserved — only `MASTER_KEY` regenerated. Verify `BEDROCK_MODEL_ARN`, `BEDROCK_REGION`, and `AGENT_PORT` are still set if required."
+2. **If `.env` did not exist:** the script above creates it from `.env.example`
+   with the key already set. Also write the **non-secret routing vars** collected
+   in Phase 0 and the chosen port (`AGENT_PORT=<port>`) into the new `.env`.
+   Non-secret routing vars by backend:
+   - Bedrock: `BEDROCK_REGION=`, `BEDROCK_MODEL_ARN=`
+   - OpenAI: `OPENAI_MODEL=`
+   - Azure OpenAI: `AZURE_OPENAI_ENDPOINT=`, `AZURE_OPENAI_DEPLOYMENT=`, `AZURE_API_VERSION=`
+   **Never write any API key or secret into `.env`** — LLM API keys go into the
+   `__model__` namespace via the credential store (see step 5 below).
+   **If `.env` already exists (re-run):** the script updates only the `MASTER_KEY=`
+   line in-place. Update `AGENT_PORT=` only if it is currently blank. Warn:
+   "Existing `.env` preserved — only `MASTER_KEY` regenerated. Verify routing vars
+   and `AGENT_PORT` are still set if required."
 3. **The key never leaves the file.** Never print or echo it to chat, a log, or shell history. Tell the user:
    "`MASTER_KEY` generated and written to `.env` (git-ignored). Rotate later with
    `python -m agent_sdk rotate-master-key` — offline only."
 4. Leave `PUBLIC_URL` empty and `DEV_MODE=false`; the walkthrough runs in
    `DEV_MODE=true` locally.
+5. **Seed the LLM API key via the credential store** (after the agent bootstraps
+   in Phase 5). Once `POST /admin/api/keys` has returned the first admin key, seed
+   the LLM API key for the chosen backend:
+   - OpenAI: `PUT /admin/api/credentials/__model__/openai_api_key` `{"value": "<key>"}`
+   - Azure OpenAI: `PUT /admin/api/credentials/__model__/azure_openai_api_key` `{"value": "<key>"}`
+   - Anthropic: NOT YET IMPLEMENTED — skip this step; do not attempt to configure
+     an Anthropic model backend until the SDK adds support.
+   - Bedrock (static IAM keys only, if not using an IAM role):
+     `PUT /admin/api/credentials/__bedrock__/aws_access_key_id` and
+     `PUT /admin/api/credentials/__bedrock__/aws_secret_access_key`.
+     If the deployment uses token-based auth, also seed
+     `PUT /admin/api/credentials/__bedrock__/bearer_token` (optional).
+   Confirm each response returns `{"set": true}`. Never print or echo the key
+   value — refer to it only by field name. This is an SI-6 requirement: LLM API
+   keys must never be written to `.env` or any other file on disk.
 
 ## Phase 4 — Manifest verification
 
@@ -280,13 +322,13 @@ Then go directly to the Handoff.
 
 4. Boot:
    ```bash
-   DEV_MODE=true .venv/bin/uvicorn src.main:app --port $PORT --workers 1
+   DEV_MODE=true .venv/bin/uvicorn src.main:app --port $PORT --workers 1 > "$tmplog" 2>&1 &
    ```
    One worker is mandatory (task store / SSE / rate-limiter are process-local).
-   Run in background, redirect stdout to a temp file.
+   Run in background, redirecting both stdout and stderr to a temp file.
 
 5. Walk the console: open `http://localhost:$PORT/admin`. The first run prints a
-   single-use **bootstrap token to stdout** — grep the temp file for it and paste
+   single-use **bootstrap token to stderr** (captured via 2>&1 redirection) — grep the temp file for it and paste
    into the console to mint the first admin API key. Delete the temp log file
    immediately after capturing the token. Then: add each source's credentials
    (stored encrypted, never in env), and confirm a tool renders in the "Try"
@@ -302,7 +344,7 @@ Then go directly to the Handoff.
 2. **Phase 0 — Interview** — name, domain, sources, auth, model backend + ARN, contrib; confirm before writing.
 3. **Phase 1 — Preflight git access** — confirm SDK URL, verify SSH, resolve SHA + tag via `git ls-remote` (not `git+ls-remote`); stop on failure; offer HTTPS fallback.
 4. **Phase 2 — Substitute placeholders** — all files including manifest; wire sources; grep survivors outside `.claude/`; verify pip VCS URL format.
-5. **Phase 3 — Generate MASTER_KEY** — write to `.env` (create or update-in-place); write model backend vars; never echoed.
+5. **Phase 3 — Generate MASTER_KEY** — write to `.env` (create or update-in-place); write non-secret routing vars only (never LLM API keys); seed LLM key via `PUT /admin/api/credentials/__model__/<key_field>` after bootstrap; never echoed.
 6. **Phase 4 — Manifest verification** — confirm `.claude/.harness-manifest.json` has no remaining `{{`.
 7. **Phase 5 — First run** (skip with `--no-run`) — install venv; test; port check; boot; bootstrap token → admin key; tear down.
 8. **Handoff.**

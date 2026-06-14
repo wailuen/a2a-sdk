@@ -22,7 +22,7 @@ OAuth-chain curl probes the umbrella doesn't own, and an optional console smoke.
 - `--prod` — boot with a real `PUBLIC_URL` + `MASTER_KEY` (production fidelity: the
   card/OAuth checks need real advertised URLs). Default is `DEV_MODE=true` local.
 - `--no-console` — skip the Playwright console leg.
-- `--no-stack-check` — skip the conformance umbrella (e.g. when the check kit isn't installed).
+- `--no-stack-check` — skip the conformance umbrella (use when the check kit is unavailable for this environment).
 
 ## Phase 0 — Resolve port
 
@@ -37,16 +37,22 @@ All subsequent `<port>` references in this skill use this resolved value.
 ## Phase 1 — Boot the agent
 
 1. Boot one worker (process-local stores require it):
-   `DEV_MODE=true BEDROCK_MODEL_ARN=<arn> .venv/bin/uvicorn src.main:app --port <port> --workers 1`
+   `DEV_MODE=true <MODEL_BACKEND_VARS> .venv/bin/uvicorn src.main:app --port <port> --workers 1 > "$tmplog" 2>&1 &`
    — or, with `--prod`, set `PUBLIC_URL=http://localhost:<port>` + a real `MASTER_KEY`
    and `DEV_MODE=false` (a non-localhost `PUBLIC_URL` with `DEV_MODE=true` is a hard
-   boot failure, by design). **`BEDROCK_MODEL_ARN` is required even in `DEV_MODE`** —
+   boot failure, by design). **The model backend env vars are required even in `DEV_MODE`** —
    `build_app()` constructs the model client at boot and DEV_MODE does not relax it
-   (DEV_MODE relaxes only the MASTER_KEY/PUBLIC_URL/secure-transport checks). The
-   surface probes never invoke the model, so a **syntactically-valid placeholder ARN**
-   is enough for a surface-only run; use the real ARN (or a `model_client=`) for a run
-   that also exercises tool calls. Run it in the background; capture stdout (the
-   first-run **bootstrap token** prints there — it's a secret, refer to it by location).
+   (DEV_MODE relaxes MASTER_KEY/PUBLIC_URL/secure-transport checks and the per-request DNS-rebinding guard in SourceAdapter — localhost adapter targets are valid only in DEV_MODE). Replace
+   `<MODEL_BACKEND_VARS>` with the env vars for your configured backend:
+   - **Bedrock** → `BEDROCK_MODEL_ARN=<arn> BEDROCK_REGION=<region>`
+   - **OpenAI** → `OPENAI_MODEL=<model>`
+   - **Azure OpenAI** → `AZURE_OPENAI_ENDPOINT=<url> AZURE_OPENAI_DEPLOYMENT=<name>`
+
+   The surface probes never invoke the model, so syntactically-valid placeholder values
+   are enough for a surface-only run; use real values (or a `model_client=`) for a run
+   that also exercises tool calls. Run it in the background; capture stderr (redirected
+   via `2>&1`) — the first-run **bootstrap token** prints to stderr — it's a secret,
+   refer to it by location.
 2. Wait for readiness: poll `GET /health` until 200 (fail fast if it never comes up;
    surface the boot error, not a timeout).
 3. Mint a throwaway admin API key from the bootstrap token for the authenticated
@@ -64,8 +70,8 @@ It detects roles per protocol and dispatches `a2a-advisor`, `a2ui-advisor`,
 `ag-ui-advisor`, `mcp-advisor` (each applying its `/<p>-check` methodology) plus
 the S1–S6 cross-protocol seam audits, returning one deduped, severity-ranked
 verdict. **Do not restate protocol rules here** — capture its report verbatim into
-this skill's output. If the kit isn't installed, skip this leg and **say so loudly**
-in the report (never let a skipped umbrella read as a pass).
+this skill's output. If the kit is unavailable for this environment, skip this leg
+and **say so loudly** in the report (never let a skipped umbrella read as a pass).
 
 ## Phase 3 — OAuth-chain curl probes (this skill owns these)
 
@@ -117,9 +123,13 @@ the run.
 2. Run `/agent-stack-check --live` (Phase 2) unless skipped; capture its verdict.
 3. Run the OAuth-chain curl probes (Phase 3); record pass/fail per probe.
 4. Console smoke (Phase 4) if a browser exists; else mark SKIPPED.
-5. **Codify** — for each critical/high finding, invoke `/codify <finding-summary>`
+5. **Classify findings** — for each critical/high finding, determine whether it is
+   SDK-level (harness, workflow, SDK internals, protocol surface) or agent-domain
+   (domain tools, sources, credentials). SDK-level findings are marked as
+   SDK candidates for `/sdk-issue`; agent-domain findings go to `/codify` only.
+6. **Codify** — for each critical/high finding, invoke `/codify <finding-summary>`
    so the root cause becomes a permanent LRN check wired into future redteam runs.
-6. Synthesize the report (Phase 5); **tear down the agent**; hand findings to the
+7. Synthesize the report (Phase 5); **tear down the agent**; hand findings to the
    user. **Do not fix** — point each finding at `/add-tool`, `/add-source`,
    `sdk-advisor`, or the owning `/<p>-check` for remediation.
 
@@ -128,7 +138,7 @@ the run.
 ```
 ## Agent verification — <agent> @ <BASE>   Mode: <dev|prod>
 Boot:            <ok | failed: …>
-Stack-check:     <verbatim OVERALL verdict | SKIPPED (kit not installed)>
+Stack-check:     <verbatim OVERALL verdict | SKIPPED (unavailable for this environment)>
 OAuth-chain probes:
   401 + WWW-Authenticate
     (resource_metadata present) PASS|FAIL (…)
@@ -142,6 +152,10 @@ OAuth-chain probes:
 Console smoke:    PASS | FAIL | SKIPPED (no browser)
 OVERALL:          PASS | FAIL  (FAIL if any Critical/High, or any OAuth-chain probe failed)
 Next:             <which skill/advisor owns each open finding>   (no commit made)
+
+SDK Candidates:
+<!-- Omit if no SDK-level findings were classified -->
+  - <finding summary> — run `/sdk-issue "<summary>"` to file on wailuen/a2a-sdk
 ```
 
 ## Notes

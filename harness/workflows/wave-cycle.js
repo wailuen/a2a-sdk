@@ -8,7 +8,7 @@ export const meta = {
     { title: 'Unit Redteam',   detail: 'Per-group zero-tolerance fix loop (max 5 rounds/group; debug fires at r3+ and on stall)' },
     { title: 'Phase Redteam',  detail: 'Full-wave zero-tolerance fix loop (max 8 rounds; debug fires at r3+ and on stall)' },
     { title: 'Protocol Audit', detail: 'A2A/MCP/AG-UI/A2UI conformance — parallel advisors + seam check (protocol-surface waves only)' },
-    { title: 'Codify',         detail: 'Parallel LRN capture for critical/high findings; sequential C-NNN registration for new component candidates' },
+    { title: 'Codify',         detail: 'SDK issue scan (sequential) → parallel LRN capture for critical/high findings → README index update → sequential C-NNN registration for new component candidates' },
     { title: 'Archive',        detail: 'Move wave file to completed/, update plan.md, backfill FR Implementation: fields' },
   ],
 }
@@ -20,8 +20,8 @@ const WAVE_FILE = args.waveFile
 const TODAY     = args.today || '(see context date)'
 
 // ─── protocol surface paths (trigger the Protocol Audit phase) ─────────────────
-const A2A_SURFACE  = ['src/routes/a2a', 'src/routes/mcp', 'src/routes/oauth',
-                      'src/routes/agent_card', 'src/models/a2a']
+const A2A_SURFACE  = ['src/routes/a2a', 'src/routes/agent_card', 'src/models/a2a']
+const MCP_SURFACE  = ['src/routes/mcp', 'src/routes/oauth']
 const AGUI_SURFACE = ['src/routes/ag_ui']
 const A2UI_SURFACE = ['src/a2ui/', 'src/models/content_types']
 
@@ -76,12 +76,13 @@ const RT_SCHEMA = {
         required: ['id', 'severity', 'file', 'description', 'fix'],
         additionalProperties: false,
         properties: {
-          id:          { type: 'string' },
-          severity:    { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
-          file:        { type: 'string' },
-          description: { type: 'string' },
-          fix:         { type: 'string' },
-          codify:      { type: 'string' },
+          id:           { type: 'string' },
+          severity:     { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
+          file:         { type: 'string' },
+          description:  { type: 'string' },
+          fix:          { type: 'string' },
+          codify:       { type: 'string' },
+          sdkCandidate: { type: 'boolean' },
         },
       },
     },
@@ -106,6 +107,7 @@ const PROTO_SCHEMA = {
           severity:    { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
           rule:        { type: 'string' },
           description: { type: 'string' },
+          fix:         { type: 'string' },
           codify:      { type: 'string' },
         },
       },
@@ -173,6 +175,30 @@ const PLAN_RT_SCHEMA = {
   },
 }
 
+// SDK issue scan schema — classifies findings as SDK-level vs agent-domain
+const SDK_SCAN_SCHEMA = {
+  type: 'object',
+  required: ['sdkCandidates'],
+  additionalProperties: false,
+  properties: {
+    sdkCandidates: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['description', 'severity', 'component', 'rationale'],
+        additionalProperties: false,
+        properties: {
+          description: { type: 'string' },
+          severity:    { type: 'string' },
+          component:   { type: 'string' },
+          rationale:   { type: 'string' },
+          file:        { type: 'string' },
+        },
+      },
+    },
+  },
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 // Stall detection uses description (not id) because agents re-derive ids each round.
@@ -221,6 +247,7 @@ const lrnBase          = wave.lrnNext
 const allHighFindings  = []   // accumulates critical/high for codify phase
 let   protocolBlocked  = false
 let   totalTodos       = 0
+let   sdkCandidatesCount = 0   // set by sdk:scan in Codify phase
 
 // ─── phase 1: todos redteam ───────────────────────────────────────────────────
 phase('Todos Redteam')
@@ -501,21 +528,24 @@ phase('Protocol Audit')
 const runA2A  = wave.allCreates.some(function(p) {
   return A2A_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
 })
+const runMCP  = wave.allCreates.some(function(p) {
+  return MCP_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
+})
 const runAGUI = wave.allCreates.some(function(p) {
   return AGUI_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
 })
 const runA2UI = wave.allCreates.some(function(p) {
   return A2UI_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
 })
-const runProtocol = runA2A || runAGUI || runA2UI
+const runProtocol = runA2A || runMCP || runAGUI || runA2UI
 
 if (!runProtocol) {
   log('Protocol audit skipped — no protocol surfaces in creates list')
 } else {
-  log('Protocol audit triggered (A2A=' + runA2A + ' AG-UI=' + runAGUI + ' A2UI=' + runA2UI + ')')
+  log('Protocol audit triggered (A2A=' + runA2A + ' MCP=' + runMCP + ' AG-UI=' + runAGUI + ' A2UI=' + runA2UI + ')')
   // AD-001: advisor agents are external (check kit). If the kit is absent they fall back to
   // the default agent and results will be incomplete — log what we expect so the user can verify.
-  log('Protocol audit: requires a2a-advisor / ag-ui-advisor / a2ui-advisor from the check kit. ' +
+  log('Protocol audit: requires a2a-advisor / mcp-advisor / ag-ui-advisor / a2ui-advisor from the check kit. ' +
       'If the kit is absent, advisor legs return partial or empty results — NOT a green pass.')
 
   const advisorTasks = []
@@ -523,16 +553,33 @@ if (!runProtocol) {
   if (runA2A) {
     advisorTasks.push(function() {
       return agent(
-        'A2A v0.3.0 + MCP conformance audit.\n\n' +
+        'A2A v0.3.0 conformance audit.\n\n' +
         'Files to audit:\n' +
         wave.allCreates.filter(function(p) {
           return A2A_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
         }).join('\n') + '\n\n' +
         'Check: agent card shape, task/message/part/artifact shapes, streaming,\n' +
-        'error codes (-32001 through -32007 → correct HTTP status), auth,\n' +
-        'MCP Streamable-HTTP transport, OAuth 2.1 routes.\n\n' +
-        'Return structured findings. Set protocol="A2A" or "MCP" per finding.',
+        'error codes (-32001 through -32007 → correct HTTP status), auth.\n\n' +
+        'Return structured findings. Set protocol="A2A" per finding.',
         { schema: PROTO_SCHEMA, agentType: 'a2a-advisor', label: 'proto:a2a', phase: 'Protocol Audit' }
+      )
+    })
+  }
+
+  if (runMCP) {
+    advisorTasks.push(function() {
+      return agent(
+        'MCP conformance audit.\n\n' +
+        'Files to audit:\n' +
+        wave.allCreates.filter(function(p) {
+          return MCP_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
+        }).join('\n') + '\n\n' +
+        'Check: Streamable-HTTP transport, OAuth 2.1 discovery (/.well-known/oauth-authorization-server),\n' +
+        'PKCE (S256, code_challenge_method), initialize request/response echo (protocolVersion,\n' +
+        'serverInfo, capabilities), tools/list shape (name, description, inputSchema),\n' +
+        'token endpoint CORS, and auth error codes.\n\n' +
+        'Return structured findings. Set protocol="MCP" per finding.',
+        { schema: PROTO_SCHEMA, agentType: 'mcp-advisor', label: 'proto:mcp', phase: 'Protocol Audit' }
       )
     })
   }
@@ -562,7 +609,7 @@ if (!runProtocol) {
           return A2UI_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
         }).join('\n') + '\n\n' +
         'Check: createSurface/updateComponents/updateDataModel/deleteSurface shapes,\n' +
-        'Core 7 + Extended 11 Standard Profile types only, JSON-Pointer binding,\n' +
+        'Core 6 + Extended 8 Standard Profile types only (14 FROZEN total; 4 RESERVED names are never emitted), JSON-Pointer binding,\n' +
         'A2A DataPart delivery, translator.py message types, field contracts.\n\n' +
         'Return structured findings. Set protocol="A2UI" per finding.',
         { schema: PROTO_SCHEMA, agentType: 'a2ui-advisor', label: 'proto:a2ui', phase: 'Protocol Audit' }
@@ -579,11 +626,11 @@ if (!runProtocol) {
       'src/routes/oauth.py, and any AG-UI/A2UI route files in the creates list.\n\n' +
       'Wave creates paths:\n' + wave.allCreates.join('\n') + '\n\n' +
       'Check:\n' +
-      '- Agent card skills array matches every SKILL.md in src/skills/.\n' +
+      '- Agent card skills array contains one entry per @tool in the ToolRegistry (no tool advertised in the card is absent from the registry).\n' +
+      '- src/skills/*.md files are reachable via the load_skill tool (skills_dir is wired in the Agent constructor); these are separate from the card\'s skills[] and no 1:1 count match is required.\n' +
       '- Agent card streaming flag matches actual SSE implementation.\n' +
       '- Auth mode enforced uniformly: no surface accepts a token type another rejects.\n' +
-      '- Version strings identical across agent card, MCP server info, health endpoint.\n' +
-      '- No tool advertised in the agent card is absent from the tool registry.\n\n' +
+      '- Version strings identical across agent card, MCP server info, health endpoint.\n\n' +
       'Return structured findings. Set protocol="SEAM" per finding.',
       { schema: PROTO_SCHEMA, label: 'proto:seam', phase: 'Protocol Audit' }
     )
@@ -607,7 +654,7 @@ if (!runProtocol) {
         severity:    f.severity,
         file:        'protocol-surface',
         description: f.description,
-        fix:         f.description,
+        fix:         f.fix || ('See protocol-audit findings for ' + f.protocol + ' rule ' + f.rule),
         codify:      f.codify,
       }
     })
@@ -630,10 +677,21 @@ if (!runProtocol) {
     if (runA2A) {
       recheckTasks.push(function() {
         return agent(
-          'A2A v0.3.0 + MCP re-audit after preceding fix. Check same surfaces.\n' +
+          'A2A v0.3.0 re-audit after preceding fix. Check same surfaces.\n' +
           'Creates paths:\n' + wave.allCreates.join('\n') + '\n' +
           'Focus on previously-critical findings. Return structured findings.',
           { schema: PROTO_SCHEMA, agentType: 'a2a-advisor', label: 'proto:recheck:a2a', phase: 'Protocol Audit' }
+        )
+      })
+    }
+    if (runMCP) {
+      recheckTasks.push(function() {
+        return agent(
+          'MCP re-audit after preceding fix. Check same surfaces.\n' +
+          'Creates paths:\n' + wave.allCreates.join('\n') + '\n' +
+          'Focus on previously-critical findings (Streamable-HTTP, OAuth 2.1, PKCE, initialize echo, tools/list). ' +
+          'Return structured findings.',
+          { schema: PROTO_SCHEMA, agentType: 'mcp-advisor', label: 'proto:recheck:mcp', phase: 'Protocol Audit' }
         )
       })
     }
@@ -697,6 +755,56 @@ for (const f of allHighFindings) {
 }
 
 log('Codifying ' + toCodeify.length + ' critical/high finding(s)')
+
+// ─── SDK issue scan (end of Codify) ──────────────────────────────────────────
+// Classify critical/high findings as SDK-level vs agent-domain.
+// SDK-level ones are written to workspace/sdk-candidates.md for /sdk-issue-scan.
+if (toCodeify.length > 0) {
+  const sdkScan = await agent(
+    'Classify each finding as SDK-level or agent-domain.\n\n' +
+    'SDK-LEVEL (include in output):\n' +
+    '- Harness: wrong step in a SKILL.md, wrong agent instruction, wave-cycle.js logic error\n' +
+    '- SDK internals: build_app(), Agent, ToolSet, SourceAdapter base class, credential store, loop\n' +
+    '- Protocol surface: wrong HTTP status, missing handler, wrong shape in src/routes/\n' +
+    '- Template scaffold: wrong pattern shown in template/, wrong SDK API in an example\n' +
+    '- Security: an SI violation that the SDK itself causes (not domain code)\n\n' +
+    'AGENT-DOMAIN (exclude):\n' +
+    '- src/tools/, src/sources/, src/config.py, src/persona.py\n' +
+    '- Agent-specific credential setup, domain test failures\n' +
+    '- An SI violation in the agent\'s domain code (fix the code, not the SDK)\n\n' +
+    'For each SDK-level finding, assign a component:\n' +
+    'harness/skill | harness/workflow | harness/agent | harness/template |\n' +
+    'sdk/build | sdk/loop | sdk/credentials | sdk/console |\n' +
+    'protocol/a2a | protocol/mcp | protocol/ag-ui | protocol/a2ui | protocol/oauth | security\n\n' +
+    'Findings to classify:\n' + JSON.stringify(toCodeify, null, 2),
+    { schema: SDK_SCAN_SCHEMA, label: 'sdk:scan', phase: 'Codify' }
+  )
+
+  if (sdkScan && sdkScan.sdkCandidates.length > 0) {
+    sdkCandidatesCount = sdkScan.sdkCandidates.length
+    const candidateLines = sdkScan.sdkCandidates.map(function(c, i) {
+      return '## Candidate ' + (i + 1) + ': ' + c.description + '\n' +
+             '- Severity: ' + c.severity + '\n' +
+             '- Component: ' + c.component + '\n' +
+             '- File: ' + (c.file || 'n/a') + '\n' +
+             '- Rationale: ' + c.rationale
+    }).join('\n\n')
+
+    await agent(
+      'Write the file workspace/sdk-candidates.md with exactly this content:\n\n' +
+      '# SDK issue candidates — ' + wave.waveId + ' (' + TODAY + ')\n\n' +
+      'These critical/high findings from wave ' + wave.waveId + ' are classified as\n' +
+      'SDK-level. Run `/sdk-issue-scan` to review and file them as GitHub issues\n' +
+      'on `wailuen/a2a-sdk`. One confirmation per filing — nothing is filed automatically.\n\n' +
+      candidateLines,
+      { label: 'sdk:candidates', phase: 'Codify' }
+    )
+    log('SDK issue candidates: ' + sdkScan.sdkCandidates.length + ' finding(s) written to workspace/sdk-candidates.md')
+    log('Run /sdk-issue-scan to file them as GitHub issues on wailuen/a2a-sdk')
+  } else {
+    log('SDK issue scan: no SDK-level findings in this wave')
+  }
+}
 
 if (toCodeify.length > 0) {
   await parallel(toCodeify.map(function(f, i) {
@@ -788,6 +896,7 @@ return {
   totalTodos:         totalTodos,
   lrnsCaptured:       toCodeify.length,
   cNnnRegistered:     registryCandidates.length,
+  sdkCandidates:      sdkCandidatesCount,
   groupsExecuted:     wave.groups.length,
   phaseRedteamRounds: pRound,
   exhausted:          pRound >= 8,
