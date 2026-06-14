@@ -14,7 +14,9 @@ async def test_card_shape(client):
     card = r.json()
     assert card["protocolVersion"] == "0.3.0"
     assert card["preferredTransport"] == "HTTP+JSON"
-    assert card["url"].startswith("http")
+    # HTTP+JSON: clients append /v1/message:send etc. to url; url must be the server root, not the endpoint prefix
+    assert not card["url"].endswith("/v1"), f"card url must be server root, not endpoint prefix: {card['url']}"
+    assert card["url"].startswith("http"), f"card url must be absolute: {card['url']}"
     assert card["capabilities"]["streaming"] is True
     assert card["capabilities"]["pushNotifications"] is False
     assert card["supportsAuthenticatedExtendedCard"] is False

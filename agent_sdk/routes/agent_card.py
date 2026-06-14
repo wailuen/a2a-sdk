@@ -72,7 +72,7 @@ def build_agent_card(
     card = AgentCard(
         name=settings.agent_name,
         description=settings.agent_description or settings.agent_name,
-        url=base_url,  # REQUIRED — dev falls back to localhost (§4.5)
+        url=base_url,  # HTTP+JSON transport: clients append /v1/message:send per §2 (not /)
         version=settings.agent_version,
         capabilities=AgentCapabilities(
             streaming=True,
