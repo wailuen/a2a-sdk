@@ -4,6 +4,26 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.4.4] — 2026-06-14
+
+### Fixed
+
+- **OData parameterization in `AzureTableCommitmentStore`** — all OData filter strings
+  in `list()`, `claim_due()`, and `reap_stale_firing()` now use named parameters
+  (`@partition_key`, `@status`, `@now`, `@cutoff`) with a `parameters=` dict instead
+  of string interpolation. The `now` parameter in `claim_due()` was previously
+  injectable via its public signature; `status` in `list()` was injectable but
+  only internally sourced today. Manual `replace("'", "''")` escaping removed —
+  the `azure-data-tables` SDK handles OData escaping client-side.
+
+- **Test hardening** — `test_claim_due_only_returns_due_pending` and
+  `test_list_filters_by_*` updated to assert parameterized form;
+  `partition_key` parameter presence asserted in filter tests;
+  `test_list_odata_escapes_single_quote_in_identity_binding` renamed to
+  `test_list_parameterizes_single_quote_in_identity_binding` with updated docstring.
+
+---
+
 ## [0.4.3] — 2026-06-14
 
 ### Added

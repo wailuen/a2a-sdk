@@ -183,12 +183,16 @@ class AzureTableCommitmentStore(CommitmentBackend):
         now = now or _utcnow_iso()
         claimed_at = _utcnow_iso()
         filter_expr = (
-            f"PartitionKey eq '{self.PARTITION_KEY}'"
-            f" and status eq '{STATUS_PENDING}'"
-            f" and fire_at le '{now}'"
+            "PartitionKey eq @partition_key"
+            " and status eq @status"
+            " and fire_at le @now"
         )
         candidates = list(
-            self._table.query_entities(filter_expr, results_per_page=limit)
+            self._table.query_entities(
+                filter_expr,
+                parameters={"partition_key": self.PARTITION_KEY, "status": STATUS_PENDING, "now": now},
+                results_per_page=limit,
+            )
         )[:limit]
 
         claimed = []
@@ -269,11 +273,16 @@ class AzureTableCommitmentStore(CommitmentBackend):
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         filter_expr = (
-            f"PartitionKey eq '{self.PARTITION_KEY}'"
-            f" and status eq '{STATUS_FIRING}'"
-            f" and claimed_at le '{cutoff}'"
+            "PartitionKey eq @partition_key"
+            " and status eq @status"
+            " and claimed_at le @cutoff"
         )
-        candidates = list(self._table.query_entities(filter_expr))
+        candidates = list(
+            self._table.query_entities(
+                filter_expr,
+                parameters={"partition_key": self.PARTITION_KEY, "status": STATUS_FIRING, "cutoff": cutoff},
+            )
+        )
 
         count = 0
         for entity in candidates:
@@ -314,16 +323,17 @@ class AzureTableCommitmentStore(CommitmentBackend):
         limit: int = 100,
     ) -> list[Commitment]:
         """List commitments, newest first (by created_at), optionally scoped."""
-        filters = [f"PartitionKey eq '{self.PARTITION_KEY}'"]
+        filters = ["PartitionKey eq @partition_key"]
+        parameters: dict[str, Any] = {"partition_key": self.PARTITION_KEY}
         if identity_binding is not None:
-            # OData-escape single quotes to prevent filter injection.
-            safe_binding = identity_binding.replace("'", "''")
-            filters.append(f"identity_binding eq '{safe_binding}'")
+            filters.append("identity_binding eq @identity_binding")
+            parameters["identity_binding"] = identity_binding
         if status is not None:
-            filters.append(f"status eq '{status}'")
+            filters.append("status eq @status")
+            parameters["status"] = status
         filter_expr = " and ".join(filters)
 
-        entities = list(self._table.query_entities(filter_expr))
+        entities = list(self._table.query_entities(filter_expr, parameters=parameters))
         # Sort newest first by created_at (lexicographically safe — canonical UTC Z).
         entities.sort(key=lambda e: e.get("created_at", ""), reverse=True)
         return [self._to_commitment(e) for e in entities[:limit]]

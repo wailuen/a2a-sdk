@@ -288,11 +288,14 @@ def test_claim_due_only_returns_due_pending():
     result = store.claim_due()
 
     assert result == []
-    # Verify the filter expression is correct
+    # Verify parameterized filter expression and parameters dict
     call_args = table.query_entities.call_args
-    filter_str = call_args[0][0] if call_args[0] else call_args[1].get("query_filter", "")
-    assert "status eq 'pending'" in filter_str
-    assert "fire_at le" in filter_str
+    filter_str = call_args[0][0]
+    params = call_args.kwargs["parameters"]
+    assert "status eq @status" in filter_str
+    assert "fire_at le @now" in filter_str
+    assert params["status"] == "pending"
+    assert params["partition_key"] == "commitments"
 
 
 def test_claim_due_increments_attempts():
@@ -561,9 +564,12 @@ def test_list_filters_by_identity_binding():
     assert len(results) == 1
     assert results[0].identity_binding == "user:alice"
 
-    # Verify filter expression includes identity_binding clause
+    # Verify filter expression uses parameterized form
     call_filter = table.query_entities.call_args[0][0]
-    assert "identity_binding eq 'user:alice'" in call_filter
+    call_params = table.query_entities.call_args.kwargs["parameters"]
+    assert "identity_binding eq @identity_binding" in call_filter
+    assert call_params["identity_binding"] == "user:alice"
+    assert call_params["partition_key"] == "commitments"
 
 
 def test_list_filters_by_status():
@@ -579,7 +585,24 @@ def test_list_filters_by_status():
     assert results[0].status == "pending"
 
     call_filter = table.query_entities.call_args[0][0]
-    assert "status eq 'pending'" in call_filter
+    call_params = table.query_entities.call_args.kwargs["parameters"]
+    assert "status eq @status" in call_filter
+    assert call_params["status"] == "pending"
+    assert call_params["partition_key"] == "commitments"
+
+
+def test_list_parameterizes_status_filter():
+    table = MagicMock()
+    table.query_entities.return_value = iter([])
+
+    store = _make_store(table)
+    malicious = "pending' or status ne 'pending"
+    assert store.list(status=malicious) == []
+
+    call_filter = table.query_entities.call_args[0][0]
+    call_params = table.query_entities.call_args.kwargs["parameters"]
+    assert malicious not in call_filter
+    assert call_params["status"] == malicious
 
 
 def test_list_respects_limit():
@@ -777,11 +800,9 @@ def test_get_etag_raises_runtime_error_on_missing_etag():
         AzureTableCommitmentStore._get_etag(bare_entity)
 
 
-def test_list_odata_escapes_single_quote_in_identity_binding():
-    """Finding 5: OData filter injection via single-quote in identity_binding.
-    A value like "O'Brien" must not break the filter string."""
-    from azure.core.exceptions import ResourceNotFoundError
-
+def test_list_parameterizes_single_quote_in_identity_binding():
+    """The SDK passes raw values via parameters dict; azure-data-tables applies
+    OData escaping client-side. The raw value must not appear in the filter template."""
     table = MagicMock()
     store = _make_store(table)
 
@@ -792,7 +813,7 @@ def test_list_odata_escapes_single_quote_in_identity_binding():
 
     assert table.query_entities.called
     filter_used = table.query_entities.call_args[0][0]
-    # The single quote must be doubled per OData spec
-    assert "O''Brien" in filter_used
-    # The raw unescaped form must not appear in a way that would break the filter
-    assert "O'Brien" not in filter_used.replace("O''Brien", "")
+    params = table.query_entities.call_args.kwargs["parameters"]
+    assert "identity_binding eq @identity_binding" in filter_used
+    assert "O'Brien" not in filter_used
+    assert params["identity_binding"] == "O'Brien"
