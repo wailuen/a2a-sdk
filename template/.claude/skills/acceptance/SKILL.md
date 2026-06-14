@@ -40,12 +40,24 @@ not return until all scenarios pass or the round budget is exhausted.
 
 ## Phase 0 — Pre-flight
 
-1. **Read ADR-000.** Open `workspace/adr/ADR-000-<env>-credentials.md`.
+1. **Protocol conformance gate (mandatory).** Before marking acceptance passed,
+   run `/agent-stack-check` at full scope (no `--only`/`--skip` flags). All
+   High and Critical findings must be resolved. This gate applies even when the
+   feature wave did not touch protocol surfaces — pre-existing regressions are
+   caught here, not in the wave redteam. Do not proceed to Phase 1 until
+   `/agent-stack-check` exits clean at High/Critical severity.
+
+   Also run `/redteam` with **no scope argument** (full scope). A wave-scoped
+   redteam (e.g., `/redteam w006`) only covers changed code — pre-existing
+   protocol surface bugs on untouched routes will not be detected (LRN-002).
+   Both checks must be clean before Phase 1 begins.
+
+2. **Read ADR-000.** Open `workspace/adr/ADR-000-<env>-credentials.md`.
    Parse the YAML frontmatter: extract `endpoint` (use as base URL unless
    `--url` was passed) and `admin_key`. If the file does not exist, stop:
    "Run `/provision` first — ADR-000-<env>-credentials.md not found."
 
-2. **Confirm server is alive.**
+3. **Confirm server is alive.**
    ```bash
    curl -sf <base_url>/health
    ```
@@ -53,12 +65,12 @@ not return until all scenarios pass or the round budget is exhausted.
    `DEV_MODE=true .venv/bin/uvicorn src.main:app --port <port> --workers 1`
    then re-run `/acceptance`."
 
-3. **Read agent context.** Read `src/artifacts/system.md` (or `src/persona.py`
+4. **Read agent context.** Read `src/artifacts/system.md` (or `src/persona.py`
    if present) for the agent name and description. Read all `@tools.tool` decorated functions in
    `src/tools/` — capture name, `emits=` type, and docstring for each.
    This becomes `agentContext` passed to the workflow.
 
-4. **Determine scenario target:**
+5. **Determine scenario target:**
    - `--scenario acceptance-NNN` → run that one file only
    - `--rerun-failing` → read `workspace/scenarios/results/latest.json`,
      extract all scenario IDs where `passed == false`

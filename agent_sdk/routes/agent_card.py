@@ -29,6 +29,49 @@ router = APIRouter()
 # the console's routing table are asserted equal by a unit test.
 CUSTOM_EVENTS = ("AGENT_ARTIFACT", "A2UI_UPDATE", "AGENT_PROGRESS", "AGENT_NOTE")
 
+# P6-01: AG-UI customEvents must be objects with name + valueSchema, not flat
+# strings.  The name set is identical to CUSTOM_EVENTS (routing table parity).
+_CUSTOM_EVENT_SCHEMAS = [
+    {
+        "name": "AGENT_ARTIFACT",
+        "valueSchema": {
+            "type": "object",
+            "properties": {
+                "dataType": {"type": "string"},
+                "toolName": {"type": "string"},
+                "data": {"type": "object"},
+            },
+        },
+    },
+    {
+        "name": "A2UI_UPDATE",
+        "valueSchema": {
+            "type": "object",
+            "properties": {
+                "messages": {"type": "array"},
+            },
+        },
+    },
+    {
+        "name": "AGENT_PROGRESS",
+        "valueSchema": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "AGENT_NOTE",
+        "valueSchema": {
+            "type": "object",
+            "properties": {
+                "note": {"type": "string"},
+            },
+        },
+    },
+]
+
 
 def _skill_for(entry: Any) -> AgentSkill:
     emits = entry.decl.emits
@@ -88,7 +131,7 @@ def build_agent_card(
         x_agui={
             "transport": "sse",
             "endpoint": f"{base_url}/ag-ui/run",
-            "customEvents": list(CUSTOM_EVENTS),
+            "customEvents": _CUSTOM_EVENT_SCHEMAS,
         },
     )
     return card.wire()

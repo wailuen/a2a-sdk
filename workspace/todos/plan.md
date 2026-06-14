@@ -28,6 +28,30 @@ the broken workaround) are completely eliminated.
 
 **Total:** 6 waves, 35 slices
 
+---
+
+# Plan — Protocol bug fixes (0.4.1)
+
+## Goal
+
+Fix 5 protocol conformance bugs surfaced by downstream agents after the 0.4.0 release (GH issues #4–#8). All 5 are independent file-level changes; they can be implemented in a single parallel wave.
+
+## Issues
+
+| Issue | Severity | Component | Root cause summary |
+|-------|----------|-----------|-------------------|
+| #4 | High | `routes/mcp.py` | `Mcp-Protocol-Version` response header on `initialize` returns default (`2025-03-26`), not the negotiated version from the body |
+| #5 | Medium | `routes/agent_card.py` | `x-agui.customEvents` is a flat `string[]`; `valueSchema` missing |
+| #6 | High | `agent/runner.py` | `ContentModel` artifacts emit only `TextPart`; `DataPart` never emitted unless A2UI extension activated by client (A2A §D3 violation) |
+| #7 | Medium | `auth/middleware.py` | `resource_metadata` in `WWW-Authenticate` only set for `/mcp`; all other 401s return bare `Bearer realm="agent"` |
+| #8 | Medium | `common/cors.py` | `Access-Control-Expose-Headers` absent from OPTIONS 204 preflight; blocks browser OAuth discovery |
+
+## Wave summary
+
+| Wave | File | Parallel group | Slices | Depends |
+|------|------|----------------|--------|---------|
+| W6 ✅ 2026-06-14 | w006-protocol-bugfixes.md | F (all parallel) | 5 | — |
+
 ## Dependency graph
 
 ```

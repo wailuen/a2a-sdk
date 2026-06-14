@@ -36,7 +36,9 @@ async def test_card_shape(client):
         }
         assert not bare, bare
     assert card["x-agui"]["endpoint"].endswith("/ag-ui/run")
-    assert sorted(card["x-agui"]["customEvents"]) == sorted(CUSTOM_EVENTS)
+    # P6-01: customEvents are now objects with name + valueSchema (not flat strings)
+    custom_event_names = {e["name"] for e in card["x-agui"]["customEvents"]}
+    assert custom_event_names == set(CUSTOM_EVENTS)
     # never emit v1.0-only fields
     assert "supportedInterfaces" not in card
 

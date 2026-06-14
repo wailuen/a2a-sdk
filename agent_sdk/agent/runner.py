@@ -108,6 +108,17 @@ def build_artifact(
             parts.append(
                 DataPart(data=a2ui_messages, metadata={"mimeType": A2UI_MIME_TYPE})
             )
+        else:
+            # P6-02 / A2A §D3: always emit a DataPart for structured payloads,
+            # even when A2UI is not active, so plain A2A clients can consume
+            # the model dump without screen-scraping the TextPart fallback.
+            dump = payload.model_dump(mode="json", by_alias=True, exclude_none=True)
+            parts.append(
+                DataPart(
+                    data=dump,
+                    metadata={"data_type": event.data_type, "tool_name": event.tool_name},
+                )
+            )
     elif isinstance(payload, BaseModel):
         dump = payload.model_dump(mode="json", by_alias=True, exclude_none=True)
         parts = [

@@ -1,0 +1,39 @@
+#!/bin/bash
+# pre-push hook: auto-bump the SDK patch version before every push to main.
+#
+# Activate once per clone:
+#   git config core.hooksPath .githooks
+#
+# The hook bumps pyproject.toml, stages it, and creates a new bump commit
+# so the version increment is part of the push. If the bump commit already
+# happened (version in HEAD pyproject.toml differs from origin/main), the
+# hook skips to avoid a double-bump.
+
+set -euo pipefail
+
+REMOTE="$1"
+URL="$2"
+
+# Only run on pushes that target main (or master).
+while IFS=' ' read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
+    case "$REMOTE_REF" in
+        refs/heads/main|refs/heads/master) ;;
+        *) continue ;;
+    esac
+
+    # Skip if this push contains only the bump commit itself (avoid loops).
+    MSG=$(git log -1 --format="%s" "$LOCAL_SHA" 2>/dev/null || true)
+    if [[ "$MSG" == chore:\ bump\ patch\ version* ]]; then
+        exit 0
+    fi
+
+    python3 -m agent_sdk bump-patch
+    git add pyproject.toml
+    if ! git diff --cached --quiet pyproject.toml; then
+        git commit -m "chore: bump patch version" \
+            --no-verify \
+            -m "Auto-bumped by pre-push hook."
+    fi
+done
+
+exit 0

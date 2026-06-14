@@ -59,13 +59,10 @@ def _bearer(request: Request) -> str | None:
 
 
 def _unauthorized(request: Request, runtime: AuthRuntime, detail: str) -> HTTPException:
-    # Every 401 carries a WWW-Authenticate challenge (RFC 7235). The MCP
-    # surface points at the PRM so OAuth discovery can start; other surfaces
-    # get a plain Bearer challenge so browsers can read the 401.
-    if request.url.path == "/mcp" or request.url.path.startswith("/mcp/"):
-        challenge = f'Bearer resource_metadata="{runtime.prm_url}"'
-    else:
-        challenge = 'Bearer realm="agent"'
+    # P6-03: every 401 carries a WWW-Authenticate challenge pointing at the
+    # PRM (RFC 9728 §3.1) so OAuth discovery can start from any protected
+    # surface, not just /mcp.
+    challenge = f'Bearer resource_metadata="{runtime.prm_url}"'
     return HTTPException(
         status_code=401, detail=detail, headers={"WWW-Authenticate": challenge}
     )

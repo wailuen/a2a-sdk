@@ -82,6 +82,9 @@ class CorsMiddleware:
                     (b"access-control-allow-origin", origin),
                     (b"access-control-allow-methods", _ALLOW_METHODS),
                     (b"access-control-allow-headers", _ALLOW_HEADERS),
+                    # P6-04: expose headers on preflight so the browser can
+                    # read WWW-Authenticate and OAuth discovery can start.
+                    (b"access-control-expose-headers", _EXPOSE_HEADERS),
                 ]
             await send(
                 {

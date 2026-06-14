@@ -11,6 +11,11 @@ test-chat:
     to a running server via ``--url``.  Single-shot when a QUERY argument
     is given; interactive REPL when omitted.  Tool calls, A2UI surface
     sequences, and the final text reply are printed to stdout.
+
+bump-patch:
+    Increment the patch segment of the SDK version in ``pyproject.toml``
+    (e.g. 0.4.0 → 0.4.1).  Run before every push to main so the released
+    version is always monotonically increasing.
 """
 
 from __future__ import annotations
@@ -440,6 +445,39 @@ def _cmd_migrate_store(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── bump-patch ────────────────────────────────────────────────────────────────
+
+def _cmd_bump_patch(args: argparse.Namespace) -> int:
+    """Increment the patch segment in pyproject.toml (X.Y.Z → X.Y.Z+1)."""
+    import re
+
+    root = Path(__file__).parent.parent
+    pyproject = root / "pyproject.toml"
+    if not pyproject.exists():
+        print(f"error: {pyproject} not found", file=sys.stderr)
+        return 1
+
+    text = pyproject.read_text()
+    pattern = r'^(version\s*=\s*")(\d+)\.(\d+)\.(\d+)(")'
+    match = re.search(pattern, text, re.MULTILINE)
+    if not match:
+        print('error: could not find version = "X.Y.Z" in pyproject.toml', file=sys.stderr)
+        return 1
+
+    major, minor, patch_ = int(match.group(2)), int(match.group(3)), int(match.group(4))
+    old_ver = f"{major}.{minor}.{patch_}"
+    new_ver = f"{major}.{minor}.{patch_ + 1}"
+    new_text = re.sub(
+        pattern,
+        lambda m: f"{m.group(1)}{new_ver}{m.group(5)}",
+        text,
+        flags=re.MULTILINE,
+    )
+    pyproject.write_text(new_text)
+    print(f"bumped {old_ver} → {new_ver}")
+    return 0
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
@@ -529,6 +567,13 @@ def main(argv: list[str] | None = None) -> int:
         help="overwrite existing Azure entities (default: skip collisions)",
     )
     migrate.set_defaults(fn=_cmd_migrate_store)
+
+    # bump-patch
+    bump = sub.add_parser(
+        "bump-patch",
+        help="increment the patch version in pyproject.toml (X.Y.Z → X.Y.Z+1)",
+    )
+    bump.set_defaults(fn=_cmd_bump_patch)
 
     args = parser.parse_args(argv)
     return args.fn(args)

@@ -383,6 +383,13 @@ async def mcp_post(
         sessions[session_id] = (time.time(), owner)  # bound to the caller
         _prune_sessions(sessions)
         headers[_SESSION_ID_HEADER] = session_id
+        # P6-00: override the response version header with the negotiated
+        # version from the initialize result body (the request may have carried
+        # no MCP-Protocol-Version header, so base_headers holds the fallback
+        # default; the body always contains the real negotiated version).
+        negotiated_ver = response["result"].get("protocolVersion")
+        if negotiated_ver:
+            headers[_PROTOCOL_VERSION_HEADER] = negotiated_ver
 
     return JSONResponse(content=response, headers=headers)
 

@@ -4,6 +4,56 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.4.1] — 2026-06-14
+
+### Fixed
+
+- **MCP `Mcp-Protocol-Version` response header on `initialize`** (GH #4) — header now reflects the
+  version negotiated in the body (e.g. `2025-06-18`), not the request-header fallback default
+  (`2025-03-26`). Root cause: `_negotiated_version()` in `routes/mcp.py` read the *request* header
+  (absent on first contact) and the result was locked into `base_headers` before dispatch.
+  Fix: after `_handle_initialize` resolves `protocolVersion`, override the response header to match.
+
+- **`x-agui.customEvents` schema** (GH #5) — entries are now `{name, valueSchema}` objects instead
+  of a flat `string[]`. AG-UI CUSTOM event conformance requires `valueSchema` on each entry.
+
+- **`ContentModel` artifacts always emit `DataPart`** (GH #6) — `build_artifact()` previously only
+  appended a `DataPart` when the A2UI extension was activated by the client. Plain A2A clients now
+  receive a raw `DataPart` (model dump) alongside the `TextPart`, satisfying A2A §D3.
+
+- **`WWW-Authenticate` carries `resource_metadata` on all 401 responses** (GH #7) — auth middleware
+  previously added `resource_metadata` only for `/mcp` paths; all other protected routes (A2A,
+  AG-UI, admin) returned bare `Bearer realm="agent"`, breaking RFC 9728 OAuth discovery for
+  non-MCP clients.
+
+- **`Access-Control-Expose-Headers` in CORS preflight 204** (GH #8) — the OPTIONS preflight
+  response now includes `Access-Control-Expose-Headers: WWW-Authenticate, Mcp-Session-Id,
+  X-A2A-Extensions`, matching the non-preflight path. Previously absent, which silently blocked
+  some user-agents from reading the `WWW-Authenticate` header.
+
+### Added
+
+- **`python -m agent_sdk bump-patch`** — increments the patch segment of the SDK version in
+  `pyproject.toml` (e.g. `0.4.1 → 0.4.2`). Used by the `.githooks/pre-push` hook and wave
+  commit workflow to keep the version monotonically increasing.
+
+- **`.githooks/pre-push`** — git hook that auto-bumps the patch version and commits the change
+  before every push to `main`. Activate with `git config core.hooksPath .githooks`.
+
+- **`workspace/learning/` LRN-001–LRN-006** — codified learnings from GH #4–#8: HTTP wire-level
+  test coverage, pre-release full-scope redteam requirement, `resource_metadata` uniformity,
+  CORS preflight expose-headers, MCP version header/body sync, ContentModel DataPart invariant.
+
+- **`tests/test_protocol_wire.py`** — HTTP wire-level tests for all five protocol surfaces
+  (CORS, auth challenge format, MCP version negotiation, agent card shape, ContentModel artifact
+  parts). Complements `test_protocol_fixes_w6.py` (9 unit-level regression tests).
+
+- **Acceptance skill mandatory `/agent-stack-check` gate** — both `harness/skills/acceptance/SKILL.md`
+  and `template/.claude/skills/acceptance/SKILL.md` now mandate a full-scope `/agent-stack-check`
+  pass before acceptance can be marked complete, even when the wave did not touch protocol surfaces.
+
+---
+
 ## [0.4.0] — 2026-06-14
 
 ### Added

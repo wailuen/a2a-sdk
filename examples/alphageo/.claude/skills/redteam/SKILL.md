@@ -61,3 +61,10 @@ learnings that block future regressions.
 - Auto-invoked at the end of every `/wave` unit and phase
 - Auto-invoked at the end of `/implement` on landed code
 - Standalone at any time
+
+**Pre-release scope rule (LRN-002):** when `/redteam` is invoked as part of a
+release gate (not a single-wave review), it MUST run at full scope with no
+scope argument. A scoped redteam (e.g., `/redteam w006`) only covers changed
+code — pre-existing protocol surface bugs on untouched routes (e.g., GH #4–#8:
+CORS headers, WWW-Authenticate challenge, MCP version sync, customEvents shape)
+will not be detected. Full scope is the only safe pre-release posture.
