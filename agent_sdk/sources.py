@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from .common.http import _is_non_public_ip
 from .models.errors import AgentError, ErrorCategory
 
 CredentialResolver = Callable[[str, str], str | None]  # (source_name, field) -> value
@@ -109,14 +110,7 @@ class SourceAdapter:
                 )
             for info in infos:
                 ip = ipaddress.ip_address(info[4][0])
-                if (
-                    ip.is_private
-                    or ip.is_loopback
-                    or ip.is_link_local
-                    or ip.is_reserved
-                    or ip.is_multicast
-                    or ip.is_unspecified
-                ):
+                if _is_non_public_ip(ip):
                     raise AgentError(
                         ErrorCategory.VALIDATION,
                         f"upstream '{self.source_name}' host resolves to a non-public address",

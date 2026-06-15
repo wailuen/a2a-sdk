@@ -79,7 +79,7 @@ of compliance = finding.
 
 | ID | Invariant | Severity |
 |----|-----------|----------|
-| **SI-1** | No raw `httpx`/`aiohttp`/`requests` in `src/tools/`. All outbound HTTP through a `SourceAdapter` — the base-class client enforces `allowed_hosts` and owns retries. | Critical |
+| **SI-1** | No raw `httpx`/`aiohttp`/`requests` in `src/tools/`. All outbound HTTP through a `SourceAdapter` — the base-class client enforces `allowed_hosts` and owns retries. If fetching a user-supplied URL outside an adapter is unavoidable, use `agent_sdk.common.http.safe_get(url)` — bare httpx without this wrapper is an SI-1 violation. | Critical |
 | **SI-2** | No secrets or user-input values in errors or logs. Raise `AgentError(category, "generic message", source=...)`. Never interpolate credential values, tokens, or request payloads into exception text. | Critical |
 | **SI-3** | Path/URL parameters go through SDK validators. Use `agent_sdk.validation.url_segment(...)` before interpolating into a URL path; `safe_id(...)` for identifiers. Never f-string raw input into a URL. | High |
 | **SI-4** | Credentials are resolved, never read. Use `self.credential("field_name")` — resolves only from that adapter's namespace in the encrypted store. Never `os.environ` in tools or adapters. | High |

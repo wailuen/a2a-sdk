@@ -4,6 +4,34 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.2] — 2026-06-15
+
+### 🔧 Fixes
+
+- **mcp: structuredContent coercion failure now returns isError:True (GH-23)** —
+  `_handle_tools_call()` previously swallowed `model_validate` exceptions with
+  `except: pass`, returning `isError: False` with no `structuredContent` — a spec
+  MUST violation (MCP §4). Now returns `isError: True` with the exception class name;
+  attacker-influenced field values are no longer echoed into model context.
+
+### 🔧 Security
+
+- **mcp: SSRF defense — `safe_get()` utility + shared IP-block predicate (GH-24)** —
+  Added `agent_sdk/common/http.py` exporting `safe_get(url)` and `_is_non_public_ip()`.
+  `safe_get` resolves hostname via async DNS, blocks RFC 1918 / loopback / link-local
+  (169.254.x.x IMDS) / reserved / multicast targets, and disables redirect-following.
+  The duplicate IP-block logic in `SourceAdapter._on_request` and
+  `validate_credential_url` is refactored to call the shared predicate.
+  `harness/CLAUDE.md` SI-1 updated to document `safe_get` as the approved escape hatch
+  for user-URL fetching outside a `SourceAdapter`.
+
+### 🧪 Test / CI
+
+- `tests/test_w011_mcp_ssrf.py` — 19 new tests: coercion-failure `isError:True`,
+  coercion-success `structuredContent` present, `_is_non_public_ip` parametric
+  (13 addresses), `safe_get` loopback/IMDS/RFC1918 blocked, public URL passes,
+  `follow_redirects=False` enforced.
+
 ## [0.5.1] — 2026-06-15
 
 ### 🧪 Test / CI

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import ipaddress
 import socket
 from typing import Literal
 from urllib.parse import urlparse
 
+import ipaddress
 from pydantic import BaseModel, Field
+
+from agent_sdk.common.http import _is_non_public_ip
 
 
 class CredentialField(BaseModel):
@@ -38,13 +40,6 @@ def validate_credential_url(value: str) -> str:
         raise ValueError(f"cannot resolve host {host!r}") from exc
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
+        if _is_non_public_ip(ip):
             raise ValueError(f"host {host!r} resolves to a non-public address")
     return value

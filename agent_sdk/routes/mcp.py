@@ -339,8 +339,14 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
     if emits_type is not None and not isinstance(artifact, BaseModel):
         try:
             artifact = emits_type.model_validate(artifact)
-        except Exception:
-            pass  # fall through; isError handling remains below
+        except Exception as exc:
+            # MCP §4: structuredContent MUST be present when outputSchema is declared.
+            # Coercion failure → surface as isError so clients can detect the contract
+            # violation rather than receiving a silent success with no structuredContent.
+            return {
+                "content": [{"type": "text", "text": f"tool '{name}' output coercion failed: {type(exc).__name__}"}],
+                "isError": True,
+            }
 
     result: dict[str, Any] = {
         "content": [{"type": "text", "text": _tool_text(artifact)}],
