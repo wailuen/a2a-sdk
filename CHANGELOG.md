@@ -4,6 +4,41 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.5] — 2026-06-15
+
+### 🟡 Protocol surface changes
+
+- **a2a: correct error code on terminal-task message/send (A2A-F1)** —
+  `_resume_or_error` now returns `-32004` (UnsupportedOperation, HTTP 501) when
+  `message/send` targets a completed/failed/canceled task. Previously used
+  `-32002` (TaskNotCancelable, HTTP 409) which per A2A §2 maps exclusively to
+  `tasks/cancel`. Tests updated: `test_a2a.py` GH-16 assertion and
+  `test_protocol_fixes_w9_group_a.py` now assert `(501, -32004)`.
+
+### ✅ Features
+
+- **a2ui: system prompt Profile v1 wire-contract injection (A2UI-F1)** —
+  `agent_sdk/a2ui/catalog.py` exports `get_system_prompt_section()` returning a
+  compact `## A2UI Output Format` block listing every registered FROZEN component
+  with its required/optional field types. `app.py` appends this section to the
+  system prompt when content types are registered, giving LLMs prompt-level
+  guidance on PascalCase component names and field shapes.
+
+### 🔧 Fixes
+
+- **ag-ui: history message content uses canonical multimodal array (AG-UI-F-M-01)** —
+  User messages pushed to `aguiMessages` history in `chat.js` now use
+  `content: [{type:"text", text}]` (AG-UI multimodal form) instead of
+  `content: text` (flat string). `_fold_history` server-side already handled
+  both; canonical form eliminates divergence and future-proofs multimodal payloads.
+
+### 🧪 Test / CI
+
+- `tests/test_a2ui_wire.py` — 2 new tests: `get_system_prompt_section()` always
+  returns a str; returns non-empty string containing "A2UI" + "KpiCard" when types
+  are registered
+- `tests/test_a2a_error_envelope.py` — terminal-task `message/send` asserts -32004
+
 ## [0.5.4] — 2026-06-15
 
 ### 🟡 Protocol surface changes

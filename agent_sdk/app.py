@@ -301,6 +301,12 @@ class Agent:
         if catalog:
             system_prompt = f"{system_prompt}\n\n{catalog}"
 
+        from .a2ui.catalog import get_system_prompt_section
+
+        a2ui_section = get_system_prompt_section()
+        if a2ui_section:
+            system_prompt = system_prompt + "\n\n" + a2ui_section
+
         sources = dict(self._sources)
         lifespan_extras = list(self._lifespan_extras)
 

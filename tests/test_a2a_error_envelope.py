@@ -109,6 +109,41 @@ async def test_task_id_with_colon_returns_unsupported_operation(client):
 
 
 # ===========================================================================
+# A3 — terminal-task message/send error code (A2A-F1)
+# ===========================================================================
+
+
+async def test_terminal_task_send_returns_unsupported_operation(client):
+    """message/send to a completed task must return -32004 (UnsupportedOperation),
+    NOT -32002 (TaskNotCancelable). -32002 is reserved for tasks/cancel only
+    (A2A v0.3.0 §2 error code table)."""
+    # Create a new task and let it run to completion.
+    r = await client.post("/v1/message:send", json=_send_body("hello"))
+    assert r.status_code == 200
+    task_id = r.json()["id"]
+
+    # Wait for the task to reach a terminal state.
+    await wait_for_state(client, task_id, {"completed", "failed", "canceled"})
+
+    # Now attempt to send a new message to the completed task.
+    resume_body = {
+        "message": {
+            "role": "user",
+            "parts": [{"kind": "text", "text": "resume attempt"}],
+            "messageId": uuid.uuid4().hex,
+            "taskId": task_id,
+        }
+    }
+    r2 = await client.post("/v1/message:send", json=resume_body)
+    body = r2.json()
+    assert "error" in body, f"Expected A2A error envelope; got {body}"
+    assert body["error"]["code"] == -32004, (
+        f"Expected -32004 (UnsupportedOperation) for message/send to terminal task; "
+        f"got {body['error']['code']}"
+    )
+
+
+# ===========================================================================
 # A4 — MCP Origin validation
 # ===========================================================================
 

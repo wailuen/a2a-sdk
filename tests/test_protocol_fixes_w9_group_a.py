@@ -157,14 +157,16 @@ async def test_gh15_no_content_type_proceeds(client, fake_model):
     assert r.status_code == 200, r.text
 
 
-# ── GH-16: terminal task re-message → -32002/409 ────────────────────────────
+# ── GH-16: terminal task re-message → -32004/501 ────────────────────────────
 
 
 async def test_gh16_terminal_task_remessage_returns_409(client, fake_model):
-    """Completing a task then re-messaging it → HTTP 409 + code -32002.
+    """Completing a task then re-messaging it → HTTP 501 + code -32004.
 
     GET /v1/tasks/{id} → 200 for the same taskId, confirming the task exists
-    and the 409 is intentional (not a 404/not-found confusion).
+    and the 501 is intentional (not a 404/not-found confusion).
+    -32004 (UnsupportedOperation) is the correct A2A §2 code for message/send
+    on a terminal task; -32002 (TaskNotCancelable) is reserved for tasks/cancel.
     """
     fake_model.script(reply("done"))
     r = await client.post("/v1/message:send", json=send_body("hi"))
@@ -178,8 +180,8 @@ async def test_gh16_terminal_task_remessage_returns_409(client, fake_model):
 
     # Now try to resume the completed task
     r_resume = await client.post("/v1/message:send", json=send_body("again", task_id))
-    assert r_resume.status_code == 409, r_resume.text
-    assert r_resume.json()["error"]["code"] == -32002
+    assert r_resume.status_code == 501, r_resume.text
+    assert r_resume.json()["error"]["code"] == -32004
 
 
 # ── SC-A2: plain scalar artifact emits TextPart + DataPart ──────────────────

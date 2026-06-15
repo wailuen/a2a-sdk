@@ -397,7 +397,7 @@ export function render(pane, ctx) {
   /* ── AG-UI mode (§5.3) ── */
 
   async function sendAgui(text) {
-    state.aguiMessages.push({ id: uuid(), role: "user", content: text });
+    state.aguiMessages.push({ id: uuid(), role: "user", content: [{ type: "text", text: text }] });
     const body = {
       threadId: state.threadId,
       runId: uuid(),

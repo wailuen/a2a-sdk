@@ -173,9 +173,10 @@ def _resume_or_error(
         return a2a_error(A2A_TASK_NOT_FOUND, "task not found")
     state = record.task.status.state
     if state in TERMINAL_STATES:
-        # GH-16: task exists but is terminal — use -32002 (HTTP 409) not -32001 (HTTP 404)
-        # so clients can distinguish "task not found" from "task found but non-resumable".
-        return a2a_error(A2A_TASK_NOT_CANCELABLE, "task is terminal and cannot be resumed")
+        # A2A-F1: use -32004 (UnsupportedOperation) for terminal-task message/send.
+        # -32002 (TaskNotCancelable) is exclusively for tasks/cancel; using it here
+        # misleads consumers that check the method→code mapping table.
+        return a2a_error(A2A_UNSUPPORTED_OPERATION, "task is in a terminal state and cannot accept new messages")
     if state not in INTERRUPT_STATES:
         # working task not awaiting input: continuing it is not a supported op
         return a2a_error(A2A_UNSUPPORTED_OPERATION, "task is not awaiting input")

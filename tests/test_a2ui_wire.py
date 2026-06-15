@@ -248,3 +248,37 @@ def test_translate_update_data_model_carries_wire_value():
     assert isinstance(metrics[0].get("trend"), str), (
         f"trend in translate wire value must be a string; got {metrics[0].get('trend')!r}"
     )
+
+
+# ── D1: get_system_prompt_section() ─────────────────────────────────────────
+
+def test_get_system_prompt_section_returns_string_always():
+    """get_system_prompt_section() must always return a str — never raises,
+    even with an empty registry."""
+    from agent_sdk.a2ui.catalog import get_system_prompt_section
+
+    result = get_system_prompt_section()
+    assert isinstance(result, str)
+
+
+def test_get_system_prompt_section_nonempty_when_types_registered():
+    """When A2UI content types are registered the section must be non-empty,
+    contain an 'A2UI' heading, and list at least one component name.
+
+    The standard Profile types are registered at import time (content_types.py
+    module-level loop), so importing KpiCard above already seeds the registry.
+    If for any reason the registry is empty the test simply verifies the empty-
+    string contract and skips the content assertions."""
+    from agent_sdk.a2ui.catalog import get_system_prompt_section
+    from agent_sdk.models.content_types import registered_content_types
+
+    section = get_system_prompt_section()
+    assert isinstance(section, str)
+
+    if registered_content_types():
+        assert section, "section must be non-empty when content types are registered"
+        assert "A2UI" in section, f"section must contain 'A2UI'; got:\n{section}"
+        # At least one component name must appear (e.g. 'KpiCard')
+        assert "KpiCard" in section, (
+            f"section must list KpiCard (always registered); got:\n{section}"
+        )
