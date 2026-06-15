@@ -337,7 +337,7 @@ for (const group of wave.groups) {
       'serialisation), write the failing test FIRST (confirm RED), then the code\n' +
       '(confirm GREEN), then refactor. The todo is not done until the test was RED.\n\n' +
       'Todo:\n' + todo.body + '\n\n' +
-      'After implementing, run: pytest -q tests/ (scope to changed files if possible).\n' +
+      'After implementing, run: pytest -q (scope to changed files if possible).\n' +
       'Report: files created/modified, test count, any blockers.',
       { label: 'impl:' + todo.id, phase: 'Implement', agentType: 'python-implementer' }
     )
@@ -354,7 +354,7 @@ for (const group of wave.groups) {
           'SI-6: vendor keys in credential store only; SI-7: non-empty allowed_hosts.\n\n' +
           'Test-first for correctness-bearing code (RED then GREEN then refactor).\n\n' +
           'Todo:\n' + todo.body + '\n\n' +
-          'Run: pytest -q tests/ after implementing. Report: files created/modified, test count.',
+          'Run: pytest -q after implementing. Report: files created/modified, test count.',
           { label: 'impl:' + todo.id, phase: 'Implement', agentType: 'python-implementer' }
         )
       }
@@ -434,7 +434,7 @@ for (const group of wave.groups) {
         return agent(
           'Fix these findings in ' + file + ':\n\n' +
           JSON.stringify(byFile[file], null, 2) + '\n\n' +
-          'Enforce SDK SI-1…SI-7 in your fix. Run pytest -q tests/ after.',
+          'Enforce SDK SI-1…SI-7 in your fix. Run pytest -q after.',
           { label: 'fix:unit:' + group.label + ':r' + uRound + ':' + file.replace(/\//g, '-'),
             phase: 'Unit Redteam', agentType: 'python-implementer' }
         )
@@ -508,7 +508,7 @@ while (true) {
     return function() {
       return agent(
         'Fix findings in ' + file + ':\n\n' + JSON.stringify(byFile[file], null, 2) + '\n\n' +
-        'Enforce SI-1…SI-7. Run pytest -q tests/ after.',
+        'Enforce SI-1…SI-7. Run pytest -q after.',
         { label: 'fix:phase:r' + pRound + ':' + file.replace(/\//g, '-'),
           phase: 'Phase Redteam', agentType: 'python-implementer' }
       )
@@ -668,7 +668,7 @@ if (!runProtocol) {
         allProtoFindings.filter(function(f) { return f.severity === 'critical' }),
         null, 2
       ) + '\n\n' +
-      'Run pytest -q tests/ after fixing. Report files changed.',
+      'Run pytest -q after fixing. Report files changed.',
       { label: 'proto:fix', phase: 'Protocol Audit', agentType: 'python-implementer' }
     )
 

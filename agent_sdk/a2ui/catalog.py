@@ -11,32 +11,54 @@ from ..models.content_types import (
 )
 
 
-def supported_catalogs() -> list[str]:
-    """Standard catalog first, then any registered domain catalogs."""
+def _filtered_types(
+    allowed_components: list[str] | None,
+) -> dict[str, type[ContentModel]]:
+    """Return the registered content-type map, optionally filtered to those
+    whose component name is in ``allowed_components``.  None = all types."""
+    all_types = registered_content_types()
+    if allowed_components is None:
+        return all_types
+    allowed_set = set(allowed_components)
+    return {dt: cls for dt, cls in all_types.items() if cls.component in allowed_set}
+
+
+def supported_catalogs(allowed_components: list[str] | None = None) -> list[str]:
+    """Standard catalog first, then any registered domain catalogs.
+
+    When *allowed_components* is provided only the catalog IDs of the allowed
+    component types are included (SC-D2).
+    """
     catalogs = [CATALOG_ID]
-    for cls in registered_content_types().values():
+    for cls in _filtered_types(allowed_components).values():
         if cls.catalog_id not in catalogs:
             catalogs.append(cls.catalog_id)
     return catalogs
 
 
-def data_types_for_catalog(catalog_id: str) -> list[str]:
+def data_types_for_catalog(
+    catalog_id: str, allowed_components: list[str] | None = None
+) -> list[str]:
     return sorted(
         cls.data_type
-        for cls in registered_content_types().values()
+        for cls in _filtered_types(allowed_components).values()
         if cls.catalog_id == catalog_id
     )
 
 
-def a2ui_extension() -> AgentExtension:
+def a2ui_extension(allowed_components: list[str] | None = None) -> AgentExtension:
     """The card's A2UI extension declaration (activated via
-    X-A2A-Extensions echo, §5.1)."""
+    X-A2A-Extensions echo, §5.1).
+
+    When *allowed_components* is set (SC-D2) only the matching catalog IDs
+    are advertised in ``supportedCatalogIds``.
+    """
     return AgentExtension(
         uri=A2UI_EXTENSION_URI,
         description="A2UI v0.9.1 over A2A DataParts",
         required=False,
         params={
-            "supportedCatalogIds": supported_catalogs(),
+            "supportedCatalogIds": supported_catalogs(allowed_components),
             "acceptsInlineCatalogs": False,
         },
     )

@@ -89,6 +89,46 @@ def _set_status(
     record.task.status = TaskStatus(state=state, message=message, timestamp=_now())
 
 
+def _validate_a2ui_wire(payload: "ContentModel", a2ui_messages: list[Any]) -> None:
+    """SC-D1: Structural assertion on translate() output + domain-card wire() value.
+
+    Standard Profile types use _Wire.wire() (Pydantic-validated), so this
+    primarily catches domain cards whose wire() returns a non-conformant value.
+    Raises ValueError before delivery rather than silently sending malformed data.
+    """
+    from ..models.content_types import CATALOG_ID as _CATALOG_ID  # local to avoid circulars
+
+    cls = type(payload)
+    label = f"{cls.__name__!r} ({payload.data_type!r})"
+
+    # Structural assertion on the a2ui_messages list itself.
+    if not (isinstance(a2ui_messages, list) and len(a2ui_messages) > 0):
+        raise ValueError(
+            f"Content type {label}: translate() must return a non-empty list of dicts; "
+            f"got {type(a2ui_messages).__name__!r}"
+        )
+    if not all(isinstance(m, dict) and "version" in m for m in a2ui_messages):
+        raise ValueError(
+            f"Content type {label}: each A2UI message must be a dict with a 'version' key; "
+            f"malformed translate() output detected"
+        )
+
+    # For domain cards (non-standard-catalog types): also validate wire() output
+    # directly. Standard Profile types are Pydantic-validated so wire() is safe.
+    if cls.catalog_id != _CATALOG_ID:
+        try:
+            wire_val = payload.wire()
+        except Exception as exc:
+            raise ValueError(
+                f"Domain card {label}: wire() raised an exception: {exc}"
+            ) from exc
+        if not isinstance(wire_val, dict) or not wire_val:
+            raise ValueError(
+                f"Domain card {label}: wire() must return a non-empty dict; "
+                f"got {type(wire_val).__name__!r}: {wire_val!r}"
+            )
+
+
 def build_artifact(
     event: ArtifactEvent, capabilities: A2uiCapabilities
 ) -> Artifact:
@@ -104,6 +144,8 @@ def build_artifact(
         parts: list[Any] = [TextPart(text=payload.to_plain_text())]
         a2ui_messages = translate(payload, capabilities=capabilities)
         if a2ui_messages is not None:
+            # SC-D1: validate structure before delivery
+            _validate_a2ui_wire(payload, a2ui_messages)
             metadata["mimeType"] = A2UI_MIME_TYPE
             # A2UI delivery: DataPart.data is the bare message array (trap #11),
             # and the part is self-describing via its mimeType.
@@ -128,7 +170,16 @@ def build_artifact(
             DataPart(data=dump, metadata=dict(metadata)),
         ]
     else:
-        parts = [TextPart(text=str(payload))]
+        # SC-A2: plain scalar — emit TextPart fallback + DataPart so plain A2A
+        # clients can extract structured data without screen-scraping (A2A §D3).
+        parts = [
+            TextPart(text=str(payload)),
+            DataPart(
+                kind="data",
+                data={"value": payload},
+                metadata={"mimeType": "application/json"},
+            ),
+        ]
     return Artifact(
         artifactId=uuid.uuid4().hex,
         name=event.data_type,

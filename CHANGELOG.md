@@ -4,6 +4,141 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.0] — 2026-06-15
+
+### 🟡 Protocol surface changes
+
+- **A2A — bare-Message sync-reply path** — `message/send` now supports an optional
+  `sync_reply` hook on `Agent`. When registered, the hook is called before task creation;
+  returning a non-`None` string skips the task and returns a bare `Message` directly
+  (A2A v0.3.0 §2 quick-response pattern). Closes GH-SC-A1.
+
+- **A2A — Content-Type guard → -32005 / HTTP 415** — `_parse_send()` now inspects
+  `Content-Type` before attempting `json.loads`. A non-`application/json` body returns
+  `-32005 ContentTypeNotSupported` at HTTP 415 instead of the previous `-32602 /
+  HTTP 400`. Closes GH-15.
+
+- **A2A — terminal-task re-message returns -32002 / HTTP 409** — `_resume_or_error()`
+  now distinguishes "task not found" (`-32001` / 404) from "task is terminal"
+  (`-32002 TaskNotCancelable` / 409). Closes GH-16.
+
+- **AG-UI — TOOL_CALL_ARGS injected on resume** — the synthetic interrupt-resume
+  tool-call sequence now emits `TOOL_CALL_START → TOOL_CALL_ARGS(delta="{}") →
+  TOOL_CALL_END` satisfying the ≥1 ARGS requirement for strict consumers. Closes GH-14.
+
+- **AG-UI — `_fold_history` ContentPart extraction** — `content` arrays in
+  `messages[].content` are now extracted as `"".join(p["text"] for p in parts)` instead
+  of `str(content)`. Fixes garbled input for CopilotKit-style frontends. Closes GH-17.
+
+- **AG-UI — SSE heartbeat** — `sub.get()` is now wrapped in
+  `asyncio.wait_for(timeout=15.0)`; a `TimeoutError` emits an SSE comment keepalive
+  (`": ping"`) and resumes waiting. Keeps long idle runs alive across proxies.
+
+- **MCP — `tools/list` cursor pagination** — `_handle_tools_list` now returns
+  `nextCursor` (base64-encoded int offset) and accepts `cursor` in the request.
+  PAGE_SIZE = 64. Agents with ≥65 Tier-1 tools now paginate correctly per MCP §3.
+
+- **MCP — `structuredContent` for non-BaseModel artifacts** — when `emits=` is
+  declared but the artifact is not already a `BaseModel`, the route attempts
+  `entry.decl.emits.model_validate(artifact)` before the `structuredContent` gate.
+  Dicts from tool returns that match the `emits` schema now produce `structuredContent`.
+
+- **MCP — tool name ≤64 chars enforced at registration** — `registry.py` raises
+  `ValueError` if a tool name exceeds 64 characters, catching MCP spec violations
+  at boot rather than at `tools/list` time.
+
+- **A2UI — pre-wire assertion** — `_validate_a2ui_wire()` asserts the message list
+  is non-empty and every message carries a `version` key before delivery. Bad tool
+  returns now surface as agent errors rather than silent partial updates.
+
+- **A2UI — `a2ui_allowed_components` setting** — `BaseAgentSettings` gains
+  `a2ui_allowed_components: list[str] | None`. When set, `build_app()` validates
+  that all registered content types are in the allow-list.
+
+- **A2A — scalar artifact DataPart** — `build_artifact()` for plain scalar results
+  (non-ContentModel, non-mapping) now emits both a `TextPart` and a
+  `DataPart(kind="data", data={"value": payload}, metadata={"mimeType": "application/json"})`.
+
+- **A2A — `/v1/card` requires identity** — `extended_card()` now carries
+  `Depends(require_identity)`, enforcing authentication before exposing extended
+  card fields.
+
+### ✅ Features
+
+- **`ChatDriver.resume()`** — new method to continue an interrupted task by
+  `taskId` + `contextId`, sending back the user's reply after an `input-required`
+  interrupt. Implements D7.8 of the A2A consumer spec.
+
+- **`ChatDriver` credentials forwarding** — `ChatDriver.__init__` now accepts a
+  `credentials: dict[str, str]` kwarg; entries are merged into every request header,
+  enabling per-call credential injection for the A2UI extension and other custom
+  headers.
+
+- **`ChatDriver` agent.json fallback** — card discovery now falls back from
+  `/.well-known/agent-card.json` to `/.well-known/agent.json` on 404, matching the
+  server's legacy alias route.
+
+- **`ChatDriver` `additionalInterfaces` transport selection** — when
+  `preferredTransport` is unsupported, `a2a_turn()` walks `additionalInterfaces` to
+  find a supported transport instead of failing immediately.
+
+- **`A2AError` class constants** — `A2AError` now exposes named class-level
+  constants for all 7 A2A error codes (`TASK_NOT_FOUND`, `TASK_NOT_CANCELABLE`,
+  `PUSH_NOT_SUPPORTED`, `UNSUPPORTED_OPERATION`, `CONTENT_TYPE_NOT_SUPPORTED`,
+  `INVALID_AGENT_RESPONSE`, `NOT_AUTHORIZED`).
+
+- **`/provision` skill** — interactive credential-store interview for a new agent:
+  bootstraps admin API key, seeds model backend keys, and writes
+  `workspace/adr/ADR-001-<env>-credentials.md`. Targets Azure Table Storage
+  as the primary store.
+
+- **Credential ADR discipline** — a `PostToolUse` hook in `.claude/settings.json`
+  fires after every admin credential write and prompts updating `ADR-001`.
+  `/provision` Phase 3 auto-writes the inventory file.
+
+- **`harness/CLAUDE.md` template** — agent-facing harness conventions file seeded
+  into downstream agent `.claude/CLAUDE.md` at `/new-agent` time.
+
+### 🔧 Fixes
+
+- **Azure Table Storage enforced as primary store** — `build_app()` now emits a
+  `WARNING` at boot when the credential store falls back to SQLite outside
+  `DEV_MODE`. The admin console boot-check route surfaces this warning.
+
+- **`Agent.close()` hardened** — `close()` guards every sub-close call against
+  `AttributeError` and `Exception`, preventing partial-init teardown from masking
+  the original exception.
+
+- **MCP `WWW-Authenticate` `scope=""` removed** — the Bearer challenge at
+  `middleware.py:65` no longer appends `, scope=""` when no scopes are enforced,
+  per RFC 6750 §3.
+
+- **GH-18: `pytest -q tests/` → `pytest -q` in wave-cycle.js** — all 5 agent
+  prompt templates in `harness/workflows/wave-cycle.js` that passed an explicit
+  `tests/` path to pytest now use bare `pytest -q`, respecting `addopts` ignores
+  from `pyproject.toml`. Closes GH-18.
+
+### 🧪 Test / CI
+
+- **Zero-tolerance mypy + warnings gate** — `mypy` and `filterwarnings = ["error"]`
+  are both hard gates in `/sdk-test`; any new type error or deprecation warning
+  blocks release.
+
+- **`/sdk-test` Leg 3 — static conformance at release** — protocol conformance is
+  now gated once at SDK release (via `/agent-stack-check` on the SDK source) rather
+  than per downstream agent upgrade. `/upgrade` runs `--no-stack-check`.
+
+- **`/sdk-release` is the only commit+push path** — wave completion stages changes;
+  `/sdk-release` is the only flow that commits, tags, and pushes, ensuring the full
+  3-leg test gate always runs before any code reaches `origin/main`.
+
+- **5 new test modules** — `test_protocol_fixes_w9_group_a.py`,
+  `test_ag_ui_group_b.py`, `test_mcp_conformance_w9.py`,
+  `test_a2ui_group_d.py`, `test_emits_return_type.py` — covering the w009 protocol
+  fixes. 491 tests total.
+
+---
+
 ## [0.4.4] — 2026-06-14
 
 ### Fixed

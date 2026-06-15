@@ -11,10 +11,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 
 from ..a2ui.catalog import a2ui_extension
 from ..agent.registry import ToolRegistry
+from ..auth.identity import Identity
+from ..auth.middleware import require_identity
 from ..common.etag import etag_for, matches
 from ..common.wire_errors import a2a_error
 from ..config import BaseAgentSettings
@@ -97,15 +99,21 @@ def build_agent_card(
     settings: BaseAgentSettings,
     registry: ToolRegistry,
     credential_fields: dict[str, list[CredentialField]] | None = None,
+    *,
+    allowed_components: list[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the wire-ready card dict once at boot (app.state.agent_card).
 
     ``credential_fields`` (source_name → declared fields) drives the optional
     credential-forwarding extension; the vendor key is NOT an agent
-    securityScheme (a2a-advisor) — the card's own auth stays bearer-only."""
+    securityScheme (a2a-advisor) — the card's own auth stays bearer-only.
+
+    ``allowed_components`` (SC-D2): when set, the A2UI extension only
+    advertises catalog IDs for the listed component types.
+    """
     base_url = settings.resolved_base_url
     extensions = [
-        a2ui_extension(),
+        a2ui_extension(allowed_components),
         # AG-UI is advertised via x-agui.endpoint below, not as an A2A
         # capabilities extension (wrong slot per A2UI F2 / S1 audit).
     ]
@@ -162,7 +170,9 @@ async def agent_card_legacy(request: Request) -> Response:
 
 
 @router.get("/v1/card")
-async def extended_card() -> Any:
+async def extended_card(identity: Identity = Depends(require_identity)) -> Any:
+    # SC-A3: auth-gate the extended card per A2A §1 intent.
+    # Even when not configured, the route requires a valid identity (401 before 501).
     return a2a_error(
         A2A_AUTHENTICATED_EXTENDED_CARD_NOT_CONFIGURED,
         "authenticated extended card is not configured",

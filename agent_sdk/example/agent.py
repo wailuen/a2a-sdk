@@ -26,7 +26,7 @@ class EchoInput(BaseModel):
     text: str = Field(description="Text to echo back")
 
 
-@tools.tool(tier=1)
+@tools.tool(tier=1, read_only=True)
 async def echo(inp: EchoInput) -> dict[str, Any]:
     """Echo the input text back, reversed and as-is."""
     return {"text": inp.text, "reversed": inp.text[::-1], "length": len(inp.text)}
@@ -36,7 +36,7 @@ class KpiInput(BaseModel):
     title: str = Field(description="Title for the KPI card")
 
 
-@tools.tool(tier=1, emits=KpiCard, sample={"title": "Demo KPIs"})
+@tools.tool(tier=1, emits=KpiCard, sample={"title": "Demo KPIs"}, read_only=True)
 async def demo_kpis(inp: KpiInput) -> KpiCard:
     """Produce a demonstration KPI card with fixed sample metrics."""
     return KpiCard(

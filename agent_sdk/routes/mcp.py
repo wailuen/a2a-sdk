@@ -34,6 +34,7 @@ prefers ``text/event-stream``.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -186,7 +187,7 @@ async def _dispatch(app: Any, message: dict[str, Any]) -> dict[str, Any] | None:
         if method == "ping":
             return _result(request_id, {})
         if method == "tools/list":
-            return _result(request_id, _handle_tools_list(app))
+            return _result(request_id, _handle_tools_list(app, params))
         if method == "tools/call":
             result = await _handle_tools_call(app, params)
             if isinstance(result, dict) and "__jrpc_error__" in result:
@@ -233,11 +234,36 @@ def _handle_initialize(app: Any, params: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _handle_tools_list(app: Any) -> dict[str, Any]:
+_PAGE_SIZE = 64
+
+
+def _decode_cursor(cursor: Any) -> int:
+    """Decode an opaque base64-encoded cursor to an int offset.
+    Invalid or absent cursor → 0."""
+    if not cursor or not isinstance(cursor, str):
+        return 0
+    try:
+        return int(base64.b64decode(cursor.encode()).decode())
+    except Exception:
+        return 0
+
+
+def _encode_cursor(offset: int) -> str:
+    return base64.b64encode(str(offset).encode()).decode()
+
+
+def _handle_tools_list(app: Any, params: dict[str, Any] | None = None) -> dict[str, Any]:
     """Tier 1 only (§5.6). ``outputSchema`` appears ONLY when the tool
-    declares ``emits`` — structuredContent is never emitted unclaimed."""
+    declares ``emits`` — structuredContent is never emitted unclaimed.
+    Supports cursor/nextCursor pagination (PAGE_SIZE=64)."""
+    if params is None:
+        params = {}
+    all_entries = app.state.registry.tier1()
+    offset = _decode_cursor(params.get("cursor"))
+    page_entries = all_entries[offset : offset + _PAGE_SIZE]
+
     tools: list[dict[str, Any]] = []
-    for entry in app.state.registry.tier1():
+    for entry in page_entries:
         tool: dict[str, Any] = {
             "name": entry.name,
             "description": entry.description,
@@ -251,7 +277,12 @@ def _handle_tools_list(app: Any) -> dict[str, Any]:
         if entry.annotations:
             tool["annotations"] = entry.annotations
         tools.append(tool)
-    return {"tools": tools}
+
+    result: dict[str, Any] = {"tools": tools}
+    next_offset = offset + _PAGE_SIZE
+    if next_offset < len(all_entries):
+        result["nextCursor"] = _encode_cursor(next_offset)
+    return result
 
 
 def _tool_text(artifact: Any) -> str:
@@ -300,6 +331,16 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
             "content": [{"type": "text", "text": f"tool '{name}' execution failed"}],
             "isError": True,
         }
+
+    # SC-C1: if the tool declares emits but the artifact is a raw dict/scalar,
+    # attempt to coerce it into the declared emits model so structuredContent
+    # can be emitted (MCP §4 MUST when outputSchema is advertised).
+    emits_type = entry.decl.emits
+    if emits_type is not None and not isinstance(artifact, BaseModel):
+        try:
+            artifact = emits_type.model_validate(artifact)
+        except Exception:
+            pass  # fall through; isError handling remains below
 
     result: dict[str, Any] = {
         "content": [{"type": "text", "text": _tool_text(artifact)}],

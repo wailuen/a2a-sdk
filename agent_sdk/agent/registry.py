@@ -192,6 +192,10 @@ class ToolRegistry:
         self.entries: dict[str, ToolEntry] = {}
         for ts in toolsets:
             for decl in ts.decls:
+                if len(decl.name) > 64:
+                    raise ValueError(
+                        f"tool name {decl.name!r} exceeds 64-char MCP Directory limit"
+                    )
                 if decl.name in self.entries:
                     raise ValueError(f"duplicate tool name {decl.name!r}")
                 for pname, cls in decl.adapter_params.items():

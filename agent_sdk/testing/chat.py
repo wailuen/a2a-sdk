@@ -23,7 +23,20 @@ from ..validation.validators import safe_id
 
 
 class A2AError(Exception):
-    """Raised by ChatDriver when the server returns an A2A error (§11.2 D7.10)."""
+    """Raised by ChatDriver when the server returns an A2A error (§11.2 D7.10).
+
+    Class-level constants for the seven A2A error codes (SC-E5) allow callers
+    to branch on ``e.code == A2AError.TASK_NOT_FOUND`` without hardcoding ints.
+    """
+
+    # A2A §11.2 error code constants (SC-E5)
+    TASK_NOT_FOUND      = -32001
+    TASK_NOT_CANCELABLE = -32002
+    PUSH_NOT_SUPPORTED  = -32003
+    UNSUPPORTED_OP      = -32004
+    CONTENT_TYPE_UNSUP  = -32005
+    INVALID_AGENT_RESP  = -32006
+    NOT_AUTHENTICATED   = -32007
 
     def __init__(self, code: int | None, message: str) -> None:
         super().__init__(message)
@@ -68,6 +81,7 @@ class ChatDriver:
         extra_catalogs: list[str] | None = None,
         poll_interval: float = 0.5,
         timeout: float = 180.0,
+        credentials: dict[str, str] | None = None,
     ) -> None:
         self._client = client
         self._caps: dict[str, Any] = {
@@ -79,6 +93,8 @@ class ChatDriver:
         self._timeout = timeout
         self._card: dict[str, Any] | None = None
         self._a2ui_active: bool = False
+        # SC-E1: optional credential headers injected into every outbound request
+        self._credentials: dict[str, str] | None = credentials
 
     def _raise_a2a_error(self, emit: dict[str, Callable] | None, response: Any) -> None:
         """Parse A2A error envelope and raise A2AError on non-2xx (§11.2 D7.10)."""
@@ -93,10 +109,26 @@ class ChatDriver:
         self._fire(emit, "error", f"A2A error code={code}: {msg}")
         raise A2AError(code, msg)
 
+    def _merged_headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+        """Return headers dict merging self._credentials (SC-E1) with *extra*."""
+        merged: dict[str, str] = {}
+        if self._credentials:
+            merged.update(self._credentials)
+        if extra:
+            merged.update(extra)
+        return merged
+
     async def _discover_card(self) -> dict[str, Any]:
-        """Fetch and cache the agent card (A2A §11.2.1 card discovery)."""
+        """Fetch and cache the agent card (A2A §11.2.1 card discovery).
+
+        SC-E2: on 404 from /.well-known/agent-card.json, retries the legacy
+        /.well-known/agent.json path before raising.
+        """
         if self._card is None:
             r = await self._client.get("/.well-known/agent-card.json")
+            if r.status_code == 404:
+                # SC-E2: legacy fallback for A2A v0.2.x agents
+                r = await self._client.get("/.well-known/agent.json")
             r.raise_for_status()
             self._card = r.json()
         return self._card
@@ -200,8 +232,20 @@ class ChatDriver:
         # A2A §11.2.1 — discover card before first request; select transport
         card = await self._discover_card()
         transport = card.get("preferredTransport", "HTTP+JSON")
-        if transport not in ("HTTP+JSON", "JSONRPC"):
-            raise ValueError(f"unsupported A2A transport: {transport!r}")
+        _supported = ("HTTP+JSON", "JSONRPC")
+        if transport not in _supported:
+            # SC-E3: iterate additionalInterfaces for a supported transport fallback
+            transport = None
+            for iface in card.get("additionalInterfaces", []):
+                t = iface.get("transport", "")
+                if t in _supported:
+                    transport = t
+                    break
+            if transport is None:
+                raise ValueError(
+                    f"unsupported A2A transport: {card.get('preferredTransport')!r} "
+                    "and no supported transport found in additionalInterfaces"
+                )
 
         body: dict[str, Any] = {
             "message": {
@@ -216,10 +260,11 @@ class ChatDriver:
             body["message"]["contextId"] = context_id
 
         # H3 (D7.11): request the A2UI extension so the server activates it
+        # SC-E1: merge credentials into every outbound request
         r = await self._client.post(
             "/v1/message:send",
             json=body,
-            headers={"X-A2A-Extensions": _A2UI_EXT_URI},
+            headers=self._merged_headers({"X-A2A-Extensions": _A2UI_EXT_URI}),
         )
         self._raise_a2a_error(emit, r)
         # D7.11: confirm A2UI extension was activated by reading the response echo
@@ -236,7 +281,10 @@ class ChatDriver:
         deadline = asyncio.get_running_loop().time() + self._timeout
         while True:
             await asyncio.sleep(self._poll_interval)
-            g = await self._client.get(f"/v1/tasks/{task_id}")
+            g = await self._client.get(
+                f"/v1/tasks/{task_id}",
+                headers=self._merged_headers(),  # SC-E1: credentials on poll too
+            )
             self._raise_a2a_error(emit, g)
             task = g.json()
             st = task["status"]["state"]
@@ -249,6 +297,65 @@ class ChatDriver:
                 raise A2AError(None, f"task {task_id} requires input in state {st!r}")
             if asyncio.get_running_loop().time() > deadline:
                 self._fire(emit, "error", f"task {task_id} timed out in state {st!r}")
+                return task
+
+        return task
+
+    async def resume(
+        self,
+        task_id: str,
+        context_id: str,
+        reply: str,
+        *,
+        emit: dict[str, Callable] | None = None,
+    ) -> dict[str, Any]:
+        """Resume an interrupted task (SC-E4 / A2A §7 D7.8).
+
+        Constructs a message/send request with *task_id* and *context_id*
+        to satisfy the A2A MUST that interrupted tasks continue with the
+        SAME taskId + contextId.  Returns the same result as :meth:`a2a_turn`.
+        """
+        body: dict[str, Any] = {
+            "message": {
+                "kind": "message",
+                "role": "user",
+                "messageId": uuid.uuid4().hex,
+                "taskId": task_id,
+                "contextId": context_id,
+                "parts": [{"kind": "text", "text": reply}],
+                "metadata": {"a2uiClientCapabilities": self._caps},
+            }
+        }
+        r = await self._client.post(
+            "/v1/message:send",
+            json=body,
+            headers=self._merged_headers({"X-A2A-Extensions": _A2UI_EXT_URI}),
+        )
+        self._raise_a2a_error(emit, r)
+        result = r.json()
+        if result.get("kind") == "message":
+            return result
+        task = result
+        task_id_validated = safe_id(str(task["id"]), what="task id")
+
+        deadline = asyncio.get_running_loop().time() + self._timeout
+        while True:
+            await asyncio.sleep(self._poll_interval)
+            g = await self._client.get(
+                f"/v1/tasks/{task_id_validated}",
+                headers=self._merged_headers(),
+            )
+            self._raise_a2a_error(emit, g)
+            task = g.json()
+            st = task["status"]["state"]
+            self._fire(emit, "tool_done")
+            if st in ("completed", "failed", "canceled", "rejected"):
+                break
+            if st in ("input-required", "auth-required"):
+                self._fire(emit, "interrupt", task)
+                raise A2AError(None, f"task {task_id_validated} requires input in state {st!r}")
+            if asyncio.get_running_loop().time() > deadline:
+                self._fire(emit, "error", f"task {task_id_validated} timed out in state {st!r}")
                 return task
 
         return task

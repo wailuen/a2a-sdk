@@ -62,7 +62,7 @@ def _unauthorized(request: Request, runtime: AuthRuntime, detail: str) -> HTTPEx
     # P6-03: every 401 carries a WWW-Authenticate challenge pointing at the
     # PRM (RFC 9728 §3.1) so OAuth discovery can start from any protected
     # surface, not just /mcp.
-    challenge = f'Bearer resource_metadata="{runtime.prm_url}"'
+    challenge = f'Bearer resource_metadata="{runtime.prm_url}", scope=""'
     return HTTPException(
         status_code=401, detail=detail, headers={"WWW-Authenticate": challenge}
     )

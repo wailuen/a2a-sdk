@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -33,6 +34,7 @@ from ..models.a2a import (
     TaskStatusUpdateEvent,
     TextPart,
 )
+from ..credentials.card import EXTENSION_URI as CREDENTIAL_FORWARDING_EXTENSION_URI
 from ..models.content_types import A2UI_EXTENSION_URI, A2UI_MIME_TYPE
 from ..models.errors import (
     A2A_CONTENT_TYPE_NOT_SUPPORTED,
@@ -55,11 +57,19 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_ECHO_EXTENSION_URIS = frozenset({A2UI_EXTENSION_URI, CREDENTIAL_FORWARDING_EXTENSION_URI})
+
+
 def _echo_extensions(request: Request, response: Response) -> None:
-    """X-A2A-Extensions: response echoes the activated subset (§5.1)."""
+    """X-A2A-Extensions: response echoes the activated subset (§5.1).
+
+    SC-A4: credential-forwarding URI is echoed alongside A2UI when requested.
+    """
     requested = request.headers.get("x-a2a-extensions", "")
     activated = [
-        uri.strip() for uri in requested.split(",") if uri.strip() == A2UI_EXTENSION_URI
+        uri.strip()
+        for uri in requested.split(",")
+        if uri.strip() in _ECHO_EXTENSION_URIS
     ]
     if activated:
         response.headers["X-A2A-Extensions"] = ", ".join(activated)
@@ -96,6 +106,10 @@ def _config_error(params: MessageSendParams) -> JSONResponse | None:
 
 
 async def _parse_send(request: Request) -> MessageSendParams | JSONResponse:
+    # GH-15: reject non-JSON Content-Type before parsing (A2A §5.1 → -32005/HTTP 415)
+    ct = request.headers.get("content-type", "").split(";")[0].strip()
+    if ct and ct != "application/json":
+        return a2a_error(A2A_CONTENT_TYPE_NOT_SUPPORTED, "Content-Type must be application/json")
     raw = await request.body()
     if len(raw) > _MAX_BODY_BYTES:
         return a2a_invalid_params("request body too large")
@@ -159,9 +173,9 @@ def _resume_or_error(
         return a2a_error(A2A_TASK_NOT_FOUND, "task not found")
     state = record.task.status.state
     if state in TERMINAL_STATES:
-        # terminal: no resumable interrupt remains — the resumable task is gone
-        # (-32002 TaskNotCancelable is cancel-specific and wrong here).
-        return a2a_error(A2A_TASK_NOT_FOUND, "task not found")
+        # GH-16: task exists but is terminal — use -32002 (HTTP 409) not -32001 (HTTP 404)
+        # so clients can distinguish "task not found" from "task found but non-resumable".
+        return a2a_error(A2A_TASK_NOT_CANCELABLE, "task is terminal and cannot be resumed")
     if state not in INTERRUPT_STATES:
         # working task not awaiting input: continuing it is not a supported op
         return a2a_error(A2A_UNSUPPORTED_OPERATION, "task is not awaiting input")
@@ -204,6 +218,22 @@ async def message_send(
         if isinstance(record, JSONResponse):
             return record
         return JSONResponse(_task_wire(record), headers=dict(response.headers))
+    # SC-A1: bare-Message quick-response path (A2A v0.3.0 §2).
+    # Call the optional sync_reply hook BEFORE task creation; if it returns a
+    # non-empty string, skip task creation and return a bare Message directly.
+    sync_reply_fn = getattr(request.app.state, "sync_reply", None)
+    if sync_reply_fn is not None:
+        reply_text = sync_reply_fn(params.message)
+        if reply_text:
+            ctx_id = params.message.context_id or uuid.uuid4().hex
+            bare_msg = Message(
+                kind="message",
+                role="agent",
+                messageId=uuid.uuid4().hex,
+                contextId=ctx_id,
+                parts=[TextPart(kind="text", text=reply_text)],
+            )
+            return JSONResponse(bare_msg.wire(), headers=dict(response.headers))
     record = _create_task_record(request, params, identity)
     _start_worker(request, record, _capabilities(params.message))
     history_length = (

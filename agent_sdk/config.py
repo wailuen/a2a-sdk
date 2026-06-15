@@ -96,6 +96,14 @@ class BaseAgentSettings(BaseSettings):
     )
     max_turns: int = Field(default=20, alias="AGENT_SDK_MAX_TURNS")
 
+    # ── A2UI component allow-list (SC-D2) ──
+    # None (default) = all registered component types are available.
+    # A non-None list restricts the catalog to only the named component types.
+    # Types not in the list will raise an error if used as an emits= target.
+    a2ui_allowed_components: list[str] | None = Field(
+        default=None, alias="AGENT_SDK_A2UI_ALLOWED_COMPONENTS"
+    )
+
     @field_validator("cors_origins")
     @classmethod
     def _no_wildcard_cors(cls, v: list[str]) -> list[str]:

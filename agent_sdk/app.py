@@ -12,6 +12,7 @@ are unauthenticated until they add ``Depends(agent_sdk.auth.require_identity)``.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from asyncio import sleep as _asyncio_sleep
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
@@ -87,6 +88,18 @@ class Agent:
         self.console_static_dir = console_static_dir
         self._lifespan_extras = list(lifespan_extras or [])
         self._sources: dict[type[SourceAdapter], _SourceRegistration] = {}
+        self._sync_reply: Callable[[Any], str | None] | None = None
+
+    def set_sync_reply(self, fn: Callable[[Any], str | None]) -> None:
+        """Register a hook called before task creation in message/send.
+
+        The hook receives the incoming Message object and returns a plain-text
+        reply string or None. If a non-empty string is returned the route skips
+        task creation and returns a bare Message immediately (A2A v0.3.0 §2
+        quick-response pattern). If None is returned (or no hook is registered)
+        the normal Task path is taken.
+        """
+        self._sync_reply = fn
 
     def register_source(
         self,
@@ -115,7 +128,11 @@ class Agent:
 
     # ── build ──
 
-    def _validate_emits(self, registry: ToolRegistry) -> None:
+    def _validate_emits(
+        self,
+        registry: ToolRegistry,
+        allowed_components: list[str] | None = None,
+    ) -> None:
         for entry in registry.all():
             emits = entry.decl.emits
             if emits is None:
@@ -127,11 +144,40 @@ class Agent:
                         "registered Profile/domain content type "
                         "(register_content_type it first)"
                     )
+                # SC-D2: check against allowed_components allowlist when set.
+                if allowed_components is not None and emits.component not in allowed_components:
+                    raise ValueError(
+                        f"tool {entry.name!r} emits {emits.__name__!r} (component "
+                        f"{emits.component!r}), which is not in the agent's "
+                        f"a2ui_allowed_components list {allowed_components!r}"
+                    )
             elif not (isinstance(emits, type) and issubclass(emits, BaseModel)):
                 raise ValueError(
                     f"tool {entry.name!r}: emits must be a ContentModel or pydantic "
                     "BaseModel subclass"
                 )
+            # ── SC-F1: enforce return annotation matches emits ────────────────
+            # Resolve string annotations (from __future__ import annotations) using
+            # inspect.get_annotations with eval=True so we get real types.
+            fn = entry.decl.fn
+            try:
+                resolved = inspect.get_annotations(fn, eval_str=True)
+            except Exception:
+                resolved = getattr(fn, "__annotations__", {})
+            ret = resolved.get("return")
+            # Accept: no annotation (None), typing.Any, exact emits type, or a
+            # superclass of emits.  Reject any other concrete type.
+            if ret is None:
+                continue  # unannotated — permitted
+            import typing as _typing
+            if ret is _typing.Any:
+                continue  # -> Any — permitted
+            if inspect.isclass(ret) and issubclass(emits, ret):
+                continue  # emits is ret or a subclass of ret — permitted
+            raise ValueError(
+                f"tool {fn.__name__!r} return annotation {ret!r} does not match "
+                f"emits={emits!r}"
+            )
 
     def _build_model_client(self, credential_store: CredentialStore) -> ModelClient:
         if self._model_client is not None:
@@ -205,7 +251,8 @@ class Agent:
         base_url = settings.resolved_base_url
 
         registry = ToolRegistry(self.toolsets, dict(self._sources))
-        self._validate_emits(registry)
+        allowed_components = settings.a2ui_allowed_components
+        self._validate_emits(registry, allowed_components=allowed_components)
 
         credential_store = self._build_credential_store()
         api_keys = ApiKeyStore(credential_store)
@@ -335,10 +382,12 @@ class Agent:
         app.state.persona = persona_str
         app.state.system_prompt = system_prompt
         app.state.agent_card = build_agent_card(
-            settings, registry, app.state.credential_fields
+            settings, registry, app.state.credential_fields,
+            allowed_components=allowed_components,
         )
         app.state.default_capabilities = A2uiCapabilities()
         app.state.console_static_dirs = []
+        app.state.sync_reply = self._sync_reply  # SC-A1: bare-Message hook
 
         # routers are imported here, not at module top, so a missing surface
         # is a loud boot failure local to build_app()

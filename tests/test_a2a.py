@@ -132,10 +132,10 @@ async def test_interrupt_resume_via_message_send(client, fake_model):
     done = await wait_for_state(client, task_id)
     assert done["status"]["state"] == "completed"
 
-    # resume of a terminal task: no resumable task remains → TaskNotFound
-    # (-32002 TaskNotCancelable is cancel-specific and was wrong here)
+    # GH-16: resume of a terminal task → TaskNotCancelable (-32002, HTTP 409)
+    # so clients can distinguish "task not found" from "task exists but non-resumable".
     r = await client.post("/v1/message:send", json=send_body("again", task_id))
-    assert (r.status_code, r.json()["error"]["code"]) == (404, -32001)
+    assert (r.status_code, r.json()["error"]["code"]) == (409, -32002)
 
 
 async def test_cancel_running_task(client, fake_model):

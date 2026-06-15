@@ -13,6 +13,7 @@ like the A2A path (§5.1).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -27,7 +28,7 @@ from ..a2ui.translator import A2uiCapabilities, translate
 from ..agent.runner import new_task, run_task_worker
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
-from ..common.sse import SSE_HEADERS, sse_data
+from ..common.sse import HEARTBEAT, SSE_HEADERS, sse_data
 from ..credentials import forwarding
 from ..models.content_types import ContentModel
 from ..tasks.store import StreamTerminated, TaskRecord
@@ -68,7 +69,12 @@ def _fold_history(raw_messages: list[Any]) -> list[dict[str, Any]] | None:
         if role not in ("user", "assistant"):
             continue
         content = raw.get("content") or ""
-        if not isinstance(content, str):
+        if isinstance(content, list):
+            content = "".join(
+                p["text"] for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+        elif not isinstance(content, str):
             content = str(content)
         if role == "assistant" and not content.strip():
             continue
@@ -229,6 +235,9 @@ class _RunMapper:
                     synthetic_start["parentMessageId"] = self.last_message_id
                 frames += [
                     synthetic_start,
+                    # AG-UI spec requires ≥1 TOOL_CALL_ARGS between START and END.
+                    # On the resume path we have no original args, so emit empty JSON.
+                    {"type": "TOOL_CALL_ARGS", "toolCallId": event.tool_call_id, "delta": "{}"},
                     {"type": "TOOL_CALL_END", "toolCallId": event.tool_call_id},
                 ]
             frames.append(
@@ -308,8 +317,6 @@ def _capabilities(body: dict[str, Any]) -> A2uiCapabilities:
 
 
 def _start_worker(request: Request, record: TaskRecord, capabilities: A2uiCapabilities) -> None:
-    import asyncio
-
     state = request.app.state
     # Bind per-call forwarded credentials BEFORE create_task so the worker
     # snapshots them via contextvars (mirrors the A2A route pattern).
@@ -403,7 +410,11 @@ async def ag_ui_run(
                 _start_worker(request, record, mapper.capabilities)
 
             while not mapper.terminal_sent:
-                item = await sub.get()
+                try:
+                    item = await asyncio.wait_for(sub.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield HEARTBEAT
+                    continue
                 if item is None:
                     break
                 for frame in mapper.map(item.event):
