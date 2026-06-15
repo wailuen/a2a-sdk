@@ -121,9 +121,22 @@ Full grep checks in `.claude/reference/sdk-security-invariants.md`.
 | Upstream/vendor key | Encrypted credential store (AES-256-GCM, keyed by MASTER_KEY) | `self.credential("field_name")` inside a `SourceAdapter` | Upstream APIs (CRM, financial data, Graph, etc.) |
 | LLM API key | Encrypted credential store (`__model__` namespace) | SDK reads it at boot from `/admin → Model Backend`; never in `.env` | LLM backend |
 | Model backend config | `.env` — non-secret operational vars only (`BEDROCK_MODEL_ARN`, `OPENAI_MODEL`, `AZURE_OPENAI_ENDPOINT`, etc.) | `Settings` fields; no secrets here | routing only |
-| Azure Storage connection string | `.env` — operational infra config (treat as secret; use managed identity in prod) | `AZURE_STORAGE_CONNECTION_STRING` env var (read by SDK auto-detection, not by adapter code) | Azure Table Storage |
+| Azure Storage connection string | `.env` — infrastructure config (treat as secret; use managed identity in prod) | `AZURE_STORAGE_CONNECTION_STRING` env var (read by SDK auto-detection) | Azure Table Storage |
+| `MASTER_KEY` | `.env` — **same value in dev AND prod** | SDK reads at boot; never in source | decrypts credential store |
 
-> **Note:** `AZURE_STORAGE_CONNECTION_STRING` is the one exception to the "no secrets in .env" rule — it is infrastructure plumbing, not an upstream API key. Prefer managed identity (`AZURE_STORAGE_ACCOUNT_NAME` only, no key) in production ACA deployments.
+> **Azure Table Storage is the PRIMARY credential store.** SQLite (`/data/credentials.db`) is a
+> dev fallback only. The SDK logs a WARNING at boot if it falls back to SQLite outside DEV_MODE —
+> that warning means `AZURE_STORAGE_CONNECTION_STRING` is missing from `.env`. Fix it before
+> deploying.
+
+> **`MASTER_KEY` must be identical across all environments.** Generate it once during `/provision`
+> and copy the same value to every environment's `.env` (dev, staging, prod). A different key in
+> prod means the Azure Table rows encrypted in dev cannot be decrypted in prod. Never rotate
+> `MASTER_KEY` without re-encrypting the store.
+
+> **Note:** `AZURE_STORAGE_CONNECTION_STRING` is the one exception to the "no secrets in .env"
+> rule — it is infrastructure plumbing. Prefer managed identity (`AZURE_STORAGE_ACCOUNT_NAME`
+> only, no key) in production ACA deployments.
 
 **Common mistakes (all caught by `/redteam` — fail-closed):**
 
@@ -132,8 +145,34 @@ Full grep checks in `.claude/reference/sdk-security-invariants.md`.
 - ❌ `OPENAI_API_KEY=sk-...` in `.env` → SI-6 violation. Seed it once via `/provision` or `/admin → Model Backend`.
 - ❌ `azure_openai_api_key: SecretStr` in `Settings` → SI-6 violation. The key goes in the credential store, not settings.
 - ❌ `settings.some_api_key` in a `SourceAdapter` → SI-4 violation. Settings fields are for *operational* config (URLs, timeouts, feature flags), not credentials.
+- ❌ Agent boots without `AZURE_STORAGE_CONNECTION_STRING` in prod → credential store falls back to local SQLite. SDK warns at boot; treat this as a P0 misconfiguration.
+- ❌ Different `MASTER_KEY` in dev vs prod → credentials written in dev cannot be decrypted in prod.
 
 Never put upstream keys in `.env`. Never log either key.
+
+## Migrating from SQLite to Azure Table Storage
+
+If an agent was bootstrapped without Azure configured (SQLite fallback), migrate before deploying:
+
+```bash
+# 1. Confirm the boot warning is present (SQLite fallback active)
+DEV_MODE=true uvicorn src.main:app --port 8000 --workers 1  # look for WARNING in logs
+
+# 2. Set Azure + MASTER_KEY in .env (same key that was used for SQLite)
+echo "AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=..." >> .env
+echo "MASTER_KEY=<your-existing-key>" >> .env
+
+# 3. Dry-run to see what will move
+python3 -m agent_sdk migrate-store --data-dir .data --dry-run
+
+# 4. Migrate (skips fields already present in Azure by default)
+python3 -m agent_sdk migrate-store --data-dir .data
+
+# 5. Reboot — boot warning should be gone
+```
+
+`migrate-store` transfers credentials, pending commitments, and webhook subscriptions.
+It is idempotent (skips existing Azure rows) and never deletes the SQLite source files.
 
 ## Credential ADR discipline (enforced by hook)
 
@@ -147,15 +186,28 @@ whenever a credential is written via the admin API.
 - `/provision` (writes ADR-001 automatically in Phase 3d)
 - Manual credential rotation via the admin console
 
-**What to record:** namespace + field name + set status. **Never the value.**
+**What to record:** ALL expected credential fields for this agent, with set/unset status.
+Pre-fill the table at `/provision` time even for fields not yet set — `✗` means
+"required but not yet provisioned". Never record the value itself.
 
 ```markdown
-| alphageo  | api_key           | ✓ |
-| __model__ | openai_api_key    | ✓ |
+# ADR-001 — <agent-name> credential inventory (<env>)
+
+## Infrastructure
+| Variable | Value | Notes |
+|---|---|---|
+| `MASTER_KEY` | ✓ set | **Same value across all envs** |
+| `AZURE_STORAGE_CONNECTION_STRING` | ✓ set | Dev: connection string; Prod: use managed identity |
+
+## Credential store
+| Namespace | Field | Status | Notes |
+|---|---|---|---|
+| `__model__` | `openai_api_key` | ✓ | Azure OpenAI key |
+| `<source_name>` | `api_key` | ✗ | Required before first tool call |
 ```
 
 `workspace/adr/ADR-001-*-credentials.md` is gitignored (same as ADR-000).
-If the file does not exist, create it from the template in `/provision` Phase 3d.
+If the file does not exist, create it from the template above in `/provision` Phase 3d.
 
 ## Workspace layout
 

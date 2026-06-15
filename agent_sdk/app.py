@@ -187,6 +187,15 @@ class Agent:
                 account_name=self.settings.azure_storage_account_name,
                 prefix=self.settings.azure_storage_table_prefix,
             )
+        if not self.settings.dev_mode:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "Credential store: falling back to local SQLite (%s/credentials.db). "
+                "Set AZURE_STORAGE_CONNECTION_STRING (or AZURE_STORAGE_ACCOUNT_NAME) "
+                "to use Azure Table Storage as the primary store. "
+                "Run `python3 -m agent_sdk migrate-store` to lift existing credentials.",
+                self.settings.data_dir,
+            )
         db_path = Path(self.settings.data_dir) / "credentials.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
         return EncryptedSqliteStore(db_path, master_key)
