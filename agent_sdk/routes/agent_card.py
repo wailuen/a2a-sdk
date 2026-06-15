@@ -84,13 +84,13 @@ def _skill_for(entry: Any) -> AgentSkill:
         x_sdk["outputSchema"] = output_schema
     if emits is not None:
         x_sdk["emits"] = getattr(emits, "data_type", emits.__name__)
-    return AgentSkill(
-        id=entry.name,
-        name=entry.name,
-        description=entry.description,
-        tags=[f"tier-{entry.tier}"],
-        x_sdk=x_sdk,
-    )
+    return AgentSkill.model_validate({
+        "id": entry.name,
+        "name": entry.name,
+        "description": entry.description,
+        "tags": [f"tier-{entry.tier}"],
+        "x-sdk": x_sdk,
+    })
 
 
 def build_agent_card(
@@ -112,28 +112,28 @@ def build_agent_card(
     cred_ext = credential_forwarding_extension(credential_fields or {})
     if cred_ext is not None:
         extensions.append(cred_ext)
-    card = AgentCard(
-        name=settings.agent_name,
-        description=settings.agent_description or settings.agent_name,
-        url=base_url,  # HTTP+JSON transport: clients append /v1/message:send per §2 (not /)
-        version=settings.agent_version,
-        capabilities=AgentCapabilities(
+    card = AgentCard.model_validate({
+        "name": settings.agent_name,
+        "description": settings.agent_description or settings.agent_name,
+        "url": base_url,  # HTTP+JSON transport: clients append /v1/message:send per §2 (not /)
+        "version": settings.agent_version,
+        "capabilities": AgentCapabilities(
             streaming=True,
-            push_notifications=False,
+            pushNotifications=False,
             extensions=extensions,
         ),
-        default_input_modes=["text/plain"],
-        default_output_modes=["text/plain", "application/json", "application/a2ui+json"],
-        skills=[_skill_for(e) for e in registry.all()],
-        supports_authenticated_extended_card=False,
-        security_schemes={"bearer": {"type": "http", "scheme": "bearer"}},
-        security=[{"bearer": []}],
-        x_agui={
+        "defaultInputModes": ["text/plain"],
+        "defaultOutputModes": ["text/plain", "application/json", "application/a2ui+json"],
+        "skills": [_skill_for(e) for e in registry.all()],
+        "supportsAuthenticatedExtendedCard": False,
+        "securitySchemes": {"bearer": {"type": "http", "scheme": "bearer"}},
+        "security": [{"bearer": []}],
+        "x-agui": {
             "transport": "sse",
             "endpoint": f"{base_url}/ag-ui/run",
             "customEvents": _CUSTOM_EVENT_SCHEMAS,
         },
-    )
+    })
     return card.wire()
 
 

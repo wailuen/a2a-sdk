@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, List
 
 from ...models.errors import AgentError, ErrorCategory
 from ..azure_utils import require_azure_packages
@@ -198,7 +198,7 @@ class AzureTableSubscriptionStore(SubscriptionBackend):
         rows.sort(key=lambda r: r.get("expiration", ""))
         return rows
 
-    def due_for_renewal(self, before_iso: str) -> list[dict[str, Any]]:
+    def due_for_renewal(self, before_iso: str) -> List[dict[str, Any]]:
         """Return subscriptions expiring at or before *before_iso* (UTC ISO)."""
         entities = self._client.query_entities(
             f"PartitionKey eq '{_PARTITION_KEY}' and expiration le '{before_iso}'"

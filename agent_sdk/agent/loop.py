@@ -203,6 +203,9 @@ async def run_loop(
         messages.append({"role": "assistant", "content": assistant_content})
 
         result_blocks: list[dict[str, Any]] = []
+        ok: bool
+        result: Any
+        error: str | None
         for tc in response.tool_calls:
             yield ToolCallEvent(
                 tool_call_id=tc.tool_call_id, tool_name=tc.name, arguments=tc.arguments
@@ -275,7 +278,7 @@ async def run_loop(
                     interrupt_id=interrupt_id,
                     reason=interrupted.reason,
                     message=interrupted.message,
-                    response_schema=interrupted.response_schema,
+                    response_schema=interrupted.response_schema or {},
                     tool_call_id=tc.tool_call_id,
                 )
                 if wait_resume is None:

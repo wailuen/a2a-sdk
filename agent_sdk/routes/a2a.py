@@ -31,6 +31,7 @@ from ..models.a2a import (
     TaskState,
     TaskStatus,
     TaskStatusUpdateEvent,
+    TextPart,
 )
 from ..models.content_types import A2UI_EXTENSION_URI, A2UI_MIME_TYPE
 from ..models.errors import (
@@ -65,7 +66,7 @@ def _echo_extensions(request: Request, response: Response) -> None:
 
 
 def _message_text(message: Message) -> str:
-    return "\n".join(p.text for p in message.parts if getattr(p, "kind", "") == "text")
+    return "\n".join(p.text for p in message.parts if isinstance(p, TextPart))
 
 
 def _capabilities(message: Message) -> A2uiCapabilities:
@@ -231,8 +232,8 @@ def _open_stream(
                 # consumer sees final:true and stops, never a bare snapshot (§5.2).
                 yield sse_data(
                     TaskStatusUpdateEvent(
-                        task_id=record.task.id,
-                        context_id=record.task.context_id,
+                        taskId=record.task.id,
+                        contextId=record.task.context_id,
                         status=record.task.status,
                         final=True,
                     ).wire()
@@ -326,8 +327,8 @@ async def tasks_cancel(
     record.interrupted = False
     record.task.status = TaskStatus(state=TaskState.CANCELED, timestamp=_now_iso())
     frame = TaskStatusUpdateEvent(
-        task_id=record.task.id,
-        context_id=record.task.context_id,
+        taskId=record.task.id,
+        contextId=record.task.context_id,
         status=record.task.status,
         final=True,
     ).wire()

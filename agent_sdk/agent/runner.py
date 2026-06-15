@@ -67,17 +67,17 @@ def _agent_message(
     return Message(
         role="agent",
         parts=[TextPart(text=text)],
-        message_id=uuid.uuid4().hex,
-        task_id=record.task.id,
-        context_id=record.task.context_id,
+        messageId=uuid.uuid4().hex,
+        taskId=record.task.id,
+        contextId=record.task.context_id,
         metadata=metadata,
     )
 
 
 def _status_frame(record: TaskRecord, *, final: bool = False) -> dict[str, Any]:
     return TaskStatusUpdateEvent(
-        task_id=record.task.id,
-        context_id=record.task.context_id,
+        taskId=record.task.id,
+        contextId=record.task.context_id,
         status=record.task.status,
         final=final,
     ).wire()
@@ -130,7 +130,7 @@ def build_artifact(
     else:
         parts = [TextPart(text=str(payload))]
     return Artifact(
-        artifact_id=uuid.uuid4().hex,
+        artifactId=uuid.uuid4().hex,
         name=event.data_type,
         parts=parts,
         metadata=metadata,
@@ -194,10 +194,10 @@ async def run_task_worker(
                 artifact = build_artifact(event, capabilities)
                 task.artifacts = (task.artifacts or []) + [artifact]
                 frame = TaskArtifactUpdateEvent(
-                    task_id=task.id,
-                    context_id=task.context_id,
+                    taskId=task.id,
+                    contextId=task.context_id,
                     artifact=artifact,
-                    last_chunk=True,
+                    lastChunk=True,
                 ).wire()
                 publish(frame, event)
             elif isinstance(event, InterruptEvent):
@@ -262,7 +262,7 @@ async def run_task_worker(
 def new_task(context_id: str | None = None) -> Task:
     return Task(
         id=uuid.uuid4().hex,
-        context_id=context_id or uuid.uuid4().hex,
+        contextId=context_id or uuid.uuid4().hex,
         status=TaskStatus(state=TaskState.SUBMITTED, timestamp=_now()),
         history=[],
         artifacts=[],

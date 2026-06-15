@@ -110,7 +110,7 @@ class CommitmentsSource(SourceAdapter):
         is given). Returns True iff a pending row was cancelled."""
         return self.store.cancel(commitment_id, identity_binding=identity_binding)
 
-    async def get(
+    async def get(  # type: ignore[override]
         self, commitment_id: str, *, identity_binding: str | None = None
     ) -> Commitment | None:
         """Identity-scoped lookup (mismatch → None, existence not leaked)."""

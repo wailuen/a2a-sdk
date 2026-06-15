@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 from typing import AsyncIterator
 
 import httpx
@@ -27,7 +28,10 @@ def fake_model() -> FakeModelClient:
 
 @pytest.fixture
 def app(settings, fake_model):
-    return make_agent(settings, model_client=fake_model).build_app()
+    built = make_agent(settings, model_client=fake_model).build_app()
+    yield built
+    built.state.credential_store.close()
+    gc.collect()
 
 
 @pytest.fixture

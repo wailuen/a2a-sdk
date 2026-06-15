@@ -41,7 +41,7 @@ import threading
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, List
 
 from ...models.errors import AgentError, ErrorCategory
 from .backend import SubscriptionBackend
@@ -261,7 +261,7 @@ class SubscriptionStore(SubscriptionBackend):
             rows = cur.fetchall()
         return [self._row(r) for r in rows]
 
-    def due_for_renewal(self, before_iso: str) -> list[dict[str, Any]]:
+    def due_for_renewal(self, before_iso: str) -> List[dict[str, Any]]:
         """Subscriptions expiring at or before ``before_iso`` (canonical UTC)."""
         self._ensure_open()
         with self._lock:

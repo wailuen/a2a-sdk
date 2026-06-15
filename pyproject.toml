@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-sdk"
-version = "0.4.6"
+version = "0.4.7"
 description = "SDK for building A2A/AG-UI/A2UI agents with an OAuth-protected MCP server"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -43,3 +43,10 @@ artifacts = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+filterwarnings = ["error"]
+
+[tool.mypy]
+ignore_missing_imports = true
+strict = false
+# Zero-tolerance: any new error is a release blocker.
+# Run: mypy agent_sdk/ --ignore-missing-imports

@@ -39,9 +39,10 @@ and a live conformance check against the bundled example agent.
 
 3. Run `mypy` on the SDK source:
    ```bash
-   .venv/bin/mypy agent_sdk/ --ignore-missing-imports -q
+   .venv/bin/mypy agent_sdk/ --ignore-missing-imports
    ```
-   Report any errors. An error-free run prints "Success: no issues found."
+   **Zero-tolerance gate.** Any error is a release blocker — do not proceed.
+   A clean run prints "Success: no issues found in N source files."
 
 ### Leg 3 — Example stack-check (skipped with `--no-example`)
 
@@ -90,6 +91,11 @@ Failures:
 
 - **Zero failures required to tag a release.** If any leg is RED, stop and report —
   do not proceed to `/sdk-release`.
+- **Zero mypy errors.** The type check is a hard gate, not advisory. Any new error
+  introduced by a change is a blocker; fix it before tagging. Baseline is 0 errors.
+- **Zero pytest warnings.** `filterwarnings = ["error"]` is set in `pyproject.toml`.
+  A warning that becomes an error in tests means the code or the test needs fixing —
+  never add a `# noqa` or warning suppression to paper over it.
 - **`--no-example` is for iteration only.** The full three-leg run is the release gate.
 - Never silence a failing test with `# noqa` or `@pytest.mark.skip` without
   surfacing it as a known issue in `REVIEWS.md`.

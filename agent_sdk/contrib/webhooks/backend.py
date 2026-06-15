@@ -14,7 +14,7 @@ subclasses this ABC.
 from __future__ import annotations
 
 import abc
-from typing import Any
+from typing import Any, List
 
 
 class SubscriptionBackend(abc.ABC):
@@ -72,7 +72,7 @@ class SubscriptionBackend(abc.ABC):
         """Return all subscription records ordered by expiration (ascending)."""
 
     @abc.abstractmethod
-    def due_for_renewal(self, before_iso: str) -> list[dict[str, Any]]:
+    def due_for_renewal(self, before_iso: str) -> List[dict[str, Any]]:
         """Return subscriptions expiring at or before ``before_iso`` (UTC ISO).
 
         Results should be ordered by expiration ascending so the soonest-to-

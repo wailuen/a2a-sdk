@@ -548,11 +548,11 @@ async def oauth_token(request: Request) -> JSONResponse:
         client_id = form.get("client_id", "")
         if not (refresh_token and client_id):
             return _token_error("invalid_request", "missing required parameter")
-        pair = store.rotate_refresh(refresh_token, client_id=client_id)
-        if pair is None:
+        pair2 = store.rotate_refresh(refresh_token, client_id=client_id)
+        if pair2 is None:
             return _token_error("invalid_grant", "token is invalid, expired, or rotated")
         logger.info("oauth token issued grant=refresh client_id=%s...", client_id[:8])
-        return _token_success(pair)
+        return _token_success(pair2)
 
     if not grant_type:
         return _token_error("invalid_request", "grant_type is required")

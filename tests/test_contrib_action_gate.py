@@ -215,7 +215,9 @@ def app(settings: BaseAgentSettings, fake_model):
         toolsets=[gtools],
         model_client=fake_model,
     )
-    return agent.build_app()
+    built = agent.build_app()
+    yield built
+    built.state.credential_store.close()
 
 
 def _send(text: str, task_id: str | None = None) -> dict:

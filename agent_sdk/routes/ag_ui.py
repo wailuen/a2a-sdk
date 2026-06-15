@@ -20,7 +20,7 @@ import uuid
 from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from ..a2ui.translator import A2uiCapabilities, translate
@@ -332,11 +332,10 @@ def _start_worker(request: Request, record: TaskRecord, capabilities: A2uiCapabi
 @router.post("/ag-ui/run")
 async def ag_ui_run(
     request: Request, identity: Identity = Depends(require_identity)
-) -> StreamingResponse:
+) -> Response:
     raw = await request.body()
     if len(raw) > _MAX_BODY_BYTES:
-        from fastapi.responses import Response as _Response
-        return _Response(status_code=413, content=b"request body too large")
+        return Response(status_code=413, content=b"request body too large")
     try:
         body = json.loads(raw)
         if not isinstance(body, dict):

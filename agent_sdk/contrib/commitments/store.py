@@ -361,6 +361,9 @@ class CommitmentStore(CommitmentBackend):
                 self._conn.close()
                 self._closed = True
 
+    def __del__(self) -> None:
+        self.close()
+
     # ── internals ──
     def _ensure_open(self) -> None:
         if self._closed:

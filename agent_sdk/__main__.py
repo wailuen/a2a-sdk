@@ -25,6 +25,7 @@ import getpass
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 
 # ── rotate-master-key ─────────────────────────────────────────────────────────
@@ -56,7 +57,7 @@ def _cmd_rotate(args: argparse.Namespace) -> int:
 
 # ── test-chat ─────────────────────────────────────────────────────────────────
 
-def _load_app(spec: str) -> object:
+def _load_app(spec: str) -> Any:
     """Import ``module:attr`` like uvicorn does.  Inserts cwd into sys.path."""
     import importlib
 
@@ -77,8 +78,8 @@ def _load_app(spec: str) -> object:
 
 def _print_a2ui(messages: list, label: str) -> None:
     verbs = [next((k for k in m if k != "version"), "?") for m in messages]
-    cs = next((m.get("createSurface", {}) for m in messages if "createSurface" in m), {})
-    uc = next((m.get("updateComponents", {}) for m in messages if "updateComponents" in m), {})
+    cs: dict[str, Any] = next((m.get("createSurface", {}) for m in messages if "createSurface" in m), {})
+    uc: dict[str, Any] = next((m.get("updateComponents", {}) for m in messages if "updateComponents" in m), {})
     comp = (uc.get("components") or [{}])[0]
     print(
         f"  [A2UI:{label}]"
@@ -365,8 +366,8 @@ def _cmd_migrate_store(args: argparse.Namespace) -> int:
                 commit_count += 1
             else:
                 if not force:
-                    existing = dst_commit.get(c.id)
-                    if existing is not None:
+                    existing_commit = dst_commit.get(c.id)
+                    if existing_commit is not None:
                         continue
                 import json as _json
                 # Insert directly: bypass add() to preserve the original id
@@ -420,8 +421,8 @@ def _cmd_migrate_store(args: argparse.Namespace) -> int:
                 sub_count += 1
             else:
                 if not force:
-                    existing = dst_sub.get(sub["id"])
-                    if existing is not None:
+                    existing_sub = dst_sub.get(sub["id"])
+                    if existing_sub is not None:
                         continue
                 dst_sub.upsert(
                     id=sub["id"],
