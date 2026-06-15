@@ -199,6 +199,19 @@ const SDK_SCAN_SCHEMA = {
   },
 }
 
+// GH-19: pytest gate schema — exit code + failure list consumed to block fix loops
+const GATE_SCHEMA = {
+  type: 'object',
+  required: ['exitCode', 'passCount', 'failCount', 'failures'],
+  additionalProperties: false,
+  properties: {
+    exitCode:  { type: 'number' },
+    passCount: { type: 'number' },
+    failCount: { type: 'number' },
+    failures:  { type: 'array', items: { type: 'string' } },
+  },
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 // Stall detection uses description (not id) because agents re-derive ids each round.
@@ -246,6 +259,7 @@ log('Wave ' + wave.waveId + ': ' + wave.groups.length + ' group(s), ' +
 const lrnBase          = wave.lrnNext
 const allHighFindings  = []   // accumulates critical/high for codify phase
 let   protocolBlocked  = false
+let   testsRed         = false
 let   totalTodos       = 0
 let   sdkCandidatesCount = 0   // set by sdk:scan in Codify phase
 
@@ -337,8 +351,10 @@ for (const group of wave.groups) {
       'serialisation), write the failing test FIRST (confirm RED), then the code\n' +
       '(confirm GREEN), then refactor. The todo is not done until the test was RED.\n\n' +
       'Todo:\n' + todo.body + '\n\n' +
-      'After implementing, run: pytest -q (scope to changed files if possible).\n' +
-      'Report: files created/modified, test count, any blockers.',
+      'You MAY run scoped tests (`python -m pytest -q tests/test_<specific>.py`) to confirm\n' +
+      'RED→GREEN for your own files. Do NOT run the full test suite — a centralized gate\n' +
+      'runs after all groups finish and will catch suite-wide regressions.\n' +
+      'Report: files created/modified, RED→GREEN confirmation, any blockers.',
       { label: 'impl:' + todo.id, phase: 'Implement', agentType: 'python-implementer' }
     )
   } else {
@@ -354,7 +370,9 @@ for (const group of wave.groups) {
           'SI-6: vendor keys in credential store only; SI-7: non-empty allowed_hosts.\n\n' +
           'Test-first for correctness-bearing code (RED then GREEN then refactor).\n\n' +
           'Todo:\n' + todo.body + '\n\n' +
-          'Run: pytest -q after implementing. Report: files created/modified, test count.',
+          'You MAY run scoped tests (`python -m pytest -q tests/test_<specific>.py`) to confirm\n' +
+          'RED→GREEN for your own files. Do NOT run the full test suite — a centralized gate\n' +
+          'runs after all groups finish. Report: files created/modified, RED→GREEN confirmation.',
           { label: 'impl:' + todo.id, phase: 'Implement', agentType: 'python-implementer' }
         )
       }
@@ -446,6 +464,24 @@ for (const group of wave.groups) {
     })
     allHighFindings.push.apply(allHighFindings, highFindings)
     await parallel(fixTasks)
+
+    // GH-19: consume gate result — red suite blocks loop continuation
+    const unitGate = await agent(
+      'Run: python -m pytest -q\n' +
+      'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
+      '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
+      { schema: GATE_SCHEMA, label: 'gate:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam' }
+    )
+    if (unitGate && unitGate.exitCode !== 0) {
+      testsRed = true
+      log('Gate RED (' + unitGate.failCount + ' failing) — dispatching test-fix agent')
+      await agent(
+        'Fix the failing tests below. Read the test file and the source it covers.\n' +
+        'Failing tests:\n' + unitGate.failures.join('\n') + '\n\n' +
+        'Run `python -m pytest -q <failing-test-file>` to confirm GREEN before finishing.',
+        { label: 'fix:tests:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam' }
+      )
+    }
   }
 }
 
@@ -520,6 +556,24 @@ while (true) {
   })
   allHighFindings.push.apply(allHighFindings, highFindings)
   await parallel(fixTasks)
+
+  // GH-19: consume gate result — red suite blocks loop continuation
+  const phaseGate = await agent(
+    'Run: python -m pytest -q\n' +
+    'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
+    '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
+    { schema: GATE_SCHEMA, label: 'gate:phase:r' + pRound, phase: 'Phase Redteam' }
+  )
+  if (phaseGate && phaseGate.exitCode !== 0) {
+    testsRed = true
+    log('Gate RED (' + phaseGate.failCount + ' failing) — dispatching test-fix agent')
+    await agent(
+      'Fix the failing tests below. Read the test file and the source it covers.\n' +
+      'Failing tests:\n' + phaseGate.failures.join('\n') + '\n\n' +
+      'Run `python -m pytest -q <failing-test-file>` to confirm GREEN before finishing.',
+      { label: 'fix:tests:phase:r' + pRound, phase: 'Phase Redteam' }
+    )
+  }
 }
 
 // ─── phase 5: protocol audit ──────────────────────────────────────────────────
@@ -671,6 +725,24 @@ if (!runProtocol) {
       'Run pytest -q after fixing. Report files changed.',
       { label: 'proto:fix', phase: 'Protocol Audit', agentType: 'python-implementer' }
     )
+
+    // GH-20: gate after protocol fix — domain regressions must be caught before recheck
+    const protoFixGate = await agent(
+      'Run: python -m pytest -q\n' +
+      'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
+      '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
+      { schema: GATE_SCHEMA, label: 'gate:proto:fix', phase: 'Protocol Audit' }
+    )
+    if (protoFixGate && protoFixGate.exitCode !== 0) {
+      testsRed = true
+      log('Gate RED after proto:fix (' + protoFixGate.failCount + ' failing) — dispatching test-fix agent')
+      await agent(
+        'Fix the failing tests introduced by the protocol fix. Read the test file and source.\n' +
+        'Failing tests:\n' + protoFixGate.failures.join('\n') + '\n\n' +
+        'Run `python -m pytest -q <failing-test-file>` to confirm GREEN before finishing.',
+        { label: 'fix:tests:proto:fix', phase: 'Protocol Audit' }
+      )
+    }
 
     // Recheck: same parallel advisor dispatch as the initial audit (including seam)
     const recheckTasks = []
@@ -870,6 +942,20 @@ if (registryCandidates.length > 0) {
 // ─── phase 7: archive ─────────────────────────────────────────────────────────
 phase('Archive')
 
+// GH-22: pre-archive gate — suite must be green before marking wave complete
+const preArchiveGate = await agent(
+  'Run: python -m pytest -q\n' +
+  'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
+  '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
+  { schema: GATE_SCHEMA, label: 'gate:pre-archive', phase: 'Archive' }
+)
+if (preArchiveGate && preArchiveGate.exitCode !== 0) {
+  testsRed = true
+  protocolBlocked = true  // reuse block-archive flag
+  log('Suite is RED (' + preArchiveGate.failCount + ' failing) — archive BLOCKED.')
+  log('Fix the failing tests and re-run /wave ' + wave.waveId)
+}
+
 if (protocolBlocked) {
   log('Archive SKIPPED — wave ' + wave.waveId + ' blocked by critical protocol findings')
   log('Fix protocol issues, run /agent-verify, then re-run /wave ' + wave.waveId)
@@ -901,4 +987,5 @@ return {
   phaseRedteamRounds: pRound,
   exhausted:          pRound >= 8,
   protocolBlocked:    protocolBlocked,
+  testsRed:           testsRed,
 }

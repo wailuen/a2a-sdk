@@ -4,6 +4,28 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.1] — 2026-06-15
+
+### 🧪 Test / CI
+
+- **wave-cycle.js — pytest gate architecture (GH-19)** — Added `GATE_SCHEMA`
+  `{exitCode, passCount, failCount, failures}` and schema-gated gate agents at
+  unit-redteam and phase-redteam checkpoints. Gate RED → targeted test-fix
+  agent dispatched; `testsRed` flag propagated to return object.
+
+- **wave-cycle.js — post-proto-fix gate (GH-20)** — Added schema-gated gate
+  agent between `proto:fix` and `recheck` dispatch so a protocol fix that
+  breaks tests is caught before the audit loop continues.
+
+- **wave-cycle.js — implement prompts scoped (GH-21)** — Implement agents now
+  run only scoped tests (`pytest -q tests/test_<specific>.py`) during
+  implementation; the centralized gate catches suite-wide regressions.
+  Full-suite runs during implementation were driving unnecessary memory pressure.
+
+- **wave-cycle.js — pre-archive gate (GH-22)** — Schema-gated gate agent runs
+  at the top of the Archive phase. Suite RED blocks archive and re-run is
+  required, preventing red-suite commits from reaching the learning store.
+
 ## [0.5.0] — 2026-06-15
 
 ### 🟡 Protocol surface changes
