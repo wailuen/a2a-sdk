@@ -333,6 +333,8 @@ async def tasks_get(
     historyLength: int | None = None,
     identity: Identity = Depends(require_identity),
 ) -> Any:
+    if ":" in task_id:
+        return a2a_error(A2A_UNSUPPORTED_OPERATION, "method not found on this resource")
     record = request.app.state.task_store.get(task_id, identity)
     if record is None:
         return a2a_error(A2A_TASK_NOT_FOUND, "task not found")

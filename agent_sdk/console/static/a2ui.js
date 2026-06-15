@@ -156,7 +156,11 @@ function paintSurface(entry, fallbackText, notes) {
   const value = binding !== null ? pointerGet(entry.dataModel, binding) : entry.dataModel;
   const renderer = RENDERERS[root.component];
   if (!renderer) {
-    notes.push(`unknown component ${String(root.component)} — text fallback rendered`);
+    notes.push(`unknown component ${String(root.component)} — JSON fallback rendered`);
+    const resolvedValue = value === undefined ? null : value;
+    if (resolvedValue !== null && typeof resolvedValue === "object") {
+      return jsonFallbackNode(root.component, resolvedValue);
+    }
     return fallbackNode(fallbackText, `unknown component: ${String(root.component)}`);
   }
   try {
@@ -178,6 +182,20 @@ function fallbackNode(fallbackText, reason) {
   } else {
     node.appendChild(el("div", { class: "dim" }, reason));
   }
+  return node;
+}
+
+/**
+ * Render an unknown structured component as formatted JSON so that new domain
+ * content types are inspectable in the console even before a dedicated renderer
+ * is registered. Uses <pre class="a2ui-json"> — same pattern as chat.js fmtJson.
+ */
+function jsonFallbackNode(componentName, data) {
+  const node = el("div", { class: "a2ui-surface a2ui-fallback" });
+  node.appendChild(el("div", { class: "dim" }, `unknown component: ${String(componentName)}`));
+  const pre = el("pre", { class: "a2ui-json" });
+  pre.appendChild(document.createTextNode(JSON.stringify(data, null, 2)));
+  node.appendChild(pre);
   return node;
 }
 
@@ -229,20 +247,19 @@ function money(m) {
 const ARROWS = { up: "▲", down: "▼", flat: "→" };
 
 function trendSpan(trend, changePct) {
-  if (!trend && changePct === null) return null;
+  if (!trend && (changePct === null || changePct === undefined)) return null;
+  // Wire contract (Standard Profile v1): trend is a direction string "up"|"down"|"flat".
+  // The object form {direction, delta_pct, period} no longer appears on the wire;
+  // changePct (from MetricItem.change_pct) carries any numeric delta annotation.
   let dir = null;
   let detail = "";
-  if (typeof trend === "string") dir = trend;
-  else if (trend && typeof trend === "object") {
-    dir = trend.direction;
-    if (trend.delta_pct !== undefined && trend.delta_pct !== null) {
-      detail = ` ${trend.delta_pct > 0 ? "+" : ""}${fmtNum(trend.delta_pct)}%`;
-    } else if (trend.delta !== undefined && trend.delta !== null) {
-      detail = ` ${trend.delta > 0 ? "+" : ""}${fmtNum(trend.delta)}`;
-    }
-    if (trend.period) detail += ` ${trend.period}`;
+  if (typeof trend === "string") {
+    dir = trend;
+  } else if (trend && typeof trend === "object") {
+    // Back-compat for any pre-wire-fix data that may still pass a KpiTrend object.
+    dir = trend.direction || null;
   }
-  if (changePct !== undefined && changePct !== null && !detail) {
+  if (changePct !== undefined && changePct !== null) {
     detail = ` ${changePct > 0 ? "+" : ""}${fmtNum(changePct)}%`;
   }
   if (!dir && !detail) return null;

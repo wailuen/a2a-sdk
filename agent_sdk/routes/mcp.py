@@ -42,7 +42,7 @@ import uuid
 from collections import OrderedDict
 from typing import Any, AsyncIterator
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -372,6 +372,9 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
 async def mcp_post(
     request: Request, identity: Identity = Depends(require_identity)
 ) -> Response:
+    origin = request.headers.get("origin")
+    if origin is not None and origin not in request.app.state.cors_origins:
+        raise HTTPException(status_code=403, detail="origin not allowed")
     sessions = _sessions(request.app)
     _prune_sessions(sessions)
     owner = _identity_key(identity)
@@ -449,6 +452,9 @@ async def mcp_get(
     (``listChanged: false``) so the stream is idle heartbeats — but it MUST
     exist: Claude.ai Desktop treats the connection as established only once
     this GET returns 200 text/event-stream (LRN-053; 405 breaks it)."""
+    origin = request.headers.get("origin")
+    if origin is not None and origin not in request.app.state.cors_origins:
+        raise HTTPException(status_code=403, detail="origin not allowed")
 
     async def heartbeats() -> AsyncIterator[bytes]:
         # Padding comment forces proxy buffers to flush the first chunk so the

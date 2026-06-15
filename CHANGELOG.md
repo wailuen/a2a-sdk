@@ -4,6 +4,84 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.4] — 2026-06-15
+
+### 🟡 Protocol surface changes
+
+- **a2a: comprehensive /v1/ HTTP error envelope (GH-25 / A2A-C1/C2/H1)** —
+  `_a2a_auth_envelope` now wraps ALL `StarletteHTTPException` on `/v1/` paths
+  (not just 401/403). Code map: 401/403→-32000, 404→-32001, 405→-32004,
+  415→-32005, others→-32603. Added `RequestValidationError` handler returning
+  400 + -32602 with field **locations only** — never echoes submitted values
+  (SI-2). `tasks_get` guards against `task_id` containing `:` (returns -32004
+  instead of -32001 for route-collision hits).
+
+- **mcp: remove malformed `scope=""` from WWW-Authenticate challenge (GH-27 / MCP-C1)** —
+  `_prm_challenge(prm_url)` helper extracted in `middleware.py`; returns
+  RFC 6750 §3-conformant `Bearer resource_metadata="{prm_url}"` with no
+  empty-scope param. All five challenge sites (middleware, 2× oauth, admin)
+  now use the shared helper. Flip-flopping root cause fixed: SC-C3 test
+  invariant corrected to assert ABSENCE of `scope=`.
+
+- **ag-ui: TOOL_CALL_ARGS + TOOL_CALL_END consumer handling (GH-31 / AG-UI-C1/C2)** —
+  `chat.js` now accumulates `TOOL_CALL_ARGS.delta` fragments per `toolCallId`
+  in a `Map` and parses the full JSON only at `TOOL_CALL_END`, with a try/catch
+  fallback for partial/malformed JSON.
+
+- **a2ui: MetricItem.trend wire type corrected to string (A2UI-H3)** —
+  `@field_serializer("trend")` on `MetricItem` collapses any `KpiTrend` instance
+  to its `direction` string before serialization. Profile v1 specifies `trend`
+  as `"up"/"down"/"flat"` string only; the object form is now Python-internal only.
+
+- **a2ui: TimeSeriesChart series fields excluded from wire (A2UI-H4)** —
+  `TimeSeriesDataPoint.series` and `TimeSeriesChart.series` marked
+  `Field(exclude=True)`; both are Python-internal only. Wire output now matches
+  the Profile v1 contract: `data:[{date,value,label?}]` only.
+
+### 🟠 Security
+
+- **mcp: Origin validation on /mcp endpoints (MCP-H2)** —
+  `mcp_post` and `mcp_get` now validate the `Origin` header against
+  `app.state.cors_origins` (MCP spec §10/§12 MUST for DNS-rebinding defense).
+  Requests without an `Origin` header (non-browser tools) pass through unchanged.
+  `app.state.cors_origins` set at app construction in `app.py`.
+
+- **a2a: 422 validation errors never echo user input (SI-2)** —
+  New `_a2a_validation_envelope` handler for `RequestValidationError` on `/v1/`
+  returns field **locations** only (never values) in the -32602 message.
+
+### 🔧 Fixes
+
+- **ag-ui: AGENT_ARTIFACT wire payload documented as camelCase (AG-UI-H1 / C2)** —
+  `docs/protocols.md` corrected: `AGENT_ARTIFACT.value` fields are `dataType`,
+  `toolName`, `data` (camelCase wire) — not snake_case as previously documented.
+  `DESIGN.md` updated to match.
+
+- **a2ui: JSON fallback for unknown structured components (GH-28 / A2UI-H1)** —
+  `a2ui.js` `paintSurface` now renders unknown components with a non-null object
+  value as formatted JSON in a `<pre class="a2ui-json">` block instead of
+  discarding structured data via the text-only fallback.
+
+### 🧪 Test / CI
+
+- `tests/test_a2a_error_envelope.py` (new, 7 tests) — 405/422/404 envelope,
+  -32602 no-value-echo, task_id colon guard, MCP Origin validation
+- `tests/test_http_protocol.py` (new, 7 tests) — WWW-Authenticate exact format
+  (no scope=), path-suffixed PRM URL, MCP SSE GET 401, cross-surface consistency
+- `tests/test_oauth_flow.py` (new, 7 tests) — token endpoint grant types, DCR
+  redirect URI validation, scope omission from token response
+- `tests/test_a2ui_wire.py` (new, 13 tests) — KpiTrend string-only wire,
+  TimeSeriesChart no-series wire, translate() output structure
+- `tests/test_mcp_conformance_w9.py` SC-C3 — flipped to assert `scope=` ABSENT
+  (fixing the root cause of repeated GH-27 flip-flopping)
+- `tests/test_card_console.py` — routing parity tightened to assert
+  `case "TOOL_CALL_ARGS"` and `case "TOOL_CALL_END"` appear in switch body
+
+### — Other
+
+- `ec10fd0` docs: LRN-015/016/017 — MCP coercion failure, SSRF single-predicate, wave gate architecture
+- `ab84eb9` chore: v0.5.3 — harness /upgrade pytest path + /agent-verify --no-stack-check clarification
+
 ## [0.5.2] — 2026-06-15
 
 ### 🔧 Fixes

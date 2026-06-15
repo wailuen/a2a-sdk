@@ -2,7 +2,7 @@
 
 SC-C1  structuredContent for non-BaseModel emits (dict returned against declared emits=)
 SC-C2  tools/list cursor/nextCursor pagination (PAGE_SIZE=64)
-SC-C3  WWW-Authenticate challenge includes scope= parameter
+SC-C3  WWW-Authenticate challenge omits scope= (RFC 6750 §3 — empty scope is malformed)
 SC-C4  Example tools (echo, demo_kpis) have annotations.destructiveHint=false
 SC-C5  Tool name length > 64 raises ValueError at registration time
 """
@@ -257,12 +257,18 @@ async def test_sc_c2_pagination_second_page(sc_c2_client):
 
 
 # ---------------------------------------------------------------------------
-# SC-C3: WWW-Authenticate challenge includes scope=
+# SC-C3: WWW-Authenticate challenge is RFC 6750 §3-compliant (no empty scope=)
 # ---------------------------------------------------------------------------
 
 
-async def test_sc_c3_www_authenticate_has_scope(client):
-    """Unauthenticated request → 401 WWW-Authenticate header must contain scope=."""
+async def test_sc_c3_www_authenticate_no_empty_scope(client):
+    """Unauthenticated request → 401 WWW-Authenticate must NOT contain scope=.
+
+    RFC 6750 §3 ABNF requires at least one non-empty token in the scope
+    production; an empty scope="" is malformed and causes strict OAuth 2.1
+    clients to abort discovery.  The challenge must carry resource_metadata=
+    (RFC 9728 §3.1) but omit scope entirely when no scopes are defined.
+    """
     r = await client.post(
         "/mcp",
         json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
@@ -270,7 +276,14 @@ async def test_sc_c3_www_authenticate_has_scope(client):
     )
     assert r.status_code == 401
     www_auth = r.headers.get("www-authenticate", "")
-    assert "scope=" in www_auth, f"Expected 'scope=' in WWW-Authenticate but got: {www_auth!r}"
+    assert "scope=" not in www_auth, (
+        f"scope= must not appear in WWW-Authenticate (empty scope is RFC 6750 §3 "
+        f"malformed); got: {www_auth!r}"
+    )
+    assert 'resource_metadata="' in www_auth, (
+        f"WWW-Authenticate must still carry resource_metadata= (RFC 9728 §3.1); "
+        f"got: {www_auth!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

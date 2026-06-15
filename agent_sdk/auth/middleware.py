@@ -58,11 +58,16 @@ def _bearer(request: Request) -> str | None:
     return None
 
 
+def _prm_challenge(prm_url: str) -> str:
+    """RFC 6750 §3-compliant Bearer challenge pointing at the PRM URL."""
+    return f'Bearer resource_metadata="{prm_url}"'
+
+
 def _unauthorized(request: Request, runtime: AuthRuntime, detail: str) -> HTTPException:
     # P6-03: every 401 carries a WWW-Authenticate challenge pointing at the
     # PRM (RFC 9728 §3.1) so OAuth discovery can start from any protected
     # surface, not just /mcp.
-    challenge = f'Bearer resource_metadata="{runtime.prm_url}", scope=""'
+    challenge = _prm_challenge(runtime.prm_url)
     return HTTPException(
         status_code=401, detail=detail, headers={"WWW-Authenticate": challenge}
     )

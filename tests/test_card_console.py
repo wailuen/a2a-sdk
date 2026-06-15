@@ -59,6 +59,12 @@ def test_custom_events_match_console_routing_table():
     chat_js = (CONSOLE_STATIC / "chat.js").read_text()
     for name in CUSTOM_EVENTS:
         assert name in chat_js, f"console chat.js does not route {name}"
+    # Tighter check: TOOL_CALL_ARGS and TOOL_CALL_END must appear as switch cases,
+    # not just incidentally elsewhere in the file (e.g. comments).
+    assert 'case "TOOL_CALL_ARGS"' in chat_js, \
+        "chat.js switch is missing case \"TOOL_CALL_ARGS\""
+    assert 'case "TOOL_CALL_END"' in chat_js, \
+        "chat.js switch is missing case \"TOOL_CALL_END\""
 
 
 async def test_console_page_and_health(client):

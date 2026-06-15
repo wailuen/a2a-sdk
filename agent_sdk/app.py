@@ -344,26 +344,52 @@ class Agent:
         app.middleware("http")(request_id_middleware)
         _cors_origins = set(settings.cors_origins) | {"https://claude.ai"}
         app.add_middleware(CorsMiddleware, origins=_cors_origins)
+        app.state.cors_origins = _cors_origins
 
         # A2A surface (/v1/*) speaks the spec error envelope, including for
         # auth failures. FastAPI's default emits {"detail": ...}; translate
-        # 401/403 there to {"error": {code, message}} while preserving the
-        # HTTP status and challenge headers (WWW-Authenticate). The HTTP
-        # status is authoritative; -32000 is the JSON-RPC implementation-
-        # defined server-error slot, never colliding with A2A's -3200x.
-        from fastapi.exception_handlers import http_exception_handler
+        # all HTTP errors there to {"error": {code, message}} per A2A §5.1.
+        # The HTTP status is authoritative; -32000 is the JSON-RPC
+        # implementation-defined server-error slot, never colliding with
+        # A2A's -3200x codes. Non-/v1/ paths fall through to FastAPI default.
+        from fastapi.exception_handlers import (
+            http_exception_handler,
+            request_validation_exception_handler,
+        )
+        from fastapi.exceptions import RequestValidationError as _RequestValidationError
         from fastapi.responses import JSONResponse as _JSONResponse
         from starlette.exceptions import HTTPException as _StarletteHTTPException
 
+        _A2A_CODE: dict[int, int] = {
+            401: -32000, 403: -32000,
+            404: -32001, 405: -32004, 415: -32005,
+        }
+
         @app.exception_handler(_StarletteHTTPException)
         async def _a2a_auth_envelope(request: Any, exc: _StarletteHTTPException) -> Any:
-            if request.url.path.startswith("/v1/") and exc.status_code in (401, 403):
+            if request.url.path.startswith("/v1/"):
+                code = _A2A_CODE.get(exc.status_code, -32603)
                 return _JSONResponse(
                     status_code=exc.status_code,
-                    content={"error": {"code": -32000, "message": str(exc.detail)}},
+                    content={"error": {"code": code, "message": str(exc.detail)}},
                     headers=getattr(exc, "headers", None) or None,
                 )
             return await http_exception_handler(request, exc)
+
+        @app.exception_handler(_RequestValidationError)
+        async def _a2a_validation_envelope(request: Any, exc: _RequestValidationError) -> Any:
+            if request.url.path.startswith("/v1/"):
+                # Report offending field LOCATIONS only — never echo submitted
+                # values (SI-2: secrets hygiene). e.g. "body.historyLength".
+                fields = ", ".join(
+                    ".".join(str(loc) for loc in e["loc"]) for e in exc.errors()[:3]
+                )
+                detail = f"invalid params (check: {fields})" if fields else "invalid params"
+                return _JSONResponse(
+                    status_code=400,
+                    content={"error": {"code": -32602, "message": detail}},
+                )
+            return await request_validation_exception_handler(request, exc)
 
         # frozen app.state contract (consumed by routes + console + tests)
         app.state.settings = settings

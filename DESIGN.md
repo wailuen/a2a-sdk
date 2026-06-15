@@ -317,7 +317,7 @@ Documented consumer contract: a stream severed without a `final` frame → re-`:
 
 | name | value shape |
 |---|---|
-| `AGENT_ARTIFACT` | `{data_type, tool_name, data}` |
+| `AGENT_ARTIFACT` | `{dataType, toolName, data}` |
 | `A2UI_UPDATE` | `{messages: [<a2ui message>, …]}` (translator list wrapped under `messages`) |
 | `AGENT_PROGRESS` | `{message: str}` |
 | `AGENT_NOTE` | `{note: str}` |

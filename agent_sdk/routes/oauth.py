@@ -38,7 +38,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from ..auth.middleware import AuthRuntime, require_identity, unauth_rate_limit
+from ..auth.middleware import AuthRuntime, _prm_challenge, require_identity, unauth_rate_limit
 from ..auth.oauth_tokens import OAuthTokenStore
 from ..common.etag import etag_for, matches
 from ..models.errors import AgentError
@@ -451,9 +451,7 @@ async def oauth_authorize_approve(request: Request) -> Response:
         page = _consent_page(
             cleaned, params, error="Invalid or non-admin API key.", status=401
         )
-        page.headers["WWW-Authenticate"] = (
-            f'Bearer resource_metadata="{runtime.prm_url}"'
-        )
+        page.headers["WWW-Authenticate"] = _prm_challenge(runtime.prm_url)
         return page
 
     store.mark_consented(cleaned["client_id"])
@@ -599,7 +597,7 @@ async def oauth_revoke(request: Request) -> JSONResponse:
             raise HTTPException(
                 status_code=401,
                 detail="invalid credentials",
-                headers={"WWW-Authenticate": f'Bearer resource_metadata="{runtime.prm_url}"'},
+                headers={"WWW-Authenticate": _prm_challenge(runtime.prm_url)},
             )
         store.revoke_by_value(token, caller=identity)
         return JSONResponse(content={})
@@ -609,7 +607,7 @@ async def oauth_revoke(request: Request) -> JSONResponse:
         raise HTTPException(
             status_code=401,
             detail="missing bearer credentials",
-            headers={"WWW-Authenticate": f'Bearer resource_metadata="{runtime.prm_url}"'},
+            headers={"WWW-Authenticate": _prm_challenge(runtime.prm_url)},
         )
     store.revoke_by_client_id(token, client_id=client_id)
     return JSONResponse(content={})

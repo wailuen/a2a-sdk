@@ -36,7 +36,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pydantic import BaseModel, ValidationError
 
-from ..auth.middleware import AuthRuntime, require_admin, unauth_rate_limit
+from ..auth.middleware import AuthRuntime, _prm_challenge, require_admin, unauth_rate_limit
 from ..credentials.fields import CredentialField, validate_credential_url
 from ..credentials.store import NS_BEDROCK, NS_MODEL, RESERVED_NAMESPACES, CredentialStore
 from ..models.errors import AgentError, ErrorCategory
@@ -247,7 +247,7 @@ async def mint_key(request: Request, body: KeyMintRequest) -> dict[str, Any]:
             raise HTTPException(
                 status_code=401,
                 detail="invalid or expired bootstrap token",
-                headers={"WWW-Authenticate": f'Bearer resource_metadata="{auth.prm_url}"'},
+                headers={"WWW-Authenticate": _prm_challenge(auth.prm_url)},
             )
         key_id, plaintext = auth.api_keys.mint(body.label, admin=True)
         logger.warning("bootstrap token consumed: first admin key %s minted", key_id)

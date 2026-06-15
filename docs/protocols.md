@@ -42,7 +42,7 @@ Custom events (also advertised on the card's `x-agui.customEvents`):
 
 | `name` | `value` |
 |---|---|
-| `AGENT_ARTIFACT` | `{data_type, tool_name, data}` |
+| `AGENT_ARTIFACT` | `{dataType, toolName, data}` |
 | `A2UI_UPDATE` | `{messages: [...]}` — the A2UI sequence |
 | `AGENT_PROGRESS` | `{message}` |
 | `AGENT_NOTE` | `{note}` |

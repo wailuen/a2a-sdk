@@ -20,7 +20,7 @@ from __future__ import annotations
 import abc
 from typing import Annotated, Any, ClassVar, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 CATALOG_ID = "urn:a2ui-profile:standard:v1"
 A2UI_VERSION = "v0.9.1"
@@ -93,6 +93,18 @@ class MetricItem(_Wire):
     trend: Literal["up", "down", "flat"] | KpiTrend | None = None
     change_pct: float | None = None
 
+    @field_serializer("trend")
+    def _serialize_trend(
+        self, trend: "Literal['up', 'down', 'flat'] | KpiTrend | None"
+    ) -> "str | None":
+        """Wire contract: trend is always a direction string or absent — never a
+        KpiTrend object dict. KpiTrend instances are collapsed to their direction
+        field here so that third-party renderers following Standard Profile v1
+        receive the frozen contract shape."""
+        if isinstance(trend, KpiTrend):
+            return trend.direction
+        return trend
+
     @field_validator("value", mode="before")
     @classmethod
     def _reject_non_scalar(cls, v: Any) -> Any:
@@ -161,7 +173,9 @@ class TimeSeriesDataPoint(_Wire):
     date: str
     value: float | None
     label: str | None = None
-    series: str | None = None
+    # series is intentionally NOT on the wire: Standard Profile v1 data points
+    # are {date, value, label?} only. Store it for Python-side grouping only.
+    series: str | None = Field(default=None, exclude=True)
 
 
 class TimeSeriesSummary(_Wire):
@@ -193,7 +207,9 @@ class TimeSeriesChart(ContentModel):
     total_count: int = 0  # set by model_validator below
     summary: TimeSeriesSummary | None = None
     metadata: dict[str, Any] | None = None
-    series: list[SeriesMeta] | None = None
+    # series is NOT on the wire: Profile v1 time_series has no top-level series
+    # field. Store it for Python-side multi-series grouping only.
+    series: list[SeriesMeta] | None = Field(default=None, exclude=True)
 
     @model_validator(mode="before")
     @classmethod

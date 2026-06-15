@@ -417,6 +417,7 @@ export function render(pane, ctx) {
     }
 
     const textBuffers = new Map(); // messageId -> streamingBubble
+    const toolArgBuffers = new Map(); // toolCallId -> accumulated JSON fragment string
     let terminal = false;
 
     await readSse(resp, ({ json, data }) => {
@@ -445,6 +446,22 @@ export function render(pane, ctx) {
         case "TOOL_CALL_START":
           systemLine(`tool call: ${json.toolCallName || json.toolCallId}`);
           break;
+        case "TOOL_CALL_ARGS": {
+          const buf = toolArgBuffers.get(json.toolCallId) ?? "";
+          toolArgBuffers.set(json.toolCallId, buf + (json.delta ?? ""));
+          break;
+        }
+        case "TOOL_CALL_END": {
+          const raw = toolArgBuffers.get(json.toolCallId) ?? "";
+          toolArgBuffers.delete(json.toolCallId);
+          try {
+            const parsed = JSON.parse(raw);
+            systemLine(`tool args: ${fmtJson(parsed)}`);
+          } catch {
+            systemLine(`tool args (raw): ${raw}`);
+          }
+          break;
+        }
         case "TOOL_CALL_RESULT":
           systemLine(`tool result for ${json.toolCallId || "?"}`);
           break;
