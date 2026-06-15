@@ -135,20 +135,31 @@ Target: <next patch version>.
    ```
    This runs the full wave-cycle: implement → redteam → protocol audit → codify → archive.
 
-8. After the wave completes successfully:
-   - Bump the patch version: `python3 -m agent_sdk bump-patch`
-   - Stage all changes and commit:
-     ```bash
-     git add -A
-     git commit -m "feat: v<new-version> — close GH #<N1>, #<N2>, ..."
-     ```
-   - Close each resolved issue:
-     ```bash
-     gh issue close <N> --comment "Fixed in v<version> (<sha7>)."
-     ```
-   - Push: `git push origin main`
+8. After the wave completes, stage all changes but **do not commit or push**:
+   ```bash
+   git add -A
+   ```
+   `/sdk-release` is the only path that commits and pushes. This ensures the full
+   test gate (unit + mypy + static conformance) runs before anything ships.
 
-9. Report: issues fixed, issues deferred (with reasons), new version, commit SHA.
+9. Report and hand off:
+
+   ```
+   Wave w<NNN> complete — changes staged, not committed.
+
+   Run `/sdk-release <next-patch-version>` to:
+     • run the full sdk-test gate (unit + mypy + static conformance)
+     • write CHANGELOG.md
+     • commit, tag, and push
+
+   After the release ships, close the resolved issues:
+     gh issue close <N1> --repo wailuen/a2a-sdk \
+       --comment "Fixed in v<version> (<sha7>)."
+     ...
+   ```
+
+   List every GH issue number that was fixed in the wave so the developer
+   can paste the close commands after `/sdk-release` confirms success.
 
 ---
 
@@ -176,5 +187,10 @@ These are NOT actionable without developer input:
 - **Respect the scope boundary.** Only fixes inside `agent_sdk/`, `harness/`, or
   `template/` are in scope. Issues about downstream agent code are misrouted — close
   with a comment directing to the agent's own issue tracker.
-- **Version bump on every push** — always run `python3 -m agent_sdk bump-patch`
-  before the commit in Phase 4.
+- **Never commit or push in Phase 4.** `/sdk-release` is the only path that ships
+  code. Phase 4 stages changes and hands off — it never runs `git commit`, `git push`,
+  or `python3 -m agent_sdk bump-patch`. The test gate in `/sdk-release` must run
+  before anything reaches `origin/main`.
+- **Never close GH issues in Phase 4.** Issues are closed after `/sdk-release`
+  confirms a successful push, not before. Phase 4 surfaces the close commands for
+  the developer to run post-release.

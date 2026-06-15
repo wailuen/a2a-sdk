@@ -143,6 +143,9 @@ Pushed:     YES | PENDING USER CONFIRMATION
 Next:
   - agents using this SDK can now run /upgrade to get v<semver>
   - post the changelog to the project README / release notes
+  - if this release shipped a /gh-review wave, close the resolved GH issues now:
+      gh issue close <N> --repo wailuen/a2a-sdk \
+        --comment "Fixed in v<semver> (<sha7>)."
 ```
 
 ## Rules
