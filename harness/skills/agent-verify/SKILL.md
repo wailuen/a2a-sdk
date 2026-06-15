@@ -22,7 +22,7 @@ OAuth-chain curl probes the umbrella doesn't own, and an optional console smoke.
 - `--prod` — boot with a real `PUBLIC_URL` + `MASTER_KEY` (production fidelity: the
   card/OAuth checks need real advertised URLs). Default is `DEV_MODE=true` local.
 - `--no-console` — skip the Playwright console leg.
-- `--no-stack-check` — skip the conformance umbrella (use when the check kit is unavailable for this environment).
+- `--no-stack-check` — skip the conformance umbrella. **Standard for `/upgrade`** — protocol conformance is gated at SDK release time (`/sdk-release` Leg 3); re-running it per upgrade is redundant. Pass this flag when calling from `/upgrade`, or when the check kit is unavailable for this environment.
 
 ## Phase 0 — Resolve port
 

@@ -82,7 +82,8 @@ sync harness files in `.claude/` — showing every diff before writing anything.
      reverted `pyproject.toml`." Stop.
 
 8. **Run tests.**
-   `pytest -q tests/` — confirm green baseline before declaring success.
+   `pytest -q` — confirm green baseline before declaring success.
+   (No explicit path — let `pyproject.toml` `testpaths` and `addopts` control scope.)
    If tests fail, report which tests broke and ask the user whether to proceed to
    `/agent-verify` or to stop for investigation.
 
