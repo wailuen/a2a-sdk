@@ -86,9 +86,19 @@ sync harness files in `.claude/` — showing every diff before writing anything.
    If tests fail, report which tests broke and ask the user whether to proceed to
    `/agent-verify` or to stop for investigation.
 
-9. **Run `/agent-verify`.**
-   The conformance gate catches any protocol-surface breaks the new SDK introduced.
-   Surface the report verbatim.
+9. **Run `/agent-verify --no-stack-check`.**
+   Confirms the agent boots cleanly on the new SDK version and that the OAuth
+   chain (401 + WWW-Authenticate, PRM endpoints, AS metadata, CORS) is intact.
+
+   `--no-stack-check` is intentional: A2A, AG-UI, A2UI, and MCP protocol
+   conformance is audited **once** against the SDK source before each SDK
+   release (via `/sdk-test` Leg 3). Every agent on that SDK version inherits
+   the conformance result — re-running the full stack-check per upgrade is
+   redundant and breaks in CI when the agent can't boot due to missing API
+   keys. If you suspect a conformance regression specific to your agent's
+   custom tools or card configuration, run `/agent-stack-check` manually.
+
+   Surface the `/agent-verify` report verbatim.
 
 10. **Sync harness files** (skip with `--skip-harness`).
 
@@ -231,7 +241,7 @@ sync harness files in `.claude/` — showing every diff before writing anything.
 Previous:  <current_sha7>  (<current_tag or "no tag">)
 New:       <target_sha7>   (<new_tag or "no tag">)
 Tests:     <N> passed / <M> failed
-Verify:    PASS | FAIL | SKIPPED (error: …)
+Verify:    PASS | FAIL | SKIPPED (error: …)  [boot + OAuth-chain only; conformance verified at SDK release]
 Harness:   <N> updated  <M> conflicts (skipped/accepted)  <K> new  <J> removed
            Kept (your version): <list of skipped conflict files>
 Manifest:  updated → .claude/.harness-manifest.json
@@ -243,6 +253,11 @@ Next:      review any kept conflicts manually; commit when satisfied
 - **Never widen security invariants** during an upgrade — if `/agent-verify` finds
   a new SI violation introduced by the SDK change, stop and report it rather than
   suppressing the finding.
+- **Do not run `/agent-stack-check` during upgrade.** Protocol conformance is an
+  SDK-level gate (verified before each SDK release). Running it downstream per
+  upgrade is redundant and creates false failures when the agent can't boot in CI.
+  Use `/agent-verify --no-stack-check` (step 9). Run `/agent-stack-check` manually
+  only when you suspect a conformance issue specific to this agent's own wiring.
 - **No commit is made by this skill.** The user reviews, then commits.
 - If the upgrade surfaces a **breaking change** in the changelog (tagged `BREAKING`),
   emit a prominent warning before the confirm prompt.
