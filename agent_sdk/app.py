@@ -12,6 +12,7 @@ are unauthenticated until they add ``Depends(agent_sdk.auth.require_identity)``.
 from __future__ import annotations
 
 import asyncio
+from asyncio import sleep as _asyncio_sleep
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -260,7 +261,7 @@ class Agent:
 
             async def _sweeper() -> None:
                 while True:
-                    await asyncio.sleep(_SWEEP_INTERVAL_SECONDS)
+                    await _asyncio_sleep(_SWEEP_INTERVAL_SECONDS)
                     task_store.sweep()
 
             sweep_task = asyncio.create_task(_sweeper())
