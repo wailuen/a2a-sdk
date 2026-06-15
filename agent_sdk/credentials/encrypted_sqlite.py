@@ -33,6 +33,7 @@ _CHECK_VALUE = "agent-sdk-store-check"
 
 class EncryptedSqliteStore(CredentialStore):
     def __init__(self, db_path: str | Path, master_key: str) -> None:
+        self._closed = False  # must be first — __del__ reads this on partial-init failures
         if len(master_key) < 32:
             raise ValueError("MASTER_KEY must be at least 32 characters")
         self._path = Path(db_path)

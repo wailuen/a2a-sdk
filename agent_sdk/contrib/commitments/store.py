@@ -140,6 +140,7 @@ class CommitmentStore(CommitmentBackend):
     """SQLite-backed durable store for scheduled tool commitments (DESIGN §9)."""
 
     def __init__(self, db_path: str | Path = "commitments.db") -> None:
+        self._closed = False  # must be first — __del__ reads this on partial-init failures
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -147,7 +148,6 @@ class CommitmentStore(CommitmentBackend):
         self._conn.row_factory = sqlite3.Row
         # Wait (don't fail) if another process holds the write lock mid-claim.
         self._conn.execute("PRAGMA busy_timeout=5000")
-        self._closed = False
 
     def initialize(self) -> None:
         """Create the table + index if absent. Idempotent."""
@@ -357,7 +357,7 @@ class CommitmentStore(CommitmentBackend):
         """Close the connection. Idempotent (the executor lifespan and the
         owning source may both close it)."""
         with self._lock:
-            if not self._closed:
+            if not getattr(self, "_closed", False):
                 self._conn.close()
                 self._closed = True
 

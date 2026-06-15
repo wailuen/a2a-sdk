@@ -9,6 +9,7 @@ Three layers:
 
 from __future__ import annotations
 
+import gc
 from typing import Any
 
 import pytest
@@ -218,6 +219,7 @@ def app(settings: BaseAgentSettings, fake_model):
     built = agent.build_app()
     yield built
     built.state.credential_store.close()
+    gc.collect()
 
 
 def _send(text: str, task_id: str | None = None) -> dict:
