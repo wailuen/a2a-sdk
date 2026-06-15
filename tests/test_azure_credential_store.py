@@ -6,6 +6,7 @@ Azure packages (azure-data-tables, azure-identity) must be installed.
 
 from __future__ import annotations
 
+import gc
 import os
 import time
 from unittest.mock import MagicMock, patch
@@ -252,6 +253,19 @@ class TestInstantiationPaths:
 def make_sqlite_store(tmp_path):
     db = tmp_path / "creds.db"
     return EncryptedSqliteStore(db, MASTER_KEY)
+
+
+def test_sqlite_store_del_tolerates_partial_init_before_lock(tmp_path):
+    store = EncryptedSqliteStore.__new__(EncryptedSqliteStore)
+    store._closed = False
+    store.__del__()  # must not raise if __init__ failed before _lock/_conn
+    assert store._closed is True
+
+
+def test_sqlite_store_constructor_failure_has_quiet_del(tmp_path):
+    with pytest.raises(ValueError, match="32 characters"):
+        EncryptedSqliteStore(tmp_path / "creds.db", "short")
+    gc.collect()
 
 
 def make_azure_store(tmp_path):

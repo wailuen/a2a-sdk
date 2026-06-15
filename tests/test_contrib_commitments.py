@@ -15,6 +15,7 @@ Layers:
 
 from __future__ import annotations
 
+import gc
 import os
 import tempfile
 from contextlib import asynccontextmanager
@@ -335,6 +336,21 @@ def test_close_is_idempotent(tmp_path_str):
     s.close()
     s.close()  # must not raise
     assert s._closed is True
+
+
+def test_store_del_tolerates_partial_init_before_lock():
+    s = CommitmentStore.__new__(CommitmentStore)
+    s._closed = False
+    s.__del__()  # must not raise if __init__ failed before _lock/_conn
+    assert s._closed is True
+
+
+def test_store_constructor_failure_has_quiet_del(tmp_path):
+    parent_as_file = tmp_path / "not-a-directory"
+    parent_as_file.write_text("x")
+    with pytest.raises(FileExistsError):
+        CommitmentStore(parent_as_file / "commitments.db")
+    gc.collect()
 
 
 # ── 2. executor ──

@@ -356,9 +356,16 @@ class CommitmentStore(CommitmentBackend):
     def close(self) -> None:
         """Close the connection. Idempotent (the executor lifespan and the
         owning source may both close it)."""
-        with self._lock:
+        if getattr(self, "_closed", False):
+            return
+        lock = getattr(self, "_lock", None)
+        conn = getattr(self, "_conn", None)
+        if lock is None or conn is None:
+            self._closed = True
+            return
+        with lock:
             if not getattr(self, "_closed", False):
-                self._conn.close()
+                conn.close()
                 self._closed = True
 
     def __del__(self) -> None:

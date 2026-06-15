@@ -135,9 +135,16 @@ class EncryptedSqliteStore(CredentialStore):
         return [r[0] for r in rows]
 
     def close(self) -> None:
-        with self._lock:
+        if getattr(self, "_closed", False):
+            return
+        lock = getattr(self, "_lock", None)
+        conn = getattr(self, "_conn", None)
+        if lock is None or conn is None:
+            self._closed = True
+            return
+        with lock:
             if not getattr(self, "_closed", False):
-                self._conn.close()
+                conn.close()
                 self._closed = True
 
     def __del__(self) -> None:
