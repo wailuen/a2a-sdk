@@ -71,7 +71,7 @@ def _fold_history(raw_messages: list[Any]) -> list[dict[str, Any]] | None:
         content = raw.get("content") or ""
         if isinstance(content, list):
             content = "".join(
-                p["text"] for p in content
+                p.get("text", "") for p in content
                 if isinstance(p, dict) and p.get("type") == "text"
             )
         elif not isinstance(content, str):
@@ -194,9 +194,10 @@ class _RunMapper:
                 "type": "TOOL_CALL_START",
                 "toolCallId": event.tool_call_id,
                 "toolCallName": event.tool_name,
+                # always present so consumers can key on the field; null when no
+                # preceding text turn has established an assistant message id
+                "parentMessageId": self.last_message_id,
             }
-            if self.last_message_id is not None:
-                start["parentMessageId"] = self.last_message_id
             return self._ensure_step() + [
                 start,
                 {
@@ -230,9 +231,8 @@ class _RunMapper:
                     "type": "TOOL_CALL_START",
                     "toolCallId": event.tool_call_id,
                     "toolCallName": event.tool_name,
+                    "parentMessageId": self.last_message_id,
                 }
-                if self.last_message_id is not None:
-                    synthetic_start["parentMessageId"] = self.last_message_id
                 frames += [
                     synthetic_start,
                     # AG-UI spec requires ≥1 TOOL_CALL_ARGS between START and END.
@@ -293,6 +293,8 @@ class _RunMapper:
                 interrupt["responseSchema"] = event.response_schema
             if event.tool_call_id is not None:
                 interrupt["toolCallId"] = event.tool_call_id
+            if event.expires_at is not None:
+                interrupt["expiresAt"] = int(event.expires_at * 1000)
             return self.run_finished(
                 outcome={"type": "interrupt", "interrupts": [interrupt]}
             )

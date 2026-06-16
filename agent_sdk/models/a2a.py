@@ -2,7 +2,7 @@
 
 Rules baked in here:
 - Parts discriminate on ``kind``, never ``type``.
-- ``TaskStatus`` serializes to ``{state, message?, timestamp?}`` only; anything
+- ``TaskStatus`` serializes to ``{state, message?, timestamp?, error?}``; anything
   the SDK tracks internally lives outside these models.
 - Server-emitted ``contextId`` is always a non-empty UUID (enforced by the
   task store, not by the model).
@@ -15,6 +15,8 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from .errors import WireError
 
 
 class _Wire(BaseModel):
@@ -103,10 +105,10 @@ INTERRUPT_STATES = frozenset({TaskState.INPUT_REQUIRED, TaskState.AUTH_REQUIRED}
 
 
 class TaskStatus(_Wire):
-    # Whitelist wire shape: {state, message?, timestamp?} ONLY (DESIGN §5.1).
     state: TaskState
     message: Message | None = None
     timestamp: str | None = None
+    error: WireError | None = None
 
 
 class Artifact(_Wire):
@@ -186,7 +188,7 @@ class MessageSendParams(_Wire):
 
 class AgentInterface(_Wire):
     # v0.3.0 additionalInterfaces entries: BOTH fields required (DESIGN §4.5).
-    transport: str
+    transport: Literal["JSONRPC", "GRPC", "HTTP+JSON"]
     url: str
 
 
@@ -228,7 +230,7 @@ class AgentCard(_Wire):
     name: str
     description: str
     url: str  # REQUIRED — never omitted; dev falls back to localhost (DESIGN §4.5)
-    preferred_transport: str = Field(default="HTTP+JSON", alias="preferredTransport")
+    preferred_transport: Literal["JSONRPC", "GRPC", "HTTP+JSON"] = Field(default="HTTP+JSON", alias="preferredTransport")
     additional_interfaces: list[AgentInterface] | None = Field(
         default=None, alias="additionalInterfaces"
     )

@@ -33,6 +33,8 @@ class ToolDecl:
     # absent, so a read-only query must opt out explicitly or Claude.ai's
     # consent UI flags it as destructive.
     annotations: dict[str, Any] | None = None
+    # Consumer-facing discoverability tags (A2A §1). Tier is in x-sdk, not here.
+    tags: list[str] = field(default_factory=list)
 
 
 class ToolSet:
@@ -51,6 +53,7 @@ class ToolSet:
         title: str | None = None,
         read_only: bool = False,
         annotations: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
     ) -> Callable:
         if tier not in (1, 2):
             raise ValueError("tier must be 1 (query: A2A+MCP) or 2 (composite: A2A only)")
@@ -66,6 +69,11 @@ class ToolSet:
         def decorator(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
             if not inspect.iscoroutinefunction(fn):
                 raise TypeError(f"tool {fn.__name__!r} must be async")
+            _tool_name = name or fn.__name__
+            if len(_tool_name) > 64:
+                raise ValueError(
+                    f"Tool name {_tool_name!r} exceeds 64 characters (MCP spec recommends ≤ 64)"
+                )
             # eval_str: tools commonly live in modules with
             # `from __future__ import annotations`, which turns annotations
             # into strings — they must be resolved to real classes here.
@@ -113,7 +121,7 @@ class ToolSet:
             self.decls.append(
                 ToolDecl(
                     fn=fn,
-                    name=name or fn.__name__,
+                    name=_tool_name,
                     description=description.strip(),
                     tier=tier,
                     emits=emits,
@@ -122,6 +130,7 @@ class ToolSet:
                     adapter_params=adapter_params,
                     title=title,
                     annotations=merged_annotations,
+                    tags=list(tags or []),
                 )
             )
             return fn

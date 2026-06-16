@@ -182,3 +182,44 @@ Verdict: **APPROVE** — all 12 Round-1b REJECT-driver rows verified resolved wi
 | INFO | post-resume general-TTL clock behavior | left as implementation detail |
 
 **Design phase sign-off: complete (v3). Next red-team checkpoint: after SDK core implementation — check skills + live curl probes per §12, before the investment_analysts_v2 port.**
+
+## Round 2 — Conformance audit (2026-06-16, pre-v0.5.6)
+
+Four-advisor /agent-stack-check static audit. All Critical/High findings fixed across three fix rounds. Verdict: **COMPLIANT** (zero Critical, zero High). Punch-list below — deferred items acknowledged per /sdk-test policy.
+
+### Findings fixed in this round
+
+| Protocol | Sev | Finding | Fix |
+|---|---|---|---|
+| A2A | HIGH | `GET /v1/tasks` was -32004 stub | Implemented `list_tasks_for_identity` in InMemoryTaskStore; `tasks_list` route |
+| A2A | MED | `tasks/list` response used `totalCount`/`pageSize` missing | Corrected to `ListTasksResponse` shape: `totalSize`, `pageSize`, `nextPageToken` |
+| A2A | MED | `preferred_transport`/`transport` were unconstrained `str` | Changed to `Literal["JSONRPC","GRPC","HTTP+JSON"]` |
+| A2A | MED | HTTPS not enforced for public deployment | Added `_deployment_invariants()` check in `config.py`; loopback exempt |
+| AG-UI | HIGH | `parentMessageId` absent on first tool call | Always emit (as null) in `ag_ui.py` |
+| AG-UI | HIGH | Interrupt `expiresAt` not wired to wire | Three-file chain: `events.py` field → `runner.py` mutation → `ag_ui.py` wire |
+| AG-UI | MED | Assistant history `content` was plain string | Changed to `[{type:"text", text:...}]` array in `chat.js:481` |
+| AG-UI | LOW | `if event.expires_at:` truthy guard | Changed to `if event.expires_at is not None:` in `ag_ui.py:296` |
+| AG-UI | LOW | Test resume entries used `status:"approved"` | Updated to `status:"resolved"` + `payload:{decision:"approved"}` in 3 test files |
+| A2UI | CRITICAL | a2ui.js validation guard `!msg.type` always true | Removed `\|\| !msg.type \|\| typeof msg.type !== "string"` — A2UI messages have no `type` field |
+| A2UI | HIGH | `updateComponents` ignored `id` — full replace instead of upsert | `_componentMap = new Map()` keyed by `component.id`; upsert semantics |
+| A2UI | HIGH | Duplicate `createSurface` for open surface silently accepted | Added `else if (existing && !existing.closed)` guard with `console.warn` |
+| A2UI | MED | `updateDataModel` null vs absent conflated | `MISSING` sentinel + `apply_data_model_update()` in `translator.py` |
+| A2UI | MED | System prompt catalog missing compact schemas + examples | `_COMPACT_SCHEMAS` + `_FEW_SHOT_EXAMPLES` in `catalog.py` |
+| A2UI | LOW | `catalog.py` docstring said "120 characters" | Corrected to "250 characters" |
+| A2UI | LOW | `a2ui.js paintSurface` fell back to `components[0]` | Changed to visible `fallbackNode` with message |
+| A2UI | LOW | `chat.js` MIME dispatch included `Array.isArray(part.data)` heuristic | Removed; dispatch on `mime` string only |
+| MCP | HIGH | Tool name 64-char limit enforced only at `build_app()` | Also checked at `@tool` decoration time in `registry.py` |
+
+### Deferred findings (acknowledged, non-blocking)
+
+| Protocol | Sev | Finding | Rationale |
+|---|---|---|---|
+| MCP | MED | Bare PRM `resource` points to agent root (issuer), not canonical `{issuer}/mcp` | Intentional: A2A and AG-UI surfaces use the bare resource; MCP surface uses path-suffixed PRM. Two-value audience set handles both. Documented deviation from RFC 8707 single-URI strict reading; ADR 0001 §5.5. |
+| MCP | LOW | Unknown tool returns `-32602` (InvalidParams) instead of `-32601` (MethodNotFound) | Minor: both codes are permissible for "tool not found"; -32602 is what Claude.ai connectors expect in practice. |
+| MCP | LOW | `notifications/initialized` 202 via OR gate | Code quality only; no interop impact. Defer to refactor wave. |
+| MCP | LOW | Tool name 64-char limit is Directory constraint (spec allows 128) | SDK applies it as a hard policy for Directory compatibility; applies to all tools, not just Directory-registered ones. Intentional safety margin. |
+| A2A | LOW | Auth errors use `-32000` (non-enumerated code) | HTTP 401 status is authoritative; JSON-RPC code is informational. TCK does not enforce a specific code for auth failures. |
+| A2UI | LOW | ChildList template expansion not implemented | By design: display-only renderer (Path A). Interactive ChildList requires two-way binding (out of scope v1 per DESIGN.md §7.1). |
+| A2UI | INFO | `apply_data_model_update` server-side lacks delete path | Translator never emits `deleteSurface` mid-stream; the code path is not reached. |
+
+**Round 2 sign-off: COMPLIANT. All Critical/High fixed. Deferred items acknowledged with rationale.**

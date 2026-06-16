@@ -65,24 +65,44 @@ async def test_www_auth_no_scope_param(client):
 
 
 # ===========================================================================
-# C3-H2 — resource_metadata points to path-suffixed PRM
+# C3-H2 — A2A resource_metadata points to bare PRM; MCP uses path-suffixed PRM
 # ===========================================================================
 
 
-async def test_www_auth_points_to_path_suffixed_prm(client):
-    """WWW-Authenticate on any protected route must point to
-    ``.../.well-known/oauth-protected-resource/mcp``, not the bare
-    ``/.well-known/oauth-protected-resource``.
+async def test_www_auth_per_surface_prm(client):
+    """GH-33: A2A (/v1/) and AG-UI (/ag-ui/) routes emit the bare PRM
+    (``/.well-known/oauth-protected-resource``) so their resource metadata
+    binds to the agent root, not the MCP endpoint.
 
-    Claude.ai probes the path-suffixed form first (RFC 9728 §3.1); the
-    challenge must guide the client to the right URL."""
-    www_auth = await _www_auth(client, "post", "/v1/message:send", json=_SEND_BODY)
-    assert "/.well-known/oauth-protected-resource/mcp" in www_auth, (
-        f"resource_metadata must point to /...mcp path; got: {www_auth!r}"
+    MCP (/mcp) routes continue to use the path-suffixed form
+    (``/.well-known/oauth-protected-resource/mcp``) per RFC 9728 §3.1 /
+    Claude.ai connector expectations.
+
+    Neither challenge carries ``scope=``."""
+    www_a2a = await _www_auth(client, "post", "/v1/message:send", json=_SEND_BODY)
+    # A2A surface: bare PRM (no /mcp suffix in the resource_metadata URL)
+    assert '/.well-known/oauth-protected-resource"' in www_a2a or \
+           "/.well-known/oauth-protected-resource'" in www_a2a or \
+           www_a2a.rstrip().endswith('/.well-known/oauth-protected-resource"') or \
+           "oauth-protected-resource\"" in www_a2a, (
+        f"A2A WWW-Auth must reference bare PRM; got: {www_a2a!r}"
     )
-    # Guard: the bare path must not be the only one referenced (it may
-    # appear as a substring of the suffixed form, so check the suffix form).
-    assert www_auth.count("/.well-known/oauth-protected-resource/mcp") >= 1
+    assert "/.well-known/oauth-protected-resource/mcp" not in www_a2a, (
+        f"A2A WWW-Auth must NOT reference the /mcp path-suffixed PRM; got: {www_a2a!r}"
+    )
+    assert "scope=" not in www_a2a
+
+    # MCP surface: path-suffixed PRM (unchanged)
+    r_mcp = await client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        headers={"Authorization": ""},
+    )
+    assert r_mcp.status_code == 401
+    www_mcp = r_mcp.headers.get("www-authenticate", "")
+    assert "/.well-known/oauth-protected-resource/mcp" in www_mcp, (
+        f"MCP WWW-Auth must reference /mcp path-suffixed PRM; got: {www_mcp!r}"
+    )
 
 
 # ===========================================================================
@@ -125,24 +145,30 @@ async def test_mcp_get_unauthenticated_returns_www_auth(client):
 
 
 # ===========================================================================
-# C3-H5 — Challenge is identical across all three surfaces
+# C3-H5 — Per-surface challenge consistency (GH-33: A2A ≠ MCP, internally consistent)
 # ===========================================================================
 
 
-async def test_www_auth_consistent_across_surfaces(client):
-    """All three protected surfaces (/v1/message:send, /mcp POST, /ag-ui/run)
-    must return identical WWW-Authenticate header values.
+async def test_www_auth_consistent_within_surfaces(client):
+    """GH-33: A2A and MCP now use different PRM URLs (A2A=bare, MCP=path-suffixed).
+    Within each surface, repeated unauthenticated requests must return the same
+    challenge. AG-UI must match A2A (both are non-MCP data-plane surfaces).
 
-    Consistency ensures any client reaching any surface can bootstrap the
-    same OAuth discovery chain."""
+    Neither challenge may carry ``scope=`` (RFC 6750 §3 ABNF)."""
     # A2A surface
     r_a2a = await client.post(
-        "/v1/message:send",
-        json=_SEND_BODY,
-        headers={"Authorization": ""},
+        "/v1/message:send", json=_SEND_BODY, headers={"Authorization": ""}
     )
     assert r_a2a.status_code == 401
     www_a2a = r_a2a.headers.get("www-authenticate", "")
+    assert www_a2a, "A2A surface returned empty WWW-Authenticate"
+    assert "scope=" not in www_a2a
+    assert 'resource_metadata="' in www_a2a
+
+    # A2A challenge must NOT contain the /mcp suffix
+    assert "/mcp" not in www_a2a, (
+        f"A2A WWW-Auth must reference bare PRM (no /mcp); got: {www_a2a!r}"
+    )
 
     # MCP surface
     r_mcp = await client.post(
@@ -152,27 +178,30 @@ async def test_www_auth_consistent_across_surfaces(client):
     )
     assert r_mcp.status_code == 401
     www_mcp = r_mcp.headers.get("www-authenticate", "")
+    assert www_mcp, "MCP surface returned empty WWW-Authenticate"
+    assert "scope=" not in www_mcp
+    assert "/.well-known/oauth-protected-resource/mcp" in www_mcp, (
+        f"MCP WWW-Auth must reference path-suffixed PRM; got: {www_mcp!r}"
+    )
 
-    # AG-UI surface — may return 401; if it returns 422 auth passed, skip.
+    # A2A and MCP challenges must DIFFER (different resource scope)
+    assert www_a2a != www_mcp, (
+        "A2A and MCP WWW-Authenticate should differ (A2A=bare PRM, MCP=path-suffixed); "
+        f"both got: {www_a2a!r}"
+    )
+
+    # AG-UI surface (non-MCP) must match A2A
     r_agui = await client.post(
         "/ag-ui/run",
         json={"thread_id": "t1", "run_id": "r1", "messages": []},
         headers={"Authorization": ""},
     )
-
-    assert www_a2a, "A2A surface returned empty WWW-Authenticate"
-    assert www_mcp, "MCP surface returned empty WWW-Authenticate"
-    assert www_a2a == www_mcp, (
-        f"A2A and MCP WWW-Authenticate differ:\n  A2A: {www_a2a!r}\n  MCP: {www_mcp!r}"
-    )
-
     if r_agui.status_code == 401:
         www_agui = r_agui.headers.get("www-authenticate", "")
         assert www_agui == www_a2a, (
-            f"AG-UI WWW-Authenticate differs from A2A:\n  AG-UI: {www_agui!r}\n  A2A: {www_a2a!r}"
+            f"AG-UI WWW-Auth must match A2A (both use bare PRM):\n"
+            f"  AG-UI: {www_agui!r}\n  A2A: {www_a2a!r}"
         )
-    # If AG-UI returned 422 (auth passed, missing required fields) — skip the
-    # cross-surface comparison for that surface; A2A and MCP match is sufficient.
 
 
 # ===========================================================================

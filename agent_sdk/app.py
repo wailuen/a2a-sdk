@@ -268,6 +268,7 @@ class Agent:
             oauth=oauth_store,
             trusted_proxies=list(settings.trusted_proxies),
             prm_url=f"{base_url}/.well-known/oauth-protected-resource/mcp",
+            bare_prm_url=f"{base_url}/.well-known/oauth-protected-resource",
             identity_limiter=RateLimiter(settings.rate_limit_per_minute),
             unauth_limiter=RateLimiter(settings.unauth_rate_limit_per_minute),
         )

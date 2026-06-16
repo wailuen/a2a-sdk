@@ -131,6 +131,12 @@ class BaseAgentSettings(BaseSettings):
         if not self.dev_mode:
             if not self.public_url:
                 raise ValueError("PUBLIC_URL is required in production (DEV_MODE=false)")
+            if not self.public_url.startswith("https://") and not _is_local(self.public_url):
+                parsed = urlparse(self.public_url)
+                raise ValueError(
+                    f"PUBLIC_URL must use https:// in production (got: {parsed.scheme}). "
+                    "Set DEV_MODE=true to bypass."
+                )
             if not self.master_key:
                 raise ValueError("MASTER_KEY is required in production (DEV_MODE=false)")
             if len(self.master_key.get_secret_value()) < 32:

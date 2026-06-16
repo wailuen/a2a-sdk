@@ -53,7 +53,7 @@ async def test_resume_emits_synthetic_tool_lifecycle(client, fake_model):
         client,
         run_body(
             resume=[
-                {"interrupt_id": interrupt_id, "status": "approved", "payload": {}}
+                {"interrupt_id": interrupt_id, "status": "resolved", "payload": {"decision": "approved"}}
             ]
         ),
     )

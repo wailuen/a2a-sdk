@@ -12,6 +12,8 @@
  * - Renders the 14 FROZEN Standard Profile types; MarketBriefing is prose
  *   (no card chrome); unknown components render the artifact's text
  *   fallback. Display-only: no input binding, no action dispatch.
+ * - ChildList template expansion ({path, componentId} form) is out of scope
+ *   for this display-only renderer.
  * - Untrusted-output invariant: every dynamic value lands via
  *   createTextNode/textContent or numeric SVG attributes — never markup.
  */
@@ -56,8 +58,14 @@ function pointerSet(doc, pointer, value) {
     cur = cur[key];
   }
   const last = tokens[tokens.length - 1];
-  if (Array.isArray(cur)) cur[last === "-" ? cur.length : Number(last)] = value;
-  else cur[last] = value;
+  if (value === undefined) {
+    if (Array.isArray(cur)) cur.splice(Number(last), 1);
+    else delete cur[last];
+  } else if (Array.isArray(cur)) {
+    cur[last === "-" ? cur.length : Number(last)] = value;
+  } else {
+    cur[last] = value;
+  }
   return doc;
 }
 
@@ -78,6 +86,10 @@ export function renderA2ui(messages, opts = {}) {
   // 1) fold the whole array atomically — no painting yet
   for (const msg of list) {
     if (!msg || typeof msg !== "object") continue;
+    if (!msg.version || typeof msg.version !== "string") {
+      console.warn("[a2ui] message missing required version — skipped", msg);
+      continue;
+    }
     if (msg.createSurface) {
       const { surfaceId, catalogId } = msg.createSurface;
       if (!surfaceId) continue;
@@ -85,11 +97,15 @@ export function renderA2ui(messages, opts = {}) {
       if (existing && existing.closed) {
         notes.push(`createSurface rejected: surface ${surfaceId} is closed`);
         continue;
+      } else if (existing && !existing.closed) {
+        console.warn("[a2ui] protocol error: duplicate createSurface for open surface", surfaceId);
+        continue;
       }
       if (!existing) {
         surfaces.set(surfaceId, {
           catalogId: catalogId || "",
           components: [],
+          _componentMap: new Map(),
           dataModel: {},
           node: null,
           closed: false,
@@ -103,15 +119,23 @@ export function renderA2ui(messages, opts = {}) {
         notes.push(`updateComponents dropped: unknown/closed surface ${surfaceId}`);
         continue;
       }
-      entry.components = Array.isArray(components) ? components : [];
+      if (!entry._componentMap) entry._componentMap = new Map();
+      if (Array.isArray(components)) {
+        for (const c of components) {
+          if (c && c.id !== undefined) entry._componentMap.set(c.id, c);
+        }
+      }
+      entry.components = [...entry._componentMap.values()];
       touched.add(surfaceId);
     } else if (msg.updateDataModel) {
-      const { surfaceId, path, value } = msg.updateDataModel;
+      const { surfaceId, path } = msg.updateDataModel;
       const entry = surfaces.get(surfaceId);
       if (!entry || entry.closed) {
         notes.push(`updateDataModel dropped: unknown/closed surface ${surfaceId}`);
         continue;
       }
+      // Absent "value" key means delete; explicit null means set to null.
+      const value = "value" in msg.updateDataModel ? msg.updateDataModel.value : undefined;
       entry.dataModel = pointerSet(entry.dataModel, path || "", value);
       touched.add(surfaceId);
     } else if (msg.deleteSurface) {
@@ -147,10 +171,9 @@ export function renderA2ui(messages, opts = {}) {
 }
 
 function paintSurface(entry, fallbackText, notes) {
-  const root =
-    entry.components.find((c) => c && c.id === "root") || entry.components[0];
+  const root = entry.components.find((c) => c && c.id === "root");
   if (!root) {
-    return fallbackNode(fallbackText, "surface has no components");
+    return fallbackNode(fallbackText, entry.components.length ? "surface has no root component" : "surface has no components");
   }
   const binding = root.data && root.data.path !== undefined ? root.data.path : null;
   const value = binding !== null ? pointerGet(entry.dataModel, binding) : entry.dataModel;

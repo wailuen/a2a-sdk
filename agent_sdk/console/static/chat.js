@@ -225,6 +225,8 @@ export function render(pane, ctx) {
     state.contextId = null;
     state.threadId = uuid();
     state.aguiMessages = [];
+    pendingInterrupt = null;
+    input.placeholder = "Message the agent… (Enter to send, Shift+Enter for newline)";
     clear(transcript);
     clear(trace);
     systemLine("session reset");
@@ -384,7 +386,7 @@ export function render(pane, ctx) {
       if (part.kind !== "data") continue;
       const mime = part.metadata ? part.metadata.mimeType : "";
       // canonical mime + accepted legacy form (§5.4)
-      if (mime === "application/a2ui+json" || mime === "application/json+a2ui" || Array.isArray(part.data)) {
+      if (mime === "application/a2ui+json" || mime === "application/json+a2ui") {
         renderA2uiMessages(part.data, fallbackText);
         renderedA2ui = true;
       } else {
@@ -396,99 +398,168 @@ export function render(pane, ctx) {
 
   /* ── AG-UI mode (§5.3) ── */
 
-  async function sendAgui(text) {
-    state.aguiMessages.push({ id: uuid(), role: "user", content: [{ type: "text", text: text }] });
-    const body = {
-      threadId: state.threadId,
-      runId: uuid(),
-      messages: state.aguiMessages.slice(),
-      state: {},
-      tools: [],
-      context: [],
-      forwardedProps: { a2uiClientCapabilities: { version: "v0.9.1", catalogs: ["urn:a2ui-profile:standard:v1"], tier: "core+extended" } },
-    };
+  // pending interrupt from the last run; consumed on next send
+  let pendingInterrupt = null;
 
-    const resp = await postSse(`${state.base}/ag-ui/run`, body);
-    if (!resp.ok) {
-      const respBody = await resp.text();
-      traceFrame(`HTTP ${resp.status}`, respBody);
-      systemLine(`run request failed: HTTP ${resp.status}`);
-      return;
+  async function sendAgui(text) {
+    let body;
+    if (pendingInterrupt) {
+      // resume path: wrap the user's text as the interrupt payload
+      const { interruptId } = pendingInterrupt;
+      pendingInterrupt = null;
+      body = {
+        threadId: state.threadId,
+        runId: uuid(),
+        messages: state.aguiMessages.slice(),
+        state: {},
+        tools: [],
+        context: [],
+        forwardedProps: { a2uiClientCapabilities: { version: "v0.9.1", catalogs: ["urn:a2ui-profile:standard:v1"], tier: "core+extended" } },
+        resume: [{ interruptId, status: "resolved", payload: text }],
+      };
+    } else {
+      state.aguiMessages.push({ id: uuid(), role: "user", content: [{ type: "text", text: text }] });
+      body = {
+        threadId: state.threadId,
+        runId: uuid(),
+        messages: state.aguiMessages.slice(),
+        state: {},
+        tools: [],
+        context: [],
+        forwardedProps: { a2uiClientCapabilities: { version: "v0.9.1", catalogs: ["urn:a2ui-profile:standard:v1"], tier: "core+extended" } },
+      };
+    }
+
+    // exponential backoff retry for transient SSE connection failures
+    let resp;
+    let delay = 1000;
+    const MAX_DELAY = 30000;
+    const MAX_RETRIES = 5;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      resp = await postSse(`${state.base}/ag-ui/run`, body);
+      if (resp.ok) break;
+      if (attempt === MAX_RETRIES) {
+        const respBody = await resp.text();
+        traceFrame(`HTTP ${resp.status}`, respBody);
+        systemLine(`run request failed: HTTP ${resp.status}`);
+        return;
+      }
+      systemLine(`run request failed (HTTP ${resp.status}), retrying in ${delay / 1000}s…`);
+      await new Promise((r) => setTimeout(r, delay));
+      delay = Math.min(delay * 2, MAX_DELAY);
     }
 
     const textBuffers = new Map(); // messageId -> streamingBubble
     const toolArgBuffers = new Map(); // toolCallId -> accumulated JSON fragment string
     let terminal = false;
+    // reconnect state: if the stream drops mid-run, retry with backoff
+    let sseDelay = 1000;
+    let sseRetries = 0;
 
-    await readSse(resp, ({ json, data }) => {
-      traceFrame(json && json.type ? json.type : "data", json !== null ? json : data);
-      if (!json || !json.type) return;
-      switch (json.type) {
-        case "RUN_STARTED":
-          systemLine(`run ${json.runId || ""} started`);
-          break;
-        case "TEXT_MESSAGE_START":
-          textBuffers.set(json.messageId, streamingBubble());
-          break;
-        case "TEXT_MESSAGE_CONTENT": {
-          const buf = textBuffers.get(json.messageId);
-          if (buf && json.delta) buf.append(json.delta);
-          break;
-        }
-        case "TEXT_MESSAGE_END": {
-          const buf = textBuffers.get(json.messageId);
-          if (buf) {
-            // client owns history: fold the assistant turn back in
-            state.aguiMessages.push({ id: json.messageId, role: "assistant", content: buf.text() });
+    const processStream = async () => {
+      try {
+        await readSse(resp, ({ json, data }) => {
+          traceFrame(json && json.type ? json.type : "data", json !== null ? json : data);
+          if (!json || !json.type) return;
+          switch (json.type) {
+            case "RUN_STARTED":
+              systemLine(`run ${json.runId || ""} started`);
+              break;
+            case "TEXT_MESSAGE_START":
+              textBuffers.set(json.messageId, streamingBubble());
+              break;
+            case "TEXT_MESSAGE_CONTENT":
+            case "TEXT_MESSAGE_CHUNK": {
+              const buf = textBuffers.get(json.messageId);
+              if (buf && json.delta) buf.append(json.delta);
+              break;
+            }
+            case "TEXT_MESSAGE_END": {
+              const buf = textBuffers.get(json.messageId);
+              if (buf) {
+                // client owns history: fold the assistant turn back in
+                state.aguiMessages.push({ id: json.messageId, role: "assistant", content: [{ type: "text", text: buf.text() }] });
+              }
+              break;
+            }
+            case "TOOL_CALL_START":
+              systemLine(`tool call: ${json.toolCallName || json.toolCallId}`);
+              break;
+            case "TOOL_CALL_ARGS":
+            case "TOOL_CALL_CHUNK": {
+              const buf = toolArgBuffers.get(json.toolCallId) ?? "";
+              toolArgBuffers.set(json.toolCallId, buf + (json.delta ?? ""));
+              break;
+            }
+            case "TOOL_CALL_END": {
+              const raw = toolArgBuffers.get(json.toolCallId) ?? "";
+              toolArgBuffers.delete(json.toolCallId);
+              try {
+                const parsed = JSON.parse(raw);
+                systemLine(`tool args: ${fmtJson(parsed)}`);
+              } catch {
+                systemLine(`tool args (raw): ${raw}`);
+              }
+              break;
+            }
+            case "TOOL_CALL_RESULT":
+              systemLine(`tool result for ${json.toolCallId || "?"}`);
+              break;
+            case "STEP_STARTED":
+              systemLine(`step ${json.stepName || ""} started`);
+              break;
+            case "STEP_FINISHED":
+              systemLine(`step ${json.stepName || ""} finished`);
+              break;
+            case "CUSTOM":
+              handleCustom(json);
+              break;
+            case "RUN_FINISHED":
+              terminal = true;
+              if (json.outcome && json.outcome.type === "interrupt") {
+                const interrupts = json.outcome.interrupts || [];
+                systemLine(`interrupted: ${fmtJson(interrupts)}`);
+                if (interrupts.length > 0) {
+                  // store interrupt so the next send() becomes a resume POST
+                  pendingInterrupt = { interruptId: interrupts[0].id };
+                  const msg = interrupts[0].message || "Agent requires input to continue.";
+                  systemLine(`↩ resume required — type your response and send (${msg})`);
+                  input.placeholder = `Resume: ${msg}`;
+                }
+              } else {
+                systemLine("run finished");
+                input.placeholder = "Message the agent… (Enter to send, Shift+Enter for newline)";
+              }
+              break;
+            case "RUN_ERROR":
+              terminal = true;
+              pendingInterrupt = null;
+              input.placeholder = "Message the agent… (Enter to send, Shift+Enter for newline)";
+              systemLine(`run error: ${json.message || "unknown"}`);
+              break;
+            default:
+              break; // STATE_SNAPSHOT/STATE_DELTA/etc — trace panel only
           }
-          break;
-        }
-        case "TOOL_CALL_START":
-          systemLine(`tool call: ${json.toolCallName || json.toolCallId}`);
-          break;
-        case "TOOL_CALL_ARGS": {
-          const buf = toolArgBuffers.get(json.toolCallId) ?? "";
-          toolArgBuffers.set(json.toolCallId, buf + (json.delta ?? ""));
-          break;
-        }
-        case "TOOL_CALL_END": {
-          const raw = toolArgBuffers.get(json.toolCallId) ?? "";
-          toolArgBuffers.delete(json.toolCallId);
-          try {
-            const parsed = JSON.parse(raw);
-            systemLine(`tool args: ${fmtJson(parsed)}`);
-          } catch {
-            systemLine(`tool args (raw): ${raw}`);
+        });
+      } catch (streamErr) {
+        // SSE stream dropped before a terminal frame — retry with backoff
+        if (!terminal && sseRetries < MAX_RETRIES) {
+          sseRetries++;
+          systemLine(`SSE stream dropped, reconnecting in ${sseDelay / 1000}s… (attempt ${sseRetries}/${MAX_RETRIES})`);
+          await new Promise((r) => setTimeout(r, sseDelay));
+          sseDelay = Math.min(sseDelay * 2, MAX_DELAY);
+          resp = await postSse(`${state.base}/ag-ui/run`, body);
+          if (resp.ok) {
+            await processStream();
+          } else {
+            systemLine(`reconnect failed: HTTP ${resp.status}`);
           }
-          break;
+          return;
         }
-        case "TOOL_CALL_RESULT":
-          systemLine(`tool result for ${json.toolCallId || "?"}`);
-          break;
-        case "STEP_STARTED":
-          systemLine(`step ${json.stepName || ""} started`);
-          break;
-        case "STEP_FINISHED":
-          systemLine(`step ${json.stepName || ""} finished`);
-          break;
-        case "CUSTOM":
-          handleCustom(json);
-          break;
-        case "RUN_FINISHED":
-          terminal = true;
-          systemLine("run finished");
-          if (json.outcome && json.outcome.type === "interrupt") {
-            systemLine(`interrupted: ${fmtJson(json.outcome.interrupts || [])}`);
-          }
-          break;
-        case "RUN_ERROR":
-          terminal = true;
-          systemLine(`run error: ${json.message || "unknown"}`);
-          break;
-        default:
-          break; // STATE_SNAPSHOT/STATE_DELTA/etc — trace panel only
       }
-    });
+    };
+
+    await processStream();
 
     if (!terminal) systemLine("stream closed without RUN_FINISHED/RUN_ERROR");
   }

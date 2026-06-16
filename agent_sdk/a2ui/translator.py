@@ -24,6 +24,7 @@ caller still ships the TextPart fallback — nothing is silently dropped.
 from __future__ import annotations
 
 import uuid
+import warnings
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,6 +34,9 @@ from ..models.content_types import (
     ContentModel,
     MarketBriefing,
 )
+
+# Sentinel for "field absent from update dict" — distinct from None (explicit JSON null).
+MISSING = object()
 
 
 @dataclass(slots=True)
@@ -116,3 +120,78 @@ def translate(
             "deleteSurface": {"surfaceId": sid},
         },
     ]
+
+
+class SurfaceRegistry:
+    """Tracks open surfaces for callers that drive streaming A2UI lifecycles.
+
+    Intended for long-lived sessions that emit createSurface/deleteSurface
+    messages incrementally (e.g. AG-UI CUSTOM event streams).  The stateless
+    ``translate()`` helper above does not use this — it emits its own
+    self-contained four-message sequence.
+    """
+
+    def __init__(self) -> None:
+        self._open: set[str] = set()
+
+    def open(self, surface_id: str) -> None:
+        # M1: duplicate createSurface — warn rather than raise so existing
+        # renders are not abruptly broken by a re-open attempt.
+        if surface_id in self._open:
+            warnings.warn(
+                f"createSurface called for already-open surface {surface_id!r}; "
+                "ignoring duplicate",
+                stacklevel=2,
+            )
+            return
+        self._open.add(surface_id)
+
+    def close(self, surface_id: str) -> None:
+        self._open.discard(surface_id)
+
+    def is_open(self, surface_id: str) -> bool:
+        return surface_id in self._open
+
+
+def apply_data_model_update(
+    model: dict[str, Any],
+    pointer: str,
+    value: Any,
+) -> None:
+    """Apply a single updateDataModel patch to *model* in-place.
+
+    *pointer* must be a root-relative JSON Pointer (RFC 6901) starting with
+    ``/``.  Pointers that would escape the component root (starting with ``//``
+    or containing ``.``) are rejected — scope is always the component root,
+    never the message envelope.
+
+    *value* semantics:
+    - Pass ``MISSING`` to leave the target key unchanged (absent-from-update).
+    - Pass ``None`` to explicitly set the target field to JSON null.
+    - Any other value replaces the target field.
+    """
+    # M2: pointer scope guard — JSON Pointers here are always component-root-
+    # relative.  A double-slash prefix or a dot-segment would escape that scope.
+    if not pointer.startswith("/"):
+        raise ValueError(f"JSON Pointer must be root-relative (start with /); got {pointer!r}")
+    if pointer.startswith("//") or "/.." in pointer or pointer == "/..":
+        raise ValueError(f"JSON Pointer escapes component root: {pointer!r}")
+
+    # M3: absent-value sentinel — nothing to do.
+    if value is MISSING:
+        return
+
+    # Navigate to the parent of the target key.
+    # RFC 6901 token decoding: ~1 → /, ~0 → ~
+    tokens = [t.replace("~1", "/").replace("~0", "~") for t in pointer[1:].split("/")]
+    target = model
+    for token in tokens[:-1]:
+        if not isinstance(target, dict):
+            raise ValueError(f"Cannot traverse non-dict at token {token!r} in {pointer!r}")
+        target = target.setdefault(token, {})
+
+    leaf = tokens[-1]
+    if not isinstance(target, dict):
+        raise ValueError(f"Parent of leaf key {leaf!r} is not a dict in {pointer!r}")
+    # Explicit None → JSON null (M3); any other value → set field.
+    target[leaf] = value

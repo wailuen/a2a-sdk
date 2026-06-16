@@ -126,6 +126,13 @@ class TaskStore(abc.ABC):
         not interrupted (caller maps to the spec error)."""
 
     @abc.abstractmethod
+    def list_tasks_for_identity(
+        self, identity: Identity, page_size: int = 50, page_token: str | None = None
+    ) -> tuple[list[Task], str | None]:
+        """Return up to ``page_size`` tasks owned by ``identity``, sorted by
+        task id, plus an opaque ``nextPageToken`` when more remain."""
+
+    @abc.abstractmethod
     def evict(self, task_id: str) -> None:
         """Cancel worker, close resume channel, sentinel-close subscribers,
         drop the record."""

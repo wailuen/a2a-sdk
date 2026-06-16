@@ -89,9 +89,17 @@ def _etag_json(request: Request, payload: dict[str, Any]) -> Response:
 
 def _prm_payload(store: OAuthTokenStore) -> dict[str, Any]:
     return {
-        # The canonical resource string — the same exact value used in the
-        # authorize-time resource validation and the token audience (§5.5).
+        # MCP-scoped resource — canonical_resource is base_url/mcp (§5.5).
         "resource": store.canonical_resource,
+        "authorization_servers": [store.issuer],
+        "bearer_methods_supported": ["header"],
+    }
+
+
+def _bare_prm_payload(store: OAuthTokenStore) -> dict[str, Any]:
+    return {
+        # Agent-root resource — used by A2A (/v1/) and AG-UI (/ag-ui/) surfaces.
+        "resource": store.issuer,
         "authorization_servers": [store.issuer],
         "bearer_methods_supported": ["header"],
     }
@@ -99,7 +107,7 @@ def _prm_payload(store: OAuthTokenStore) -> dict[str, Any]:
 
 @router.get("/.well-known/oauth-protected-resource")
 async def oauth_protected_resource(request: Request) -> Response:
-    return _etag_json(request, _prm_payload(_oauth(request)))
+    return _etag_json(request, _bare_prm_payload(_oauth(request)))
 
 
 @router.get("/.well-known/oauth-protected-resource/mcp")
@@ -125,6 +133,7 @@ async def oauth_authorization_server(request: Request) -> Response:
             "code_challenge_methods_supported": ["S256"],
             "token_endpoint_auth_methods_supported": ["none"],
             "scopes_supported": [],
+            "resource_indicators_supported": True,
         },
     )
 

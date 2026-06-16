@@ -323,8 +323,23 @@ async def message_stream(
 
 
 @router.get("/v1/tasks")
-async def tasks_list(identity: Identity = Depends(require_identity)) -> Any:
-    return a2a_error(A2A_UNSUPPORTED_OPERATION, "tasks/list is not supported")
+async def tasks_list(
+    request: Request,
+    pageSize: int = 50,
+    pageToken: str | None = None,
+    identity: Identity = Depends(require_identity),
+) -> Any:
+    size = min(max(pageSize, 1), 100)
+    tasks, next_token = request.app.state.task_store.list_tasks_for_identity(
+        identity, page_size=size, page_token=pageToken
+    )
+    body: dict[str, Any] = {
+        "tasks": [t.model_dump(by_alias=True, mode="json", exclude_none=True) for t in tasks],
+        "totalSize": len(tasks),
+        "pageSize": size,
+        "nextPageToken": next_token or "",
+    }
+    return JSONResponse(body)
 
 
 @router.get("/v1/tasks/{task_id}")
@@ -371,7 +386,7 @@ async def tasks_cancel(
     return JSONResponse(_task_wire(record))
 
 
-@router.post("/v1/tasks/{task_id}:resubscribe")
+@router.post("/v1/tasks/{task_id}:subscribe")
 async def tasks_subscribe(
     task_id: str, request: Request, response: Response, identity: Identity = Depends(require_identity)
 ) -> Any:

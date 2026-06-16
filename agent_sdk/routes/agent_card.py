@@ -90,7 +90,7 @@ def _skill_for(entry: Any) -> AgentSkill:
         "id": entry.name,
         "name": entry.name,
         "description": entry.description,
-        "tags": [f"tier-{entry.tier}"],
+        "tags": entry.decl.tags,
         "x-sdk": x_sdk,
     })
 
@@ -114,8 +114,11 @@ def build_agent_card(
     base_url = settings.resolved_base_url
     extensions = [
         a2ui_extension(allowed_components),
-        # AG-UI is advertised via x-agui.endpoint below, not as an A2A
-        # capabilities extension (wrong slot per A2UI F2 / S1 audit).
+        # AG-UI is advertised via x-agui.endpoint below. The AG-UI spec
+        # (ag-ui-protocol/ag-ui) defines no canonical agent-card advertisement
+        # slot — neither x-agui nor capabilities.extensions is mandated.
+        # x-agui is used here as a vendor extension; capabilities.extensions
+        # is reserved for A2A-defined extensions (A2UI, credential-forwarding).
     ]
     cred_ext = credential_forwarding_extension(credential_fields or {})
     if cred_ext is not None:

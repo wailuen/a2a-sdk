@@ -76,7 +76,9 @@ async def test_error_table(client, fake_model):
     r = await client.get("/v1/tasks/unknown")
     assert (r.status_code, r.json()["error"]["code"]) == (404, -32001)
     r = await client.get("/v1/tasks")
-    assert (r.status_code, r.json()["error"]["code"]) == (501, -32004)
+    assert r.status_code == 200
+    assert r.json()["tasks"] == []
+    assert r.json()["totalSize"] == 0
     r = await client.get("/v1/card")
     # extended card not configured = capability absent → 501 (spec table §2)
     assert (r.status_code, r.json()["error"]["code"]) == (501, -32007)
@@ -172,3 +174,40 @@ async def test_extensions_header_echo(client, fake_model):
         headers={"X-A2A-Extensions": f"{uri}, https://other.example/ext"},
     )
     assert r.headers.get("x-a2a-extensions") == uri
+
+
+async def test_tasks_list(client, fake_model):
+    r = await client.get("/v1/tasks")
+    assert r.status_code == 200
+    body0 = r.json()
+    assert body0["tasks"] == []
+    assert body0["totalSize"] == 0
+    assert body0["pageSize"] == 50
+    assert body0["nextPageToken"] == ""
+
+    fake_model.script(reply("done"))
+    r = await client.post("/v1/message:send", json=send_body("hi"))
+    task_id = r.json()["id"]
+    await wait_for_state(client, task_id)
+
+    r = await client.get("/v1/tasks")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["totalSize"] == 1
+    assert len(body["tasks"]) == 1
+    assert body["tasks"][0]["id"] == task_id
+    assert body["nextPageToken"] == ""
+
+
+async def test_tasks_list_isolation(client, fake_model):
+    fake_model.script(reply("done"))
+    r = await client.post("/v1/message:send", json=send_body("hi"))
+    task_id = r.json()["id"]
+    await wait_for_state(client, task_id)
+
+    _, other_token = client.app.state.auth.api_keys.mint("other-user", admin=False)
+    other_headers = {"Authorization": f"Bearer {other_token}"}
+    r = await client.get("/v1/tasks", headers=other_headers)
+    assert r.status_code == 200
+    assert r.json()["totalSize"] == 0
+    assert r.json()["tasks"] == []

@@ -133,6 +133,22 @@ class InMemoryTaskStore(TaskStore):
         record.resume_future = None
         return True
 
+    # ── listing ──
+
+    def list_tasks_for_identity(
+        self, identity: Identity, page_size: int = 50, page_token: str | None = None
+    ) -> tuple[list[Task], str | None]:
+        page_size = min(max(page_size, 1), 100)
+        matching = sorted(
+            (r for r in self._records.values() if r.identity == identity.binding),
+            key=lambda r: r.task.id,
+        )
+        if page_token is not None:
+            matching = [r for r in matching if r.task.id > page_token]
+        page = matching[:page_size]
+        next_token = page[-1].task.id if len(matching) > page_size else None
+        return [r.task for r in page], next_token
+
     # ── eviction ──
 
     def evict(self, task_id: str) -> None:

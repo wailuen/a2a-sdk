@@ -71,7 +71,7 @@ def _field_summary(cls: type[ContentModel]) -> str:
 
     Reads the Pydantic model's ``model_fields`` to enumerate field names and
     their annotation strings.  Optional fields are suffixed with ``?``.  The
-    summary is truncated with ``...`` if it would exceed 120 characters.
+    summary is truncated with ``...`` if it would exceed 250 characters.
     """
     try:
         parts: list[str] = []
@@ -89,11 +89,35 @@ def _field_summary(cls: type[ContentModel]) -> str:
 
         summary = ", ".join(parts)
         # Truncate to keep system-prompt tokens manageable
-        if len(summary) > 120:
-            summary = summary[:117] + "..."
+        if len(summary) > 250:
+            summary = summary[:247] + "..."
         return f"{{{summary}}}"
     except Exception:
         return "{...}"
+
+
+_FEW_SHOT_EXAMPLES: dict[str, str] = {
+    "KpiCard": (
+        '{"component":"KpiCard","metrics":[{"label":"Revenue","value":1200000,'
+        '"unit":"USD","trend":"up"}],"title":"Q1 Summary"}'
+    ),
+    "TimeSeriesChart": (
+        '{"component":"TimeSeriesChart","chart_type":"line","title":"Price History",'
+        '"x_key":"date","y_key":"value","total_count":2,'
+        '"data":[{"date":"2026-01-01","value":100.0},{"date":"2026-02-01","value":105.0}]}'
+    ),
+    "ComparisonTable": (
+        '{"component":"ComparisonTable","columns":[{"key":"name","label":"Name"},'
+        '{"key":"value","label":"Value"}],"rows":[{"name":"Alpha","value":1.2}]}'
+    ),
+}
+
+_COMPACT_SCHEMAS: dict[str, str] = {
+    "KpiCard": '{"metrics":[{label,value,unit?,trend?}],"title?":str}',
+    "TimeSeriesChart": '{"chart_type":"line|area|bar","title":str,"x_key":str,"y_key":str,"total_count":int,"data":[{date,value,label?}]}',
+    "ComparisonTable": '{"columns":[{key,label,type?}],"rows":[{...}],"title?":str}',
+    "FundPerformance": '{"fundName?":str,"irr?":float,"tvpi?":float,"dpi?":float,"rvpi?":float,"netIrr?":float,"grossIrr?":float,"asOfDate?":str,"nav?":{"amount?":float,"currency?":str}}',
+}
 
 
 def get_system_prompt_section() -> str:
@@ -103,8 +127,8 @@ def get_system_prompt_section() -> str:
     in a bare test environment that imports nothing from content_types).
 
     When types ARE registered the returned block lists every registered
-    component on a single line with its PascalCase name and required/optional
-    fields so the LLM can pick the right schema when calling a tool.
+    component with its compact schema shape and a few-shot example for the
+    most common types.
     """
     types = registered_content_types()
     if not types:
@@ -118,11 +142,24 @@ def get_system_prompt_section() -> str:
         "Use PascalCase component names exactly as specified."
         " Required fields must be present.",
         "",
-        "Registered components:",
+        "Registered components (required fields shown, ? = optional):",
     ]
     for cls in sorted(types.values(), key=lambda c: c.component):
         tier = " [extended]" if cls.extended else ""
-        lines.append(f"- {cls.component}{tier}: {_field_summary(cls)}")
+        schema = _COMPACT_SCHEMAS.get(cls.component) or _field_summary(cls)
+        lines.append(f"- {cls.component}{tier}: {schema}")
+
+    # Few-shot examples for the most common types (only emit if registered)
+    registered_names = {cls.component for cls in types.values()}
+    examples = [
+        (name, ex)
+        for name, ex in _FEW_SHOT_EXAMPLES.items()
+        if name in registered_names
+    ]
+    if examples:
+        lines += ["", "Examples:"]
+        for name, ex in examples:
+            lines.append(f"  {name}: {ex}")
 
     return "\n".join(lines)
 

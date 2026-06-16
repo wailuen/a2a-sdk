@@ -4,6 +4,137 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.6] — 2026-06-16
+
+### 🟡 Protocol surface changes
+
+- **a2a: GET /v1/tasks — implement tasks/list (GH-32, A2A-D3)** —
+  Replaced -32004 stub with real implementation using `store.list_tasks_for_identity`.
+  Response matches A2A v0.3.0 `ListTasksResponse` shape:
+  `{tasks, totalSize, pageSize, nextPageToken}`. Cursor-based pagination
+  with identity isolation (tasks are never visible to other identities).
+
+- **a2a: transport type narrowed to Literal (A2A-D1)** —
+  `AgentCard.preferred_transport` and `AgentInterface.transport` now use
+  `Literal["JSONRPC","GRPC","HTTP+JSON"]` instead of unconstrained `str`.
+  Prevents invalid transport values from passing Pydantic validation.
+
+- **a2a: route name confirmed spec-correct (GH-32 / A2A v0.3.0 §11.3.2)** —
+  `POST /v1/tasks/{task_id}:subscribe` retained. `:resubscribe` was never
+  implemented. Spec fetch from `a2aproject/A2A` confirmed `:subscribe` is the
+  correct HTTP+JSON binding name.
+
+- **mcp: per-surface PRM routing (GH-33)** —
+  A2A (`/v1/`) and AG-UI (`/ag-ui/`) surfaces now emit the bare PRM
+  (`/.well-known/oauth-protected-resource`) in their `WWW-Authenticate` challenge.
+  MCP (`/mcp`) continues to use the path-suffixed form (`…/mcp`). Bare PRM
+  endpoint added at `GET /.well-known/oauth-protected-resource`.
+
+- **mcp: AS metadata resource_indicators_supported (GH-35)** —
+  `GET /.well-known/oauth-authorization-server` now includes
+  `"resource_indicators_supported": true` (RFC 8707 §5).
+
+- **ag-ui: skill tags flow to AgentSkill (GH-34)** —
+  `@tool(tags=[...])` values propagate to `AgentSkill.tags` on the agent card.
+  Tier label (`tier-N`) moved to `x-sdk.tier` — never appears in `tags`.
+
+- **ag-ui: TaskStatus.error field for failed tasks (GH-38)** —
+  Failed tasks now populate `status.error: {code, message}` in the A2A wire.
+  `WireError` is set in all failure branches: `DoneEvent(ok=False)`,
+  `except AgentError`, and `except Exception`.
+
+- **a2ui: updateComponents upsert-by-id semantics** —
+  `a2ui.js` renderer now maintains a `_componentMap` (JS `Map` keyed by
+  `component.id`) per surface. `updateComponents` upserts each component
+  by id rather than replacing the full list. Fixes stale-component accumulation.
+
+- **a2ui: duplicate createSurface guard** —
+  A second `createSurface` for an already-open surface now logs a protocol-error
+  warning and skips processing instead of silently overwriting the surface state.
+
+- **a2ui: updateDataModel null-vs-absent semantics** —
+  `MISSING` sentinel distinguishes absent `value` (delete the pointer) from
+  explicit `null` (set to null). `apply_data_model_update()` on the server
+  and the JS `pointerSet` in `a2ui.js` both apply delete-vs-null semantics.
+
+### 🟠 Security
+
+- **config: HTTPS enforcement for public deployment** —
+  `_deployment_invariants()` in `config.py` raises `ValueError` at boot if
+  `PUBLIC_URL` is non-local and does not start with `https://`. Loopback
+  hosts (`localhost`, `127.0.0.1`, `::1`, `0.0.0.0`) are exempt.
+
+### ✅ Features
+
+- **a2ui: SurfaceRegistry duplicate-open tracking** —
+  `SurfaceRegistry` class in `translator.py` tracks open surfaceIds and
+  emits a `warnings.warn` on duplicate `open()` calls.
+
+- **a2ui: catalog compact schemas + few-shot examples** —
+  `catalog.py` injects `_COMPACT_SCHEMAS` and `_FEW_SHOT_EXAMPLES` into the
+  system prompt section for `KpiCard`, `TimeSeriesChart`, `ComparisonTable`,
+  and `FundPerformance` — giving the LLM concise wire contracts and worked examples.
+
+- **mcp: tool name length check at decoration time** —
+  `ToolSet.tool()` now raises `ValueError` immediately if the tool name exceeds
+  64 characters (was only checked at `build_app()` time).
+
+- **ag-ui: interrupt expiresAt forwarded to wire** —
+  `InterruptEvent.expires_at` field added; populated from `record.interrupt_deadline`
+  after `store.mark_interrupted()`; forwarded as `expiresAt` (milliseconds) in the
+  AG-UI INTERRUPT event.
+
+- **ag-ui: parentMessageId always present** —
+  `TOOL_CALL_START` events always emit `parentMessageId` (as `null` if no prior
+  message) — removes the optional-omission ambiguity.
+
+### 🔧 Fixes
+
+- **a2ui: message type guard regression fixed** —
+  `a2ui.js` validation guard removed `|| !msg.type || typeof msg.type !== "string"`.
+  A2UI messages have no `type` field; the check was always truthy and silently
+  skipped every received message. Corrected guard: `version` field only.
+
+- **ag-ui: assistant history content as multimodal array** —
+  `chat.js` line ~481: `content: buf.text()` changed to
+  `content: [{type:"text", text: buf.text()}]` — matches the multimodal array
+  shape used for user turns and required by AG-UI spec.
+
+- **ag-ui: resume status "approved" → "resolved"** —
+  Three test files updated from `status: "approved"` to `status: "resolved"`
+  with `payload: {decision: "approved"}`. `"resolved"` is the canonical AG-UI
+  interrupt-resolution status literal.
+
+- **ag-ui: expires_at falsy guard** —
+  `ag_ui.py`: `if event.expires_at:` changed to `if event.expires_at is not None:`
+  to avoid suppressing a valid `0.0` deadline.
+
+- **a2ui: paintSurface fallback on missing root** —
+  `a2ui.js`: removed `|| entry.components[0]` fallback when no `id:"root"` component
+  exists. Now renders a visible `.a2ui-fallback` error node instead of silently
+  promoting an arbitrary component.
+
+- **a2ui: MIME dispatch heuristic removed** —
+  `chat.js`: removed `|| Array.isArray(part.data)` from the A2UI artifact dispatch
+  condition. Dispatch is now by MIME type string only.
+
+- **ag-ui: _fold_history safe text extraction** —
+  `ag_ui.py`: `p.get("text", "")` instead of `p["text"]` in `_fold_history`
+  prevents `KeyError` on history parts without a `text` key.
+
+### 🧪 Test / CI
+
+- `tests/test_w014_fixes.py` — 7 new tests: subscribe route, resubscribe gone,
+  tool tags flow, tags default empty, card skill tags, AS metadata, failed task error
+- `tests/test_a2ui_wire.py` — 11 new tests: SurfaceRegistry duplicate warning,
+  `apply_data_model_update` null/absent/scope (M2/M3), system prompt schema
+- `tests/test_a2a.py` — `test_tasks_list` and `test_tasks_list_isolation` added;
+  `test_error_table` updated for `GET /v1/tasks` 200 + `ListTasksResponse` shape
+- `tests/test_ag_ui.py`, `tests/test_ag_ui_resume.py` — resume status `"resolved"` + payload
+- `tests/test_http_protocol.py` — per-surface PRM routing assertions (C3-H2, C3-H5)
+- `docs/protocols.md` — `:subscribe` is spec-correct per A2A v0.3.0 §11.3.2
+- `REVIEWS.md` — Round 2 conformance audit log; all Critical/High fixed; 7 deferrals acknowledged
+
 ## [0.5.5] — 2026-06-15
 
 ### 🟡 Protocol surface changes
@@ -357,9 +488,9 @@ internals, `contrib/`) may change in minors with notice here.
 
 ### Fixed
 
-- **A2A `:resubscribe` path** — `POST /v1/tasks/{id}:resubscribe` was incorrectly
-  registered as `:subscribe`. Spec-compliant consumers calling `:resubscribe` now
-  receive the streaming response instead of 404.
+- **A2A `:subscribe` path** — `POST /v1/tasks/{id}:subscribe` is the spec-correct
+  HTTP+JSON binding (A2A spec §11.3.2). Route confirmed as `:subscribe`; a stale
+  `:resubscribe` alias was removed so only the spec-correct path is registered.
 
 - **Bootstrap 401 carries `WWW-Authenticate`** — `admin.py` bootstrap-path rejection
   (invalid/expired token) now includes `Bearer resource_metadata="..."` in

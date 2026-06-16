@@ -36,7 +36,8 @@ class AuthRuntime:
     bootstrap: BootstrapManager
     oauth: TokenVerifier | None
     trusted_proxies: list[str]
-    prm_url: str  # absolute /.well-known/oauth-protected-resource URL
+    prm_url: str       # path-suffixed /.well-known/oauth-protected-resource/mcp (for /mcp routes)
+    bare_prm_url: str  # bare /.well-known/oauth-protected-resource (for /v1/, /ag-ui/ routes)
     identity_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(100))
     unauth_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(30))
 
@@ -64,10 +65,11 @@ def _prm_challenge(prm_url: str) -> str:
 
 
 def _unauthorized(request: Request, runtime: AuthRuntime, detail: str) -> HTTPException:
-    # P6-03: every 401 carries a WWW-Authenticate challenge pointing at the
-    # PRM (RFC 9728 §3.1) so OAuth discovery can start from any protected
-    # surface, not just /mcp.
-    challenge = _prm_challenge(runtime.prm_url)
+    # P6-03 + GH-33: MCP routes use the path-suffixed PRM; all other protected
+    # routes (A2A /v1/*, AG-UI /ag-ui/*) use the bare PRM. Both point to valid
+    # RFC 9728 endpoints; the resource value in each matches the accessed surface.
+    prm = runtime.prm_url if request.url.path.startswith("/mcp") else runtime.bare_prm_url
+    challenge = _prm_challenge(prm)
     return HTTPException(
         status_code=401, detail=detail, headers={"WWW-Authenticate": challenge}
     )

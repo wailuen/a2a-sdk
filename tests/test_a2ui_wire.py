@@ -282,3 +282,130 @@ def test_get_system_prompt_section_nonempty_when_types_registered():
         assert "KpiCard" in section, (
             f"section must list KpiCard (always registered); got:\n{section}"
         )
+
+
+# ── H2: get_system_prompt_section() schema + examples ───────────────────────
+
+def test_get_system_prompt_section_includes_examples():
+    """H2: section must include a few-shot example block when common types are registered."""
+    from agent_sdk.a2ui.catalog import get_system_prompt_section
+    from agent_sdk.models.content_types import registered_content_types
+
+    section = get_system_prompt_section()
+    if not registered_content_types():
+        return  # registry empty in bare test env — skip
+    assert "Examples:" in section, f"section must contain 'Examples:'; got:\n{section}"
+    assert "KpiCard" in section
+
+
+def test_get_system_prompt_section_has_compact_schema_for_kpicard():
+    """H2: KpiCard entry must show a compact schema, not just a plain field list."""
+    from agent_sdk.a2ui.catalog import get_system_prompt_section
+    from agent_sdk.models.content_types import registered_content_types
+
+    section = get_system_prompt_section()
+    if not registered_content_types():
+        return
+    # Compact schema has metrics key
+    assert "metrics" in section, f"compact schema for KpiCard must mention 'metrics'; got:\n{section}"
+
+
+# ── M1: SurfaceRegistry duplicate createSurface warning ──────────────────────
+
+def test_surface_registry_open_warns_on_duplicate():
+    """M1: Opening an already-open surface must emit a UserWarning."""
+    import warnings
+    from agent_sdk.a2ui.translator import SurfaceRegistry
+
+    reg = SurfaceRegistry()
+    reg.open("surf-1")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        reg.open("surf-1")
+    assert len(caught) == 1
+    assert issubclass(caught[0].category, UserWarning)
+    assert "surf-1" in str(caught[0].message)
+
+
+def test_surface_registry_open_no_warn_for_new_surface():
+    """M1: Opening a fresh surface must not emit any warning."""
+    import warnings
+    from agent_sdk.a2ui.translator import SurfaceRegistry
+
+    reg = SurfaceRegistry()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        reg.open("surf-new")
+    assert not caught
+
+
+def test_surface_registry_reopen_after_close_no_warn():
+    """M1: Closing then re-opening a surface must not warn."""
+    import warnings
+    from agent_sdk.a2ui.translator import SurfaceRegistry
+
+    reg = SurfaceRegistry()
+    reg.open("surf-x")
+    reg.close("surf-x")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        reg.open("surf-x")
+    assert not caught
+
+
+# ── M2 + M3: apply_data_model_update ────────────────────────────────────────
+
+def test_apply_data_model_update_sets_value():
+    """M3: Passing a value sets the field in the model dict."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    model: dict = {}
+    apply_data_model_update(model, "/title", "Hello")
+    assert model["title"] == "Hello"
+
+
+def test_apply_data_model_update_explicit_none_sets_null():
+    """M3: Passing None (explicit null) sets the field to None — not a no-op."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    model: dict = {"title": "existing"}
+    apply_data_model_update(model, "/title", None)
+    assert "title" in model
+    assert model["title"] is None
+
+
+def test_apply_data_model_update_missing_is_noop():
+    """M3: Passing MISSING leaves the field unchanged."""
+    from agent_sdk.a2ui.translator import MISSING, apply_data_model_update
+
+    model: dict = {"title": "keep"}
+    apply_data_model_update(model, "/title", MISSING)
+    assert model["title"] == "keep"
+
+
+def test_apply_data_model_update_rejects_escape_pointer():
+    """M2: Pointer starting with // or containing /.. must raise ValueError."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    with pytest.raises(ValueError, match="escapes"):
+        apply_data_model_update({}, "//escape", "bad")
+
+    with pytest.raises(ValueError, match="escapes"):
+        apply_data_model_update({}, "/foo/../bar", "bad")
+
+
+def test_apply_data_model_update_rejects_non_root_pointer():
+    """M2: Pointer not starting with / must raise ValueError."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    with pytest.raises(ValueError, match="root-relative"):
+        apply_data_model_update({}, "title", "bad")
+
+
+def test_apply_data_model_update_nested_path():
+    """M2+M3: Nested pointer /a/b creates intermediate dicts and sets leaf."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    model: dict = {}
+    apply_data_model_update(model, "/metrics/0", {"label": "IRR", "value": 0.18})
+    assert model["metrics"]["0"] == {"label": "IRR", "value": 0.18}

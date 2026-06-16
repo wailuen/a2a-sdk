@@ -32,7 +32,7 @@ from ..models.a2a import (
     TextPart,
 )
 from ..models.content_types import A2UI_MIME_TYPE, ContentModel
-from ..models.errors import AgentError, ErrorCategory
+from ..models.errors import AgentError, ErrorCategory, WireError
 from ..tasks.store import TaskRecord, TaskStore
 from .events import (
     ArtifactEvent,
@@ -84,9 +84,15 @@ def _status_frame(record: TaskRecord, *, final: bool = False) -> dict[str, Any]:
 
 
 def _set_status(
-    record: TaskRecord, state: TaskState, message: Message | None = None
+    record: TaskRecord,
+    state: TaskState,
+    message: Message | None = None,
+    *,
+    error: WireError | None = None,
 ) -> None:
-    record.task.status = TaskStatus(state=state, message=message, timestamp=_now())
+    # stateTransitionHistory (A2A v0.3.0 §2) is not implemented: the Task
+    # model has no such field and the card advertises stateTransitionHistory=false.
+    record.task.status = TaskStatus(state=state, message=message, timestamp=_now(), error=error)
 
 
 def _validate_a2ui_wire(payload: "ContentModel", a2ui_messages: list[Any]) -> None:
@@ -255,6 +261,7 @@ async def run_task_worker(
                 # cap check + resume-channel registration; at the cap this
                 # raises and becomes a typed task failure (§5.2)
                 store.mark_interrupted(task.id, event.interrupt_id)
+                event.expires_at = record.interrupt_deadline
                 state = (
                     TaskState.AUTH_REQUIRED
                     if "auth" in event.reason
@@ -283,10 +290,12 @@ async def run_task_worker(
                         task.history = (task.history or []) + [message]
                     _set_status(record, TaskState.COMPLETED, message)
                 else:
+                    error_msg = event.error or "task failed"
                     _set_status(
                         record,
                         TaskState.FAILED,
-                        _agent_message(record, event.error or "task failed"),
+                        _agent_message(record, error_msg),
+                        error=WireError(code=-32603, message=error_msg),
                     )
                 publish(_status_frame(record, final=True), event, final=True)
             else:
@@ -299,12 +308,22 @@ async def run_task_worker(
         # stream closure
         raise
     except AgentError as err:
-        _set_status(record, TaskState.FAILED, _agent_message(record, err.message))
+        wire_err = WireError(
+            code=err.a2a_code if err.a2a_code is not None else -32603,
+            message=err.message,
+        )
+        _set_status(record, TaskState.FAILED, _agent_message(record, err.message), error=wire_err)
         publish(_status_frame(record, final=True), DoneEvent(ok=False, error=err.message), final=True)
         store.close_streams(task.id)
-    except Exception:
-        _set_status(record, TaskState.FAILED, _agent_message(record, "internal error"))
-        publish(_status_frame(record, final=True), DoneEvent(ok=False, error="internal error"), final=True)
+    except Exception as exc:
+        if isinstance(exc, ValueError):
+            wire_err = WireError(code=-32006, message="invalid agent response")
+            msg = "invalid agent response"
+        else:
+            wire_err = WireError(code=-32603, message="internal error")
+            msg = "internal error"
+        _set_status(record, TaskState.FAILED, _agent_message(record, msg), error=wire_err)
+        publish(_status_frame(record, final=True), DoneEvent(ok=False, error=msg), final=True)
         store.close_streams(task.id)
     else:
         store.close_streams(task.id)

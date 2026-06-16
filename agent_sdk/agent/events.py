@@ -87,6 +87,7 @@ class InterruptEvent(LoopEvent):
     message: str
     response_schema: dict[str, Any] = field(default_factory=dict)
     tool_call_id: str | None = None
+    expires_at: float | None = None
 
 
 @dataclass(slots=True)

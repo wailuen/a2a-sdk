@@ -28,7 +28,10 @@ Supported output modes: `text`, `text/plain`, `application/json`,
 activated subset (the A2UI extension URI).
 
 A severed stream **without** a `final: true` frame means re-subscribe via
-`tasks/{id}:subscribe` — that is the documented recovery signal.
+`tasks/{id}:subscribe` — that is the documented recovery signal. Note: the
+HTTP+JSON binding path is `:subscribe` (A2A spec §11.3.2); the operation is
+sometimes called "resubscribe" in informal descriptions but the spec-correct
+path is `:subscribe` for both initial and re-attach subscriptions.
 
 ## AG-UI (`POST /ag-ui/run`, SSE)
 

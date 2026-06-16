@@ -77,7 +77,7 @@ async def test_interrupt_outcome_and_resume(client, fake_model):
 
     frames = await run(
         client,
-        run_body(resume=[{"interrupt_id": intr["id"], "status": "approved", "payload": {}}]),
+        run_body(resume=[{"interrupt_id": intr["id"], "status": "resolved", "payload": {"decision": "approved"}}]),
     )
     types = [f["type"] for f in frames]
     assert types[-1] == "RUN_FINISHED"
@@ -93,7 +93,7 @@ async def test_resume_identity_bound(client, fake_model):
     _, other = client.app.state.auth.api_keys.mint("other", admin=False)
     r = await client.post(
         "/ag-ui/run",
-        json=run_body(resume=[{"interrupt_id": intr["id"], "status": "approved"}]),
+        json=run_body(resume=[{"interrupt_id": intr["id"], "status": "resolved", "payload": {"decision": "approved"}}]),
         headers={"Authorization": f"Bearer {other}"},
     )
     frames = sse_frames(r.text)
