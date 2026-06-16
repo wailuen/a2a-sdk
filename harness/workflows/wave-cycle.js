@@ -1,12 +1,12 @@
 export const meta = {
   name: 'wave-cycle',
-  description: 'Execute one wave: todos plan redteam (SI annotations + registry reuse) → fan-out implement per group → unit zero-tolerance redteam (debug at r3+ and on stall) → phase zero-tolerance redteam (debug at r3+ and on stall) → protocol audit → codify LRNs + register new C-NNN components → archive',
+  description: 'Execute one wave: todos plan redteam (SI annotations + registry reuse) → fan-out implement per group → unit zero-tolerance redteam (debug after >3 failed rounds (r4+) and on stall) → phase zero-tolerance redteam (debug after >3 failed rounds (r4+) and on stall) → protocol audit → codify LRNs + register new C-NNN components → archive',
   phases: [
     { title: 'Parse',          detail: 'Read wave file; extract groups, creates paths, LRN baseline' },
     { title: 'Todos Redteam',  detail: 'Redteam the wave plan: SI risk annotation, registry reuse (Reuses: C-NNN), new component candidate flagging — annotated wave file written back before implement' },
     { title: 'Implement',      detail: 'Fan out todos per group in dependency order; smoke test each' },
-    { title: 'Unit Redteam',   detail: 'Per-group zero-tolerance fix loop (max 5 rounds/group; debug fires at r3+ and on stall)' },
-    { title: 'Phase Redteam',  detail: 'Full-wave zero-tolerance fix loop (max 8 rounds; debug fires at r3+ and on stall)' },
+    { title: 'Unit Redteam',   detail: 'Per-group zero-tolerance fix loop (max 5 rounds/group; debug fires after >3 failed rounds (r4+) and on stall)' },
+    { title: 'Phase Redteam',  detail: 'Full-wave zero-tolerance fix loop (max 8 rounds; debug fires after >3 failed rounds (r4+) and on stall)' },
     { title: 'Protocol Audit', detail: 'A2A/MCP/AG-UI/A2UI conformance — parallel advisors + seam check (protocol-surface waves only)' },
     { title: 'Codify',         detail: 'SDK issue scan (sequential) → parallel LRN capture for critical/high findings → README index update → sequential C-NNN registration for new component candidates' },
     { title: 'Archive',        detail: 'Move wave file to completed/, update plan.md, backfill FR Implementation: fields' },
@@ -427,8 +427,8 @@ for (const group of wave.groups) {
     }
 
     // Debug fires at rounds 3–4 (unconditionally) and whenever stalled; round 5 exits above.
-    if (uRound >= 3 || stalled) {
-      log((stalled ? 'Stall detected — ' : 'Round 3+ — ') + 'escalating to debug agent')
+    if (uRound > 3 || stalled) {
+      log((stalled ? 'Stall detected — ' : 'Round 4+ — ') + 'escalating to debug agent')
       await agent(
         'Fix-loop requires fresh-lens analysis' + (stalled ? ' (stalled: same findings across 2 rounds)' : ' (round ' + uRound + ')') + '.\n\n' +
         'Prior findings:\n' + JSON.stringify(rt.findings, null, 2) + '\n\n' +
@@ -522,8 +522,8 @@ while (true) {
   }
 
   // Debug fires at rounds 3–7 (unconditionally) and whenever stalled; round 8 exits above.
-  if (pRound >= 3 || pStalled) {
-    log((pStalled ? 'Stall detected — ' : 'Round 3+ — ') + 'escalating to debug agent')
+  if (pRound > 3 || pStalled) {
+    log((pStalled ? 'Stall detected — ' : 'Round 4+ — ') + 'escalating to debug agent')
     await agent(
       'Phase fix-loop requires fresh-lens analysis' + (pStalled ? ' (stalled)' : ' (round ' + pRound + ')') + '.\n\n' +
       'Findings:\n' + JSON.stringify(rt.findings, null, 2) + '\n\n' +

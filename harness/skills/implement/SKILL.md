@@ -74,14 +74,14 @@ redteam at zero findings before the next unit launches.
       4. Dispatch fix specialists in parallel (one per file bucket).
       5. Accumulate critical/high findings for the phase-end codify pass
          (LRN assignment happens after the unit and phase loops complete).
-      6. After 3 rounds without zero (or stall detected): dispatch `debug`
+      6. After more than 3 rounds without zero (round 4+, or stall detected): dispatch `debug`
          for root-cause analysis. After 5 rounds: move todo to
          `workspace/todos/deferred/` with round history; continue next unit.
    f. **Register new shared components** if the unit landed `Creates: shared` —
       append a row to `workspace/components/README.md`.
    g. **Mark todo `[x]`** in the wave file.
 6. **Phase-scoped break-fix loop (zero-tolerance)** — same cycle as 5e but
-   scope = all `Creates:` across the whole wave. Debug fires at round 3+ (not 5)
+   scope = all `Creates:` across the whole wave. Debug fires after >3 failed rounds (round 4+, not 5)
    and on stall. Round budget: 8 before halting.
 7. **Protocol Audit** — if `Creates:` paths touch any protocol surface
    (`src/routes/a2a`, `src/routes/mcp`, `src/routes/oauth`,

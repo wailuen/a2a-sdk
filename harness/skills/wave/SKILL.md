@@ -66,8 +66,8 @@ For each wave whose `Depends:` items are all in `completed/`:
    - **Todos Redteam** — annotates todos with `SI:` fields and `Reuses: C-NNN` before
      implementation; flags new component candidates for registration.
    - **Implement** — parallel groups, test-first, SI-enforcing.
-   - **Unit Redteam** — zero-tolerance per group (debug fires at r3+ and stall).
-   - **Phase Redteam** — zero-tolerance full wave (debug fires at r3+ and stall).
+   - **Unit Redteam** — zero-tolerance per group (debug fires after >3 failed rounds (r4+) and on stall).
+   - **Phase Redteam** — zero-tolerance full wave (debug fires after >3 failed rounds (r4+) and on stall).
    - **Protocol Audit** — `a2a-advisor`, `mcp-advisor`, `ag-ui-advisor`, `a2ui-advisor` + seam check (protocol surfaces only).
    - **Codify** — SDK issue scan (sequential) → parallel LRN capture for critical/high
      findings → README index update → sequential C-NNN registration for new component

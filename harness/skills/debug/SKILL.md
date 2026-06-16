@@ -1,7 +1,7 @@
 ---
 name: debug
 category: core
-description: "Fresh-lens debug: read code cold, run tests, diagnose root cause from first principles — no anchoring on prior fix attempts. Automatically invoked at redteam round 3+ by the wave-cycle workflow."
+description: "Fresh-lens debug: read code cold, run tests, diagnose root cause from first principles — no anchoring on prior fix attempts. Automatically invoked after >3 failed redteam rounds (round 4+) by the wave-cycle workflow."
 ---
 
 # /debug — Fresh-Lens Debug
@@ -24,7 +24,7 @@ formed its own hypothesis.
 
 ## When to use
 
-- A redteam fix loop has stalled at 3+ rounds without converging
+- A redteam fix loop has stalled after more than 3 rounds without converging
 - Tests pass individually but fail together (cross-unit drift)
 - A finding recurs after a fix that "should have worked"
 - The implementation appears structurally wrong, not just patchy
@@ -81,7 +81,7 @@ auth or credential resolution — mock the resolution layer correctly, not absen
 
 ## Integration
 
-- **wave-cycle.js** — invokes automatically at unit redteam round 3+ and phase
-  redteam round 3+; label prefix `debug:unit:` / `debug:phase:`
+- **wave-cycle.js** — invokes automatically after >3 failed unit redteam rounds (round 4+) and phase
+  redteam round 4+; label prefix `debug:unit:` / `debug:phase:`
 - **`/redteam`** — invoke standalone if critical findings persist across 2 passes
 - **`/codify`** — call after every non-obvious root cause
