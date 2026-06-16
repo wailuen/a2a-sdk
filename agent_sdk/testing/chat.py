@@ -159,6 +159,8 @@ class ChatDriver:
             "threadId": thread_id,
             "runId": uuid.uuid4().hex,
             "messages": list(messages),
+            "tools": [],
+            "context": [],
             "forwardedProps": {"a2uiClientCapabilities": self._caps},
             "state": {},
         }

@@ -60,6 +60,8 @@ class FilePart(_Wire):
         f = values.get("file") if isinstance(values, dict) else None
         if isinstance(f, dict) and "bytes" in f and "uri" in f:
             raise ValueError("FilePart.file must have bytes XOR uri, not both")
+        elif isinstance(f, dict) and "bytes" not in f and "uri" not in f:
+            raise ValueError("FilePart.file must contain exactly one of 'bytes' or 'uri'")
         return values
 
 
@@ -108,7 +110,7 @@ class TaskStatus(_Wire):
     state: TaskState
     message: Message | None = None
     timestamp: str | None = None
-    error: WireError | None = None
+    error: WireError | None = None  # intentional extension — not in A2A v0.3.0 spec; ignored by spec-compliant consumers
 
 
 class Artifact(_Wire):

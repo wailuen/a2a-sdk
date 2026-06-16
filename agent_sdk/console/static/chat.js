@@ -537,8 +537,54 @@ export function render(pane, ctx) {
               input.placeholder = "Message the agent… (Enter to send, Shift+Enter for newline)";
               systemLine(`run error: ${json.message || "unknown"}`);
               break;
+            case "REASONING_MESSAGE_START":
+              systemLine("[thinking...]");
+              break;
+            case "REASONING_MESSAGE_CONTENT": {
+              // accumulate reasoning delta into a muted italic line; reuse the
+              // same system-line element that was appended for this message
+              const rBuf = textBuffers.get("__reasoning__") ?? (() => {
+                const body = el("div", { class: "chat-msg-body" });
+                const node = el("div", { class: "chat-msg agent" },
+                  el("div", { class: "chat-msg-role dim" }, "thinking"),
+                  body);
+                transcript.appendChild(node);
+                transcript.scrollTop = transcript.scrollHeight;
+                const handle = {
+                  append(delta) {
+                    body.appendChild(document.createTextNode(delta));
+                    transcript.scrollTop = transcript.scrollHeight;
+                  },
+                };
+                textBuffers.set("__reasoning__", handle);
+                return handle;
+              })();
+              if (json.delta) rBuf.append(json.delta);
+              break;
+            }
+            case "REASONING_MESSAGE_END":
+              textBuffers.delete("__reasoning__");
+              systemLine("[/thinking]");
+              break;
+            // intentionally not rendered — server does not emit these types
+            case "REASONING_START":
+            case "REASONING_END":
+            case "REASONING_MESSAGE_CHUNK":
+            case "REASONING_ENCRYPTED_VALUE":
+            case "THINKING_TEXT_MESSAGE_START":
+            case "THINKING_TEXT_MESSAGE_CONTENT":
+            case "THINKING_TEXT_MESSAGE_END":
+            case "STATE_SNAPSHOT":
+            case "STATE_DELTA":
+            case "MESSAGES_SNAPSHOT":
+            case "ACTIVITY_SNAPSHOT":
+            case "ACTIVITY_DELTA":
+            case "RAW":
+            case "THINKING_START":
+            case "THINKING_END":
+              break;
             default:
-              break; // STATE_SNAPSHOT/STATE_DELTA/etc — trace panel only
+              break; // unknown type — trace panel only
           }
         });
       } catch (streamErr) {
@@ -548,6 +594,7 @@ export function render(pane, ctx) {
           systemLine(`SSE stream dropped, reconnecting in ${sseDelay / 1000}s… (attempt ${sseRetries}/${MAX_RETRIES})`);
           await new Promise((r) => setTimeout(r, sseDelay));
           sseDelay = Math.min(sseDelay * 2, MAX_DELAY);
+          body.runId = uuid(); // fresh runId per reconnect attempt — prevents server-side duplicate-run rejection
           resp = await postSse(`${state.base}/ag-ui/run`, body);
           if (resp.ok) {
             await processStream();

@@ -507,3 +507,56 @@ def test_sc_e5_existing_raise_sites_unaffected():
     err = A2AError(None, "some error")
     assert err.code is None
     assert str(err) == "some error"
+
+
+# ---------------------------------------------------------------------------
+# L-9: agui_turn() body must include tools and context (RunAgentInput schema)
+# ---------------------------------------------------------------------------
+
+
+class _CapturingTransport:
+    """httpx async transport that captures the first POST body then returns SSE."""
+
+    def __init__(self, sse_body: bytes) -> None:
+        self._sse_body = sse_body
+        self.captured_body: dict | None = None
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            self.captured_body = json.loads(request.content)
+        stream = httpx.ByteStream(self._sse_body)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=stream,
+        )
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+
+async def test_l9_agui_turn_body_includes_tools_and_context():
+    """agui_turn() POST body must include 'tools' and 'context' (RunAgentInput schema)."""
+    frames = [
+        {"type": "RUN_STARTED", "runId": "r1", "threadId": "t1"},
+        {"type": "TEXT_MESSAGE_START", "messageId": "m1"},
+        {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": "hi"},
+        {"type": "TEXT_MESSAGE_END", "messageId": "m1"},
+        {"type": "RUN_FINISHED", "outcome": {"type": "success"}},
+    ]
+    sse_body = sse_lines(frames)
+    transport = _CapturingTransport(sse_body)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        driver = ChatDriver(client)
+        await driver.agui_turn("hello", "thread-1", [])
+
+    body = transport.captured_body
+    assert body is not None, "no POST body was captured"
+    assert "tools" in body, f"'tools' key missing from agui_turn() POST body: {list(body.keys())}"
+    assert "context" in body, f"'context' key missing from agui_turn() POST body: {list(body.keys())}"
+    assert body["tools"] == [], f"expected tools=[], got {body['tools']!r}"
+    assert body["context"] == [], f"expected context=[], got {body['context']!r}"

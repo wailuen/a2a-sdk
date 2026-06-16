@@ -19,6 +19,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from pydantic import ValidationError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -303,3 +304,42 @@ def test_build_artifact_a2ui_enabled_yields_datapart_with_a2ui_mime():
         f"A2UI message array must have 4 messages (create/update/updateData/delete); "
         f"got {len(data_part.data)}"
     )
+
+
+# ===========================================================================
+# Group 6 — FilePart.file XOR validation (L-5)
+# ===========================================================================
+
+
+def test_file_part_neither_bytes_nor_uri_raises():
+    """FilePart with an empty file dict (neither bytes nor uri) must be rejected
+    by the _file_xor validator."""
+    from agent_sdk.models.a2a import FilePart
+
+    with pytest.raises(ValidationError):
+        FilePart(kind="file", file={})
+
+
+def test_file_part_bytes_only_is_valid():
+    """FilePart with only bytes in the file dict must be accepted."""
+    from agent_sdk.models.a2a import FilePart
+
+    part = FilePart(kind="file", file={"bytes": "aGVsbG8="})
+    assert part.file.bytes == "aGVsbG8="  # type: ignore[union-attr]
+
+
+def test_file_part_uri_only_is_valid():
+    """FilePart with only uri in the file dict must be accepted."""
+    from agent_sdk.models.a2a import FilePart
+
+    part = FilePart(kind="file", file={"uri": "https://example.com/file.pdf"})
+    assert part.file.uri == "https://example.com/file.pdf"  # type: ignore[union-attr]
+
+
+def test_file_part_both_bytes_and_uri_raises():
+    """FilePart with both bytes and uri present must be rejected by the _file_xor
+    validator."""
+    from agent_sdk.models.a2a import FilePart
+
+    with pytest.raises(ValidationError):
+        FilePart(kind="file", file={"bytes": "aGVsbG8=", "uri": "https://example.com/file.pdf"})

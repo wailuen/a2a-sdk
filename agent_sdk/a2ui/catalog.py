@@ -110,13 +110,44 @@ _FEW_SHOT_EXAMPLES: dict[str, str] = {
         '{"component":"ComparisonTable","columns":[{"key":"name","label":"Name"},'
         '{"key":"value","label":"Value"}],"rows":[{"name":"Alpha","value":1.2}]}'
     ),
+    # FundPerformance uses camelCase aliases on the wire (snake_case Python fields
+    # must NOT appear in serialised output — always call wire() / by_alias=True).
+    "FundPerformance": (
+        '{"component":"FundPerformance","fundName":"Acme Fund III",'
+        '"irr":0.182,"tvpi":1.74,"dpi":0.95,"rvpi":0.79,'
+        '"netIrr":0.164,"grossIrr":0.211,"moic":1.74,'
+        '"asOfDate":"2025-12-31","nav":{"amount":320000000,"currency":"USD"},'
+        '"asOfQuarter":4,"asOfYear":2025}'
+    ),
 }
 
 _COMPACT_SCHEMAS: dict[str, str] = {
     "KpiCard": '{"metrics":[{label,value,unit?,trend?}],"title?":str}',
     "TimeSeriesChart": '{"chart_type":"line|area|bar","title":str,"x_key":str,"y_key":str,"total_count":int,"data":[{date,value,label?}]}',
     "ComparisonTable": '{"columns":[{key,label,type?}],"rows":[{...}],"title?":str}',
-    "FundPerformance": '{"fundName?":str,"irr?":float,"tvpi?":float,"dpi?":float,"rvpi?":float,"netIrr?":float,"grossIrr?":float,"asOfDate?":str,"nav?":{"amount?":float,"currency?":str}}',
+    "BarChart": '{"bars":[{category:str,value:float}],"title?":str,"x_key?":str,"y_key?":str}',
+    "EntityList": '{"entity_type":str,"items":[{id,name,summary?}],"total_count?":int,"has_more?":bool,"title?":str,"showing?":int}',
+    # prose exception — see annotation in get_system_prompt_section()
+    "MarketBriefing": "(prose exception) return MarketBriefing(title=..., as_of=..., prose='...markdown...') — the wire value is a markdown string, not a card",
+    # WaterfallSegment sub-shape: {label,value,type,cumulative,tooltip?}
+    # type is one of: initial|final|inflow|outflow|gain|loss|subtotal
+    "WaterfallChart": '{"title":str,"segments":[{label:str,value:float,type:"initial|final|inflow|outflow|gain|loss|subtotal",cumulative:float,tooltip?:str}],"subtitle?":str,"currency?":str,"entity_name?":str,"as_of_date?":str,"date_range?":{"start":str,"end":str}}',
+    # MultiCategoryPeriod sub-shape: {period,categories:{name:{value,count?,metadata?}},period_total?}
+    # date_range uses first/last keys (NOT start/end — frozen divergence from WaterfallChart)
+    "MultiCategoryChart": '{"title":str,"periods":[{period:str,categories:{name:{value:float,count?:int}},period_total?:float}],"summary":{"by_category":{name:{value,count?}},"grand_total?":float,"period_count":int},"date_range":{"first":str,"last":str},"subtitle?":str,"unit_label?":str,"currency?":str,"entity_name?":str,"item_count?":int}',
+    # FundPerformance is the sole camelCase-wire type — ALL field names use camelCase aliases
+    "FundPerformance": '{"fundName?":str,"pbId?":str,"irr?":float,"tvpi?":float,"dpi?":float,"rvpi?":float,"netIrr?":float,"grossIrr?":float,"moic?":float,"quartile?":int,"asOfDate?":str,"asOfQuarter?":int,"asOfYear?":int,"nav?":{"amount?":float,"currency?":str},"calledDownPct?":float,"dryPowder?":{"amount?":float,"currency?":str},"dryPowderPct?":float,"distributed?":{"amount?":float,"currency?":str},"remainingValue?":{"amount?":float,"currency?":str},"distributedPlusRemaining?":{"amount?":float,"currency?":str}}',
+    # EmailMessage sub-shape: {id,conversation_id?,subject,preview,from:{name,email},to_recipients:[{name,email}],received_at,is_read,has_attachments,importance,flag_status?,web_link}
+    "EmailList": '{"messages":[{id:str,subject:str,preview:str,from:{name,email},to_recipients:[{name,email}],received_at:str,is_read:bool,has_attachments:bool,importance:"low|normal|high",flag_status?:"notFlagged|flagged|complete",web_link:str}],"total_count":int,"has_more":bool,"folder?":str,"query?":str}',
+    # CalendarEvent sub-shape: {id,subject,start,end,is_all_day,is_cancelled,is_recurring,organizer:{name,email},attendees_count,importance,show_as,location?,...}
+    # date_range uses start/end keys (same as WaterfallChart, frozen)
+    "CalendarEvents": '{"events":[{id:str,subject:str,start:str,end:str,is_all_day:bool,is_cancelled:bool,is_recurring:bool,organizer:{name,email},attendees_count:int,importance:"low|normal|high",show_as:"free|tentative|busy|oof|workingElsewhere|unknown",location?:{display_name?,is_online?,join_url?},response_status?:"accepted|tentative|declined|none",web_link:str}],"date_range":{"start":str,"end":str},"total_count":int,"has_more":bool}',
+    # UserPresence sub-shape: {availability,activity,status_message?}
+    # OutOfOfficeSettings sub-shape: {is_enabled,start_date?,end_date?,internal_message?,external_message?}
+    "UserProfile": '{"id":str,"display_name":str,"email":str,"given_name?":str,"surname?":str,"job_title?":str,"department?":str,"office_location?":str,"mobile_phone?":str,"business_phones":list,"manager?":{"id":str,"display_name":str,"email":str,"job_title?":str},"presence?":{"availability":str,"activity":str},"photo_url?":str,"out_of_office?":{"is_enabled":bool}}',
+    "UserList": '{"users":[{id:str,display_name:str,email:str,job_title?:str,department?:str,presence?:{availability,activity}}],"total_count":int,"has_more":bool,"query?":str}',
+    # DocumentItem sub-shape: {id,name,type?,modified?,link?,size?,web_url?,last_modified?,modified_by?}
+    "DocumentList": '{"documents":[{id:str,name:str,type?:str,modified?:str,link?:str,size?:float,web_url?:str,last_modified?:str,modified_by?:str}],"total_count?":int,"has_more?":bool}',
 }
 
 
@@ -147,6 +178,11 @@ def get_system_prompt_section() -> str:
     for cls in sorted(types.values(), key=lambda c: c.component):
         tier = " [extended]" if cls.extended else ""
         schema = _COMPACT_SCHEMAS.get(cls.component) or _field_summary(cls)
+        if cls.component == "MarketBriefing":
+            schema += (
+                " [prose — return MarketBriefing(title=..., as_of=..., prose='...markdown...')"
+                " — rendered as plain markdown, not a structured card]"
+            )
         lines.append(f"- {cls.component}{tier}: {schema}")
 
     # Few-shot examples for the most common types (only emit if registered)

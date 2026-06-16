@@ -118,6 +118,9 @@ class ToolSet:
                         f"tool {fn.__name__!r}: *args and **kwargs are not supported"
                     )
             description = inspect.getdoc(fn) or fn.__name__.replace("_", " ")
+            resolved_title = title if title is not None else " ".join(
+                word.capitalize() for word in _tool_name.split("_")
+            )
             self.decls.append(
                 ToolDecl(
                     fn=fn,
@@ -128,7 +131,7 @@ class ToolSet:
                     sample=sample,
                     input_model=input_model,
                     adapter_params=adapter_params,
-                    title=title,
+                    title=resolved_title,
                     annotations=merged_annotations,
                     tags=list(tags or []),
                 )

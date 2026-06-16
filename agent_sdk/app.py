@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from asyncio import sleep as _asyncio_sleep
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
@@ -49,6 +50,8 @@ from .tasks.store import TaskStore
 _DEV_MASTER_KEY = "agent-sdk-dev-mode-master-key-do-not-use-in-production"
 
 _SWEEP_INTERVAL_SECONDS = 60.0
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -253,6 +256,13 @@ class Agent:
         registry = ToolRegistry(self.toolsets, dict(self._sources))
         allowed_components = settings.a2ui_allowed_components
         self._validate_emits(registry, allowed_components=allowed_components)
+
+        for entry in registry.all():
+            if not entry.decl.tags:
+                logger.warning(
+                    "Skill '%s' has empty tags — it will not be discoverable by tag in A2A catalogs.",
+                    entry.name,
+                )
 
         credential_store = self._build_credential_store()
         api_keys = ApiKeyStore(credential_store)

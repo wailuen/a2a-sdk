@@ -192,6 +192,8 @@ async def _dispatch(app: Any, message: dict[str, Any]) -> dict[str, Any] | None:
             result = await _handle_tools_call(app, params)
             if isinstance(result, dict) and "__jrpc_error__" in result:
                 return _error(request_id, _INVALID_PARAMS, result["__jrpc_error__"])
+            if isinstance(result, dict) and "__jrpc_not_found__" in result:
+                return _error(request_id, _METHOD_NOT_FOUND, result["__jrpc_not_found__"])
             return _result(request_id, result)
         return _error(request_id, _METHOD_NOT_FOUND, f"unknown method: {method}")
     except Exception:
@@ -295,9 +297,12 @@ def _tool_text(artifact: Any) -> str:
 
 
 async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Validate → invoke → fold. Protocol-shape faults (unknown name, non-dict
-    arguments) surface as JSON-RPC -32602 via the ``__jrpc_error__`` sentinel;
-    anything raised INSIDE the tool — AgentError or otherwise — is an
+    """Validate → invoke → fold. Protocol-shape faults surface via sentinels:
+    - ``__jrpc_error__``: invalid-params (-32602) — missing/non-string name,
+      non-dict arguments.
+    - ``__jrpc_not_found__``: method-not-found (-32601) — unknown tool name
+      (Tier 2 tools are indistinguishable from unknown on this surface, §5.6).
+    Anything raised INSIDE the tool — AgentError or otherwise — is an
     ``isError: true`` RESULT, never a JSON-RPC error (§5.5)."""
     name = params.get("name")
     if not isinstance(name, str) or not name:
@@ -312,7 +317,7 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
     # A Tier 2 tool must be indistinguishable from an unknown name on this
     # surface (§5.6 — MCP exposes Tier 1 only).
     if entry is None or entry.tier != 1:
-        return {"__jrpc_error__": f"unknown tool: {name}"}
+        return {"__jrpc_not_found__": f"unknown tool: {name}"}
 
     try:
         artifact = await entry.invoke(arguments, app.state.adapters)
@@ -414,6 +419,18 @@ async def mcp_post(
             return JSONResponse(
                 status_code=404, content={"error": "session not found"}, headers=base_headers
             )
+    # If the header is absent on a non-initialize request AND the owner already
+    # has at least one live session, the client is misbehaving — reject with 400
+    # so it can recover via re-initialize rather than silently creating orphaned
+    # dispatch without a session context.
+    if presented_session is None and not is_initialize:
+        owner_has_session = any(rec[1] == owner for rec in sessions.values())
+        if owner_has_session:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Mcp-Session-Id required"},
+                headers=base_headers,
+            )
 
     # Per-call forwarded credentials are request-scoped: bind around dispatch
     # (synchronous, same task as the tool invoke) and unbind in finally.
@@ -456,6 +473,7 @@ async def mcp_get(
     if origin is not None and origin not in request.app.state.cors_origins:
         raise HTTPException(status_code=403, detail="origin not allowed")
 
+    # Last-Event-ID not implemented: server emits no server-initiated messages (listChanged=False), so nothing to resume.
     async def heartbeats() -> AsyncIterator[bytes]:
         # Padding comment forces proxy buffers to flush the first chunk so the
         # client marks the channel open immediately.

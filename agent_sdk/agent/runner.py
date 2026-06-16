@@ -120,7 +120,9 @@ def _validate_a2ui_wire(payload: "ContentModel", a2ui_messages: list[Any]) -> No
         )
 
     # For domain cards (non-standard-catalog types): also validate wire() output
-    # directly. Standard Profile types are Pydantic-validated so wire() is safe.
+    # directly. Standard Profile types are Pydantic-validated via _Wire.wire() /
+    # model_dump(exclude_none=True), so structural conformance is guaranteed without
+    # re-checking here.
     if cls.catalog_id != _CATALOG_ID:
         try:
             wire_val = payload.wire()

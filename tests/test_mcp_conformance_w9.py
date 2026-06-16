@@ -404,3 +404,62 @@ def test_sc_c5_tool_name_exactly_64_ok(settings, fake_model):
     app = agent.build_app()  # should not raise
     app.state.credential_store.close()
     gc.collect()
+
+
+# ---------------------------------------------------------------------------
+# SC-C6: Auto-derived title for tools registered without explicit title=
+# ---------------------------------------------------------------------------
+
+
+def test_sc_c6_auto_derived_title_snake_case():
+    """A tool registered via @tools.tool() without title= gets an auto-derived
+    title from its snake_case function name (e.g. get_user_profile → 'Get User Profile')."""
+    extra = ToolSet()
+
+    @extra.tool(tier=1, read_only=True)
+    async def get_user_profile() -> None:
+        """Get user profile."""
+
+    decl = extra.decls[0]
+    assert decl.title == "Get User Profile", (
+        f"expected auto-derived title 'Get User Profile', got {decl.title!r}"
+    )
+
+
+def test_sc_c6_explicit_title_not_overridden():
+    """A tool registered with an explicit title= must keep that title exactly."""
+    extra = ToolSet()
+
+    @extra.tool(tier=1, read_only=True, title="My Custom Title")
+    async def get_user_profile() -> None:
+        """Get user profile."""
+
+    decl = extra.decls[0]
+    assert decl.title == "My Custom Title", (
+        f"explicit title should be preserved, got {decl.title!r}"
+    )
+
+
+async def test_sc_c6_auto_title_appears_in_tools_list_wire(client):
+    """A tool with no explicit title= must appear with its auto-derived title
+    in the tools/list wire response."""
+    headers = await _mcp_init(client)
+
+    r = await client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    tools = r.json()["result"]["tools"]
+    echo = next((t for t in tools if t["name"] == "echo"), None)
+    assert echo is not None, "echo tool not found in tools/list"
+    # echo is registered with explicit title="Echo" in example/agent.py
+    assert echo.get("title") == "Echo", (
+        f"echo title should be 'Echo', got {echo.get('title')!r}"
+    )
+    demo_kpis = next((t for t in tools if t["name"] == "demo_kpis"), None)
+    assert demo_kpis is not None, "demo_kpis tool not found in tools/list"
+    assert demo_kpis.get("title") == "Demo Kpis", (
+        f"demo_kpis title should be 'Demo Kpis', got {demo_kpis.get('title')!r}"
+    )
