@@ -1,7 +1,7 @@
 ---
 name: acceptance
 category: quality
-description: "Autonomous acceptance gate: generate 30+ scenario seed files, drive live multi-turn AG-UI conversations against a provisioned agent, judge-score each turn 1–10 for content coherency, self-heal failures (classify → fix → restart → re-test), and reach 100% pass before returning. Optional --ux path runs the same scenarios sequentially through the admin test console via Playwright, adding a rendering fidelity score per A2UI component type. Requires /provision to have run (reads admin key from workspace/adr/ADR-000-<env>-credentials.md). Never exits with open failures."
+description: "Autonomous acceptance gate: generate 30+ scenario seed files, drive live multi-turn conversations against a provisioned agent on BOTH A2A (message/send) and AG-UI (POST /run SSE) transports in parallel, judge-score each turn 1–10 for content coherency per transport, self-heal failures (classify → fix → restart → re-test), and reach 100% pass on both paths before returning. Optional --ux path runs the same scenarios sequentially through the admin test console via Playwright, adding a rendering fidelity score per A2UI component type. Requires /provision to have run (reads admin key from workspace/adr/ADR-000-<env>-credentials.md). Never exits with open failures."
 ---
 
 # /acceptance — Autonomous acceptance gate
@@ -15,7 +15,7 @@ not return until all scenarios pass or the round budget is exhausted.
 
 ```
 /acceptance [--env dev|prod] [--url <base-url>] [--ux] [--scenario <id>]
-            [--rerun-failing] [--regenerate]
+            [--rerun-failing] [--regenerate] [--transport a2a|agui|both]
 ```
 
 - `--env` — which ADR-000 to read for the admin key (`dev` default)
@@ -25,6 +25,7 @@ not return until all scenarios pass or the round budget is exhausted.
 - `--rerun-failing` — re-run scenarios that failed in `latest.json`
 - `--regenerate` — rebuild all seed files (preserves hand-annotated fields:
   `expected_tools`, `expected_content_types`, `max_turns`)
+- `--transport a2a|agui|both` — restrict which API path(s) to test (`both` default)
 
 ## Lifecycle position
 
@@ -32,7 +33,7 @@ not return until all scenarios pass or the round budget is exhausted.
 /wave         → build + zero-tolerance redteam + protocol conformance
 /agent-verify → A2A/AG-UI/A2UI/MCP conformance + OAuth chain
 /provision    → boot real server, seed credentials, write ADR-000   ← prerequisite
-/acceptance   → domain correctness: 30+ scenarios, self-healing to 100%
+/acceptance   → domain correctness: 30+ scenarios × 2 transports, self-healing to 100%
 /acceptance --ux → same + rendering fidelity through the rendered UI
 ```
 
@@ -123,7 +124,12 @@ Update `workspace/scenarios/README.md` with one row per new file.
 
 ---
 
-## Phase 2A — API path (default, parallel)
+## Phase 2A — Dual-path API (A2A + AG-UI, default)
+
+Each scenario runs on **both** transports concurrently. A scenario passes only
+when **both** paths score ≥ 7. Use `--transport a2a|agui` to restrict to one.
+
+### Setup
 
 1. **Read all target seed files** into a `scenarios` array: parse each file's
    YAML frontmatter into `{id, name, category, seedQuery, expectedTools,
@@ -133,44 +139,126 @@ Update `workspace/scenarios/README.md` with one row per new file.
    run ID is the highest number + 1 (zero-padded to 3 digits: `run-001`).
    Create `workspace/scenarios/results/` if it does not exist.
 
-3. **Invoke the acceptance-api workflow:**
-   ```
-   Workflow({
-     name: 'acceptance-api',
-     args: {
-       scenarios: <parsed scenarios array>,
-       baseUrl: <base_url>,
-       adminKey: <admin_key>,
-       agentContext: {name, description, tools: [{name, emits, description}]},
-       onlyIds: <empty [] for full run, or list of IDs for --rerun-failing>
-     }
-   })
-   ```
+### A2A transport (per scenario, parallel)
 
-4. **Stream results** as each scenario completes (the workflow fan-out is
-   parallel; log each result as soon as its agent returns):
+Drive each scenario via `POST /v1/message/stream` (SSE) or `POST /v1/message/send`
+(non-streaming), authenticated with `Authorization: Bearer <admin_key>`.
+
+**Turn 1 — A2A request:**
+```json
+POST /v1/message/stream
+Authorization: Bearer <admin_key>
+Content-Type: application/json
+
+{
+  "jsonrpc": "2.0",
+  "method": "message/stream",
+  "id": "<scenario-id>-t1",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [{"kind": "text", "text": "<seed_query>"}]
+    }
+  }
+}
+```
+Parse the SSE stream: collect `TaskStatusUpdateEvent` and `TaskArtifactUpdateEvent`
+events. Extract:
+- Reply text: text parts from message artifacts with `role: "agent"`
+- A2UI artifacts: `DataPart` artifacts with MIME type matching the A2UI extension
+- Tool usage: `TaskStatusUpdateEvent` with `state: "working"` carrying a
+  `TaskCallLog` (if present) to verify `expected_tools`
+
+**Score A2A turn (1–10):**
+- 9–10: reply is relevant, complete, tools match `expected_tools`, A2UI types match `expected_content_types`
+- 7–8: relevant and complete; minor tool or type mismatch
+- 5–6: partial answer; key tool not called or content type missing
+- 3–4: off-topic or wrong tool; task errored but recovered
+- 1–2: task failed (`state: "failed"`); no useful output
+
+**Multi-turn A2A:** For turns 2–N (up to `maxTurns`), send the follow-up
+message in the same task context by including the `taskId` from the first
+response in the next `message/stream` call:
+```json
+"params": { "taskId": "<task-id-from-turn-1>", "message": { ... } }
+```
+
+### AG-UI transport (per scenario, parallel)
+
+Drive each scenario via `POST /run` SSE, authenticated with
+`Authorization: Bearer <admin_key>`.
+
+**Turn 1 — AG-UI request:**
+```json
+POST /run
+Authorization: Bearer <admin_key>
+Content-Type: application/json
+Accept: text/event-stream
+
+{
+  "threadId": "<scenario-id>",
+  "runId": "<scenario-id>-t1",
+  "messages": [{"role": "user", "content": "<seed_query>"}]
+}
+```
+Parse the SSE stream: collect AG-UI events. Extract:
+- Reply text: concatenate `content` from all `TEXT_MESSAGE_CONTENT` events
+- A2UI artifacts: `AGENT_ARTIFACT` events with A2UI MIME type and `data` payload
+- Tool usage: `TOOL_CALL_START` events to verify `expected_tools`
+
+**Score AG-UI turn (1–10):** same 1–10 scale as A2A transport.
+Map AG-UI events to the same criteria — `RUN_ERROR` = 1–2;
+partial TEXT with no artifact when one is expected = 5–6; full match = 9–10.
+
+**Multi-turn AG-UI:** For turns 2–N, append the agent's reply to `messages`
+and send a new `/run` request with the same `threadId` and an incremented `runId`.
+
+### Workflow invocation
+
+```
+Workflow({
+  name: 'acceptance-api',
+  args: {
+    scenarios: <parsed scenarios array>,
+    baseUrl: <base_url>,
+    adminKey: <admin_key>,
+    agentContext: {name, description, tools: [{name, emits, description}]},
+    onlyIds: <[] for full run, or list of IDs for --rerun-failing>,
+    transports: ["a2a", "agui"]   // or ["a2a"] / ["agui"] with --transport flag
+  }
+})
+```
+
+The workflow fans out all scenarios × transports in parallel. Each scenario
+agent runs both transport legs and returns a `SCENARIO_RESULT` with
+`a2aMinScore`, `aguiMinScore`, `passed` (true iff both ≥ 7).
+
+### Stream and write results
+
+3. **Stream results** as each scenario completes:
    ```
-   acceptance-001 [happy-path]  PASS  min=9  turns=3
-   acceptance-002 [edge-case]   FAIL  min=4  turns=3  class=code-bug
+   acceptance-001 [happy-path]  A2A=9  AGUI=9  PASS  turns=3
+   acceptance-002 [edge-case]   A2A=8  AGUI=4  FAIL  turns=3  class=transport-divergence
+   acceptance-003 [multi-turn]  A2A=3  AGUI=3  FAIL  turns=4  class=code-bug
    ...
    ```
 
-5. **Write run results** to `workspace/scenarios/results/run-<NNN>.json`:
+4. **Write run results** to `workspace/scenarios/results/run-<NNN>.json`:
    ```json
    {
      "runId": "run-001",
      "env": "dev",
      "baseUrl": "http://localhost:8000",
+     "transports": ["a2a", "agui"],
      "scenarios": [ <all SCENARIO_RESULT objects> ]
    }
    ```
-   Also write/overwrite `workspace/scenarios/results/latest.json` with the
-   same content. Update per-scenario score history in latest.json:
-   for each scenario, append `{runId, minScore, passed}` to a `history` array.
+   Also write/overwrite `workspace/scenarios/results/latest.json`.
+   Per-scenario `history`: append `{runId, a2aMin, aguiMin, passed}`.
 
-6. **If all pass → done.** Print final report and exit.
+5. **If all pass → done.** Print final report and exit.
 
-7. **If any fail → fix loop** (Phase 3).
+6. **If any fail → fix loop** (Phase 3).
 
 ---
 
@@ -193,13 +281,27 @@ Round N:
 
 ### Fix dispatch by failure class
 
-**`code-bug`** — wrong tool logic, wrong output format, tool errored:
+**`transport-divergence`** — one transport path passed but the other failed for
+the same scenario. The domain logic is correct; the wire format diverges:
+- If A2A passed but AG-UI failed: inspect the AG-UI `/run` SSE event stream.
+  Common causes: missing `TEXT_MESSAGE_CONTENT` events, wrong `AGENT_ARTIFACT`
+  MIME type, or `RUN_ERROR` emitted instead of graceful reply.
+- If AG-UI passed but A2A failed: inspect the A2A `message/stream` SSE events.
+  Common causes: `TaskArtifactUpdateEvent` MIME mismatch, `state: "failed"` on
+  the task, or reply text buried in a non-text Part.
+- Spawn an implementer targeting the route that failed
+  (`agent_sdk/routes/ag_ui.py` or `agent_sdk/routes/a2a.py`). No domain code changes.
+- Server restart required before re-test.
+
+**`code-bug`** — wrong tool logic, wrong output format, tool errored (fails on
+BOTH transports with the same root cause):
 - Spawn an implementer agent for each affected file. Brief: failing scenario +
   turn + judge rationale + actual reply vs expected tool/type.
 - Agent fixes the code. Runs `pytest -q tests/` after.
 - Server restart required before re-test.
 
-**`content-type-gap`** — agent did not emit the expected A2UI content type:
+**`content-type-gap`** — agent did not emit the expected A2UI content type
+(fails on both transports — the type is never produced):
 - Check `src/content.py` (or equivalent). Is the type registered?
   Is `emits=` set on the tool?
 - Spawn implementer to add/fix `emits=` annotation and/or type registration.
@@ -260,10 +362,11 @@ Remaining failures:
   ...
 
 Recommended actions:
-  persona-gap     → /analyze update prd → add FR → /wave → /acceptance
-  code-bug        → /debug <scenario-id> rationale  → fix → /acceptance
-  upstream-issue  → /diagnose source <name>
-  bad-scenario    → /acceptance --scenario <id> --regenerate
+  transport-divergence → inspect failing transport route (ag_ui.py or a2a.py) → fix → /acceptance
+  persona-gap          → /analyze update prd → add FR → /wave → /acceptance
+  code-bug             → /debug <scenario-id> rationale  → fix → /acceptance
+  upstream-issue       → /diagnose source <name>
+  bad-scenario         → /acceptance --scenario <id> --regenerate
 ```
 
 Write the above to `workspace/scenarios/results/run-<NNN>-escalation.md`.
@@ -388,8 +491,8 @@ trajectory across all runs:
 {
   "scenarioId": "acceptance-001",
   "history": [
-    {"runId": "run-001", "minScore": 4, "passed": false},
-    {"runId": "run-002", "minScore": 9, "passed": true}
+    {"runId": "run-001", "a2aMin": 9, "aguiMin": 4, "passed": false},
+    {"runId": "run-002", "a2aMin": 9, "aguiMin": 9, "passed": true}
   ]
 }
 ```
@@ -399,22 +502,28 @@ trajectory across all runs:
 ## Final report format
 
 ```
-## Acceptance — <agent-name>   Run: <run-id>   Env: <env>   Path: API|UX
+## Acceptance — <agent-name>   Run: <run-id>   Env: <env>
 
 Scenarios:   <N> total  |  <P> passed  |  <F> failed  |  <E> escalated
-Min score:   <n>/10  (threshold: 7)
+Transports:  A2A + AG-UI  (both must be ≥ 7 to pass)
+Min score:   A2A <n>/10  |  AG-UI <n>/10  (threshold: 7 each)
 Rounds used: <R>/5
 
 Results:
-  acceptance-001  [happy-path]       PASS  turns=3  min=9
-  acceptance-002  [edge-case]        PASS  turns=4  min=8
-  acceptance-003  [content-type]     PASS  turns=3  min=9    fidelity=9  (UX only)
-  acceptance-004  [interrupt-resume] FAIL  turns=3  min=4  class=code-bug
+  acceptance-001  [happy-path]       A2A=9  AGUI=9  PASS  turns=3
+  acceptance-002  [edge-case]        A2A=8  AGUI=8  PASS  turns=4
+  acceptance-003  [content-type]     A2A=9  AGUI=9  PASS  turns=3    fidelity=9  (UX only)
+  acceptance-004  [interrupt-resume] A2A=9  AGUI=4  FAIL  turns=3    class=transport-divergence
+  acceptance-005  [multi-turn]       A2A=3  AGUI=3  FAIL  turns=4    class=code-bug
   ...
 
-OVERALL:  PASS (all scenarios ≥ 7) | INCOMPLETE (escalated) | FAIL (open failures)
+Transport verdicts:
+  A2A path:   PASS | FAIL (<n> scenarios failed)
+  AG-UI path: PASS | FAIL (<n> scenarios failed)
 
-Next:  /acceptance --ux (if API path just passed)
+OVERALL:  PASS (all scenarios ≥ 7 on both transports) | INCOMPLETE (escalated) | FAIL (open failures)
+
+Next:  /acceptance --ux (if dual-path API just passed)
        /wave → /acceptance (if persona-gap scenarios were escalated)
 ```
 
