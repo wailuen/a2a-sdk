@@ -4,6 +4,37 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.9] — 2026-06-16
+
+### ✅ Features
+
+- **f53fd07 harness: adapt template skills into .claude + /debug threshold raised to round 4+** —
+  Copied 16 skills and `wave-cycle.js` from `template/.claude/` into the SDK's `.claude/`
+  project directory (SDK-adapted variants: `agent_sdk/` paths, SI invariants, sdk-test recovery).
+  `/debug` escalation threshold raised from round 3 to round 4+ across `wave-cycle.js`,
+  `wave/SKILL.md`, `implement/SKILL.md`, and `debug/SKILL.md` in harness, template, and `.claude/`.
+
+- **14cef76 harness: full sync with template — advisor agents, conformance skills, reference docs** —
+  Added 4 advisor agent specs (`a2a-advisor`, `a2ui-advisor`, `ag-ui-advisor`, `mcp-advisor`),
+  5 conformance check skills (`a2a-check`, `a2ui-check`, `ag-ui-check`, `mcp-check`,
+  `agent-stack-check`), 2 authoring skills (`add-artifact`, `sdk-issue-scan`), 3 protocol
+  reference docs, and `.harness-manifest.json` to `harness/`. Template received `new-agent`
+  skill and `.claude-plugin`; drifted files (`analyst.md`, `planner.md`, `agent-verify`,
+  `upgrade`, `acceptance`) synced from harness as source of truth.
+
+- **b491085 acceptance skill: dual-path A2A + AG-UI testing** —
+  `/acceptance` now drives every scenario on both transports concurrently. A2A path uses
+  `POST /v1/message/stream` (JSON-RPC SSE, `TaskArtifactUpdateEvent`/`TaskStatusUpdateEvent`);
+  AG-UI path uses `POST /run` SSE. Both must score ≥ 7 for `passed=true`. New
+  `transport-divergence` failure class. Added `--transport a2a|agui|both` flag.
+
+- **575fa5c acceptance-api workflow: dual-path A2A + AG-UI** —
+  Rewrote `acceptance-api.js` from AG-UI-only to dual-path. Schema changed from
+  `minScore/turns` to `a2aMinScore/aguiMinScore/a2aTurns/aguiTurns`. A2A leg drives
+  `POST /v1/message/stream` with `httpx` streaming and persists `taskId` across turns.
+  AG-UI leg uses `ChatDriver.agui_turn()`. Both run per-scenario; summary log shows
+  A2A min + AG-UI min + diverged count. `args.transports` wires the `--transport` flag through.
+
 ## [0.5.6] — 2026-06-16
 
 ### 🟡 Protocol surface changes
