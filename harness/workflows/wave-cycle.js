@@ -29,12 +29,17 @@ const A2UI_SURFACE = ['src/a2ui/', 'src/models/content_types']
 
 const WAVE_SCHEMA = {
   type: 'object',
-  required: ['waveId', 'allCreates', 'groups', 'lrnNext'],
+  required: ['waveId', 'allCreates', 'groups', 'groupDeps', 'lrnNext'],
   additionalProperties: false,
   properties: {
     waveId:     { type: 'string' },
     allCreates: { type: 'array', items: { type: 'string' } },
     lrnNext:    { type: 'integer' },
+    groupDeps: {
+      type: 'object',
+      description: 'Maps group label to the labels of OTHER groups it depends on (empty array = no external deps)',
+      additionalProperties: { type: 'array', items: { type: 'string' } },
+    },
     groups: {
       type: 'array',
       items: {
@@ -239,11 +244,15 @@ const wave = await agent(
   '- waveId: the w[NNN] identifier from the filename\n' +
   '- allCreates: every "Creates:" path listed across all todos in this wave\n' +
   '- lrnNext: highest existing LRN number + 1\n' +
-  '- groups: execution groups in dependency order (Depends: respected).\n' +
+  '- groups: execution groups (Depends: respected).\n' +
   '  Todos without ‖ group: get label "ungrouped-N" (N = position).\n' +
   '  Same ‖ group: label → same group entry.\n' +
-  '  Group ordering: a group whose todos all have Depends: satisfied by ' +
-  '  earlier groups comes after them.\n\n' +
+  '  Do NOT impose a sequential ordering — let groupDeps express ordering instead.\n' +
+  '- groupDeps: for each group label, list the labels of OTHER groups whose todos\n' +
+  '  appear in any `Depends:` field of this group\'s todos.\n' +
+  '  A group with no external Depends: references maps to [].\n' +
+  '  Todos that Depends: on another todo in the SAME group do not add a dep entry.\n' +
+  '  Format: {"A": [], "B": ["A"], ...}\n\n' +
   'Return structured data.',
   { schema: WAVE_SCHEMA, label: 'parse', phase: 'Parse' }
 )
@@ -333,34 +342,44 @@ if (planRt) {
 // ─── phase 2: implement ───────────────────────────────────────────────────────
 phase('Implement')
 
-for (const group of wave.groups) {
-  totalTodos += group.todos.length
-  log('Implementing group ' + group.label + ' (' + group.todos.length + ' todo(s))')
+// Tier-based parallel execution: each tier contains groups whose external deps
+// are all satisfied by previously-completed tiers. Groups within a tier run in
+// parallel (no file conflict, since the planner groups conflicting todos together).
+const completedGroups = new Set()
+const remainingGroups = wave.groups.slice()
 
-  if (group.todos.length === 1) {
-    // Solo todo
-    const todo = group.todos[0]
-    await agent(
-      'Implement this todo. Read CLAUDE.md and workspace/components/README.md first.\n\n' +
-      'CLAUDE.md security invariants (SI-1…SI-7) apply — enforce them in your output:\n' +
-      'SI-1: no raw httpx in src/tools/; SI-2: no secrets in error messages;\n' +
-      'SI-3: url_segment()/safe_id() for URL path vars in adapters;\n' +
-      'SI-4: self.credential() only for creds; SI-5: auth on all endpoints;\n' +
-      'SI-6: vendor keys in credential store only; SI-7: non-empty allowed_hosts.\n\n' +
-      'Test-first discipline: for correctness-bearing code (tool logic, validation,\n' +
-      'serialisation), write the failing test FIRST (confirm RED), then the code\n' +
-      '(confirm GREEN), then refactor. The todo is not done until the test was RED.\n\n' +
-      'Todo:\n' + todo.body + '\n\n' +
-      'You MAY run scoped tests (`python -m pytest -q tests/test_<specific>.py`) to confirm\n' +
-      'RED→GREEN for your own files. Do NOT run the full test suite — a centralized gate\n' +
-      'runs after all groups finish and will catch suite-wide regressions.\n' +
-      'Report: files created/modified, RED→GREEN confirmation, any blockers.',
-      { label: 'impl:' + todo.id, phase: 'Implement', agentType: 'python-implementer' }
-    )
-  } else {
-    // Parallel group
-    await parallel(group.todos.map(function(todo) {
-      return function() {
+while (remainingGroups.length > 0) {
+  // Collect all groups ready to run (all external deps complete)
+  const readyGroups = remainingGroups.filter(function(g) {
+    const deps = (wave.groupDeps && wave.groupDeps[g.label]) || []
+    return deps.every(function(dep) { return completedGroups.has(dep) })
+  })
+
+  if (readyGroups.length === 0) {
+    // Circular or unresolvable dep — fall back: run first remaining group
+    log('WARNING: unresolvable group dependency; falling back to sequential for group ' + remainingGroups[0].label)
+    readyGroups.push(remainingGroups[0])
+  }
+
+  // Remove from remaining
+  for (const rg of readyGroups) {
+    const idx = remainingGroups.findIndex(function(g) { return g.label === rg.label })
+    if (idx !== -1) remainingGroups.splice(idx, 1)
+  }
+
+  const tierLabel = readyGroups.map(function(g) { return g.label }).join(', ')
+  totalTodos += readyGroups.reduce(function(n, g) { return n + g.todos.length }, 0)
+
+  if (readyGroups.length > 1) {
+    log('Implementing ' + readyGroups.length + ' groups in parallel: ' + tierLabel)
+  }
+
+  // Build per-group implement thunks
+  function makeGroupThunk(group) {
+    return function() {
+      log('Implementing group ' + group.label + ' (' + group.todos.length + ' todo(s))')
+      if (group.todos.length === 1) {
+        const todo = group.todos[0]
         return agent(
           'Implement this todo. Read CLAUDE.md and workspace/components/README.md first.\n\n' +
           'CLAUDE.md security invariants (SI-1…SI-7) apply — enforce them in your output:\n' +
@@ -368,16 +387,46 @@ for (const group of wave.groups) {
           'SI-3: url_segment()/safe_id() for URL path vars in adapters;\n' +
           'SI-4: self.credential() only for creds; SI-5: auth on all endpoints;\n' +
           'SI-6: vendor keys in credential store only; SI-7: non-empty allowed_hosts.\n\n' +
-          'Test-first for correctness-bearing code (RED then GREEN then refactor).\n\n' +
+          'Test-first discipline: for correctness-bearing code (tool logic, validation,\n' +
+          'serialisation), write the failing test FIRST (confirm RED), then the code\n' +
+          '(confirm GREEN), then refactor. The todo is not done until the test was RED.\n\n' +
           'Todo:\n' + todo.body + '\n\n' +
           'You MAY run scoped tests (`python -m pytest -q tests/test_<specific>.py`) to confirm\n' +
           'RED→GREEN for your own files. Do NOT run the full test suite — a centralized gate\n' +
-          'runs after all groups finish. Report: files created/modified, RED→GREEN confirmation.',
+          'runs after all groups finish and will catch suite-wide regressions.\n' +
+          'Report: files created/modified, RED→GREEN confirmation, any blockers.',
           { label: 'impl:' + todo.id, phase: 'Implement', agentType: 'python-implementer' }
         )
+      } else {
+        return parallel(group.todos.map(function(todo) {
+          return function() {
+            return agent(
+              'Implement this todo. Read CLAUDE.md and workspace/components/README.md first.\n\n' +
+              'CLAUDE.md security invariants (SI-1…SI-7) apply — enforce them in your output:\n' +
+              'SI-1: no raw httpx in src/tools/; SI-2: no secrets in error messages;\n' +
+              'SI-3: url_segment()/safe_id() for URL path vars in adapters;\n' +
+              'SI-4: self.credential() only for creds; SI-5: auth on all endpoints;\n' +
+              'SI-6: vendor keys in credential store only; SI-7: non-empty allowed_hosts.\n\n' +
+              'Test-first for correctness-bearing code (RED then GREEN then refactor).\n\n' +
+              'Todo:\n' + todo.body + '\n\n' +
+              'You MAY run scoped tests (`python -m pytest -q tests/test_<specific>.py`) to confirm\n' +
+              'RED→GREEN for your own files. Do NOT run the full test suite — a centralized gate\n' +
+              'runs after all groups finish. Report: files created/modified, RED→GREEN confirmation.',
+              { label: 'impl:' + todo.id, phase: 'Implement', agentType: 'python-implementer' }
+            )
+          }
+        }))
       }
-    }))
+    }
   }
+
+  if (readyGroups.length === 1) {
+    await makeGroupThunk(readyGroups[0])()
+  } else {
+    await parallel(readyGroups.map(makeGroupThunk))
+  }
+
+  for (const rg of readyGroups) completedGroups.add(rg.label)
 }
 
 // ─── phase 3: unit redteam (per group, zero-tolerance) ───────────────────────

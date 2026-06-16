@@ -39,7 +39,11 @@ any implementation, zero-tolerance fix loops, and auto-codify at the end.
    - `use` → skip to the Execution step.
    - `replace` → move current plan to `superseded/` with a date suffix, then continue.
 6. Invoke the `planner` agent — produces `workspace/todos/plan.md` and wave files
-   under `workspace/todos/active/`.
+   under `workspace/todos/active/`. **Planner instruction: maximize parallel execution.**
+   Assign todos with no file conflict (non-overlapping `Creates:` paths and no
+   cross-todo `Depends:`) to the same `‖ group:` label so `wave-cycle.js` runs them
+   concurrently. Only separate into distinct groups when a `Depends:` chain exists
+   between them. Prefer one tier of many parallel todos over many sequential tiers.
 7. **Auto-redteam loop until zero critiques (all severities):**
    - Run `redteam` scoped to the plan files.
    - If findings: invoke `planner` to fix; re-redteam. Cap at 3 rounds; log any
@@ -62,10 +66,12 @@ For each wave whose `Depends:` items are all in `completed/`:
    })
    ```
    The workflow runs 8 phases for this wave:
-   - **Parse** — reads wave file; extracts groups, creates paths, and LRN baseline.
+   - **Parse** — reads wave file; extracts groups, creates paths, inter-group dependency map (`groupDeps`), and LRN baseline.
    - **Todos Redteam** — annotates todos with `SI:` fields and `Reuses: C-NNN` before
      implementation; flags new component candidates for registration.
-   - **Implement** — parallel groups, test-first, SI-enforcing.
+   - **Implement** — tier-based parallel execution: groups with no inter-group deps run
+     concurrently; dependent groups wait for their tier's completion. Todos within each
+     group also run in parallel. Test-first, SI-enforcing.
    - **Unit Redteam** — zero-tolerance per group (debug fires after >3 failed rounds (r4+) and on stall).
    - **Phase Redteam** — zero-tolerance full wave (debug fires after >3 failed rounds (r4+) and on stall).
    - **Protocol Audit** — `a2a-advisor`, `mcp-advisor`, `ag-ui-advisor`, `a2ui-advisor` + seam check (protocol surfaces only).
