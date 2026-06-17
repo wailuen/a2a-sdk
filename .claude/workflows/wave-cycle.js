@@ -833,9 +833,9 @@ if (!runProtocol) {
           return A2UI_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
         }).join('\n') + '\n\n' +
         // LRN-012: Keep in sync with DESIGN.md §5.4 and agent_sdk/models/content_types.py — single logical unit
-        // WC-RT-003: Core 7 + Extended 11 = 18 total; 4 RESERVED (TradeActivity, CompanyInfo, DealList, InvestorProfile) never emitted.
+        // WC-RT-003: Core 6 + Extended 8 = 14 FROZEN; 4 RESERVED (TradeActivity, CompanyInfo, DealList, InvestorProfile) never emitted.
         'Check: createSurface/updateComponents/updateDataModel/deleteSurface shapes,\n' +
-        'Core 7 + Extended 11 Standard Profile types only (18 total; 4 RESERVED: TradeActivity, CompanyInfo, DealList, InvestorProfile — never emitted with an assumed shape), JSON-Pointer binding,\n' +
+        'Core 6 + Extended 8 Standard Profile types only (14 FROZEN total; 4 RESERVED: TradeActivity, CompanyInfo, DealList, InvestorProfile — never emitted), JSON-Pointer binding,\n' +
         'A2A DataPart delivery, translator.py message types, field contracts.\n\n' +
         'Return structured findings. Set protocol="A2UI" per finding.',
         { schema: PROTO_SCHEMA, agentType: 'a2ui-advisor', label: 'proto:a2ui', phase: 'Protocol Audit' }

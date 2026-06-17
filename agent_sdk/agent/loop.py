@@ -21,7 +21,9 @@ import json
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable, Union, get_args, get_origin
+
+from pydantic import BaseModel, ValidationError
 
 from ..models.errors import AgentError, ErrorCategory
 from .events import (
@@ -114,6 +116,143 @@ def _fold_result_content(result: Any) -> dict[str, Any]:
     if isinstance(result, (dict, list)):
         return {"json": {"result": result} if isinstance(result, list) else result}
     return {"text": "" if result is None else str(result)}
+
+
+# Fixed human strings keyed by Pydantic error ``type`` code. SI-2: we never
+# interpolate ``e['msg']`` or ``e['input']`` because both can embed the raw
+# rejected value verbatim — e.g. a custom ``@field_validator`` that raises
+# ``ValueError(f"... {v!r}")`` produces a ``value_error``/``assertion_error``
+# whose ``msg`` echoes the secret. The model and logs only ever see loc + a
+# type-derived phrase built here.
+_VALIDATION_TYPE_PHRASES: dict[str, str] = {
+    "missing": "required field is missing",
+    "int_parsing": "expected an integer",
+    "int_type": "expected an integer",
+    "float_parsing": "expected a number",
+    "float_type": "expected a number",
+    "bool_parsing": "expected a boolean",
+    "bool_type": "expected a boolean",
+    "string_type": "expected a string",
+    "string_too_short": "value is too short",
+    "string_too_long": "value is too long",
+    "string_pattern_mismatch": "value does not match the required pattern",
+    "list_type": "expected a list",
+    "dict_type": "expected an object",
+    "model_type": "expected an object",
+    "enum": "value is not one of the allowed choices",
+    "literal_error": "value is not one of the allowed choices",
+    "greater_than": "value is too small",
+    "greater_than_equal": "value is too small",
+    "less_than": "value is too large",
+    "less_than_equal": "value is too large",
+    "value_error": "value failed a validation rule",
+    "assertion_error": "value failed a validation rule",
+    "json_invalid": "value is not valid JSON",
+    "extra_forbidden": "unexpected field",
+}
+
+
+def _unwrap_annotation(ann: Any) -> Any:
+    """Strip Optional/Union noise to the first concrete member annotation.
+
+    Used only to walk an error ``loc`` against the declared schema; on any
+    Union we descend into the first non-``None`` member, which is sufficient
+    to decide field-name vs. dict-key for the loc segment under inspection.
+    """
+    origin = get_origin(ann)
+    if origin is Union:
+        members = [a for a in get_args(ann) if a is not type(None)]
+        return members[0] if members else ann
+    return ann
+
+
+def _redact_loc(loc: tuple[Any, ...], err_type: str, model: type[BaseModel] | None) -> str:
+    """Render a Pydantic error ``loc`` keeping only schema-declared identifiers.
+
+    SI-2: a ``loc`` can carry user-supplied content — for ``extra_forbidden``
+    the final segment is the user's extra field NAME, and for any value error
+    under a ``dict[str, X]`` field the segment is the user-supplied dict KEY
+    (verified: ``loc=('mapping', 'USER_KEY')`` / ``('mapping','USER_KEY','[key]')``).
+    Echoing those into the tool-result string would leak a field/key name to the
+    model. We walk the declared model alongside ``loc``: declared field names and
+    list indices pass through verbatim; any segment that lands on a dict/mapping
+    key, or the trailing extra-field name of an ``extra_forbidden`` error, is
+    replaced with ``<key>`` so only schema-declared identifiers are ever echoed.
+    """
+    n = len(loc)
+    rendered: list[str] = []
+    current: Any = model
+    for i, seg in enumerate(loc):
+        is_last = i == n - 1
+        # extra_forbidden: trailing segment is the user-supplied extra field name.
+        if is_last and err_type == "extra_forbidden":
+            rendered.append("<extra>")
+            continue
+        # Structural Pydantic markers (e.g. '[key]') are not user content.
+        if isinstance(seg, str) and seg.startswith("[") and seg.endswith("]"):
+            rendered.append(seg)
+            continue
+        # List/tuple/set indices are integers — never user content.
+        if isinstance(seg, int):
+            rendered.append(str(seg))
+            origin = get_origin(_unwrap_annotation(current)) if current is not None else None
+            if origin in (list, tuple, set, frozenset):
+                args = get_args(_unwrap_annotation(current))
+                current = args[0] if args else None
+            else:
+                current = None
+            continue
+        ann = _unwrap_annotation(current) if current is not None else None
+        origin = get_origin(ann)
+        # Walking a Pydantic model: a matching declared field name is safe.
+        if isinstance(current, type) and issubclass(current, BaseModel):
+            field = current.model_fields.get(str(seg))
+            if field is not None:
+                rendered.append(str(seg))
+                current = field.annotation
+                continue
+            # Not a declared field → user-supplied (extra / unexpected) key.
+            rendered.append("<key>")
+            current = None
+            continue
+        # Walking a dict/mapping: the segment IS a user-supplied key.
+        if origin in (dict,) or (isinstance(origin, type) and issubclass(origin, dict)):
+            rendered.append("<key>")
+            args = get_args(ann)
+            current = args[1] if len(args) == 2 else None
+            continue
+        # Unknown / unresolved structure: be conservative — if it is a plain
+        # declared-style root segment on the model we'd have matched above, so
+        # treat any remaining string as a potential user key.
+        if model is None:
+            # No schema to verify against → keep the (likely declared) name.
+            rendered.append(str(seg))
+        else:
+            rendered.append("<key>")
+        current = None
+    return ".".join(rendered) or "<root>"
+
+
+def _safe_validation_message(
+    tool_name: str,
+    exc: ValidationError,
+    input_model: type[BaseModel] | None = None,
+) -> str:
+    """Build a tool-input error string from loc + type only (SI-2).
+
+    Never includes ``e['msg']`` or ``e['input']`` — both can leak the raw
+    rejected value. ``loc`` is walked against ``input_model`` so that only
+    schema-declared field names (and list indices) are echoed; user-supplied
+    dict keys and ``extra_forbidden`` field names are redacted (see
+    ``_redact_loc``). Unknown type codes fall back to the bare code, which is
+    safe-by-construction (a fixed Pydantic identifier, never user input).
+    """
+    fields = "; ".join(
+        f"{_redact_loc(tuple(e['loc']), e['type'], input_model)} — "
+        f"{_VALIDATION_TYPE_PHRASES.get(e['type'], e['type'])}"
+        for e in exc.errors()
+    )
+    return f"tool '{tool_name}' input invalid: {fields}"
 
 
 async def run_loop(
@@ -269,6 +408,13 @@ async def run_loop(
                     ok, error = False, f"tool '{tc.name}' timed out after {int(timeout)}s"
                 except AgentError as err:
                     ok, error = False, err.message
+                except ValidationError as exc:
+                    # loc + type only — e['msg']/e['input'] can leak input (SI-2).
+                    # loc walked against input_model so user dict keys / extra
+                    # field names are redacted, not echoed.
+                    ok, error = False, _safe_validation_message(
+                        tc.name, exc, entry.decl.input_model
+                    )
                 except Exception:
                     ok, error = False, f"tool '{tc.name}' failed"
 
@@ -298,6 +444,13 @@ async def run_loop(
                             ok, error = False, err.message
                         except asyncio.TimeoutError:
                             ok, error = False, f"tool '{tc.name}' timed out after resume"
+                        except ValidationError as exc:
+                            # loc + type only — e['msg']/e['input'] leak input (SI-2).
+                            # loc walked against input_model so user dict keys /
+                            # extra field names are redacted, not echoed.
+                            ok, error = False, _safe_validation_message(
+                                tc.name, exc, entry.decl.input_model
+                            )
                         except Exception:
                             ok, error = False, f"tool '{tc.name}' failed after resume"
                     else:

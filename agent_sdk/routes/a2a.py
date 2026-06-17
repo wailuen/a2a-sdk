@@ -23,7 +23,7 @@ from ..auth.identity import Identity
 from ..auth.middleware import require_identity
 from ..credentials import forwarding
 from ..common.sse import SSE_HEADERS, sse_data
-from ..common.wire_errors import a2a_error, a2a_invalid_params
+from ..common.wire_errors import a2a_error, a2a_invalid_params, a2a_parse_error
 from ..models.a2a import (
     INTERRUPT_STATES,
     TERMINAL_STATES,
@@ -79,7 +79,12 @@ def _message_text(message: Message) -> str:
     return "\n".join(p.text for p in message.parts if isinstance(p, TextPart))
 
 
-def _capabilities(message: Message) -> A2uiCapabilities:
+def _capabilities(message: Message, request: Request) -> A2uiCapabilities:
+    # Gate A2UI on the opt-in header — clients that never sent X-A2A-Extensions
+    # containing A2UI_EXTENSION_URI must not receive A2UI DataParts.
+    extensions = request.headers.get("x-a2a-extensions", "")
+    if A2UI_EXTENSION_URI not in [u.strip() for u in extensions.split(",")]:
+        return A2uiCapabilities(tier="none", catalogs=[])
     raw = (message.metadata or {}).get("a2uiClientCapabilities")
     return A2uiCapabilities.from_metadata(raw)
 
@@ -115,7 +120,9 @@ async def _parse_send(request: Request) -> MessageSendParams | JSONResponse:
         return a2a_invalid_params("request body too large")
     try:
         body = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
+    except json.JSONDecodeError:
+        return a2a_parse_error("request body is not valid JSON")
+    except ValueError:
         return a2a_invalid_params("request body is not valid JSON")
     try:
         params = MessageSendParams.model_validate(body)
@@ -236,7 +243,7 @@ async def message_send(
             )
             return JSONResponse(bare_msg.wire(), headers=dict(response.headers))
     record = _create_task_record(request, params, identity)
-    _start_worker(request, record, _capabilities(params.message))
+    _start_worker(request, record, _capabilities(params.message, request))
     history_length = (
         params.configuration.history_length if params.configuration else None
     )
@@ -314,7 +321,7 @@ async def message_stream(
     else:
         record = _create_task_record(request, params, identity)
         stream, _ = _open_stream(request, record)
-        _start_worker(request, record, _capabilities(params.message))
+        _start_worker(request, record, _capabilities(params.message, request))
     return StreamingResponse(
         stream,
         media_type="text/event-stream",

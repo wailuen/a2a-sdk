@@ -1,5 +1,5 @@
 ---
-id: LRN-025
+id: LRN-035
 title: Test-fix agent result must be verified with a re-gate pytest pass
 category: testing
 severity: high

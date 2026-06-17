@@ -8,12 +8,14 @@ export const meta = {
 
 // ─── args ─────────────────────────────────────────────────────────────────────
 // args.scenarios   : array of {id, name, category, seedQuery, expectedTools,
-//                    expectedContentTypes, maxTurns}
+//                    expectedContentTypes, maxTurns, followUpTurns?}
 // args.baseUrl     : e.g. "http://localhost:8000"
 // args.adminKey    : admin API key from workspace/adr/ADR-000-<env>-credentials.md
 // args.agentContext: {name, description, tools: [{name, emits, description}]}
 // args.onlyIds     : optional string[] — re-run only these scenario IDs
 // args.transports  : optional string[] — ["a2a","agui"] (default: both)
+// (followUpTurns is a PER-SCENARIO field — see s.followUpTurns above; there is
+//  no top-level args.followUpTurns and one passed here would be ignored.)
 
 // ─── schema ───────────────────────────────────────────────────────────────────
 
@@ -47,7 +49,7 @@ const SCENARIO_RESULT_SCHEMA = {
     aguiTurns:    { type: 'array', items: TURN_SCHEMA },
     failureClass: {
       type: 'string',
-      enum: ['none', 'transport-divergence', 'code-bug', 'content-type-gap', 'persona-gap', 'upstream-issue', 'bad-scenario'],
+      enum: ['none', 'transport-divergence', 'code-bug', 'content-type-gap', 'persona-gap', 'upstream-issue', 'bad-scenario', 'harness-contamination'],
     },
     failureDetail: { type: 'string' },
   },
@@ -65,6 +67,7 @@ function buildScenarioPrompt(s, a) {
   const transports     = a.transports || ['a2a', 'agui']
   const runA2A         = transports.indexOf('a2a') !== -1
   const runAGUI        = transports.indexOf('agui') !== -1
+  const runKey         = s.id + '-' + globalThis.crypto.randomUUID()
 
   return (
     'You are running an acceptance test for the agent "' + a.agentContext.name + '".\n\n' +
@@ -80,6 +83,13 @@ function buildScenarioPrompt(s, a) {
     'Expected types:  ' + expectedCtypes + '\n' +
     'Max turns:       ' + maxTurns + ' (minimum 3)\n' +
     'Transports:      ' + transports.join(' + ') + '\n\n' +
+
+    (Array.isArray(s.followUpTurns) && s.followUpTurns.length > 0
+      ? ('━━━ DETERMINISTIC FOLLOW-UPS ━━━\n' +
+         'Use the queries below in order as the ACC_QUERY for turn 2, 3, … (pinned by test author).\n' +
+         'Do not auto-generate follow-ups when a pinned entry exists for that turn slot.\n' +
+         s.followUpTurns.map(function(q, i) { return '  Turn ' + (i + 2) + ': ' + q }).join('\n') + '\n\n')
+      : '') +
 
     '━━━ SERVER ━━━\n' +
     'Base URL:   ' + a.baseUrl + '\n' +
@@ -97,15 +107,15 @@ function buildScenarioPrompt(s, a) {
     'For EACH A2A turn:\n\n' +
 
     '1. Write and run this Python script (substitute ACC_QUERY env var with the actual query):\n\n' +
-    '   Write to /tmp/acc-' + s.id + '-a2a-turn.py:\n' +
+    '   Write to /tmp/acc-' + runKey + '-a2a-turn.py:\n' +
     '   ─────────────────────────────────────────────\n' +
     '   import asyncio, httpx, json, os\n' +
     '   from pathlib import Path\n\n' +
     '   BASE_URL = "' + a.baseUrl + '"\n' +
     '   TOKEN    = "' + a.adminKey + '"\n' +
-    '   SID      = "' + s.id + '"\n' +
+    '   RUN_KEY  = "' + runKey + '"\n' +
     '   QUERY    = os.environ["ACC_QUERY"]\n' +
-    '   TASKID_F = Path(f"/tmp/acc-{SID}-a2a-task.txt")\n\n' +
+    '   TASKID_F = Path(f"/tmp/acc-{RUN_KEY}-a2a-task.txt")\n\n' +
     '   async def main():\n' +
     '       headers = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}\n' +
     '       task_id = TASKID_F.read_text().strip() if TASKID_F.exists() else None\n' +
@@ -116,7 +126,7 @@ function buildScenarioPrompt(s, a) {
     '       async with httpx.AsyncClient(base_url=BASE_URL, headers=headers, timeout=180) as c:\n' +
     '           async with c.stream("POST", "/v1/message/stream", json={\n' +
     '               "jsonrpc": "2.0", "method": "message/stream",\n' +
-    '               "id": f"{SID}-a2a", "params": params\n' +
+    '               "id": f"{RUN_KEY}-a2a", "params": params\n' +
     '           }) as r:\n' +
     '               r.raise_for_status()\n' +
     '               async for line in r.aiter_lines():\n' +
@@ -136,7 +146,7 @@ function buildScenarioPrompt(s, a) {
     '   asyncio.run(main())\n' +
     '   ─────────────────────────────────────────────\n\n' +
 
-    '   Run it:   ACC_QUERY="QUERY_TEXT" .venv/bin/python3 /tmp/acc-' + s.id + '-a2a-turn.py\n' +
+    '   Run it:   ACC_QUERY="QUERY_TEXT" .venv/bin/python3 /tmp/acc-' + runKey + '-a2a-turn.py\n' +
     '   Parse:    {reply, tools, contentTypes}\n\n' +
 
     '   Note: tool names are not directly observable on the A2A stream (the protocol\n' +
@@ -153,10 +163,12 @@ function buildScenarioPrompt(s, a) {
     '3. Decide continue/stop: always continue if turn < 3; continue if turn < ' + maxTurns + ' and\n' +
     '   prior reply opens a natural follow-up; stop at natural conclusion or turn ' + maxTurns + '.\n\n' +
 
-    '4. Generate follow-up: reference specific values from the prior A2A reply (not generic).\n\n' +
+    '4. Follow-up query: if a pinned follow-up exists for this turn slot (see DETERMINISTIC FOLLOW-UPS\n' +
+    '   above), use it verbatim. Otherwise, generate a follow-up that references specific values\n' +
+    '   from the prior A2A reply (not generic).\n\n' +
 
     'After all A2A turns: compute a2aMinScore = min of all turn scores.\n' +
-    'Clean up /tmp/acc-' + s.id + '-a2a-* files.\n\n'
+    'Clean up /tmp/acc-' + runKey + '-a2a-* files.\n\n'
     ) : '') +
 
     // ── AG-UI transport ────────────────────────────────────────────────────────
@@ -168,15 +180,15 @@ function buildScenarioPrompt(s, a) {
     'For EACH AG-UI turn:\n\n' +
 
     '1. Write and run this Python script:\n\n' +
-    '   Write to /tmp/acc-' + s.id + '-agui-turn.py:\n' +
+    '   Write to /tmp/acc-' + runKey + '-agui-turn.py:\n' +
     '   ─────────────────────────────────────────────\n' +
     '   import asyncio, httpx, json, os\n' +
     '   from pathlib import Path\n' +
     '   from agent_sdk.testing import ChatDriver\n\n' +
     '   BASE_URL  = "' + a.baseUrl + '"\n' +
     '   TOKEN     = "' + a.adminKey + '"\n' +
-    '   THREAD_ID = "' + s.id + '-agui"\n' +
-    '   MSGS_FILE = Path("/tmp/acc-' + s.id + '-agui-msgs.json")\n' +
+    '   THREAD_ID = "' + runKey + '-agui"\n' +
+    '   MSGS_FILE = Path("/tmp/acc-' + runKey + '-agui-msgs.json")\n' +
     '   QUERY     = os.environ["ACC_QUERY"]\n\n' +
     '   async def main():\n' +
     '       msgs = json.loads(MSGS_FILE.read_text()) if MSGS_FILE.exists() else []\n' +
@@ -199,7 +211,7 @@ function buildScenarioPrompt(s, a) {
     '   asyncio.run(main())\n' +
     '   ─────────────────────────────────────────────\n\n' +
 
-    '   Run it:   ACC_QUERY="QUERY_TEXT" .venv/bin/python3 /tmp/acc-' + s.id + '-agui-turn.py\n' +
+    '   Run it:   ACC_QUERY="QUERY_TEXT" .venv/bin/python3 /tmp/acc-' + runKey + '-agui-turn.py\n' +
     '   Parse:    {reply, tools, contentTypes}\n\n' +
 
     '2. Score the AG-UI reply 1–10 (content coherency):\n' +
@@ -211,10 +223,12 @@ function buildScenarioPrompt(s, a) {
 
     '3. Decide continue/stop: same rules as A2A.\n\n' +
 
-    '4. Generate follow-up: reference specific values from the prior AG-UI reply.\n\n' +
+    '4. Follow-up query: if a pinned follow-up exists for this turn slot (see DETERMINISTIC FOLLOW-UPS\n' +
+    '   above), use it verbatim. Otherwise, generate a follow-up that references specific values\n' +
+    '   from the prior AG-UI reply (not generic).\n\n' +
 
     'After all AG-UI turns: compute aguiMinScore = min of all turn scores.\n' +
-    'Clean up /tmp/acc-' + s.id + '-agui-* files.\n\n'
+    'Clean up /tmp/acc-' + runKey + '-agui-* files.\n\n'
     ) : '') +
 
     // ── scoring and classification ─────────────────────────────────────────────
@@ -222,13 +236,17 @@ function buildScenarioPrompt(s, a) {
     'passed = ' + (runA2A && runAGUI ? 'a2aMinScore ≥ 7 AND aguiMinScore ≥ 7' : 'min score ≥ 7') + '\n\n' +
 
     'Classify failure (if passed == false):\n' +
-    '  transport-divergence — one transport ≥ 7, the other < 7 (domain OK, wire format diverges)\n' +
-    '  code-bug             — both transports < 7 due to wrong tool logic, wrong output, or error\n' +
-    '  content-type-gap     — agent did not emit the expected A2UI content type on either transport\n' +
-    '  persona-gap          — agent lacks the capability entirely (needs a new wave)\n' +
-    '  upstream-issue       — failure due to source adapter / credential problem on both transports\n' +
-    '  bad-scenario         — seed query is malformed or unanswerable by design\n' +
-    '  none                 — all turns ≥ 7 on all transports\n\n' +
+    '  transport-divergence   — one transport ≥ 7, the other < 7 (domain OK, wire format diverges)\n' +
+    '  code-bug               — both transports < 7 due to wrong tool logic, wrong output, or error\n' +
+    '  content-type-gap       — agent did not emit the expected A2UI content type on either transport\n' +
+    '  persona-gap            — agent lacks the capability entirely (needs a new wave)\n' +
+    '  upstream-issue         — failure due to source adapter / credential problem on both transports\n' +
+    '  bad-scenario           — seed query is malformed or unanswerable by design\n' +
+    '  harness-contamination  — cross-run bleed detected; flag when ALL THREE conditions hold:\n' +
+    '                           (1) tool names from a different scenario appear in this turn context,\n' +
+    '                           (2) this scenario\'s min score is anomalously low vs a single-run baseline,\n' +
+    '                           (3) you explicitly identify the contaminating scenario or tool set.\n' +
+    '  none                   — all turns ≥ 7 on all transports\n\n' +
 
     'IMPORTANT RULES:\n' +
     '- Never hard-fail on a network timeout — score the turn 1, rationale "timeout".\n' +

@@ -62,6 +62,8 @@ class A2uiCapabilities:
         return "extended" in self.tier
 
     def allows(self, model_cls: type[ContentModel]) -> bool:
+        if self.tier == "none":
+            return False
         if model_cls.catalog_id != CATALOG_ID:
             # domain gating: tier alone never unlocks domain types
             return model_cls.catalog_id in self.catalogs

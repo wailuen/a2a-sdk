@@ -1,5 +1,5 @@
 ---
-id: LRN-023
+id: LRN-034
 title: Unconditional seam audit fires on every protocol wave
 category: ops
 severity: high

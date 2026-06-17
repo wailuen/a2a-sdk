@@ -1,5 +1,5 @@
 ---
-id: LRN-022
+id: LRN-033
 title: Wave-cycle missing re-gate after test-fix dispatch
 category: testing
 severity: high

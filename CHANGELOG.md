@@ -4,6 +4,57 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.13] — 2026-06-17
+
+### 🟡 Protocol surface changes
+
+- **a2a: JSON parse errors return -32700, not -32602 (GH-45)** —
+  `_parse_send()` now calls the new `a2a_parse_error()` helper
+  (`common/wire_errors.py`) for unparseable request bodies, matching JSON-RPC
+  2.0 §5 (Parse Error). -32602 (Invalid Params) remains reserved for valid JSON
+  that fails `MessageSendParams` validation.
+
+- **a2a: A2UI DataParts gated behind X-A2A-Extensions opt-in (GH-50)** —
+  `_capabilities()` now reads the `X-A2A-Extensions` request header and only
+  enables A2UI DataPart emission when it advertises the A2UI extension URI.
+  Absent the header, capabilities resolve to `tier='none'` so no A2UI MIME
+  DataPart is emitted — the client must opt in.
+
+- **mcp: openWorldHint=false for tier-1 / read-only tools (GH-52)** —
+  `ToolSet.tool()` now emits `annotations.openWorldHint = False` for tools with
+  `tier=1` or `read_only=True`, overriding the MCP 2025-06-18 default of `true`
+  so pure read-only query tools are no longer misclassified as world-altering.
+
+### 🔧 Fixes
+
+- **loop: tool ValidationError surfaces field/type so the model can self-correct (GH-48)** —
+  A targeted `except ValidationError` branch now builds a tool-result error from
+  `loc` + a type-derived phrase via `_safe_validation_message`, instead of
+  collapsing into the generic `"tool '{name}' failed"`. SI-2: `msg` and `input`
+  are never echoed (both can embed the raw rejected value). The error `loc` is
+  walked against the tool's `input_model` so only schema-declared field names
+  and list indices are echoed — user-supplied dict keys and `extra_forbidden`
+  field names are redacted to `<key>`/`<extra>`, closing the residual loc-borne
+  input-leak gap.
+
+### 🔨 Harness
+
+- **acceptance-api: per-invocation thread isolation + failureClass + deterministic follow-ups (GH-53, GH-55)** —
+  `acceptance-api.js` now suffixes `THREAD_ID` and all `/tmp/acc-{s.id}-*`
+  filenames with a per-invocation UUID, eliminating cross-contamination between
+  concurrent runs of the same scenario; `SCENARIO_RESULT_SCHEMA.failureClass`
+  gains the `harness-contamination` value; and `buildScenarioPrompt` now honours
+  a scenario's `followUpTurns` array, injecting pinned follow-up queries verbatim
+  on both A2A and AG-UI paths before falling back to auto-generation.
+
+### 📖 Documentation
+
+- **learning: resolve LRN-028 ID collision + reindex README (GH-54)** —
+  The duplicate `LRN-028` is renumbered to a free ID, a new LRN codifies the
+  acceptance-api `THREAD_ID` contamination risk with a Check clause that greps
+  `harness/workflows/acceptance-api.js`, and `workspace/learning/README.md` is
+  reindexed to cover the full LRN-018+ range.
+
 ## [0.5.12] — 2026-06-17
 
 ### 🟡 Protocol surface changes

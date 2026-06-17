@@ -1,5 +1,5 @@
 ---
-id: LRN-018
+id: LRN-039
 title: SC-F1 emits annotation validator must skip — not raise — when eval_str resolution fails
 category: sdk
 severity: high

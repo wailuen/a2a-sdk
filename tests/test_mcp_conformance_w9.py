@@ -573,3 +573,86 @@ async def test_sc_c7_market_briefing_structured_content_is_string(sc_c7_client):
     assert "Markets flat." in sc, (
         f"Expected prose 'Markets flat.' in markdown output, got: {sc!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# SC-C8: GH-52 — openWorldHint=False for all tier-1 and read_only tools
+#
+# MCP 2025-06-18: openWorldHint defaults to True when absent, which causes
+# Claude.ai's consent UI to flag pure read-only query tools as world-altering.
+# The SDK must seed openWorldHint=False for tier==1 OR read_only=True.
+# ---------------------------------------------------------------------------
+
+
+async def test_sc_c8_echo_open_world_hint_false(client):
+    """echo (tier=1, read_only=True) must have annotations.openWorldHint=False."""
+    headers = await _mcp_init(client)
+
+    r = await client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    tools = r.json()["result"]["tools"]
+    echo = next((t for t in tools if t["name"] == "echo"), None)
+    assert echo is not None, "echo tool not found in tools/list"
+    annotations = echo.get("annotations", {})
+    assert annotations.get("openWorldHint") is False, (
+        f"echo.annotations.openWorldHint should be False (GH-52), got: {annotations}"
+    )
+
+
+async def test_sc_c8_demo_kpis_open_world_hint_false(client):
+    """demo_kpis (tier=1, read_only=True) must have annotations.openWorldHint=False."""
+    headers = await _mcp_init(client)
+
+    r = await client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        headers=headers,
+    )
+    assert r.status_code == 200, r.text
+    tools = r.json()["result"]["tools"]
+    demo_kpis = next((t for t in tools if t["name"] == "demo_kpis"), None)
+    assert demo_kpis is not None, "demo_kpis tool not found in tools/list"
+    annotations = demo_kpis.get("annotations", {})
+    assert annotations.get("openWorldHint") is False, (
+        f"demo_kpis.annotations.openWorldHint should be False (GH-52), got: {annotations}"
+    )
+
+
+def test_sc_c8_tier1_without_read_only_gets_open_world_hint_false():
+    """A tier-1 tool registered WITHOUT read_only=True must still get
+    openWorldHint=False because tier==1 implies a non-destructive query tool."""
+    extra = ToolSet()
+
+    @extra.tool(tier=1)
+    async def query_only() -> None:
+        """A tier-1 query tool registered without read_only."""
+
+    decl = extra.decls[0]
+    assert decl.annotations is not None, (
+        "tier-1 tool should have annotations dict seeded (openWorldHint=False)"
+    )
+    assert decl.annotations.get("openWorldHint") is False, (
+        f"tier-1 tool without read_only=True must still get openWorldHint=False, "
+        f"got: {decl.annotations}"
+    )
+
+
+def test_sc_c8_explicit_annotations_can_override_open_world_hint():
+    """An explicit annotations={'openWorldHint': True} must override the seeded
+    default, allowing callers to opt out field-by-field."""
+    extra = ToolSet()
+
+    @extra.tool(tier=1, annotations={"openWorldHint": True})
+    async def special_tool() -> None:
+        """A tier-1 tool that explicitly opts into openWorldHint=True."""
+
+    decl = extra.decls[0]
+    assert decl.annotations is not None
+    assert decl.annotations.get("openWorldHint") is True, (
+        f"explicit annotations dict must override seeded openWorldHint=False, "
+        f"got: {decl.annotations}"
+    )

@@ -1,5 +1,5 @@
 ---
-id: LRN-027
+id: LRN-036
 title: Phase redteam null-response must not reset prevSigs
 category: testing
 severity: high

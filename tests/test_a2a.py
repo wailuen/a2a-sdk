@@ -23,10 +23,16 @@ def send_body(text: str, task_id: str | None = None) -> dict:
 
 
 async def test_send_completes_with_artifact(client, fake_model):
+    from agent_sdk.models.content_types import A2UI_EXTENSION_URI
+
     fake_model.script(
         tool_call("demo_kpis", {"title": "Q2"}), reply("KPIs attached.")
     )
-    r = await client.post("/v1/message:send", json=send_body("kpis please"))
+    r = await client.post(
+        "/v1/message:send",
+        json=send_body("kpis please"),
+        headers={"X-A2A-Extensions": A2UI_EXTENSION_URI},
+    )
     assert r.status_code == 200
     task = r.json()
     assert task["status"]["state"] in ("submitted", "working")

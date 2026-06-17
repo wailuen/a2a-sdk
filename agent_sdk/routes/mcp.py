@@ -65,8 +65,11 @@ assert SUPPORTED_PROTOCOL_VERSIONS == tuple(
     sorted(SUPPORTED_PROTOCOL_VERSIONS, reverse=True)
 ), "SUPPORTED_PROTOCOL_VERSIONS must be newest-first (newest at index 0)"
 
-# serverInfo.title was introduced in 2025-11-25; emitting it under an older
-# negotiated version causes Claude.ai to reject the handshake (GH #43).
+# Spec introduced serverInfo.title in 2025-06-18 (mcp-protocol.md §2), but
+# GH-43 observed Claude.ai rejecting the handshake when title was present
+# under a 2025-06-18-negotiated session. We conservatively gate at 2025-11-25
+# until that can be re-tested live. Omitting an optional field is spec-valid.
+# REVIEWS.md Round 4 documents this as a deferred spec-annotation finding.
 _TITLE_MIN_VERSION = "2025-11-25"
 # Header absent on a post-init request → the spec says assume the older
 # baseline, NOT the server's preferred version.
@@ -221,10 +224,10 @@ def _handle_initialize(app: Any, params: dict[str, Any]) -> dict[str, Any]:
 
     serverInfo deliberately carries name/version only (plus title when the
     negotiated version is 2025-11-25 or newer) — ``icons`` makes Claude.ai's
-    schema validator reject the handshake (pitchbook LRN-087), and ``title``
-    was introduced in 2025-11-25; emitting it under an older negotiated session
-    causes Claude.ai to reject the handshake with "Authorization with the MCP
-    server failed" (GH #43).
+    schema validator reject the handshake (pitchbook LRN-087). ``title`` is
+    spec-valid at 2025-06-18 per mcp-protocol.md §2, but we gate it at
+    2025-11-25 conservatively (GH-43 observed a rejection; see REVIEWS.md
+    Round 4). A future wave can re-test and lower the gate to 2025-06-18.
     """
     client_version = params.get("protocolVersion")
     version = (

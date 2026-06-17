@@ -1,7 +1,8 @@
 """MCP initialize version-gated serverInfo.title — GH #43.
 
-AC:
-  1. serverInfo.title ABSENT when negotiated version is 2025-06-18 or older.
+AC (conservative gate — see REVIEWS.md Round 4 and _TITLE_MIN_VERSION comment):
+  1. serverInfo.title ABSENT when negotiated version is 2025-06-18 (GH-43 observed
+     Claude.ai rejecting the handshake; gate conservatively at 2025-11-25 until re-tested live).
   2. serverInfo.title PRESENT when negotiated version is 2025-11-25.
   3. 2025-11-25 is in SUPPORTED_PROTOCOL_VERSIONS (clients requesting it get it echoed).
   4. A client requesting 2025-11-25 gets 2025-11-25 back, not the old fallback.

@@ -1,5 +1,5 @@
 ---
-id: LRN-028
+id: LRN-038
 title: Unconditional seam audit dispatch on empty seam paths
 category: testing
 severity: high

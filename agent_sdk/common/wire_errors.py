@@ -24,17 +24,23 @@ _CATEGORY_HTTP = {
     ErrorCategory.INTERNAL: 500,
 }
 
+_PARSE_ERROR = -32700
 _INVALID_PARAMS = -32602
 _INTERNAL_ERROR = -32603
 
 
 def a2a_error(code: int, message: str, data: Any = None) -> JSONResponse:
     """A2A spec error (the seven -3200x codes or JSON-RPC standard codes)."""
-    status = A2A_HTTP_STATUS.get(code, 400 if code == _INVALID_PARAMS else 500)
+    _client_error_codes = (_PARSE_ERROR, _INVALID_PARAMS)
+    status = A2A_HTTP_STATUS.get(code, 400 if code in _client_error_codes else 500)
     body: dict[str, Any] = {"code": code, "message": message}
     if data is not None:
         body["data"] = data
     return JSONResponse(status_code=status, content={"error": body})
+
+
+def a2a_parse_error(message: str = "parse error") -> JSONResponse:
+    return a2a_error(_PARSE_ERROR, message)
 
 
 def a2a_invalid_params(message: str = "invalid params") -> JSONResponse:

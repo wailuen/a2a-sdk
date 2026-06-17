@@ -63,6 +63,8 @@ class ToolSet:
         if read_only:
             ann["readOnlyHint"] = True
             ann["destructiveHint"] = False
+        if tier == 1 or read_only:
+            ann["openWorldHint"] = False
         ann.update(annotations or {})
         merged_annotations = ann or None
 

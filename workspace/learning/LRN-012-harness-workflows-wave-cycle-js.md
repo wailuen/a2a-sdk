@@ -19,4 +19,16 @@ The audit prompt string was written (or last updated) against an earlier draft o
 
 ## Prevention
 
-When the Standard Profile type list changes, update `harness/workflows/wave-cycle.js` line 586 in the same commit as `DESIGN.md §5.4` and `content_types.py`. Treat the three files as a single logical unit: any discrepancy between them is a defect. The correct phrase is: "Core 6 + Extended 8 Standard Profile types only (14 FROZEN total; 4 RESERVED names are never emitted)."
+When the Standard Profile type list changes, update `harness/workflows/wave-cycle.js` in the same commit as `DESIGN.md §5.4` and `content_types.py`. Treat the three files as a single logical unit: any discrepancy between them is a defect. The correct phrase is: "Core 6 + Extended 8 Standard Profile types only (14 FROZEN total; 4 RESERVED names are never emitted)."
+
+## Check
+
+```bash
+grep -rn "Core 7\|Extended 11" harness/workflows/wave-cycle.js .claude/workflows/wave-cycle.js
+```
+Must return nothing. Any match means this learning regressed.
+
+```bash
+grep -c "class.*ContentModel" agent_sdk/models/content_types.py
+```
+Count must be 14 (FROZEN types) plus 4 RESERVED names. If the count changes, update wave-cycle.js and DESIGN.md §5.4 in the same commit.

@@ -1,5 +1,5 @@
 ---
-id: LRN-029
+id: LRN-041
 title: Protocol-fix loop missing re-gate before recheck
 category: testing
 severity: high
