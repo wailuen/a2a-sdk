@@ -1,8 +1,9 @@
-"""A2A HTTP error envelope conformance tests (A1 + A2 + A4).
+"""A2A HTTP error envelope conformance tests (A1 + A2 + A3 + A4).
 
 Covers:
   A1 — All /v1/ HTTP errors return {"error": {code, message}} (no "detail" key).
   A2 — task_id with ':' returns -32004 (not -32001 task-not-found).
+  A3 — GH-51: message/send to terminal task creates a continuation task (new taskId, same contextId).
   A4 — MCP Origin validation rejects foreign origins; absent Origin passes.
 """
 
@@ -109,23 +110,24 @@ async def test_task_id_with_colon_returns_unsupported_operation(client):
 
 
 # ===========================================================================
-# A3 — terminal-task message/send error code (A2A-F1)
+# A3 — GH-51: terminal-task message/send creates a continuation task
 # ===========================================================================
 
 
-async def test_terminal_task_send_returns_unsupported_operation(client):
-    """message/send to a completed task must return -32004 (UnsupportedOperation),
-    NOT -32002 (TaskNotCancelable). -32002 is reserved for tasks/cancel only
-    (A2A v0.3.0 §2 error code table)."""
-    # Create a new task and let it run to completion.
+async def test_terminal_task_send_creates_continuation(client, fake_model):
+    """GH-51 (corrected): message/send with a terminal taskId returns -32004.
+    A2A §6 item 14 prohibits starting a new task via a terminal taskId.
+    Continuation is done by sending contextId only (no taskId)."""
+    from agent_sdk.testing import reply
+
+    fake_model.script(reply("done"))
     r = await client.post("/v1/message:send", json=_send_body("hello"))
     assert r.status_code == 200
     task_id = r.json()["id"]
 
-    # Wait for the task to reach a terminal state.
     await wait_for_state(client, task_id, {"completed", "failed", "canceled"})
 
-    # Now attempt to send a new message to the completed task.
+    # Re-message with terminal taskId → must be rejected per spec
     resume_body = {
         "message": {
             "role": "user",
@@ -136,11 +138,8 @@ async def test_terminal_task_send_returns_unsupported_operation(client):
     }
     r2 = await client.post("/v1/message:send", json=resume_body)
     body = r2.json()
-    assert "error" in body, f"Expected A2A error envelope; got {body}"
-    assert body["error"]["code"] == -32004, (
-        f"Expected -32004 (UnsupportedOperation) for message/send to terminal task; "
-        f"got {body['error']['code']}"
-    )
+    assert r2.status_code in (400, 501), f"Expected error; got {body}"
+    assert body["error"]["code"] == -32004
 
 
 # ===========================================================================

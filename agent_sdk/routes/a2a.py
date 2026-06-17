@@ -166,6 +166,10 @@ def _create_task_record(request: Request, params: MessageSendParams, identity: I
     msg.context_id = task.context_id
     task.history = [msg]
     record = request.app.state.task_store.create(task, identity)
+    # A2A §3 contextId continuation: carry prior conversation history into the
+    # new task so the model can reference entities from earlier turns.
+    prior = request.app.state.task_store.context_messages(task.context_id, identity)
+    record.messages.extend(prior)
     record.messages.append({"role": "user", "content": [{"text": _message_text(msg) or " "}]})
     return record
 

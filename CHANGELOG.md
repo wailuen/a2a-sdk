@@ -4,6 +4,46 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.14] — 2026-06-17
+
+### 🟡 Protocol surface changes
+
+- **a2a: terminal taskId now returns -32004 instead of creating a new task (GH-51)** —
+  Removed `_continue_from_terminal()` which violated A2A v0.3.0 §6 item 14. A
+  `message/send` or `message/stream` targeting a terminal `taskId` now returns
+  `-32004 UnsupportedOperation` (send) or `-32001 TaskNotFound` (stream), never
+  a silent new task. Spec-correct multi-turn continuation uses `contextId` only
+  (no `taskId`): `_create_task_record()` calls `TaskStore.context_messages()` to
+  carry prior conversation history into the new task.
+
+- **a2a: `TaskStore.context_messages()` — contextId continuation API** —
+  New method on `TaskStore` ABC (default `[]`) and `InMemoryTaskStore`
+  implementation. Scans terminal tasks by `contextId` + `identity`, returns the
+  most recent task's `messages` list for model-context prepopulation. Identity
+  isolation enforced: different users cannot inherit each other's history on the
+  same `contextId`.
+
+### 🔧 Fixes
+
+- **mcp: `ToolEntry.input_schema()` now always emits `required: []` + `additionalProperties: false` (GH-47)** —
+  No-model branch returns a fully closed schema; Pydantic branch post-processes
+  with `schema.setdefault("additionalProperties", False)` and
+  `schema.setdefault("required", [])` so existing `required` arrays are preserved
+  but empty schemas are closed. Fixes MCP `tools/list` responses that previously
+  omitted these fields.
+
+### 🧪 Test / CI
+
+- `tests/test_w017_gh51_multiturn.py` — new test module covering contextId
+  continuation (inherits prior history), stream continuation, fresh context (no
+  prior history), terminal-taskId rejection (-32004), stream-terminal rejection
+  (-32001), interrupt resume, and per-identity isolation.
+- `tests/test_w017_gh47_input_schema.py` — new test module covering no-model
+  closed schema, all-optional model schema, required-fields preservation, and
+  MCP `tools/list` integration.
+
+---
+
 ## [0.5.13] — 2026-06-17
 
 ### 🟡 Protocol surface changes

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import OrderedDict
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from ..auth.identity import Identity
 from ..models.a2a import Task
@@ -132,6 +132,28 @@ class InMemoryTaskStore(TaskStore):
         record.resume_future.set_result(value)
         record.resume_future = None
         return True
+
+    # ── context continuation ──
+
+    def context_messages(
+        self, context_id: str, identity: Identity | None = None
+    ) -> Sequence[dict[str, Any]]:
+        """Return messages from the most recent terminal task in this context."""
+        from ..models.a2a import TERMINAL_STATES
+        candidates = [
+            r for r in self._records.values()
+            if r.task.context_id == context_id
+            and r.task.status.state in TERMINAL_STATES
+            and (
+                identity is None
+                or (identity.kind == "api_key" and identity.admin)
+                or r.identity == identity.binding
+            )
+        ]
+        if not candidates:
+            return []
+        latest = max(candidates, key=lambda r: r.created_at)
+        return list(latest.messages)
 
     # ── listing ──
 

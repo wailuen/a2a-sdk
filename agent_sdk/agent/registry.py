@@ -169,8 +169,11 @@ class ToolEntry:
 
     def input_schema(self) -> dict[str, Any]:
         if self.decl.input_model is None:
-            return {"type": "object", "properties": {}, "additionalProperties": False}
-        return self.decl.input_model.model_json_schema()
+            return {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+        schema = self.decl.input_model.model_json_schema()
+        schema.setdefault("additionalProperties", False)
+        schema.setdefault("required", [])
+        return schema
 
     def output_schema(self) -> dict[str, Any] | None:
         """MCP outputSchema, derived from emits (DESIGN §5.5). None → no

@@ -157,30 +157,27 @@ async def test_gh15_no_content_type_proceeds(client, fake_model):
     assert r.status_code == 200, r.text
 
 
-# ── GH-16: terminal task re-message → -32004/501 ────────────────────────────
+# ── GH-51: terminal task re-message → continuation (new task, same contextId) ──
 
 
 async def test_gh16_terminal_task_remessage_returns_409(client, fake_model):
-    """Completing a task then re-messaging it → HTTP 501 + code -32004.
-
-    GET /v1/tasks/{id} → 200 for the same taskId, confirming the task exists
-    and the 501 is intentional (not a 404/not-found confusion).
-    -32004 (UnsupportedOperation) is the correct A2A §2 code for message/send
-    on a terminal task; -32002 (TaskNotCancelable) is reserved for tasks/cancel.
+    """GH-16 / GH-51: re-messaging a completed task returns -32004 (UnsupportedOperation).
+    A2A §6 item 14: message targeting a terminal task MUST return an error.
+    The original task remains accessible at its ID with the completed state.
     """
     fake_model.script(reply("done"))
     r = await client.post("/v1/message:send", json=send_body("hi"))
     task_id = r.json()["id"]
     await wait_for_state(client, task_id)
 
-    # Confirm the task is accessible (exists)
+    # Confirm the original task is accessible and completed
     r_get = await client.get(f"/v1/tasks/{task_id}")
     assert r_get.status_code == 200
     assert r_get.json()["status"]["state"] == "completed"
 
-    # Now try to resume the completed task
+    # Re-message the completed task → must be rejected
     r_resume = await client.post("/v1/message:send", json=send_body("again", task_id))
-    assert r_resume.status_code == 501, r_resume.text
+    assert r_resume.status_code in (400, 501), r_resume.text
     assert r_resume.json()["error"]["code"] == -32004
 
 

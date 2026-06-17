@@ -140,13 +140,6 @@ async def test_interrupt_resume_via_message_send(client, fake_model):
     done = await wait_for_state(client, task_id)
     assert done["status"]["state"] == "completed"
 
-    # GH-16: resume of a terminal task → UnsupportedOperation (-32004, HTTP 501)
-    # so clients can distinguish "task not found" from "task exists but non-resumable".
-    # -32004 is the correct A2A §2 code for message/send on a terminal task;
-    # -32002 (TaskNotCancelable) is reserved for tasks/cancel only.
-    r = await client.post("/v1/message:send", json=send_body("again", task_id))
-    assert (r.status_code, r.json()["error"]["code"]) == (501, -32004)
-
 
 async def test_cancel_running_task(client, fake_model):
     fake_model.script(

@@ -18,7 +18,7 @@ from __future__ import annotations
 import abc
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
 from ..auth.identity import Identity
 from ..models.a2a import Task
@@ -131,6 +131,16 @@ class TaskStore(abc.ABC):
     ) -> tuple[list[Task], str | None]:
         """Return up to ``page_size`` tasks owned by ``identity``, sorted by
         task id, plus an opaque ``nextPageToken`` when more remain."""
+
+    def context_messages(
+        self, context_id: str, identity: Identity | None = None
+    ) -> Sequence[dict[str, Any]]:
+        """Return the Converse-format message history from the most recent
+        terminal task in ``context_id`` owned by ``identity``.  Used by
+        ``_create_task_record`` to carry prior conversation history into a
+        new task started on the same context (A2A §3 contextId continuation).
+        Returns an empty list when no prior terminal task exists."""
+        return []
 
     @abc.abstractmethod
     def evict(self, task_id: str) -> None:
