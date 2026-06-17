@@ -1,4 +1,29 @@
-"""Shared fixtures: isolated example agent + FakeModelClient + live ASGI client."""
+"""Shared fixtures: isolated example agent + FakeModelClient + live ASGI client.
+
+Test-isolation note (RT-CONTENT-TYPES-REGISTRY-GLOBAL-STATE)
+-------------------------------------------------------------
+``agent_sdk.models.content_types`` uses two module-level globals:
+
+* ``_REGISTRY`` — maps data_type str → ContentModel subclass.
+* ``_PROFILE_SEALED`` — set to ``True`` once the Standard Profile types are
+  registered at import time; never reset.
+
+Tests in ``test_content_types.py`` that register temporary domain cards clean
+up via ``try/finally: _REGISTRY.pop(...)`` blocks, which is safe under the
+current *sequential* CI execution model (pytest-xdist disabled).
+
+If parallel test execution (``-n auto``) is ever introduced:
+
+1. Refactor ``_REGISTRY`` and ``_PROFILE_SEALED`` into pytest fixtures with
+   ``function`` scope, or monkeypatch ``_REGISTRY`` at the start of each
+   test that registers a temporary type.
+2. Ensure no test relies on import-time side-effects of ``content_types`` to
+   be idempotent with a clean registry; instead restore state explicitly in
+   teardown.
+
+Until parallel execution is enabled, the sequential guarantee makes the
+existing try/finally pattern sufficient.
+"""
 
 from __future__ import annotations
 

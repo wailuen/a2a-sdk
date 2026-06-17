@@ -6,6 +6,13 @@ importable from its submodule; ``agent_sdk.testing`` and ``agent_sdk.contrib``
 are provisional.
 """
 
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+try:
+    __version__: str = _pkg_version("agent-sdk")
+except PackageNotFoundError:  # running from source tree without pip install
+    __version__ = "0.0.0+dev"
+
 from .agent.artifacts import ArtifactLoader
 from .agent.loop import LoopPolicies, ToolInterrupt
 from .agent.model_client import ModelClient, ModelResponse, ModelToolCall
@@ -16,8 +23,6 @@ from .credentials.fields import CredentialField
 from .credentials.store import NS_MODEL
 from .models.errors import AgentError, ErrorCategory
 from .sources import SourceAdapter
-
-__version__ = "0.4.0"
 
 __all__ = [
     "Agent",

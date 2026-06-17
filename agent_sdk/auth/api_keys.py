@@ -6,7 +6,7 @@ prefix-only displayed. Last-admin-key revocation is refused (lockout is
 impossible by that path).
 
 Bootstrap: whenever the store holds zero keys at startup a single-use token
-is generated in memory and printed to stdout; it expires after 15 minutes
+is generated in memory and printed to stderr; it expires after 15 minutes
 and is consumed atomically by the first key mint. There is no window where
 key-minting is open to the network.
 """

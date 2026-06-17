@@ -4,6 +4,48 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.12] — 2026-06-17
+
+### 🟡 Protocol surface changes
+
+- **mcp: gate serverInfo.title behind negotiated version 2025-11-25 (GH-43)** —
+  `serverInfo.title` is absent when clients negotiate `2025-06-18` or `2025-03-26`;
+  it is only included when the negotiated MCP protocol version is `2025-11-25` or later.
+  MCP `SUPPORTED_PROTOCOL_VERSIONS` tuple locked to newest-first order via assert.
+
+### ✅ Features
+
+- **harness: tier-based parallel wave execution (ce34027)** —
+  `wave-cycle.js` now resolves a `groupDeps` map from the wave file and executes
+  todo groups whose dependencies are all complete concurrently within each tier,
+  rather than strictly sequentially. Groups with no inter-group deps run in
+  the same tier.
+
+- **harness: pre-archive commit-intent guard (GH-40)** —
+  Archive phase in `harness/workflows/wave-cycle.js` now runs a `git status --short`
+  check before moving the wave file to `completed/`, cross-referencing dirty paths
+  against the wave's `Creates:` entries. If any Creates file is uncommitted the
+  archive is blocked (fail-closed). `ARCHIVE_INTENT_SCHEMA` is the structured gate.
+
+### 🔧 Fixes
+
+- **fix(content): DocumentList.to_plain_text() renders type and modification date (GH-42)** —
+  `DocumentItem.type` and `last_modified` / `modified` date are now included in
+  `to_plain_text()` output, matching the full wire contract for `DocumentList`.
+
+### 📖 Documentation
+
+- **docs: document lifespan_extras scheduling entry point (GH-41)** —
+  `Agent.__init__` docstring now fully describes the `lifespan_extras` parameter
+  with a minimal `asyncio.create_task` example for periodic background tasks.
+  DESIGN.md §10.4 (new) identifies `lifespan_extras` as the single scheduling
+  entry point and cross-references `commitments_lifespan` and `webhooks_renewal_lifespan`
+  as canonical patterns. No new public API surface added.
+
+- **docs: round-3 conformance audit deferred findings recorded in REVIEWS.md** —
+  All 10 findings from the v0.5.12 `/agent-stack-check` gate (1 High deferred,
+  5 Medium, 4 Low) are acknowledged with rationale. No Critical or blocking items.
+
 ## [0.5.9] — 2026-06-16
 
 ### ✅ Features

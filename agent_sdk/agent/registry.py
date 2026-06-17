@@ -172,11 +172,23 @@ class ToolEntry:
 
     def output_schema(self) -> dict[str, Any] | None:
         """MCP outputSchema, derived from emits (DESIGN §5.5). None → no
-        structuredContent is ever emitted for this tool (never unclaimed)."""
+        structuredContent is ever emitted for this tool (never unclaimed).
+
+        RTGA-001: MarketBriefing is the sole prose-exception type — its
+        structuredContent value is a markdown string, so its outputSchema
+        must advertise {"type": "string"}, not the Pydantic field dict schema.
+        """
+        from ..models.content_types import MarketBriefing
+
         emits = self.decl.emits
-        if emits is not None and issubclass(emits, BaseModel):
-            return emits.model_json_schema()
-        return None
+        if emits is None:
+            return None
+        if not issubclass(emits, BaseModel):
+            return None
+        if issubclass(emits, MarketBriefing):
+            # Wire value is to_markdown() → a plain string.
+            return {"type": "string"}
+        return emits.model_json_schema()
 
     async def invoke(
         self,

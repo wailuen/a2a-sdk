@@ -1,9 +1,11 @@
 """A2UI Standard Profile v1 content models (FROZEN — DESIGN.md §5.4).
 
 Wire-isomorphic Pydantic models for the 14 FROZEN Profile types plus the
-registry that the translator, catalog and console all read. Field contracts
+registry that the translator, catalog and console all read (Standard Profile
+v1 = 14 FROZEN + 4 RESERVED names at RESERVED_COMPONENTS — 18 total). Field
+contracts
 are frozen at catalog ``urn:a2ui-profile:standard:v1`` — do not "fix"
-inconsistencies (e.g. the three different date_range key pairs); they are
+inconsistencies (e.g. the two different date_range key pair shapes); they are
 intentional and locked.
 
 Reserved names (TradeActivity, CompanyInfo, DealList, InvestorProfile) have
@@ -138,7 +140,7 @@ class MetricItem(_Wire):
         """
         try:
             return cls(label=label, value=value, unit=unit, trend=trend, change_pct=change_pct)
-        except (ValueError, Exception):
+        except (ValueError, TypeError):
             return None
 
 
@@ -224,8 +226,10 @@ class TimeSeriesChart(ContentModel):
         lines = [self.title]
         if self.data:
             first, last = self.data[0], self.data[-1]
+            fv = first.value if first.value is not None else "N/A"
+            lv = last.value if last.value is not None else "N/A"
             lines.append(
-                f"  {first.value} @ {first.date} → {last.value} @ {last.date} "
+                f"  {fv} @ {first.date} → {lv} @ {last.date} "
                 f"({len(self.data)} points)"
             )
         return "\n".join(lines)
@@ -722,9 +726,10 @@ class DocumentList(ContentModel):
     def to_plain_text(self) -> str:
         lines = [f"{self.total_count} document(s)"]
         for d in self.documents:
+            type_suffix = f" ({d.type})" if d.type else ""
             when = d.last_modified or d.modified
-            suffix = f" (modified {when})" if when else ""
-            lines.append(f"  {d.name}{suffix}")
+            date_suffix = f"  {when}" if when else ""
+            lines.append(f"  {d.name}{type_suffix}{date_suffix}")
         return "\n".join(lines)
 
 

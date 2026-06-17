@@ -140,3 +140,11 @@ class TaskStore(abc.ABC):
     @abc.abstractmethod
     def sweep(self) -> None:
         """TTL pass — called periodically from the lifespan."""
+
+    def close_all(self) -> None:
+        """Cancel all live workers, close resume channels, and sentinel-close
+        all subscriber queues.  Called once during graceful shutdown before
+        adapters are closed.  Default implementation iterates ``evict()`` over
+        every record ID — concrete stores may override for efficiency."""
+        for task_id in list(getattr(self, "_records", {}).keys()):
+            self.evict(task_id)

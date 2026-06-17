@@ -409,3 +409,42 @@ def test_apply_data_model_update_nested_path():
     model: dict = {}
     apply_data_model_update(model, "/metrics/0", {"label": "IRR", "value": 0.18})
     assert model["metrics"]["0"] == {"label": "IRR", "value": 0.18}
+
+
+# ── SC-C7 (A2UI path): MarketBriefing prose-exception on the A2UI translator ──
+
+def test_market_briefing_translate_value_is_string_not_dict():
+    """SC-C7 (A2UI path): translate() for MarketBriefing must place the
+    to_markdown() string — not the raw wire() dict — as the updateDataModel
+    value.  Pins the prose-exception contract on the A2UI path the same way
+    SC-C7 pins it on the MCP path."""
+    from agent_sdk.models.content_types import MarketBriefing
+
+    briefing = MarketBriefing(
+        title="Morning Brief",
+        as_of="2026-06-17",
+        prose="Markets open mixed.",
+    )
+    result = translate(briefing)
+    assert result is not None, "translate() must not gate off MarketBriefing (core type)"
+    assert len(result) == 4, f"expected 4 messages, got {len(result)}"
+
+    update = result[2]
+    assert "updateDataModel" in update, f"message[2] must be updateDataModel; keys: {list(update.keys())}"
+
+    value = update["updateDataModel"]["value"]
+    assert isinstance(value, str), (
+        f"updateDataModel value for MarketBriefing must be a string (markdown), "
+        f"not {type(value).__name__!r}. Got: {value!r}"
+    )
+    # The markdown string must contain the title and as_of, confirming it is
+    # to_markdown() output and not an empty string or an unrelated serialization.
+    assert "Morning Brief" in value, (
+        f"markdown value must include the briefing title; got: {value!r}"
+    )
+    assert "2026-06-17" in value, (
+        f"markdown value must include as_of date; got: {value!r}"
+    )
+    # Explicit negative: the raw wire dict would have keys like 'title', 'as_of',
+    # 'prose', 'sections' — none of those should appear as top-level JSON keys.
+    assert not isinstance(value, dict), "value must never be a dict"

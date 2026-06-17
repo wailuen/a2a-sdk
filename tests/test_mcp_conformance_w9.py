@@ -463,3 +463,113 @@ async def test_sc_c6_auto_title_appears_in_tools_list_wire(client):
     assert demo_kpis.get("title") == "Demo Kpis", (
         f"demo_kpis title should be 'Demo Kpis', got {demo_kpis.get('title')!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# SC-C7: MarketBriefing tools/call structuredContent must be a markdown string
+#         (RTGA-001 / RTGA-005)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def sc_c7_app(settings, fake_model):
+    """App with a tool that declares emits=MarketBriefing and returns a
+    MarketBriefing instance, so the MCP route must emit structuredContent as a
+    markdown string (to_markdown()), not a dict (wire())."""
+    from pydantic import BaseModel as PM
+
+    from agent_sdk.agent.registry import ToolDecl
+    from agent_sdk.models.content_types import MarketBriefing
+
+    class _Empty(PM):
+        pass
+
+    async def briefing_tool(inp: _Empty):  # noqa: no return annotation — SC-F1 compliance
+        """Return a MarketBriefing."""
+        return MarketBriefing(title="Weekly Wrap", as_of="2026-06-16", prose="Markets flat.")
+
+    extra = ToolSet()
+    extra.decls.append(
+        ToolDecl(
+            fn=briefing_tool,
+            name="briefing_tool",
+            description="Return a MarketBriefing.",
+            tier=1,
+            emits=MarketBriefing,
+            sample=None,
+            input_model=_Empty,
+            adapter_params={},
+            title=None,
+            annotations=None,
+        )
+    )
+
+    agent = make_agent(settings, model_client=fake_model)
+    agent.toolsets = agent.toolsets + [extra]
+    app = agent.build_app()
+    yield app
+    app.state.credential_store.close()
+    gc.collect()
+
+
+@pytest.fixture
+async def sc_c7_client(sc_c7_app):
+    async with sc_c7_app.router.lifespan_context(sc_c7_app):
+        _, token = sc_c7_app.state.auth.api_keys.mint("test-admin", admin=True)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=sc_c7_app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as c:
+            yield c
+
+
+async def test_sc_c7_market_briefing_structured_content_is_string(sc_c7_client):
+    """RTGA-001/005: tools/call for a tool with emits=MarketBriefing must return
+    structuredContent as a markdown string (to_markdown()), not a dict (wire()).
+    The outputSchema in tools/list must also advertise {"type": "string"}."""
+    headers = await _mcp_init(sc_c7_client)
+
+    # 1. Verify tools/list advertises outputSchema = {"type": "string"}.
+    r_list = await sc_c7_client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        headers=headers,
+    )
+    assert r_list.status_code == 200, r_list.text
+    tools = r_list.json()["result"]["tools"]
+    briefing = next((t for t in tools if t["name"] == "briefing_tool"), None)
+    assert briefing is not None, "briefing_tool not found in tools/list"
+    output_schema = briefing.get("outputSchema")
+    assert output_schema is not None, "outputSchema must be present for emits=MarketBriefing"
+    assert output_schema == {"type": "string"}, (
+        f"outputSchema for MarketBriefing must be {{\"type\": \"string\"}}, got: {output_schema!r}"
+    )
+
+    # 2. Verify tools/call returns structuredContent as a string (markdown), not a dict.
+    r_call = await sc_c7_client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "briefing_tool", "arguments": {}},
+        },
+        headers=headers,
+    )
+    assert r_call.status_code == 200, r_call.text
+    result = r_call.json()["result"]
+    assert result.get("isError") is False, f"Unexpected error: {result}"
+    assert "structuredContent" in result, (
+        "structuredContent MUST be present when emits=MarketBriefing is declared"
+    )
+    sc = result["structuredContent"]
+    assert isinstance(sc, str), (
+        f"structuredContent for MarketBriefing must be a markdown string, got {type(sc).__name__}: {sc!r}"
+    )
+    assert "Weekly Wrap" in sc, (
+        f"Expected 'Weekly Wrap' in markdown output, got: {sc!r}"
+    )
+    assert "Markets flat." in sc, (
+        f"Expected prose 'Markets flat.' in markdown output, got: {sc!r}"
+    )

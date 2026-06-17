@@ -85,8 +85,7 @@ class SourceAdapter:
         if not any(host == h or host.endswith("." + h) for h in self.allowed_hosts):
             raise AgentError(
                 ErrorCategory.VALIDATION,
-                f"request to host '{host}' is outside allowed_hosts for "
-                f"source '{self.source_name}'",
+                f"upstream host not in allowed_hosts for source '{self.source_name}'",
                 source=self.source_name,
             )
 

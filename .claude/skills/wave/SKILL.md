@@ -54,26 +54,28 @@ For each wave whose `Depends:` items are all in `completed/`:
 
 1. **Check deps** — if any `Depends:` item is still in `active/` or `deferred/`,
    stop and report which dep is blocking.
-2. **Launch `wave-cycle.js`**:
+2. **Launch `sdk-wave.js`** (the SDK-context executor):
    ```js
    Workflow({
-     scriptPath: ".claude/workflows/wave-cycle.js",
+     scriptPath: ".claude/workflows/sdk-wave.js",
      args: { waveFile: "<absolute path to active wave file>", today: "<YYYY-MM-DD>" }
    })
    ```
    The workflow runs 8 phases for this wave:
-   - **Parse** — reads wave file; extracts groups, creates paths, and LRN baseline.
-   - **Todos Redteam** — annotates todos with `SI:` fields and `Reuses: C-NNN` before
-     implementation; flags new component candidates for registration.
-   - **Implement** — parallel groups, test-first, SI-enforcing.
-   - **Unit Redteam** — zero-tolerance per group (debug fires after >3 failed rounds (r4+) and on stall).
-   - **Phase Redteam** — zero-tolerance full wave (debug fires after >3 failed rounds (r4+) and on stall).
-   - **Protocol Audit** — `a2a-advisor`, `mcp-advisor`, `ag-ui-advisor`, `a2ui-advisor` + seam check (protocol surfaces only).
-   - **Codify** — SDK issue scan (sequential) → parallel LRN capture for critical/high
-     findings → README index update → sequential C-NNN registration for new component
-     candidates.
-   - **Archive** — wave file moved to `completed/`; `plan.md` and FR `Implementation:`
-     fields updated.
+   - **Parse** — reads wave file; extracts groups, creates paths, `groupDeps` map, and LRN baseline.
+   - **Todos Redteam** — `redteam` agent annotates todos with `SI:` fields and `Reuses: C-NNN`
+     before implementation; flags new component candidates for registration.
+   - **Implement** — tier-based parallel execution via `groupDeps`; `python-implementer` agent
+     per todo; test-first (RED→GREEN→refactor).
+   - **Unit Redteam** — `redteam` zero-tolerance per group; `debug` fires after >3 failed rounds
+     (r4+) and on stall; `python-implementer` for fixes.
+   - **Phase Redteam** — `redteam` zero-tolerance full wave; `debug` on stall/r4+.
+   - **Protocol Audit** — `a2a-advisor`, `mcp-advisor`, `ag-ui-advisor`, `a2ui-advisor` + seam
+     check (triggered only for touched protocol surfaces in `agent_sdk/routes/`).
+   - **Codify** — `codify` agent captures LRNs for critical/high findings; SDK issue scan writes
+     `workspace/sdk-candidates.md` for `/sdk-issue-scan`.
+   - **Archive** — pre-archive pytest gate → move wave file to `completed/`; update `plan.md`.
+     Note: no commit-intent guard (commits happen via `/sdk-release`, not during the wave).
 3. After the workflow returns, log progress:
    - ✅ archived → continue to the next wave automatically.
    - ⚠️ deferred items remain → continue (items are in `deferred/`; re-run after fixing).

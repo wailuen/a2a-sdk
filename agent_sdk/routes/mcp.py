@@ -50,7 +50,7 @@ from ..auth.identity import Identity
 from ..auth.middleware import require_identity
 from ..common.sse import HEARTBEAT, SSE_HEADERS
 from ..credentials import forwarding
-from ..models.content_types import ContentModel
+from ..models.content_types import ContentModel, MarketBriefing
 from ..models.errors import AgentError
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 
 # Newest first; initialize echoes the client's version when it appears here.
-SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26")
+SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
+# RTGA-004: guard the ordering invariant — the index comparison for
+# _TITLE_MIN_VERSION gating only works when the tuple is newest-first.
+assert SUPPORTED_PROTOCOL_VERSIONS == tuple(
+    sorted(SUPPORTED_PROTOCOL_VERSIONS, reverse=True)
+), "SUPPORTED_PROTOCOL_VERSIONS must be newest-first (newest at index 0)"
+
+# serverInfo.title was introduced in 2025-11-25; emitting it under an older
+# negotiated version causes Claude.ai to reject the handshake (GH #43).
+_TITLE_MIN_VERSION = "2025-11-25"
 # Header absent on a post-init request → the spec says assume the older
 # baseline, NOT the server's preferred version.
 _DEFAULT_PROTOCOL_VERSION = "2025-03-26"
@@ -67,6 +76,9 @@ _SESSION_ID_HEADER = "Mcp-Session-Id"
 
 SESSION_TTL_SECONDS = 30 * 60  # idle TTL
 _MAX_SESSIONS = 1_000
+# RT-003: cap legacy SSE sessions to prevent unbounded queue growth under
+# long-lived connections (each entry holds an asyncio.Queue(maxsize=256)).
+_MAX_SSE_SESSIONS = 500
 _MAX_BODY_BYTES = 2 * 1024 * 1024
 _HEARTBEAT_SECONDS = 15.0
 
@@ -195,7 +207,8 @@ async def _dispatch(app: Any, message: dict[str, Any]) -> dict[str, Any] | None:
             if isinstance(result, dict) and "__jrpc_not_found__" in result:
                 return _error(request_id, _METHOD_NOT_FOUND, result["__jrpc_not_found__"])
             return _result(request_id, result)
-        return _error(request_id, _METHOD_NOT_FOUND, f"unknown method: {method}")
+        # SI-2: never reflect user-supplied method name in error text.
+        return _error(request_id, _METHOD_NOT_FOUND, "method not found")
     except Exception:
         # Defensive: a handler bug must never leak a stack trace to the wire.
         logger.exception("mcp dispatch internal error method=%s", method)
@@ -206,8 +219,12 @@ def _handle_initialize(app: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Echo the client's protocolVersion when we support it; otherwise return
     our highest and let the client decide whether to continue (§5.5).
 
-    serverInfo deliberately carries name/version only — ``icons`` makes
-    Claude.ai's schema validator reject the handshake (pitchbook LRN-087).
+    serverInfo deliberately carries name/version only (plus title when the
+    negotiated version is 2025-11-25 or newer) — ``icons`` makes Claude.ai's
+    schema validator reject the handshake (pitchbook LRN-087), and ``title``
+    was introduced in 2025-11-25; emitting it under an older negotiated session
+    causes Claude.ai to reject the handshake with "Authorization with the MCP
+    server failed" (GH #43).
     """
     client_version = params.get("protocolVersion")
     version = (
@@ -216,14 +233,22 @@ def _handle_initialize(app: Any, params: dict[str, Any]) -> dict[str, Any]:
         else SUPPORTED_PROTOCOL_VERSIONS[0]
     )
     settings = app.state.settings
+    server_info: dict[str, Any] = {
+        "name": settings.agent_name,
+        "version": settings.agent_version,
+    }
+    # title was added in 2025-11-25; only emit it when the negotiated version
+    # is that version or newer.  SUPPORTED_PROTOCOL_VERSIONS is newest-first,
+    # so an index comparison is sufficient.
+    if (
+        SUPPORTED_PROTOCOL_VERSIONS.index(version)
+        <= SUPPORTED_PROTOCOL_VERSIONS.index(_TITLE_MIN_VERSION)
+    ):
+        server_info["title"] = settings.agent_name
     result: dict[str, Any] = {
         "protocolVersion": version,
         "capabilities": {"tools": {"listChanged": False}},
-        "serverInfo": {
-            "name": settings.agent_name,
-            "title": settings.agent_name,
-            "version": settings.agent_version,
-        },
+        "serverInfo": server_info,
     }
     # Surface the per-call credential header to Claude.ai, which injects
     # instructions into model context (a2a-advisor). Omitted entirely when no
@@ -261,7 +286,9 @@ def _handle_tools_list(app: Any, params: dict[str, Any] | None = None) -> dict[s
     if params is None:
         params = {}
     all_entries = app.state.registry.tier1()
-    offset = _decode_cursor(params.get("cursor"))
+    # RT-001: clamp to ≥0 — a crafted negative base64 cursor wraps Python list
+    # slicing to the tail of the list, bypassing forward-only pagination.
+    offset = max(0, _decode_cursor(params.get("cursor")))
     page_entries = all_entries[offset : offset + _PAGE_SIZE]
 
     tools: list[dict[str, Any]] = []
@@ -292,7 +319,7 @@ def _tool_text(artifact: Any) -> str:
     if isinstance(artifact, ContentModel):
         return artifact.to_plain_text()
     if isinstance(artifact, BaseModel):
-        return artifact.model_dump_json()
+        return artifact.model_dump_json(exclude_none=True)
     return str(artifact)
 
 
@@ -317,7 +344,8 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
     # A Tier 2 tool must be indistinguishable from an unknown name on this
     # surface (§5.6 — MCP exposes Tier 1 only).
     if entry is None or entry.tier != 1:
-        return {"__jrpc_not_found__": f"unknown tool: {name}"}
+        # SI-2: never reflect user-supplied tool name in error text.
+        return {"__jrpc_not_found__": "tool not found"}
 
     try:
         artifact = await entry.invoke(arguments, app.state.adapters)
@@ -332,8 +360,10 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
         # failure the model can correct and retry. Message stays generic —
         # nothing caller-supplied is echoed.
         logger.exception("mcp tool unexpected error tool=%s", name)
+        # SI-2: never reflect user-supplied / tool-derived names in error text;
+        # the tool name is already recorded in the structured log above.
         return {
-            "content": [{"type": "text", "text": f"tool '{name}' execution failed"}],
+            "content": [{"type": "text", "text": "tool execution failed"}],
             "isError": True,
         }
 
@@ -348,8 +378,15 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
             # MCP §4: structuredContent MUST be present when outputSchema is declared.
             # Coercion failure → surface as isError so clients can detect the contract
             # violation rather than receiving a silent success with no structuredContent.
+            # SI-2: tool name and exc type go to the structured log only — never echoed
+            # to the caller in the isError text.
+            logger.warning(
+                "mcp tool output coercion failed tool=%s exc_type=%s",
+                name,
+                type(exc).__name__,
+            )
             return {
-                "content": [{"type": "text", "text": f"tool '{name}' output coercion failed: {type(exc).__name__}"}],
+                "content": [{"type": "text", "text": "tool output coercion failed"}],
                 "isError": True,
             }
 
@@ -359,11 +396,17 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
     }
     # structuredContent ONLY under a declared output schema (emits), and only
     # when the artifact actually is a model we can serialize against it.
+    # RTGA-001: MarketBriefing is the sole prose-exception type — its wire value
+    # is a markdown string (to_markdown()), never the field dict (wire()).
+    # DESIGN §4.3: "MarketBriefing is the only type whose wire data is a markdown
+    # string — the translator emits model.to_markdown(), never model_dump()."
     if entry.output_schema() is not None and isinstance(artifact, BaseModel):
         result["structuredContent"] = (
-            artifact.wire()
+            artifact.to_markdown()
+            if isinstance(artifact, MarketBriefing)
+            else artifact.wire()
             if isinstance(artifact, ContentModel)
-            else artifact.model_dump(mode="json")
+            else artifact.model_dump(mode="json", exclude_none=True)
         )
     return result
 
@@ -384,36 +427,70 @@ async def mcp_post(
     _prune_sessions(sessions)
     owner = _identity_key(identity)
 
+    # MCP Streamable HTTP 2025-06-18 §3.2.1: clients MUST send
+    # Content-Type: application/json.  Reject non-conforming requests with 415;
+    # guard with `if ct` to preserve no-header pass-through (dev tools often omit it).
+    ct = request.headers.get("content-type", "").split(";")[0].strip()
+    if ct and ct != "application/json":
+        return JSONResponse(
+            status_code=415,
+            content={"error": "Content-Type must be application/json"},
+            headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
+        )
+
+    raw = await request.body()
+    # RTGA-006: parse the message FIRST so we can determine is_initialize before
+    # validating MCP-Protocol-Version.  initialize must bypass the version-header
+    # 400 and proceed to body-level negotiation (DESIGN §5.5).
+    if len(raw) > _MAX_BODY_BYTES:
+        return JSONResponse(
+            status_code=413, content={"error": "request body too large"},
+            headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
+        )
+    try:
+        message = json.loads(raw.decode("utf-8")) if raw else {}
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return JSONResponse(
+            content=_error(None, _PARSE_ERROR, "parse error"),
+            headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
+        )
+    if not isinstance(message, dict):
+        return JSONResponse(
+            content=_error(None, _INVALID_REQUEST, "invalid request"),
+            headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
+        )
+
+    is_initialize = message.get("method") == "initialize"
+
+    # RTGA-006: validate MCP-Protocol-Version only on post-init requests.  An
+    # initialize request must always proceed — the negotiation result in the
+    # response body is authoritative, so even a future/unsupported header value
+    # is not grounds for 400 here.
     version = _negotiated_version(request)
-    if version is None:
+    if version is None and not is_initialize:
         # advertise a version we DO support so the client can retry (spec)
         return JSONResponse(
             status_code=400,
             content={"error": "unsupported MCP-Protocol-Version"},
             headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
         )
-    base_headers = {_PROTOCOL_VERSION_HEADER: version}
-
-    raw = await request.body()
-    if len(raw) > _MAX_BODY_BYTES:
-        return JSONResponse(
-            status_code=413, content={"error": "request body too large"}, headers=base_headers
-        )
-    try:
-        message = json.loads(raw.decode("utf-8")) if raw else {}
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return JSONResponse(
-            content=_error(None, _PARSE_ERROR, "parse error"), headers=base_headers
-        )
-    if not isinstance(message, dict):
-        return JSONResponse(
-            content=_error(None, _INVALID_REQUEST, "invalid request"), headers=base_headers
-        )
+    # For initialize with an unrecognized header, fall back to our highest so
+    # base_headers is always a valid version string.
+    effective_version = version if version is not None else SUPPORTED_PROTOCOL_VERSIONS[0]
+    base_headers = {_PROTOCOL_VERSION_HEADER: effective_version}
 
     # Session lifecycle: an unknown/expired Mcp-Session-Id is a 404 — except
     # for initialize itself, the recovery path after a server restart.
     presented_session = request.headers.get(_SESSION_ID_HEADER)
-    is_initialize = message.get("method") == "initialize"
+    # SI-3: cap header length before any lookup — server-issued ids are
+    # uuid4().hex (32 chars); 64 chars is generous for any future format while
+    # bounding memory and comparison cost. Value is never logged or echoed (SI-2).
+    if presented_session is not None and len(presented_session) > 64:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid session id"},
+            headers=base_headers,
+        )
     if presented_session is not None and not is_initialize:
         if not _session_alive(sessions, presented_session, owner):
             return JSONResponse(
@@ -446,6 +523,13 @@ async def mcp_post(
 
     headers = dict(base_headers)
     if is_initialize and "result" in response:
+        # RTGA-010: evict any existing sessions for this owner before allocating
+        # a new one.  Re-initialization with an existing session leaks an orphan
+        # slot that counts against the LRU cap until TTL expiry.  The old session
+        # is worthless to the caller anyway (they're reinitializing), so eager
+        # eviction keeps the session map compact.
+        for orphan_sid in [s for s, rec in list(sessions.items()) if rec[1] == owner]:
+            sessions.pop(orphan_sid, None)
         session_id = uuid.uuid4().hex
         sessions[session_id] = (time.time(), owner)  # bound to the caller
         _prune_sessions(sessions)
@@ -496,6 +580,10 @@ async def mcp_delete(
     """Session termination — idempotent (an already-gone id is still 204).
     Only the owning caller can terminate a session; a mismatch is a silent
     no-op 204 so one caller can never delete another's session."""
+    # RT-004: defense-in-depth origin guard mirrors mcp_post / mcp_get.
+    origin = request.headers.get("origin")
+    if origin is not None and origin not in request.app.state.cors_origins:
+        raise HTTPException(status_code=403, detail="origin not allowed")
     session_id = request.headers.get(_SESSION_ID_HEADER)
     if session_id:
         sessions = _sessions(request.app)
@@ -516,8 +604,16 @@ async def mcp_sse(
 ) -> StreamingResponse:
     """Legacy HTTP+SSE pair: announce the session-bound messages endpoint as
     the first event; JSON-RPC responses ride this channel as message events."""
+    # RT-004: defense-in-depth origin guard mirrors mcp_post / mcp_get.
+    origin = request.headers.get("origin")
+    if origin is not None and origin not in request.app.state.cors_origins:
+        raise HTTPException(status_code=403, detail="origin not allowed")
     session_id = uuid.uuid4().hex
     queues = _sse_queues(request.app)
+    # RT-003: evict the oldest entry when the cap is reached so the dict stays
+    # bounded even when clients hold connections open indefinitely.
+    while len(queues) >= _MAX_SSE_SESSIONS:
+        queues.pop(next(iter(queues)), None)
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
     queues[session_id] = (queue, _identity_key(identity))  # bound to the caller
 
@@ -552,6 +648,15 @@ async def mcp_messages(
     """Same JSON-RPC dispatch as POST /mcp; the response is enqueued onto the
     session's SSE channel and the POST acks with 202. The caller must own the
     session (mismatch → 404, no existence oracle)."""
+    # RT-004: defense-in-depth origin guard mirrors mcp_post / mcp_get.
+    origin = request.headers.get("origin")
+    if origin is not None and origin not in request.app.state.cors_origins:
+        raise HTTPException(status_code=403, detail="origin not allowed")
+    # SI-3: cap query-param length before any lookup — mirrors the 64-char guard
+    # in mcp_post() on the Mcp-Session-Id header.  Value is never logged or
+    # echoed in the error response (SI-2).
+    if session_id and len(session_id) > 64:
+        raise HTTPException(status_code=400, detail="session_id too long")
     rec = _sse_queues(request.app).get(session_id)
     if rec is None or rec[1] != _identity_key(identity):
         return JSONResponse(status_code=404, content={"error": "session not found"})
@@ -568,14 +673,24 @@ async def mcp_messages(
 
     raw = await request.body()
     if len(raw) > _MAX_BODY_BYTES:
-        return JSONResponse(status_code=413, content={"error": "request body too large"})
+        return JSONResponse(
+            status_code=413, content={"error": "request body too large"},
+            headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
+        )
     try:
         message = json.loads(raw.decode("utf-8")) if raw else {}
     except (UnicodeDecodeError, json.JSONDecodeError):
-        await queue.put(json.dumps(_error(None, _PARSE_ERROR, "parse error")))
+        # RTGA-003: use put_nowait to avoid blocking indefinitely on a full/dead queue.
+        try:
+            queue.put_nowait(json.dumps(_error(None, _PARSE_ERROR, "parse error")))
+        except asyncio.QueueFull:
+            return Response(status_code=503, content=b"session queue full")
         return Response(status_code=202)
     if not isinstance(message, dict):
-        await queue.put(json.dumps(_error(None, _INVALID_REQUEST, "invalid request")))
+        try:
+            queue.put_nowait(json.dumps(_error(None, _INVALID_REQUEST, "invalid request")))
+        except asyncio.QueueFull:
+            return Response(status_code=503, content=b"session queue full")
         return Response(status_code=202)
 
     token = forwarding.bind(forwarding.parse_header(request.headers.get(forwarding.HEADER_NAME)))
@@ -584,5 +699,10 @@ async def mcp_messages(
     finally:
         forwarding.unbind(token)
     if response is not None and message.get("id") is not None:
-        await queue.put(json.dumps(response))
+        # RTGA-003: put_nowait matches the SDK pattern in tasks/store.py (lines 44-54);
+        # await queue.put() would block indefinitely when the SSE consumer is slow or gone.
+        try:
+            queue.put_nowait(json.dumps(response))
+        except asyncio.QueueFull:
+            return Response(status_code=503, content=b"session queue full")
     return Response(status_code=202)

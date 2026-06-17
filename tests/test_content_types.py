@@ -12,6 +12,8 @@ from pydantic import ValidationError
 from agent_sdk.models.content_types import (
     PROFILE_TYPES,
     ContentModel,
+    DocumentItem,
+    DocumentList,
     KpiCard,
     MetricItem,
     _REGISTRY,
@@ -162,3 +164,31 @@ def test_kpi_card_from_mixed_upstream_dict():
     assert len(metrics) == 2
     labels = {m.label for m in metrics}
     assert labels == {"price", "count"}
+
+
+# ── DocumentList.to_plain_text type rendering (GH #42) ───────────────────────
+
+def test_document_list_plain_text_includes_type_when_set():
+    """DocumentItem.type is rendered as '(pdf)' suffix when present."""
+    docs = DocumentList(
+        documents=[
+            DocumentItem(id="1", name="Q4 Report", type="pdf", last_modified="2026-03-31"),
+        ]
+    )
+    text = docs.to_plain_text()
+    assert "Q4 Report (pdf)" in text
+    assert "2026-03-31" in text
+
+
+def test_document_list_plain_text_omits_type_when_none():
+    """When DocumentItem.type is None, no parenthetical type suffix appears."""
+    docs = DocumentList(
+        documents=[
+            DocumentItem(id="2", name="Budget Overview", type=None, last_modified="2026-01-15"),
+        ]
+    )
+    text = docs.to_plain_text()
+    assert "Budget Overview" in text
+    assert "(None)" not in text
+    # No type parenthetical — the only parens should be the modified date
+    assert "(pdf)" not in text

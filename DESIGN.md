@@ -30,7 +30,7 @@
 |---|---|---|
 | A2A | v0.3.0 (HTTP+JSON transport) | `a2a-check` |
 | A2UI | v0.9.1 + Standard Profile v1 (18 types: 14 FROZEN + 4 RESERVED) | `a2ui-check` |
-| MCP | 2025-06-18 baseline (Streamable HTTP), SSE legacy retained | `mcp-check` |
+| MCP | 2025-11-25 (Streamable HTTP; 2025-06-18 and 2025-03-26 also accepted) | `mcp-check` |
 | AG-UI | event catalog per `ag-ui-protocol>=0.1.18` | `ag-ui-check` |
 | OAuth | 2.1 semantics via RFC 8414, 7591, 6749+PKCE, 8707, 9728, 7009 | `mcp-check` (connector flow) |
 
@@ -254,7 +254,7 @@ Endpoints:
 - `POST /v1/message:send` → **HTTP 200**, result is **`Task | Message`**: a `Message` when the agent completes synchronously without creating a task (supported by the SDK for trivial/echo flows), a `Task` snapshot otherwise.
 - `POST /v1/message:stream` → SSE: first frame full Task, then `TaskStatusUpdateEvent` / `TaskArtifactUpdateEvent`, last frame carries `final: true`.
 - `GET /v1/tasks/{id}`; `POST /v1/tasks/{id}:cancel` — success returns **HTTP 200 with the full `Task` in `canceled` state** (spec-required result, not an empty body); unknown id → 404 + `-32001`; terminal state → 409 + `-32002`; `POST /v1/tasks/{id}:subscribe` (unknown id → 404 + `-32001`).
-- `GET /v1/tasks` → 501 + `-32004 UnsupportedOperation` (`tasks/list` is optional for HTTP+JSON servers).
+- `GET /v1/tasks` → 200, identity-scoped paginated list. Query params: `pageSize` (default 50, clamped 1–100), `pageToken` (opaque cursor). Response: `{tasks, totalSize, pageSize, nextPageToken}`. Identity binding same as `GET /v1/tasks/{id}`.
 
 Inbound `Message` validation: `messageId` is required (spec REQ); missing → 400 invalid params.
 
@@ -271,7 +271,7 @@ Complete A2A error code table (all seven; internal sentinel names match spec nam
 | -32001 | TaskNotFound | unknown/expired task id |
 | -32002 | TaskNotCancelable | cancel on terminal task |
 | -32003 | PushNotificationNotSupported | any push-config request (capability false) |
-| -32004 | UnsupportedOperation | tasks/list, unsupported blocking, any unimplemented method |
+| -32004 | UnsupportedOperation | unsupported blocking, any unimplemented method |
 | -32005 | ContentTypeNotSupported | unacceptable `acceptedOutputModes` |
 | -32006 | InvalidAgentResponse | internal translator failure |
 | -32007 | AuthenticatedExtendedCardNotConfigured | extended-card request (not configured) |
@@ -340,7 +340,7 @@ The card's `x-agui.customEvents` list and the console's routing table are assert
 
 **Streamable HTTP at `/mcp` — three verbs:**
 
-- `POST /mcp` — JSON-RPC; SSE response mode supported. Session id allocated on `initialize`, returned via `Mcp-Session-Id` header; unknown/expired session → 404 (except `initialize` itself, the recovery path).
+- `POST /mcp` — JSON-RPC; always responds with `application/json` regardless of `Accept` header (MCP 2025-06-18 §3.2 permits a JSON response to SSE-accepting clients — SSE is reserved for `GET /mcp` streaming only). Session id allocated on `initialize`, returned via `Mcp-Session-Id` header; unknown/expired session → 404 (except `initialize` itself, the recovery path).
 - `GET /mcp` — server→client SSE channel: returns `text/event-stream` with heartbeats (returning 405 breaks Claude.ai Desktop — LRN-053).
 - `DELETE /mcp` — session termination: honors `Mcp-Session-Id`, idempotent, 204.
 - `MCP-Protocol-Version` header **validated when present** on post-init requests (the spec says SHOULD-send, not MUST): present-but-unrecognized → 400; absent → assume `2025-03-26`; version-future fields gated on the negotiated version.
@@ -367,8 +367,9 @@ Legacy SSE pair (`GET /mcp/sse` + `POST /mcp/messages?session_id=`) retained for
 Access-Control-Allow-Origin: https://claude.ai (+ configured origins; never *)
 Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS
 Access-Control-Allow-Headers: Authorization, Content-Type, Mcp-Session-Id,
-                              Accept, Last-Event-ID, MCP-Protocol-Version
-Access-Control-Expose-Headers: WWW-Authenticate, Mcp-Session-Id
+                              Accept, Last-Event-ID, MCP-Protocol-Version,
+                              X-A2A-Extensions, X-Agent-Credentials
+Access-Control-Expose-Headers: WWW-Authenticate, Mcp-Session-Id, X-A2A-Extensions
 ```
 
 `Expose-Headers: WWW-Authenticate` is load-bearing (without it the browser cannot read the 401 challenge and discovery never starts). OPTIONS preflight returns **204** (Starlette returns 200 — the SDK ships the rewrite middleware).
@@ -476,6 +477,38 @@ All four ship in v1 as extras (`pip install agent-sdk[obo]`) but are explicitly 
 **Deployment topology: one origin (subdomain) per agent is the supported shape.** Path-prefix deployments (`https://host/agents/foo/`) are **not** plainly supported: RFC 8615 well-known URIs are origin-rooted, so the agent card, PRM (including the path-suffixed variant `/.well-known/oauth-protected-resource/agents/foo/mcp`), and AS metadata must be served at the origin root — which a mounted app can never reach. Teams that must use path prefixes get documented reverse-proxy rewrite rules for the well-known namespace; the runtime self-check verifies externally-visible URLs either way. All advertised URLs derive from `PUBLIC_URL`.
 
 Console override: an agent-provided static dir shadows SDK assets file-by-file. Dependency policy: the SDK declares lower-bound-only constraints; the template owns exact pins.
+
+---
+
+## 10.4 Scheduling and background tasks
+
+The SDK does **not** ship an `agent_sdk.scheduler` module.  The correct and only entry point for background tasks and periodic work is `Agent(lifespan_extras=[…])`.  See the `Agent.__init__` docstring for the full contract and a minimal `asyncio.create_task` example.
+
+`lifespan_extras` callables receive the live `FastAPI` app (giving access to `app.state.settings`, `app.state.registry`, `app.state.adapters`, etc.) and are entered as async context managers inside the SDK's own lifespan, after source adapters are initialised.  Teardown (cancellation, store close) happens in reverse order on shutdown.
+
+**Two contrib reference implementations** (both in `agent_sdk/contrib/`):
+
+| Module | Lifespan helper | What it does |
+|--------|----------------|--------------|
+| `contrib.commitments` | `commitments_lifespan(…)` | Polls a `CommitmentStore` (SQLite or Azure Table) and fires due tool calls; graceful shutdown with at-most-once semantics (DESIGN §9). |
+| `contrib.webhooks` | `webhooks_renewal_lifespan(…)` | Periodically renews near-expiry Graph webhook subscriptions; uses the same `SubscriptionBackend` the route adapter writes to. |
+
+Both follow the identical wiring pattern:
+
+```python
+from agent_sdk.contrib.commitments import commitments_lifespan
+from agent_sdk.contrib.webhooks import webhooks_renewal_lifespan
+
+agent = Agent(
+    ...,
+    lifespan_extras=[
+        commitments_lifespan(poll_interval=30.0),
+        webhooks_renewal_lifespan(...),
+    ],
+)
+```
+
+For custom periodic work, copy the minimal pattern from the `Agent.__init__` docstring: create an `asyncio.Task` inside an `@asynccontextmanager`, cancel it in the `finally` block.  Do **not** import `agent_sdk.scheduler`; it does not exist.
 
 ---
 

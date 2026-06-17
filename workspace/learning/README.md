@@ -14,6 +14,11 @@ Codified bugs, gotchas, and validated patterns from SDK development and downstre
 | LRN-008 | Source health check uses GET /admin/api/overview, not a per-source POST endpoint | harness | high | 2026-06-14 |
 | LRN-009 | Anthropic model backend documented as functional but unimplemented in the SDK | docs | high | Only document model backends with a live _build_model_client code path; mark reserved/unimplemented backends explicitly. |
 | LRN-010 | SDK bootstrap token is emitted to stderr, not stdout; boot capture must use 2>&1 | ops | high | 2026-06-14 |
-| LRN-013 | AC "integration note" wording targets the Integration section, not step bodies | high | When an AC says "integration note", verify the ## Integration section explicitly — updating only the step body is not sufficient. |
 | LRN-011 | Bootstrap token goes to stderr; agent-verify boot command must use 2>&1 | ops | high | 2026-06-14 |
 | LRN-012 | wave-cycle.js A2UI audit prompt misstated Standard Profile type counts as Core 7 + Extended 11 instead of Core 6 + Extended 8 | harness | high | Keep DESIGN.md §5.4, content_types.py, and wave-cycle.js line 586 in sync as a single logical unit whenever the Standard Profile type list changes. |
+| LRN-013 | AC "integration note" wording targets the Integration section, not step bodies | high | When an AC says "integration note", verify the ## Integration section explicitly — updating only the step body is not sufficient. |
+| LRN-014 | pytest -q tests/ bypasses addopts ignore exclusions — always use bare pytest -q | testing | high | [LRN-014](LRN-014-pytest-explicit-path-bypasses-addopts.md) |
+| LRN-015 | MCP tools/call — emits coercion failure must return isError:True, never except:pass | protocol | high | [LRN-015](LRN-015-mcp-coercion-failure-must-return-iserror.md) |
+| LRN-016 | SSRF IP-block logic must live in agent_sdk/common/http.py — never duplicated | security | high | [LRN-016](LRN-016-ssrf-single-predicate-common-http.md) |
+| LRN-017 | wave-cycle.js — schema-gated gate agents required at redteam and proto-fix checkpoints | harness | high | [LRN-017](LRN-017-wave-cycle-gate-agents-at-checkpoints.md) |
+| LRN-018 | SC-F1 emits annotation validator must skip — not raise — when eval_str resolution fails | sdk | high | 2026-06-16 |

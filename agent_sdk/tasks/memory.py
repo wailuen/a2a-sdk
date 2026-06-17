@@ -168,6 +168,13 @@ class InMemoryTaskStore(TaskStore):
         for task_id in [tid for tid, r in self._records.items() if self._expired(r)]:
             self.evict(task_id)
 
+    def close_all(self) -> None:
+        """Cancel all live workers and sentinel-close all subscriber queues.
+        Called once from lifespan finally to drain interrupted tasks before
+        adapters are torn down (DESIGN.md §5.2 shutdown contract)."""
+        for task_id in list(self._records.keys()):
+            self.evict(task_id)
+
     # ── internals ──
 
     def _interrupted_count(self) -> int:

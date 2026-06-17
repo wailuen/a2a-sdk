@@ -223,3 +223,36 @@ Four-advisor /agent-stack-check static audit. All Critical/High findings fixed a
 | A2UI | INFO | `apply_data_model_update` server-side lacks delete path | Translator never emits `deleteSurface` mid-stream; the code path is not reached. |
 
 **Round 2 sign-off: COMPLIANT. All Critical/High fixed. Deferred items acknowledged with rationale.**
+
+---
+
+## Round 3 — v0.5.12 release gate (2026-06-17)
+
+`/agent-stack-check . --static-only` four-protocol fan-out. All seams S1–S6 PASS.
+
+### Fixed in v0.5.12
+
+| Protocol | Sev | Finding | Fix |
+|---|---|---|---|
+| MCP | — | `serverInfo.title` emitted under all protocol versions | Gated behind `2025-11-25` in `mcp.py:243` |
+| MCP | — | Abrupt SSE session cap (500) lacked queue bound | `_MAX_SSE_SESSIONS = 500` constant in `mcp.py`; bounded LRU |
+| A2A | — | `DocumentList.to_plain_text()` ignored `type` and `last_modified` | Fixed in `content_types.py` |
+| A2A | — | `Agent.__init__` missing `lifespan_extras` docstring | Added in `app.py` |
+| Wave | — | Harness archive phase had no commit-intent guard | `ARCHIVE_INTENT_SCHEMA` + pre-archive check added to `harness/workflows/wave-cycle.js` |
+
+### Deferred findings (acknowledged, non-blocking for v0.5.12)
+
+| Protocol | Sev | Finding | File:line | Rationale |
+|---|---|---|---|---|
+| A2A | HIGH | `403 Forbidden` maps to `-32000` (spec has no dedicated authZ code) | `app.py:512` | Extends the existing Round 2 auth-error deferral (see above). HTTP 403 status is authoritative for authZ denial; JSON-RPC code is supplementary. The A2A v0.3.0 spec defines no named code for authZ failure — `-32000` is the only option in the implementation-defined slot. TCK does not enforce a specific code for authZ failures. A comment will be added in the follow-up hardening wave. |
+| A2A | MED | `TaskStatus.error` non-spec field on wire without `AgentExtension` URI | `models/a2a.py:113` | Field only emits when set (`exclude_none=True`); spec-compliant consumers ignore unknown fields. Registering a formal extension URI is hygiene, not interop-blocking. Track as GH issue. |
+| A2A | MED | Tasks resubscribe route path is `:subscribe`, spec says `:resubscribe` | `routes/a2a.py:389` | Low real-world impact (`capabilities.stateTransitionHistory=false` means consumers rarely call resubscribe). Path rename is safe; file as GH issue with path alias for zero-downtime migration. |
+| A2A | MED | Authenticated extended card at `/v1/card` (spec: `/v1/agent/authenticatedExtendedCard`) | `routes/agent_card.py:175` | `supportsAuthenticatedExtendedCard=false` — no spec-compliant consumer will call this path today. Path rename is safe; file as GH issue. |
+| MCP | MED | OAuth-kind token → admin route rejection not fully verifiable statically | `auth/middleware.py:120-135` | `require_api_key_identity` guard exists; enforcement is structural via FastAPI dependency injection. Gap is test coverage, not missing guard. Add integration test in follow-up. |
+| A2UI | MED | `SurfaceRegistry.open()` warns on duplicate instead of raising | `a2ui/translator.py:140-147` | Affects opt-in streaming API only; stateless `translate()` (primary path) always generates a fresh `surfaceId` — unreachable. Make it a hard error in the streaming API hardening wave. |
+| MCP | LOW | Batch request rejection uses `-32600` without an explicit `"batch not supported"` message | `routes/mcp.py:457` | Functionally correct; cosmetic only. Two-line fix; deferred to cleanup pass. |
+| A2A | LOW | `TaskStatusUpdateEvent.final` has Python default `False` (spec marks REQUIRED) | `models/a2a.py:143` | Wire always emits the field (not `None`); conformant in practice. Default matches non-terminal semantics. API-breaking change to remove default; defer. |
+| A2A | LOW | `blocking: bool \| None = None` accepts `null` (not a valid spec value) | `models/a2a.py:179` | Internal SDK; callers do not send `null`. Tighten with validator in cleanup pass. |
+| AG-UI | LOW | Dead `THINKING_*` case labels in console consumer (deprecated event types) | `console/static/chat.js:574–584` | Server never emits these types; dead code only. Remove in console cleanup wave. |
+
+**Round 3 sign-off: DEFERRED. No Critical/High blockers that are not acknowledged. All Medium/Low items recorded with rationale. Proceeding to tag v0.5.12.**

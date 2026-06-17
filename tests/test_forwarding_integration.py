@@ -169,25 +169,52 @@ async def test_card_advertises_credential_extension(probe_app):
 
 
 async def test_initialize_surfaces_credential_instructions(probe_app):
+    """LRN-019: serverInfo.title is only emitted when the negotiated MCP
+    protocol version is 2025-11-25 or newer.  Tests that assert its presence
+    must negotiate that version; older versions must NOT carry title.
+    """
     app = probe_app
+
+    def _init_body_v(version: str) -> dict:
+        return {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": version, "capabilities": {}, "clientInfo": {}},
+        }
+
     async with app.router.lifespan_context(app):
         _, token = app.state.auth.api_keys.mint("admin", admin=True)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://test",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "MCP-Protocol-Version": "2025-06-18",
-            },
+            headers={"Authorization": f"Bearer {token}"},
         ) as c:
-            result = (await c.post("/mcp", json=_init_body())).json()["result"]
+            # --- 2025-11-25: title MUST be present ---
+            result_new = (
+                await c.post(
+                    "/mcp",
+                    json=_init_body_v("2025-11-25"),
+                    headers={"MCP-Protocol-Version": "2025-11-25"},
+                )
+            ).json()["result"]
 
-    instructions = result["instructions"]
-    assert "X-Agent-Credentials" in instructions
-    assert "probe: api_key" in instructions
-    # serverInfo: name + version + title (2025-06-18 optional field, safe to add);
-    # icons is the field Claude.ai rejects (LRN-087), not title.
-    assert {"name", "version", "title"} <= set(result["serverInfo"])
+            instructions = result_new["instructions"]
+            assert "X-Agent-Credentials" in instructions
+            assert "probe: api_key" in instructions
+            # serverInfo must carry name, version, AND title on 2025-11-25+
+            assert {"name", "version", "title"} <= set(result_new["serverInfo"])
+
+            # --- 2025-06-18: title MUST NOT be present (GH #43 / LRN-019) ---
+            result_old = (
+                await c.post(
+                    "/mcp",
+                    json=_init_body_v("2025-06-18"),
+                    headers={"MCP-Protocol-Version": "2025-06-18"},
+                )
+            ).json()["result"]
+
+            assert "title" not in result_old["serverInfo"]
+            # instructions are still emitted on the older version
+            assert "X-Agent-Credentials" in result_old["instructions"]
 
 
 async def test_no_credential_sources_omits_surfaces(tmp_path):

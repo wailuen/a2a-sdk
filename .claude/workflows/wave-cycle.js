@@ -7,8 +7,8 @@ export const meta = {
     { title: 'Implement',      detail: 'Fan out todos per group in dependency order; smoke test each' },
     { title: 'Unit Redteam',   detail: 'Per-group zero-tolerance fix loop (max 5 rounds/group; debug fires after >3 failed rounds (r4+) and on stall)' },
     { title: 'Phase Redteam',  detail: 'Full-wave zero-tolerance fix loop (max 8 rounds; debug fires after >3 failed rounds (r4+) and on stall)' },
-    { title: 'Protocol Audit', detail: 'A2A + MCP + AG-UI + A2UI conformance — one dedicated advisor per protocol in parallel + seam check (protocol-surface waves only)' },
-    { title: 'Codify',         detail: 'Parallel LRN capture for critical/high findings; sequential C-NNN registration; SDK issue scan writes workspace/sdk-candidates.md for /sdk-issue-scan' },
+    { title: 'Protocol Audit', detail: 'A2A/MCP/AG-UI/A2UI conformance — parallel advisors + seam check (protocol-surface waves only)' },
+    { title: 'Codify',         detail: 'SDK issue scan (sequential) → parallel LRN capture for critical/high findings → README index update → sequential C-NNN registration for new component candidates' },
     { title: 'Archive',        detail: 'Move wave file to completed/, update plan.md, backfill FR Implementation: fields' },
   ],
 }
@@ -29,12 +29,17 @@ const A2UI_SURFACE = ['src/a2ui/', 'src/models/content_types']
 
 const WAVE_SCHEMA = {
   type: 'object',
-  required: ['waveId', 'allCreates', 'groups', 'lrnNext'],
+  required: ['waveId', 'allCreates', 'groups', 'groupDeps', 'lrnNext'],
   additionalProperties: false,
   properties: {
     waveId:     { type: 'string' },
     allCreates: { type: 'array', items: { type: 'string' } },
     lrnNext:    { type: 'integer' },
+    groupDeps: {
+      type: 'object',
+      description: 'Maps group label to the labels of OTHER groups it depends on (empty array = no external deps)',
+      additionalProperties: { type: 'array', items: { type: 'string' } },
+    },
     groups: {
       type: 'array',
       items: {
@@ -107,6 +112,7 @@ const PROTO_SCHEMA = {
           severity:    { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
           rule:        { type: 'string' },
           description: { type: 'string' },
+          fix:         { type: 'string' },
           codify:      { type: 'string' },
         },
       },
@@ -198,6 +204,33 @@ const SDK_SCAN_SCHEMA = {
   },
 }
 
+// GH-19: pytest gate schema — exit code + failure list consumed to block fix loops
+const GATE_SCHEMA = {
+  type: 'object',
+  required: ['exitCode', 'passCount', 'failCount', 'failures'],
+  additionalProperties: false,
+  properties: {
+    exitCode:  { type: 'number' },
+    passCount: { type: 'number' },
+    failCount: { type: 'number' },
+    failures:  { type: 'array', items: { type: 'string' } },
+  },
+}
+
+// GH-40: archive intent schema — git status check before archive
+// The agent runs `git status --short`, parses the output into dirty paths,
+// cross-references against wave.allCreates, and returns any offending paths.
+const ARCHIVE_INTENT_SCHEMA = {
+  type: 'object',
+  required: ['gitStatusOutput', 'dirtyPaths', 'offendingPaths'],
+  additionalProperties: false,
+  properties: {
+    gitStatusOutput: { type: 'string', description: 'Raw stdout of git status --short' },
+    dirtyPaths:      { type: 'array', items: { type: 'string' }, description: 'All paths reported dirty by git' },
+    offendingPaths:  { type: 'array', items: { type: 'string' }, description: 'Dirty paths that overlap with wave.allCreates' },
+  },
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 // Stall detection uses description (not id) because agents re-derive ids each round.
@@ -225,11 +258,15 @@ const wave = await agent(
   '- waveId: the w[NNN] identifier from the filename\n' +
   '- allCreates: every "Creates:" path listed across all todos in this wave\n' +
   '- lrnNext: highest existing LRN number + 1\n' +
-  '- groups: execution groups in dependency order (Depends: respected).\n' +
+  '- groups: execution groups (Depends: respected).\n' +
   '  Todos without ‖ group: get label "ungrouped-N" (N = position).\n' +
   '  Same ‖ group: label → same group entry.\n' +
-  '  Group ordering: a group whose todos all have Depends: satisfied by ' +
-  '  earlier groups comes after them.\n\n' +
+  '  Do NOT impose a sequential ordering — let groupDeps express ordering instead.\n' +
+  '- groupDeps: for each group label, list the labels of OTHER groups whose todos\n' +
+  '  appear in any `Depends:` field of this group\'s todos.\n' +
+  '  A group with no external Depends: references maps to [].\n' +
+  '  Todos that Depends: on another todo in the SAME group do not add a dep entry.\n' +
+  '  Format: {"A": [], "B": ["A"], ...}\n\n' +
   'Return structured data.',
   { schema: WAVE_SCHEMA, label: 'parse', phase: 'Parse' }
 )
@@ -242,10 +279,17 @@ if (!wave) {
 log('Wave ' + wave.waveId + ': ' + wave.groups.length + ' group(s), ' +
     wave.allCreates.length + ' creates path(s), lrnNext=' + wave.lrnNext)
 
+// WC-RT-005: lrnBase is a snapshot; concurrent wave runs will produce LRN ID collisions.
+// Run waves sequentially (/wave without explicit waveId executes sequentially by design;
+// parallel explicit-wave invocations are unsupported). If workspace/todos/active/.wave-lock
+// exists, a wave is already running — do not start a second wave until it completes.
 const lrnBase          = wave.lrnNext
 const allHighFindings  = []   // accumulates critical/high for codify phase
-let   protocolBlocked  = false
-let   totalTodos       = 0
+let   protocolBlocked      = false
+let   testsRed             = false
+let   testsBlockedArchive  = false   // RT-003: tracks when a red test suite (not protocol) blocks archive
+let   totalTodos           = 0
+let   sdkCandidatesCount = 0   // set by sdk:scan in Codify phase
 
 // ─── phase 1: todos redteam ───────────────────────────────────────────────────
 phase('Todos Redteam')
@@ -317,32 +361,46 @@ if (planRt) {
 // ─── phase 2: implement ───────────────────────────────────────────────────────
 phase('Implement')
 
-for (const group of wave.groups) {
-  totalTodos += group.todos.length
-  log('Implementing group ' + group.label + ' (' + group.todos.length + ' todo(s))')
+// Tier-based parallel execution: each tier contains groups whose external deps
+// are all satisfied by previously-completed tiers. Groups within a tier run in
+// parallel (no file conflict, since the planner groups conflicting todos together).
+const completedGroups = new Set()
+const remainingGroups = wave.groups.slice()
 
-  if (group.todos.length === 1) {
-    // Solo todo
-    const todo = group.todos[0]
-    await agent(
-      'Implement this todo. Read CLAUDE.md and workspace/components/README.md first.\n\n' +
-      'CLAUDE.md security invariants (SI-1…SI-7) apply — enforce them in your output:\n' +
-      'SI-1: no raw httpx in src/tools/; SI-2: no secrets in error messages;\n' +
-      'SI-3: url_segment()/safe_id() for URL path vars in adapters;\n' +
-      'SI-4: self.credential() only for creds; SI-5: auth on all endpoints;\n' +
-      'SI-6: vendor keys in credential store only; SI-7: non-empty allowed_hosts.\n\n' +
-      'Test-first discipline: for correctness-bearing code (tool logic, validation,\n' +
-      'serialisation), write the failing test FIRST (confirm RED), then the code\n' +
-      '(confirm GREEN), then refactor. The todo is not done until the test was RED.\n\n' +
-      'Todo:\n' + todo.body + '\n\n' +
-      'After implementing, run: pytest -q tests/ (scope to changed files if possible).\n' +
-      'Report: files created/modified, test count, any blockers.',
-      { label: 'impl:' + todo.id, phase: 'Implement', agentType: 'python-implementer' }
-    )
-  } else {
-    // Parallel group
-    await parallel(group.todos.map(function(todo) {
-      return function() {
+while (remainingGroups.length > 0) {
+  // Collect all groups ready to run (all external deps complete)
+  const readyGroups = remainingGroups.filter(function(g) {
+    const deps = (wave.groupDeps && wave.groupDeps[g.label]) || []
+    return deps.every(function(dep) { return completedGroups.has(dep) })
+  })
+
+  if (readyGroups.length === 0) {
+    // Circular or unresolvable dep — fall back: run first remaining group
+    log('WARNING: unresolvable group dependency; falling back to sequential for group ' + remainingGroups[0].label)
+    readyGroups.push(remainingGroups[0])
+  }
+
+  // Remove from remaining
+  for (const rg of readyGroups) {
+    const idx = remainingGroups.findIndex(function(g) { return g.label === rg.label })
+    if (idx !== -1) remainingGroups.splice(idx, 1)
+  }
+
+  const tierLabel = readyGroups.map(function(g) { return g.label }).join(', ')
+  totalTodos += readyGroups.reduce(function(n, g) { return n + g.todos.length }, 0)
+
+  if (readyGroups.length > 1) {
+    log('Implementing ' + readyGroups.length + ' groups in parallel: ' + tierLabel)
+  }
+
+  // Build per-group implement thunks
+  // WC-RT-006: use a const function expression — block-scoped function declarations have
+  // engine-dependent semantics inside while loops in ES module strict mode.
+  const makeGroupThunk = function(group) {
+    return function() {
+      log('Implementing group ' + group.label + ' (' + group.todos.length + ' todo(s))')
+      if (group.todos.length === 1) {
+        const todo = group.todos[0]
         return agent(
           'Implement this todo. Read CLAUDE.md and workspace/components/README.md first.\n\n' +
           'CLAUDE.md security invariants (SI-1…SI-7) apply — enforce them in your output:\n' +
@@ -350,14 +408,46 @@ for (const group of wave.groups) {
           'SI-3: url_segment()/safe_id() for URL path vars in adapters;\n' +
           'SI-4: self.credential() only for creds; SI-5: auth on all endpoints;\n' +
           'SI-6: vendor keys in credential store only; SI-7: non-empty allowed_hosts.\n\n' +
-          'Test-first for correctness-bearing code (RED then GREEN then refactor).\n\n' +
+          'Test-first discipline: for correctness-bearing code (tool logic, validation,\n' +
+          'serialisation), write the failing test FIRST (confirm RED), then the code\n' +
+          '(confirm GREEN), then refactor. The todo is not done until the test was RED.\n\n' +
           'Todo:\n' + todo.body + '\n\n' +
-          'Run: pytest -q tests/ after implementing. Report: files created/modified, test count.',
+          'You MAY run scoped tests (`python -m pytest -q tests/test_<specific>.py`) to confirm\n' +
+          'RED→GREEN for your own files. Do NOT run the full test suite — a centralized gate\n' +
+          'runs after all groups finish and will catch suite-wide regressions.\n' +
+          'Report: files created/modified, RED→GREEN confirmation, any blockers.',
           { label: 'impl:' + todo.id, phase: 'Implement', agentType: 'python-implementer' }
         )
+      } else {
+        return parallel(group.todos.map(function(todo) {
+          return function() {
+            return agent(
+              'Implement this todo. Read CLAUDE.md and workspace/components/README.md first.\n\n' +
+              'CLAUDE.md security invariants (SI-1…SI-7) apply — enforce them in your output:\n' +
+              'SI-1: no raw httpx in src/tools/; SI-2: no secrets in error messages;\n' +
+              'SI-3: url_segment()/safe_id() for URL path vars in adapters;\n' +
+              'SI-4: self.credential() only for creds; SI-5: auth on all endpoints;\n' +
+              'SI-6: vendor keys in credential store only; SI-7: non-empty allowed_hosts.\n\n' +
+              'Test-first for correctness-bearing code (RED then GREEN then refactor).\n\n' +
+              'Todo:\n' + todo.body + '\n\n' +
+              'You MAY run scoped tests (`python -m pytest -q tests/test_<specific>.py`) to confirm\n' +
+              'RED→GREEN for your own files. Do NOT run the full test suite — a centralized gate\n' +
+              'runs after all groups finish. Report: files created/modified, RED→GREEN confirmation.',
+              { label: 'impl:' + todo.id, phase: 'Implement', agentType: 'python-implementer' }
+            )
+          }
+        }))
       }
-    }))
+    }
   }
+
+  if (readyGroups.length === 1) {
+    await makeGroupThunk(readyGroups[0])()
+  } else {
+    await parallel(readyGroups.map(makeGroupThunk))
+  }
+
+  for (const rg of readyGroups) completedGroups.add(rg.label)
 }
 
 // ─── phase 3: unit redteam (per group, zero-tolerance) ───────────────────────
@@ -382,7 +472,37 @@ for (const group of wave.groups) {
         agentType: 'redteam' }
     )
 
-    if (!rt || rt.findingsCount === 0) {
+    // RT-004: null redteam response is unknown state — must not be treated as clean (fail-open).
+    // Log a warning and continue without updating prevSigs so stall detection against
+    // the most recent real finding set remains intact. Resetting prevSigs on null would
+    // defeat stall detection: a null round followed by a round with the same findings as
+    // the prior real round would not trigger sigsEqual because prevSigs was cleared.
+    if (!rt) {
+      log('WARNING: unit redteam agent returned null for group ' + group.label + ' round ' + uRound + ' — treating as unknown (not clean); preserving last known sig set')
+      if (uRound >= 5) {
+        log('Null responses exceeded round budget for group ' + group.label + ' — deferring')
+        await agent(
+          'Write workspace/todos/deferred/' + wave.waveId + '-group-' + group.label + '-rt-null-budget.md\n\n' +
+          'Include: wave ID (' + wave.waveId + '), group (' + group.label + '), date (' + TODAY + '),\n' +
+          'round (' + uRound + '), reason: unit redteam agent returned null on every round — unknown state.\n' +
+          'Instruction: "Re-run /wave ' + wave.waveId + ' to retry unit redteam for this group."',
+          { label: 'defer:unit:' + group.label + ':rt-null-budget', phase: 'Unit Redteam' }
+        )
+        break
+      }
+      // Do NOT reset prevSigs — preserve the last real finding set so stall detection
+      // fires correctly on the next round if findings have not changed.
+      continue
+    }
+
+    // WC-RT-004: cross-validate findingsCount against findings.length — an agent returning
+    // findingsCount=0 with a non-empty array would break clean despite real findings.
+    if (rt.findingsCount === 0 && rt.findings.length > 0) {
+      log('WARNING: findingsCount=0 but findings array has ' + rt.findings.length + ' item(s) — treating as non-clean')
+      rt.findingsCount = rt.findings.length
+    }
+
+    if (rt.findingsCount === 0) {
       log('Group ' + group.label + ' clean at round ' + uRound)
       break
     }
@@ -432,7 +552,7 @@ for (const group of wave.groups) {
         return agent(
           'Fix these findings in ' + file + ':\n\n' +
           JSON.stringify(byFile[file], null, 2) + '\n\n' +
-          'Enforce SDK SI-1…SI-7 in your fix. Run pytest -q tests/ after.',
+          'Enforce SDK SI-1…SI-7 in your fix. Run pytest -q after.',
           { label: 'fix:unit:' + group.label + ':r' + uRound + ':' + file.replace(/\//g, '-'),
             phase: 'Unit Redteam', agentType: 'python-implementer' }
         )
@@ -444,6 +564,51 @@ for (const group of wave.groups) {
     })
     allHighFindings.push.apply(allHighFindings, highFindings)
     await parallel(fixTasks)
+
+    // GH-19: consume gate result — red suite blocks loop continuation.
+    // RT-006: fail-closed — null gate response is unknown state, treated as failure.
+    const unitGate = await agent(
+      'Run: python -m pytest -q\n' +
+      'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
+      '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
+      { schema: GATE_SCHEMA, label: 'gate:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam' }
+    )
+    if (!unitGate) {
+      log('WARNING: unit gate agent returned null for group ' + group.label + ' round ' + uRound + ' — treating as gate failure (unknown state)')
+      testsRed = true
+      // RT-006: null gate blocks loop continuation — do not silently proceed.
+      break
+    }
+    if (unitGate.exitCode !== 0) {
+      testsRed = true
+      log('Gate RED (' + unitGate.failCount + ' failing) — dispatching test-fix agent')
+      await agent(
+        'Fix the failing tests below. Read the test file and the source it covers.\n' +
+        'Failing tests:\n' + unitGate.failures.join('\n') + '\n\n' +
+        'Run `python -m pytest -q <failing-test-file>` to confirm GREEN before finishing.',
+        { label: 'fix:tests:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam' }
+      )
+      // RT-006: re-gate after test-fix to verify the fix succeeded before continuing the loop.
+      const unitReGate = await agent(
+        'Run: python -m pytest -q\n' +
+        'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
+        '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
+        { schema: GATE_SCHEMA, label: 'gate:unit:' + group.label + ':r' + uRound + ':recheck', phase: 'Unit Redteam' }
+      )
+      // RT-006: fail-closed — null re-gate is still unknown, treat as red.
+      if (!unitReGate || unitReGate.exitCode !== 0) {
+        const failCount = unitReGate ? unitReGate.failCount : '?'
+        log('Re-gate still RED (' + failCount + ' failing) after test-fix — deferring group ' + group.label)
+        await agent(
+          'Write workspace/todos/deferred/' + wave.waveId + '-group-' + group.label + '-tests-red-r' + uRound + '.md\n\n' +
+          'Include: wave ID (' + wave.waveId + '), group (' + group.label + '), date (' + TODAY + '),\n' +
+          'round (' + uRound + '), reason: test suite RED after fix attempt.\n' +
+          'Instruction: "Fix failing tests and re-run /wave ' + wave.waveId + '".',
+          { label: 'defer:unit:' + group.label + ':tests-red:r' + uRound, phase: 'Unit Redteam' }
+        )
+        break
+      }
+    }
   }
 }
 
@@ -467,7 +632,30 @@ while (true) {
       agentType: 'redteam' }
   )
 
-  if (!rt || rt.findingsCount === 0) {
+  // RT-004: null redteam response is unknown state — must not be treated as clean (fail-open).
+  // WC-002: also enforce the budget cap on null rounds so persistent null responses
+  // cannot loop indefinitely — the budget check is mirrored here before the continue.
+  if (!rt) {
+    log('WARNING: phase redteam agent returned null at round ' + pRound + ' — treating as unknown (not clean)')
+    if (pRound >= 8) {
+      log('Null responses exceeded phase round budget — continuing to Protocol Audit')
+      break
+    }
+    // Do NOT reset prevSigs — preserve the last real finding set so stall detection
+    // fires correctly on the next round if findings have not changed. Resetting prevSigs here
+    // would defeat stall detection: a null round followed by a round with the same findings as
+    // the prior real round would not trigger sigsEqual because prevSigs was cleared.
+    // continue to next round — do not fall through to fix/debug logic; prevSigs not reset so stall detection remains valid
+    continue
+  }
+
+  // WC-RT-004: cross-validate findingsCount against findings.length.
+  if (rt.findingsCount === 0 && rt.findings.length > 0) {
+    log('WARNING: findingsCount=0 but findings array has ' + rt.findings.length + ' item(s) — treating as non-clean')
+    rt.findingsCount = rt.findings.length
+  }
+
+  if (rt.findingsCount === 0) {
     log('Phase redteam clean at round ' + pRound)
     break
   }
@@ -506,7 +694,7 @@ while (true) {
     return function() {
       return agent(
         'Fix findings in ' + file + ':\n\n' + JSON.stringify(byFile[file], null, 2) + '\n\n' +
-        'Enforce SI-1…SI-7. Run pytest -q tests/ after.',
+        'Enforce SI-1…SI-7. Run pytest -q after.',
         { label: 'fix:phase:r' + pRound + ':' + file.replace(/\//g, '-'),
           phase: 'Phase Redteam', agentType: 'python-implementer' }
       )
@@ -518,6 +706,44 @@ while (true) {
   })
   allHighFindings.push.apply(allHighFindings, highFindings)
   await parallel(fixTasks)
+
+  // GH-19: consume gate result — red suite blocks loop continuation.
+  // RT-006: fail-closed — null gate response is unknown state, treated as failure.
+  const phaseGate = await agent(
+    'Run: python -m pytest -q\n' +
+    'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
+    '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
+    { schema: GATE_SCHEMA, label: 'gate:phase:r' + pRound, phase: 'Phase Redteam' }
+  )
+  if (!phaseGate) {
+    log('WARNING: phase gate agent returned null at round ' + pRound + ' — treating as gate failure (unknown state)')
+    testsRed = true
+    // RT-006: null gate blocks loop continuation — do not silently proceed.
+    break
+  }
+  if (phaseGate.exitCode !== 0) {
+    testsRed = true
+    log('Gate RED (' + phaseGate.failCount + ' failing) — dispatching test-fix agent')
+    await agent(
+      'Fix the failing tests below. Read the test file and the source it covers.\n' +
+      'Failing tests:\n' + phaseGate.failures.join('\n') + '\n\n' +
+      'Run `python -m pytest -q <failing-test-file>` to confirm GREEN before finishing.',
+      { label: 'fix:tests:phase:r' + pRound, phase: 'Phase Redteam' }
+    )
+    // RT-006: re-gate after test-fix to verify the fix succeeded before continuing the loop.
+    const phaseReGate = await agent(
+      'Run: python -m pytest -q\n' +
+      'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
+      '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
+      { schema: GATE_SCHEMA, label: 'gate:phase:r' + pRound + ':recheck', phase: 'Phase Redteam' }
+    )
+    // RT-006: fail-closed — null re-gate is still unknown, treat as red and stop the loop.
+    if (!phaseReGate || phaseReGate.exitCode !== 0) {
+      const failCount = phaseReGate ? phaseReGate.failCount : '?'
+      log('Re-gate still RED (' + failCount + ' failing) after test-fix — stopping phase redteam loop')
+      break
+    }
+  }
 }
 
 // ─── phase 5: protocol audit ──────────────────────────────────────────────────
@@ -541,7 +767,10 @@ if (!runProtocol) {
   log('Protocol audit skipped — no protocol surfaces in creates list')
 } else {
   log('Protocol audit triggered (A2A=' + runA2A + ' MCP=' + runMCP + ' AG-UI=' + runAGUI + ' A2UI=' + runA2UI + ')')
-  log('Protocol audit: dispatches a2a-advisor / mcp-advisor / ag-ui-advisor / a2ui-advisor — each protocol gets its own advisor (no single-advisor collapse).')
+  // AD-001: advisor agents are external (check kit). If the kit is absent they fall back to
+  // the default agent and results will be incomplete — log what we expect so the user can verify.
+  log('Protocol audit: requires a2a-advisor / mcp-advisor / ag-ui-advisor / a2ui-advisor from the check kit. ' +
+      'If the kit is absent, advisor legs return partial or empty results — NOT a green pass.')
 
   const advisorTasks = []
 
@@ -554,7 +783,7 @@ if (!runProtocol) {
           return A2A_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
         }).join('\n') + '\n\n' +
         'Check: agent card shape, task/message/part/artifact shapes, streaming,\n' +
-        'error codes (-32001 through -32007 → correct HTTP status), auth surface.\n\n' +
+        'error codes (-32001 through -32007 → correct HTTP status), auth.\n\n' +
         'Return structured findings. Set protocol="A2A" per finding.',
         { schema: PROTO_SCHEMA, agentType: 'a2a-advisor', label: 'proto:a2a', phase: 'Protocol Audit' }
       )
@@ -564,14 +793,15 @@ if (!runProtocol) {
   if (runMCP) {
     advisorTasks.push(function() {
       return agent(
-        'MCP server + Claude.ai connector conformance audit.\n\n' +
+        'MCP conformance audit.\n\n' +
         'Files to audit:\n' +
         wave.allCreates.filter(function(p) {
           return MCP_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
         }).join('\n') + '\n\n' +
-        'Check: Streamable-HTTP transport, OAuth 2.1 discovery chain (PRM + AS metadata),\n' +
-        'PKCE S256, token aud binding, CORS (claude.ai origin + WWW-Authenticate exposure),\n' +
-        'initialize echo, tools/list shape, isError vs JSON-RPC error split.\n\n' +
+        'Check: Streamable-HTTP transport, OAuth 2.1 discovery (/.well-known/oauth-authorization-server),\n' +
+        'PKCE (S256, code_challenge_method), initialize request/response echo (protocolVersion,\n' +
+        'serverInfo, capabilities), tools/list shape (name, description, inputSchema),\n' +
+        'token endpoint CORS, and auth error codes.\n\n' +
         'Return structured findings. Set protocol="MCP" per finding.',
         { schema: PROTO_SCHEMA, agentType: 'mcp-advisor', label: 'proto:mcp', phase: 'Protocol Audit' }
       )
@@ -602,8 +832,10 @@ if (!runProtocol) {
         wave.allCreates.filter(function(p) {
           return A2UI_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
         }).join('\n') + '\n\n' +
+        // LRN-012: Keep in sync with DESIGN.md §5.4 and agent_sdk/models/content_types.py — single logical unit
+        // WC-RT-003: Core 7 + Extended 11 = 18 total; 4 RESERVED (TradeActivity, CompanyInfo, DealList, InvestorProfile) never emitted.
         'Check: createSurface/updateComponents/updateDataModel/deleteSurface shapes,\n' +
-        'Core 7 + Extended 11 Standard Profile types only, JSON-Pointer binding,\n' +
+        'Core 7 + Extended 11 Standard Profile types only (18 total; 4 RESERVED: TradeActivity, CompanyInfo, DealList, InvestorProfile — never emitted with an assumed shape), JSON-Pointer binding,\n' +
         'A2A DataPart delivery, translator.py message types, field contracts.\n\n' +
         'Return structured findings. Set protocol="A2UI" per finding.',
         { schema: PROTO_SCHEMA, agentType: 'a2ui-advisor', label: 'proto:a2ui', phase: 'Protocol Audit' }
@@ -613,22 +845,35 @@ if (!runProtocol) {
 
   // Seam check: no specialist agentType — it reads multiple protocol surfaces together,
   // so no single advisor owns it. Uses the default agent with full cross-surface context.
-  advisorTasks.push(function() {
-    return agent(
-      'Cross-protocol seam audit — consistency ACROSS A2A, MCP, AG-UI, A2UI surfaces.\n\n' +
-      'Read: src/routes/agent_card.py, src/routes/a2a.py, src/routes/mcp.py,\n' +
-      'src/routes/oauth.py, and any AG-UI/A2UI route files in the creates list.\n\n' +
-      'Wave creates paths:\n' + wave.allCreates.join('\n') + '\n\n' +
-      'Check:\n' +
-      '- Agent card skills array matches every SKILL.md in src/skills/.\n' +
-      '- Agent card streaming flag matches actual SSE implementation.\n' +
-      '- Auth mode enforced uniformly: no surface accepts a token type another rejects.\n' +
-      '- Version strings identical across agent card, MCP server info, health endpoint.\n' +
-      '- No tool advertised in the agent card is absent from the tool registry.\n\n' +
-      'Return structured findings. Set protocol="SEAM" per finding.',
-      { schema: PROTO_SCHEMA, label: 'proto:seam', phase: 'Protocol Audit' }
-    )
+  // RT-005: derive seam paths from allCreates rather than hardcoding — hardcoded paths
+  // silently produce empty results when routes live at different paths or are not yet created.
+  // WC-007: leading-slash anchors each marker to a path-segment boundary, preventing
+  // false positives from names like 'mcptools.py' or 'pseudoa2a.py' matching 'mcp'/'a2a'.
+  // 'routes/' is kept as-is — the trailing slash already anchors it to a directory name.
+  const SEAM_ROUTE_MARKERS = ['routes/', '/a2a', '/mcp', '/oauth', '/agent_card', '/ag_ui', '/a2ui']
+  const seamPaths = wave.allCreates.filter(function(p) {
+    return SEAM_ROUTE_MARKERS.some(function(m) { return p.indexOf(m) !== -1 })
   })
+  if (seamPaths.length === 0) {
+    log('Seam audit skipped — no route files in creates list')
+  } else {
+    advisorTasks.push(function() {
+      return agent(
+        'Cross-protocol seam audit — consistency ACROSS A2A, MCP, AG-UI, A2UI surfaces.\n\n' +
+        'Route files to audit (derived from wave creates list):\n' +
+        seamPaths.join('\n') + '\n\n' +
+        'Wave creates paths:\n' + wave.allCreates.join('\n') + '\n\n' +
+        'Check:\n' +
+        '- Agent card skills array contains one entry per @tool in the ToolRegistry (no tool advertised in the card is absent from the registry).\n' +
+        '- src/skills/*.md files are reachable via the load_skill tool (skills_dir is wired in the Agent constructor); these are separate from the card\'s skills[] and no 1:1 count match is required.\n' +
+        '- Agent card streaming flag matches actual SSE implementation.\n' +
+        '- Auth mode enforced uniformly: no surface accepts a token type another rejects.\n' +
+        '- Version strings identical across agent card, MCP server info, health endpoint.\n\n' +
+        'Return structured findings. Set protocol="SEAM" per finding.',
+        { schema: PROTO_SCHEMA, label: 'proto:seam', phase: 'Protocol Audit' }
+      )
+    })
+  }
 
   const protoResults = (await parallel(advisorTasks)).filter(Boolean)
   let protoCritical = protoResults.reduce(function(n, r) { return n + (r.criticalCount || 0) }, 0)
@@ -648,7 +893,7 @@ if (!runProtocol) {
         severity:    f.severity,
         file:        'protocol-surface',
         description: f.description,
-        fix:         f.description,
+        fix:         f.fix || ('See protocol-audit findings for ' + f.protocol + ' rule ' + f.rule),
         codify:      f.codify,
       }
     })
@@ -662,9 +907,57 @@ if (!runProtocol) {
         allProtoFindings.filter(function(f) { return f.severity === 'critical' }),
         null, 2
       ) + '\n\n' +
-      'Run pytest -q tests/ after fixing. Report files changed.',
+      'Run pytest -q after fixing. Report files changed.',
       { label: 'proto:fix', phase: 'Protocol Audit', agentType: 'python-implementer' }
     )
+
+    // GH-20: gate after protocol fix — domain regressions must be caught before recheck
+    const protoFixGate = await agent(
+      'Run: python -m pytest -q\n' +
+      'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
+      '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
+      { schema: GATE_SCHEMA, label: 'gate:proto:fix', phase: 'Protocol Audit' }
+    )
+    // RT-006: fail-closed — null protoFixGate is unknown state, treated as failure.
+    if (!protoFixGate) {
+      log('WARNING: proto:fix gate agent returned null — treating as gate failure (unknown state); archive will be blocked')
+      testsRed = true
+      protocolBlocked = true
+    } else if (protoFixGate.exitCode !== 0) {
+      testsRed = true
+      log('Gate RED after proto:fix (' + protoFixGate.failCount + ' failing) — dispatching test-fix agent')
+      await agent(
+        'Fix the failing tests introduced by the protocol fix. Read the test file and source.\n' +
+        'Failing tests:\n' + protoFixGate.failures.join('\n') + '\n\n' +
+        'Run `python -m pytest -q <failing-test-file>` to confirm GREEN before finishing.',
+        { label: 'fix:tests:proto:fix', phase: 'Protocol Audit' }
+      )
+      // WC-RT-002: re-gate after proto test-fix — unit and phase loops each have a formal
+      // re-gate (unitReGate/phaseReGate); the proto path must too. A failed test-fix that
+      // silently proceeds to the recheck (and then to archive) defeats zero-tolerance.
+      const protoTestReGate = await agent(
+        'Run: python -m pytest -q\n' +
+        'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
+        '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
+        { schema: GATE_SCHEMA, label: 'gate:proto:fix:recheck', phase: 'Protocol Audit' }
+      )
+      // RT-001: fail-closed — null re-gate is unknown state, treated as failure.
+      if (!protoTestReGate || protoTestReGate.exitCode !== 0) {
+        const failCount = protoTestReGate ? protoTestReGate.failCount : '?'
+        log('Proto re-gate still RED (' + failCount + ' failing) after test-fix — blocking recheck; archive will be blocked')
+        testsBlockedArchive = true
+        protocolBlocked = true
+        await agent(
+          'Write workspace/todos/deferred/' + wave.waveId + '-proto-tests-red.md\n\n' +
+          'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '),\n' +
+          'reason: test suite RED after protocol test-fix attempt.\n' +
+          'Instruction: "Fix failing tests and re-run /wave ' + wave.waveId + '".',
+          { label: 'defer:proto:tests-red', phase: 'Protocol Audit' }
+        )
+        // Do not proceed to the protocol recheck — tests are red.
+        // Jump out of the if-block; protocolBlocked will skip archive.
+      }
+    }
 
     // Recheck: same parallel advisor dispatch as the initial audit (including seam)
     const recheckTasks = []
@@ -681,9 +974,10 @@ if (!runProtocol) {
     if (runMCP) {
       recheckTasks.push(function() {
         return agent(
-          'MCP server re-audit after preceding fix. Check same surfaces.\n' +
+          'MCP re-audit after preceding fix. Check same surfaces.\n' +
           'Creates paths:\n' + wave.allCreates.join('\n') + '\n' +
-          'Focus on previously-critical findings. Return structured findings.',
+          'Focus on previously-critical findings (Streamable-HTTP, OAuth 2.1, PKCE, initialize echo, tools/list). ' +
+          'Return structured findings.',
           { schema: PROTO_SCHEMA, agentType: 'mcp-advisor', label: 'proto:recheck:mcp', phase: 'Protocol Audit' }
         )
       })
@@ -709,14 +1003,18 @@ if (!runProtocol) {
       })
     }
     // Seam recheck: no specialist agentType for the same reason as the initial seam check.
-    recheckTasks.push(function() {
-      return agent(
-        'Cross-protocol seam re-audit after preceding fix.\n' +
-        'Creates paths:\n' + wave.allCreates.join('\n') + '\n' +
-        'Focus on previously-critical SEAM findings. Return structured findings.',
-        { schema: PROTO_SCHEMA, label: 'proto:recheck:seam', phase: 'Protocol Audit' }
-      )
-    })
+    // RT-005: only push seam recheck if there were seam paths to audit (mirrors initial logic).
+    if (seamPaths.length > 0) {
+      recheckTasks.push(function() {
+        return agent(
+          'Cross-protocol seam re-audit after preceding fix.\n' +
+          'Route files to audit:\n' + seamPaths.join('\n') + '\n' +
+          'Creates paths:\n' + wave.allCreates.join('\n') + '\n' +
+          'Focus on previously-critical SEAM findings. Return structured findings.',
+          { schema: PROTO_SCHEMA, label: 'proto:recheck:seam', phase: 'Protocol Audit' }
+        )
+      })
+    }
     const recheckResults = (await parallel(recheckTasks)).filter(Boolean)
     protoCritical = recheckResults.reduce(function(n, r) { return n + (r.criticalCount || 0) }, 0)
 
@@ -749,11 +1047,61 @@ for (const f of allHighFindings) {
 
 log('Codifying ' + toCodeify.length + ' critical/high finding(s)')
 
+// ─── SDK issue scan (end of Codify) ──────────────────────────────────────────
+// Classify critical/high findings as SDK-level vs agent-domain.
+// SDK-level ones are written to workspace/sdk-candidates.md for /sdk-issue-scan.
+if (toCodeify.length > 0) {
+  const sdkScan = await agent(
+    'Classify each finding as SDK-level or agent-domain.\n\n' +
+    'SDK-LEVEL (include in output):\n' +
+    '- Harness: wrong step in a SKILL.md, wrong agent instruction, wave-cycle.js logic error\n' +
+    '- SDK internals: build_app(), Agent, ToolSet, SourceAdapter base class, credential store, loop\n' +
+    '- Protocol surface: wrong HTTP status, missing handler, wrong shape in src/routes/\n' +
+    '- Template scaffold: wrong pattern shown in template/, wrong SDK API in an example\n' +
+    '- Security: an SI violation that the SDK itself causes (not domain code)\n\n' +
+    'AGENT-DOMAIN (exclude):\n' +
+    '- src/tools/, src/sources/, src/config.py, src/persona.py\n' +
+    '- Agent-specific credential setup, domain test failures\n' +
+    '- An SI violation in the agent\'s domain code (fix the code, not the SDK)\n\n' +
+    'For each SDK-level finding, assign a component:\n' +
+    'harness/skill | harness/workflow | harness/agent | harness/template |\n' +
+    'sdk/build | sdk/loop | sdk/credentials | sdk/console |\n' +
+    'protocol/a2a | protocol/mcp | protocol/ag-ui | protocol/a2ui | protocol/oauth | security\n\n' +
+    'Findings to classify:\n' + JSON.stringify(toCodeify, null, 2),
+    { schema: SDK_SCAN_SCHEMA, label: 'sdk:scan', phase: 'Codify' }
+  )
+
+  if (sdkScan && sdkScan.sdkCandidates.length > 0) {
+    sdkCandidatesCount = sdkScan.sdkCandidates.length
+    const candidateLines = sdkScan.sdkCandidates.map(function(c, i) {
+      return '## Candidate ' + (i + 1) + ': ' + c.description + '\n' +
+             '- Severity: ' + c.severity + '\n' +
+             '- Component: ' + c.component + '\n' +
+             '- File: ' + (c.file || 'n/a') + '\n' +
+             '- Rationale: ' + c.rationale
+    }).join('\n\n')
+
+    await agent(
+      'Write the file workspace/sdk-candidates.md with exactly this content:\n\n' +
+      '# SDK issue candidates — ' + wave.waveId + ' (' + TODAY + ')\n\n' +
+      'These critical/high findings from wave ' + wave.waveId + ' are classified as\n' +
+      'SDK-level. Run `/sdk-issue-scan` to review and file them as GitHub issues\n' +
+      'on `wailuen/a2a-sdk`. One confirmation per filing — nothing is filed automatically.\n\n' +
+      candidateLines,
+      { label: 'sdk:candidates', phase: 'Codify' }
+    )
+    log('SDK issue candidates: ' + sdkScan.sdkCandidates.length + ' finding(s) written to workspace/sdk-candidates.md')
+    log('Run /sdk-issue-scan to file them as GitHub issues on wailuen/a2a-sdk')
+  } else {
+    log('SDK issue scan: no SDK-level findings in this wave')
+  }
+}
+
 if (toCodeify.length > 0) {
   await parallel(toCodeify.map(function(f, i) {
     return function() {
       const lrnNum = lrnBase + i
-      const lrnId  = 'LRN-' + (lrnNum < 10 ? '00' : lrnNum < 100 ? '0' : '') + lrnNum
+      const lrnId  = 'LRN-' + String(lrnNum).padStart(3, '0')
       return agent(
         'Write a learning file. Do NOT touch workspace/learning/README.md yet.\n\n' +
         'Assigned ID: ' + lrnId + '\n' +
@@ -810,61 +1158,76 @@ if (registryCandidates.length > 0) {
   )
 }
 
-// ─── SDK issue scan (end of Codify) ──────────────────────────────────────────
-// Classify critical/high findings as SDK-level vs agent-domain.
-// SDK-level ones are written to workspace/sdk-candidates.md for /sdk-issue-scan.
-if (toCodeify.length > 0) {
-  const sdkScan = await agent(
-    'Classify each finding as SDK-level or agent-domain.\n\n' +
-    'SDK-LEVEL (include in output):\n' +
-    '- Harness: wrong step in a SKILL.md, wrong agent instruction, wave-cycle.js logic error\n' +
-    '- SDK internals: build_app(), Agent, ToolSet, SourceAdapter base class, credential store, loop\n' +
-    '- Protocol surface: wrong HTTP status, missing handler, wrong shape in src/routes/\n' +
-    '- Template scaffold: wrong pattern shown in template/, wrong SDK API in an example\n' +
-    '- Security: an SI violation that the SDK itself causes (not domain code)\n\n' +
-    'AGENT-DOMAIN (exclude):\n' +
-    '- src/tools/, src/sources/, src/config.py, src/persona.py\n' +
-    '- Agent-specific credential setup, domain test failures\n' +
-    '- An SI violation in the agent\'s domain code (fix the code, not the SDK)\n\n' +
-    'For each SDK-level finding, assign a component:\n' +
-    'harness/skill | harness/workflow | harness/agent | harness/template |\n' +
-    'sdk/build | sdk/loop | sdk/credentials | sdk/console |\n' +
-    'protocol/a2a | protocol/mcp | protocol/ag-ui | protocol/a2ui | protocol/oauth | security\n\n' +
-    'Findings to classify:\n' + JSON.stringify(toCodeify, null, 2),
-    { schema: SDK_SCAN_SCHEMA, label: 'sdk:scan', phase: 'Codify' }
-  )
-
-  if (sdkScan && sdkScan.sdkCandidates.length > 0) {
-    const candidateLines = sdkScan.sdkCandidates.map(function(c, i) {
-      return '## Candidate ' + (i + 1) + ': ' + c.description + '\n' +
-             '- Severity: ' + c.severity + '\n' +
-             '- Component: ' + c.component + '\n' +
-             '- File: ' + (c.file || 'n/a') + '\n' +
-             '- Rationale: ' + c.rationale
-    }).join('\n\n')
-
-    await agent(
-      'Write the file workspace/sdk-candidates.md with exactly this content:\n\n' +
-      '# SDK issue candidates — ' + wave.waveId + ' (' + TODAY + ')\n\n' +
-      'These critical/high findings from wave ' + wave.waveId + ' are classified as\n' +
-      'SDK-level. Run `/sdk-issue-scan` to review and file them as GitHub issues\n' +
-      'on `wailuen/a2a-sdk`. One confirmation per filing — nothing is filed automatically.\n\n' +
-      candidateLines,
-      { label: 'sdk:candidates', phase: 'Codify' }
-    )
-    log('SDK issue candidates: ' + sdkScan.sdkCandidates.length + ' finding(s) written to workspace/sdk-candidates.md')
-    log('Run /sdk-issue-scan to file them as GitHub issues on wailuen/a2a-sdk')
-  } else {
-    log('SDK issue scan: no SDK-level findings in this wave')
-  }
-}
-
 // ─── phase 7: archive ─────────────────────────────────────────────────────────
 phase('Archive')
 
+// GH-22: pre-archive gate — suite must be green before marking wave complete
+const preArchiveGate = await agent(
+  'Run: python -m pytest -q\n' +
+  'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
+  '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
+  { schema: GATE_SCHEMA, label: 'gate:pre-archive', phase: 'Archive' }
+)
+if (!preArchiveGate) {
+  // RT-001: gate agent failed — archive must not proceed on unknown state.
+  testsRed = true
+  protocolBlocked = true
+  testsBlockedArchive = true
+  log('WARNING: pre-archive gate agent failed (null response) — archive BLOCKED (gate agent failed; unknown test state)')
+  log('Re-run /wave ' + wave.waveId + ' to retry the pre-archive gate.')
+} else if (preArchiveGate.exitCode !== 0) {
+  // RT-003: track the cause separately so the archive-skip message is accurate.
+  testsRed = true
+  protocolBlocked = true
+  testsBlockedArchive = true
+  log('Suite is RED (' + preArchiveGate.failCount + ' failing) — archive BLOCKED.')
+  log('Fix the failing tests and re-run /wave ' + wave.waveId)
+}
+
+// GH-40: pre-archive commit check — all Creates: files must be committed before archive.
+// A wave that archives with deliverables only in the working tree will silently lose them
+// on `git checkout`. Run git status --short and cross-reference against wave.allCreates.
+if (!protocolBlocked) {
+  const archiveIntent = await agent(
+    'Run `git status --short` and parse the output.\n\n' +
+    'Creates paths for this wave:\n' + wave.allCreates.join('\n') + '\n\n' +
+    'Steps:\n' +
+    '1. Run: git status --short\n' +
+    '2. Collect ALL paths that appear in the output (dirty or untracked).\n' +
+    '3. Cross-reference dirty paths against the Creates: list above.\n' +
+    '   A dirty path is an offender when:\n' +
+    '   a. It exactly matches a Creates: entry, OR\n' +
+    '   b. It starts with a Creates: entry (the Creates: entry is a directory prefix), OR\n' +
+    '   c. A Creates: entry starts with the dirty path (dirty parent directory).\n' +
+    '4. Return all three fields.\n\n' +
+    'If the working tree is completely clean, gitStatusOutput is empty string,\n' +
+    'dirtyPaths is [], offendingPaths is [].',
+    { schema: ARCHIVE_INTENT_SCHEMA, label: 'gate:archive-commit', phase: 'Archive' }
+  )
+
+  if (archiveIntent && archiveIntent.offendingPaths && archiveIntent.offendingPaths.length > 0) {
+    protocolBlocked = true
+    log('Archive BLOCKED — ' + archiveIntent.offendingPaths.length + ' Creates: file(s) are uncommitted:')
+    archiveIntent.offendingPaths.forEach(function(p) { log('  [uncommitted] ' + p) })
+    log('Commit or stage the files above, then re-run /wave ' + wave.waveId)
+  } else {
+    log('Commit check passed — all Creates: files are committed')
+  }
+}
+
 if (protocolBlocked) {
-  log('Archive SKIPPED — wave ' + wave.waveId + ' blocked by critical protocol findings')
-  log('Fix protocol issues, run /agent-verify, then re-run /wave ' + wave.waveId)
+  // RT-003: use the actual block cause in the message — misdirected remediation wastes developer time.
+  if (testsBlockedArchive) {
+    const failCount = (preArchiveGate && preArchiveGate.failCount != null) ? preArchiveGate.failCount : '?'
+    if (!preArchiveGate) {
+      log('Archive SKIPPED — pre-archive gate agent failed (null response). Re-run /wave ' + wave.waveId + ' to retry.')
+    } else {
+      log('Archive BLOCKED — test suite RED (' + failCount + ' failing). Fix failing tests and re-run /wave ' + wave.waveId + '.')
+    }
+  } else {
+    log('Archive SKIPPED — wave ' + wave.waveId + ' blocked by critical protocol findings')
+    log('Fix protocol issues, run /agent-verify, then re-run /wave ' + wave.waveId)
+  }
 } else {
   await agent(
     'Archive wave ' + wave.waveId + '. Perform in order:\n\n' +
@@ -888,8 +1251,11 @@ return {
   totalTodos:         totalTodos,
   lrnsCaptured:       toCodeify.length,
   cNnnRegistered:     registryCandidates.length,
+  sdkCandidates:      sdkCandidatesCount,
   groupsExecuted:     wave.groups.length,
   phaseRedteamRounds: pRound,
   exhausted:          pRound >= 8,
-  protocolBlocked:    protocolBlocked,
+  protocolBlocked:      protocolBlocked,
+  testsRed:             testsRed,
+  testsBlockedArchive:  testsBlockedArchive,  // RT-003: distinguishes test-suite block from protocol block
 }

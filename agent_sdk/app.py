@@ -78,8 +78,74 @@ class Agent:
         console_static_dir: Path | None = None,
         lifespan_extras: list[Callable[[FastAPI], Any]] | None = None,
     ) -> None:
+        """Assemble an agent from its parts.
+
+        Args:
+            settings: A ``BaseAgentSettings`` (or subclass) instance.
+            persona: System-prompt string.  Exactly one of ``persona`` or
+                ``artifacts_dir`` is required.
+            artifacts_dir: Directory containing Jinja2 artifact files
+                (``system.md``, …).  Mutually exclusive with ``persona``.
+            artifact_vars: Extra variables rendered into artifact templates.
+            skills_dir: Directory of ``SKILL.md`` files added to the system
+                prompt's skill catalog.
+            toolsets: ``ToolSet`` instances whose tools are registered.
+            model_client: Override the auto-configured ``ModelClient``
+                (useful in tests and for non-Bedrock backends).
+            task_store: Override the default ``InMemoryTaskStore``.
+            console_static_dir: Agent-provided static assets that shadow the
+                built-in console files (DESIGN.md §10.3).
+            lifespan_extras: Additional ASGI lifespan context managers run
+                inside the app's lifespan, after source adapters are
+                initialised and before the sweeper task.  Each callable
+                receives the ``FastAPI`` app and must return an async context
+                manager (i.e. be decorated with ``@asynccontextmanager``).
+
+                This is the **blessed pattern** for background tasks and
+                long-lived resources that need ``app.state`` access at
+                startup.  The SDK itself uses it for
+                ``contrib.commitments.commitments_lifespan`` and
+                ``contrib.webhooks.webhooks_renewal_lifespan``.
+
+                Minimal example — a periodic heartbeat task::
+
+                    from contextlib import asynccontextmanager
+                    import asyncio
+                    from fastapi import FastAPI
+
+                    # Capture asyncio.sleep at import time so test patches
+                    # of asyncio.sleep don't affect the background task.
+                    _sleep = asyncio.sleep
+
+                    @asynccontextmanager
+                    async def heartbeat_lifespan(app: FastAPI):
+                        async def _beat():
+                            while True:
+                                await _sleep(60)
+                                print("alive")
+                        task = asyncio.create_task(_beat())
+                        try:
+                            yield
+                        finally:
+                            task.cancel()
+
+                    agent = Agent(
+                        ...,
+                        lifespan_extras=[heartbeat_lifespan],
+                    )
+
+                Do **not** import ``agent_sdk.scheduler``; no such module
+                exists.  ``lifespan_extras`` is the single scheduling
+                entry point.
+        """
         if persona is None and artifacts_dir is None:
             raise ValueError("Agent requires either persona= or artifacts_dir=")
+        if persona is not None and artifacts_dir is not None:
+            raise ValueError(
+                "Agent requires exactly one of persona= or artifacts_dir=, not both"
+            )
+        if persona is not None and not persona.strip():
+            raise ValueError("Agent persona= must not be empty or whitespace-only")
         self.settings = settings
         self.persona = persona
         self.artifacts_dir = artifacts_dir
@@ -163,20 +229,64 @@ class Agent:
             # Resolve string annotations (from __future__ import annotations) using
             # inspect.get_annotations with eval=True so we get real types.
             fn = entry.decl.fn
+            _annotation_resolved = True
             try:
                 resolved = inspect.get_annotations(fn, eval_str=True)
             except Exception:
                 resolved = getattr(fn, "__annotations__", {})
+                _annotation_resolved = False
             ret = resolved.get("return")
             # Accept: no annotation (None), typing.Any, exact emits type, or a
             # superclass of emits.  Reject any other concrete type.
             if ret is None:
                 continue  # unannotated — permitted
+            # SI-4: if the annotation could not be eval'd (e.g. NameError for a
+            # type imported only inside a fixture/closure), ret may be a raw
+            # string.  We cannot validate it — log a warning and skip rather
+            # than raising a false-positive ValueError that aborts build_app().
+            if isinstance(ret, str):
+                if _annotation_resolved:
+                    logger.warning(
+                        "_validate_emits: annotation for %r resolved to string %r"
+                        " — skipping SC-F1 check",
+                        fn.__name__,
+                        ret,
+                    )
+                else:
+                    logger.warning(
+                        "_validate_emits: could not resolve annotation %r for %r"
+                        " — skipping SC-F1 check",
+                        ret,
+                        fn.__name__,
+                    )
+                continue
             import typing as _typing
             if ret is _typing.Any:
                 continue  # -> Any — permitted
             if inspect.isclass(ret) and issubclass(emits, ret):
                 continue  # emits is ret or a subclass of ret — permitted
+            # Guard against generic non-Union origins (e.g. list[T], tuple[T],
+            # set[T]).  typing.get_args(list[KpiCard]) returns (KpiCard,) —
+            # identical to what Optional[KpiCard] produces — so without this
+            # check the Union unwrap path below would silently pass list[T].
+            # Any annotation with a concrete __origin__ that is not Union is
+            # an immediate mismatch (SC-F1 false-positive fix, RT-SC-F1-LIST).
+            _origin = getattr(ret, "__origin__", None)
+            if _origin is not None and _origin is not _typing.Union:
+                raise ValueError(
+                    f"tool {fn.__name__!r} return annotation {ret!r} does not match "
+                    f"emits={emits!r}"
+                )
+            # Handle Optional[T] / Union[T, None]: unwrap, filter out NoneType,
+            # and accept if every remaining arg is a class that emits satisfies.
+            _union_args = [
+                a for a in _typing.get_args(ret) if a is not type(None)
+            ]
+            if _union_args and all(
+                inspect.isclass(a) and issubclass(emits, a)
+                for a in _union_args
+            ):
+                continue  # Optional[emits] or Union[emits, ...] — permitted
             raise ValueError(
                 f"tool {fn.__name__!r} return annotation {ret!r} does not match "
                 f"emits={emits!r}"
@@ -345,12 +455,29 @@ class Agent:
                     yield
             finally:
                 sweep_task.cancel()
+                try:
+                    await sweep_task
+                except asyncio.CancelledError:
+                    pass
+                # Cancel all live workers, close resume channels, and
+                # sentinel-close SSE subscriber queues before adapters are
+                # torn down (DESIGN.md §5.2 shutdown contract).
+                task_store.close_all()
                 for adapter in adapters.values():
-                    await adapter.aclose()
+                    try:
+                        await adapter.aclose()
+                    except Exception:
+                        logger.warning("adapter.aclose failed", exc_info=True)
                 shutdown = getattr(model_client, "shutdown", None)
                 if callable(shutdown):
-                    shutdown()
-                credential_store.close()
+                    try:
+                        shutdown()
+                    except Exception:
+                        logger.warning("model_client.shutdown failed", exc_info=True)
+                try:
+                    credential_store.close()
+                except Exception:
+                    logger.warning("credential_store.close failed", exc_info=True)
 
         app = FastAPI(
             title=settings.agent_name,
@@ -359,7 +486,11 @@ class Agent:
         )
         configure_logging()
         app.middleware("http")(request_id_middleware)
-        _cors_origins = set(settings.cors_origins) | {"https://claude.ai"}
+        # RTGA-007: strip trailing slashes so the defense-in-depth origin guards
+        # in MCP routes match the same normalized form that CorsMiddleware stores
+        # internally.  Without this, CORS_ORIGINS=['https://app.example.com/']
+        # would pass the middleware check but 403 the MCP route guards.
+        _cors_origins = {o.rstrip("/") for o in settings.cors_origins} | {"https://claude.ai"}
         app.add_middleware(CorsMiddleware, origins=_cors_origins)
         app.state.cors_origins = _cors_origins
 
