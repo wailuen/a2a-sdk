@@ -16,9 +16,11 @@ full self-cleaning sequence::
   show-then-close (§7.1)
 
 Gating happens here (capabilities resolved by the route, §5.4): Extended
-profile types need ``tier="core+extended"``; domain cards need their
-``catalog_id`` listed in the client's catalogs. Gated off → ``None``; the
-caller still ships the TextPart fallback — nothing is silently dropped.
+profile types need ``tier="core+extended"``; domain cards are emitted freely
+whenever tier is active (consumers silently ignore unknown CUSTOM events per
+AG-UI spec) — only ``tier="none"`` suppresses them (GH-56). Gated off →
+``None``; the caller still ships the TextPart fallback — nothing is silently
+dropped.
 """
 
 from __future__ import annotations
@@ -65,8 +67,10 @@ class A2uiCapabilities:
         if self.tier == "none":
             return False
         if model_cls.catalog_id != CATALOG_ID:
-            # domain gating: tier alone never unlocks domain types
-            return model_cls.catalog_id in self.catalogs
+            # Domain types: emit freely when tier is active — consumers silently
+            # ignore unknown CUSTOM events (AG-UI spec).  Catalog gating only
+            # applied when tier=="none" (already returned False above).
+            return True
         if model_cls.extended:
             return self.extended
         return True

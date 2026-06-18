@@ -91,8 +91,8 @@ def _make_event(model: ContentModel) -> ArtifactEvent:
 
 # Capabilities that allow our domain catalog so translate() is called
 _CAPS_DOMAIN_ON = A2uiCapabilities(tier="core", catalogs=[_DOMAIN_CATALOG])
-# Capabilities that do NOT include domain catalog → translate() returns None
-_CAPS_DOMAIN_OFF = A2uiCapabilities(tier="core", catalogs=["urn:a2ui-profile:standard:v1"])
+# tier="none" → translate() returns None for ALL types (including domain)
+_CAPS_DOMAIN_OFF = A2uiCapabilities(tier="none")
 
 
 def test_d1_bad_domain_card_wire_empty_raises_value_error(_register_d1_cards):
@@ -129,12 +129,12 @@ def test_d1_good_domain_card_wire_nonempty_does_not_raise(_register_d1_cards):
 
 
 def test_d1_bad_domain_card_gated_off_does_not_raise(_register_d1_cards):
-    """SC-D1: When A2UI is gated off (translate() returns None), wire()
-    is not called by _validate_a2ui_wire and no error is raised for the
+    """SC-D1: When A2UI is gated off via tier="none" (translate() returns None),
+    wire() is not called by _validate_a2ui_wire and no error is raised for the
     bad card — the DataPart fallback path uses model_dump, not wire()."""
     bad_card = _BadDomainCard()
     event = _make_event(bad_card)
-    # A2UI gated off → translate() returns None → _validate_a2ui_wire not called
+    # tier="none" → translate() returns None → _validate_a2ui_wire not called
     artifact = build_artifact(event, _CAPS_DOMAIN_OFF)
     assert artifact is not None
     assert len(artifact.parts) == 2  # TextPart + model_dump DataPart
@@ -309,3 +309,93 @@ def test_d2_agent_card_supportedcatalogids_reflects_allowlist(tmp_path):
     # All allowed → standard catalog present
     catalogs_all = supported_catalogs(allowed_components=None)
     assert "urn:a2ui-profile:standard:v1" in catalogs_all
+
+
+# ---------------------------------------------------------------------------
+# GH-56: Domain catalog gating fix — allows() must emit domain types freely
+# when tier is active; only tier="none" suppresses them.
+# ---------------------------------------------------------------------------
+
+
+class _GH56DomainCard(_DomainBase):
+    """Domain card used for GH-56 AC1/AC2 tests."""
+
+    data_type: ClassVar[str] = "_test_gh56_domain_card"
+    component: ClassVar[str] = "_TestGH56DomainCard"
+    label: str = "gh56"
+
+    def wire(self) -> dict[str, Any]:  # type: ignore[override]
+        return {"label": self.label}
+
+
+@pytest.fixture()
+def _register_gh56_card():
+    register_content_type(_GH56DomainCard)
+    yield
+    _REGISTRY.pop("_test_gh56_domain_card", None)
+
+
+def test_gh56_ac1_domain_type_allowed_when_tier_core_catalog_standard(_register_gh56_card):
+    """GH-56 AC1: A2uiCapabilities(tier="core", catalogs=["urn:a2ui-profile:standard:v1"])
+    + domain ContentModel subclass → translate() returns non-None.
+
+    Consumers silently ignore unknown CUSTOM events (AG-UI spec); the server
+    must emit domain types freely when tier is active, regardless of the
+    client's catalog list."""
+    from agent_sdk.a2ui.translator import translate
+
+    payload = _GH56DomainCard(label="test-ac1")
+    caps = A2uiCapabilities(tier="core", catalogs=["urn:a2ui-profile:standard:v1"])
+    result = translate(payload, capabilities=caps)
+    assert result is not None, (
+        "translate() must return non-None for domain types when tier='core', "
+        "even if the domain catalog is not in caps.catalogs"
+    )
+    assert isinstance(result, list)
+    assert len(result) == 4
+
+
+def test_gh56_ac2_domain_type_suppressed_when_tier_none(_register_gh56_card):
+    """GH-56 AC2: A2uiCapabilities(tier="none") → translate() returns None
+    for domain ContentModel subclasses."""
+    from agent_sdk.a2ui.translator import translate
+
+    payload = _GH56DomainCard(label="test-ac2")
+    caps = A2uiCapabilities(tier="none")
+    result = translate(payload, capabilities=caps)
+    assert result is None, (
+        "translate() must return None for domain types when tier='none'"
+    )
+
+
+def test_gh56_allows_domain_type_core_plus_extended_catalog_omitted(_register_gh56_card):
+    """GH-56: tier='core+extended' also allows domain types regardless of catalog."""
+    from agent_sdk.a2ui.translator import translate
+
+    payload = _GH56DomainCard(label="test-extended")
+    caps = A2uiCapabilities(tier="core+extended", catalogs=["urn:a2ui-profile:standard:v1"])
+    result = translate(payload, capabilities=caps)
+    assert result is not None, (
+        "translate() must return non-None for domain types when tier='core+extended'"
+    )
+
+
+def test_gh56_standard_core_tier_gating_unaffected(_register_gh56_card):
+    """GH-56 AC3: Standard-catalog tier gating (core vs extended) is unaffected.
+    Extended-profile types still require tier='core+extended'."""
+    from agent_sdk.a2ui.translator import translate
+    from agent_sdk.models.content_types import WaterfallChart, WaterfallSegment
+
+    payload = WaterfallChart(
+        title="Test",
+        segments=[WaterfallSegment(label="A", value=100.0, type="initial", cumulative=100.0)],
+    )
+    # core-only caps → extended standard type must still be gated off
+    caps_core = A2uiCapabilities(tier="core", catalogs=["urn:a2ui-profile:standard:v1"])
+    result = translate(payload, capabilities=caps_core)
+    assert result is None, "Extended standard-profile type must be gated off for tier='core'"
+
+    # core+extended → allowed
+    caps_ext = A2uiCapabilities(tier="core+extended", catalogs=["urn:a2ui-profile:standard:v1"])
+    result_ext = translate(payload, capabilities=caps_ext)
+    assert result_ext is not None, "Extended standard-profile type must be allowed for tier='core+extended'"

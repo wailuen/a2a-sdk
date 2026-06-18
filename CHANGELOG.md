@@ -4,6 +4,27 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.15] — 2026-06-18
+
+### 🔧 Fixes
+
+- **a2ui/ag-ui: domain catalog types now always emitted when tier ≠ "none" (GH-56)** —
+  `A2uiCapabilities.allows()` previously gated domain `ContentModel` types on catalog
+  membership (`model_cls.catalog_id in self.catalogs`), silently suppressing `A2UI_UPDATE`
+  for consumers that omit `forwardedProps.a2uiClientCapabilities.catalogs`. This inverted
+  the AG-UI spec contract (consumers silently ignore unknown CUSTOM events; servers emit
+  freely). Fixed by removing the catalog-membership gate: domain types are now emitted
+  whenever `tier != "none"`. Tier gating within the standard catalog (core vs extended)
+  is unaffected. The `catalogs` list remains available for informational purposes.
+
+### 🧪 Test / CI
+
+- New tests in `tests/test_a2ui_group_d.py` and `tests/test_protocol_fixes_w6.py`
+  verifying domain catalog emission with standard-only capabilities, and tier=="none"
+  suppression regression guard.
+
+---
+
 ## [0.5.14] — 2026-06-17
 
 ### 🟡 Protocol surface changes

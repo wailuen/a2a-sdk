@@ -27,23 +27,24 @@ from agent_sdk.models.content_types import ContentModel
 class _SimpleCard(ContentModel):
     """Minimal concrete ContentModel for testing.
 
-    Uses a domain-specific catalog_id so we can gate A2UI off by supplying
-    a capability set that does not include that catalog.  Standard catalog
-    core types are never gated off by capabilities alone.
+    Uses a domain-specific catalog_id (non-standard catalog).  Domain types
+    are emitted freely whenever tier is active — only tier="none" suppresses
+    them (GH-56).  Standard catalog core types are never gated off by
+    capabilities alone.
     """
 
     data_type: ClassVar[str] = "_test_simple_card_w6"
     component: ClassVar[str] = "_TestSimpleCardW6"
-    catalog_id: ClassVar[str] = "urn:test-sdk-w6:v1"  # domain catalog — gated by caps
+    catalog_id: ClassVar[str] = "urn:test-sdk-w6:v1"  # domain catalog — emitted freely when tier active; only tier="none" suppresses
     value: str = "test"
 
     def to_plain_text(self) -> str:
         return f"SimpleCard: {self.value}"
 
 
-# Capabilities that do NOT include the test card's domain catalog → gated off.
-_CAPS_A2UI_OFF = A2uiCapabilities(tier="core", catalogs=["urn:a2ui-profile:standard:v1"])
-# Capabilities that DO include the test card's domain catalog → A2UI active.
+# tier="none" gates off A2UI for ALL types (including domain types).
+_CAPS_A2UI_OFF = A2uiCapabilities(tier="none")
+# tier="core" → A2UI active; domain types are emitted freely (catalog list vestigial in allows()).
 _CAPS_A2UI_ON = A2uiCapabilities(tier="core", catalogs=["urn:test-sdk-w6:v1"])
 
 
@@ -145,13 +146,13 @@ def _make_event(model: ContentModel) -> ArtifactEvent:
 
 
 def test_build_artifact_content_model_no_a2ui_emits_two_parts():
-    """When A2UI is NOT active (capabilities gate the type out), build_artifact
+    """When A2UI is NOT active (tier='none' gates all types out), build_artifact
     must still emit 2 parts: TextPart + DataPart with the raw model dump.
 
     P6-02 / A2A §D3 fix: plain A2A clients deserve the structured payload.
     """
     card = _SimpleCard(value="hello")
-    # Confirm the gate is actually closed for our test card.
+    # Confirm the gate is actually closed for our test card (tier="none").
     assert not _CAPS_A2UI_OFF.allows(_SimpleCard), "precondition: A2UI must be gated off"
 
     artifact = build_artifact(_make_event(card), _CAPS_A2UI_OFF)
