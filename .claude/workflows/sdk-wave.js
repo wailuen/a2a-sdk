@@ -1,6 +1,6 @@
 export const meta = {
   name: 'sdk-wave',
-  description: 'SDK-context wave executor: todos redteam → tier-parallel implement → unit/phase redteam → protocol audit → codify → archive. No downstream-only agentTypes (redteam/python-implementer/debug/codify); advisor agentTypes (a2a-advisor etc.) are available and used.',
+  description: 'SDK-context wave executor: todos redteam → tier-parallel implement → unit/phase redteam → protocol audit → codify → archive. All harness agentTypes are used: redteam, python-implementer, debug, codify (populated in harness/agents/core/ since 2026-06-16), plus advisor agentTypes (a2a-advisor etc.).',
   phases: [
     { title: 'Parse',          detail: 'Read wave file; extract groups, creates paths, groupDeps, LRN baseline' },
     { title: 'Todos Redteam',  detail: 'Redteam the wave plan: SI risk annotation, registry reuse (Reuses: C-NNN), new component candidate flagging' },
@@ -423,6 +423,8 @@ for (const group of wave.groups) {
       'Also check their transitive callers and importers within agent_sdk/.\n\n' +
       'Review dimensions: spec/protocol conformance, type correctness, test coverage,\n' +
       'public API stability (no breaking changes), error handling, code quality.\n' +
+      'Dimension 5: no partial implementations, stubs, TODOs, or placeholder returns —\n' +
+      'every AC in the todo body must be satisfied in the landed code.\n' +
       'For protocol routes (agent_sdk/routes/): check HTTP status codes, wire shapes,\n' +
       'spec version gating, and spec citations.\n\n' +
       'Return structured findings.',
@@ -522,7 +524,9 @@ while (true) {
     'Scope (all Creates: paths):\n' + wave.allCreates.join('\n') + '\n\n' +
     'Also check transitive callers and importers. Re-expand scope every round.\n\n' +
     'Review dimensions: protocol spec conformance, type correctness, test coverage,\n' +
-    'public API stability, error handling, code quality, backward compatibility.\n\n' +
+    'public API stability, error handling, code quality, backward compatibility.\n' +
+    'Dimension 5: no partial implementations, stubs, TODOs, or placeholder returns —\n' +
+    'every AC in the todo body must be satisfied in the landed code.\n\n' +
     'Return structured findings.',
     { schema: RT_SCHEMA, label: 'rt:phase:r' + pRound, phase: 'Phase Redteam', agentType: 'redteam' }
   )

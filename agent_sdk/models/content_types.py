@@ -150,6 +150,7 @@ class KpiCard(ContentModel):
 
     metrics: list[MetricItem] = Field(min_length=1)
     title: str | None = None
+    metadata: dict[str, Any] | None = None
 
     def to_plain_text(self) -> str:
         lines = [self.title] if self.title else []
@@ -252,6 +253,7 @@ class ComparisonTable(ContentModel):
     rows: list[dict[str, Any]]
     sort_by: str | None = None
     sort_order: Literal["asc", "desc"] | None = None
+    metadata: dict[str, Any] | None = None
 
     def to_plain_text(self) -> str:
         header = " | ".join(c.label for c in self.columns)
@@ -274,6 +276,7 @@ class BarChart(ContentModel):
     title: str | None = None
     x_key: str | None = None
     y_key: str | None = None
+    metadata: dict[str, Any] | None = None
 
     def to_plain_text(self) -> str:
         lines = [self.title] if self.title else []
@@ -297,6 +300,7 @@ class EntityList(ContentModel):
     has_more: bool | None = None
     title: str | None = None
     showing: int | None = None
+    metadata: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def _fill_total_count(self) -> "EntityList":
@@ -361,6 +365,7 @@ class MarketBriefing(ContentModel):
     as_of: str
     prose: str = ""
     sections: list[BriefingSection] = Field(default_factory=list)
+    metadata: dict[str, Any] | None = None
 
     def to_markdown(self) -> str:
         lines = [f"{self.title} ({self.as_of})"]
@@ -412,6 +417,7 @@ class WaterfallChart(ContentModel):
     entity_name: str | None = None
     as_of_date: str | None = None
     date_range: DateRange | None = None  # start/end — frozen; not first/last
+    metadata: dict[str, Any] | None = None
 
     def to_plain_text(self) -> str:
         lines = [self.title]
@@ -462,6 +468,7 @@ class MultiCategoryChart(ContentModel):
     entity_name: str | None = None
     item_count: int | None = None
     chart_config: MultiCategoryChartConfig | None = None
+    metadata: dict[str, Any] | None = None
 
     def to_plain_text(self) -> str:
         lines = [self.title]
@@ -507,6 +514,7 @@ class FundPerformance(ContentModel):
     distributed_plus_remaining: Money | None = Field(
         default=None, alias="distributedPlusRemaining"
     )
+    metadata: dict[str, Any] | None = None
 
     def to_plain_text(self) -> str:
         bits: list[str] = []
@@ -552,6 +560,7 @@ class EmailList(ContentModel):
     has_more: bool
     folder: str | None = None
     query: str | None = None
+    metadata: dict[str, Any] | None = None
 
     def to_plain_text(self) -> str:
         lines = [f"{self.total_count} message(s)"]
@@ -598,6 +607,7 @@ class CalendarEvents(ContentModel):
     date_range: DateRange  # start/end — frozen
     total_count: int
     has_more: bool
+    metadata: dict[str, Any] | None = None
 
     def to_plain_text(self) -> str:
         lines = [f"{self.total_count} event(s) {self.date_range.start} – {self.date_range.end}"]
@@ -657,6 +667,7 @@ class UserProfile(ContentModel):
     presence: UserPresence | None = None
     photo_url: str | None = None
     out_of_office: OutOfOfficeSettings | None = None
+    metadata: dict[str, Any] | None = None
 
     def to_plain_text(self) -> str:
         lines = [f"{self.display_name} <{self.email}>"]
@@ -687,6 +698,7 @@ class UserList(ContentModel):
     total_count: int
     has_more: bool
     query: str | None = None
+    metadata: dict[str, Any] | None = None
 
     def to_plain_text(self) -> str:
         lines = [f"{self.total_count} user(s)"]
@@ -716,6 +728,7 @@ class DocumentList(ContentModel):
     documents: list[DocumentItem]
     total_count: int | None = None
     has_more: bool | None = None
+    metadata: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def _fill_total_count(self) -> "DocumentList":

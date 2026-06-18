@@ -31,7 +31,7 @@ Install the extra with::
 
 from __future__ import annotations
 
-_INSTALL_HINT = "pip install agent-sdk[azure]"
+_INSTALL_HINT = "pip install agent-sdk[azure]  # or add 'agent-sdk[azure]' to your pyproject.toml dependencies"
 
 
 def require_azure_packages() -> None:

@@ -55,6 +55,7 @@ Fix 5 protocol conformance bugs surfaced by downstream agents after the 0.4.0 re
 | W16 [x] ✅ 2026-06-17 | w016-gh-issues.md | A+B+C | 7 | — |
 | W17 [x] ✅ 2026-06-17 | w017-gh-issues.md | G | 2 | — |
 | W18 [x] ✅ 2026-06-18 | w018-gh-issues.md | G | 1 | — |
+| W19 [x] ✅ 2026-06-18 | w019-gh-issues.md | G | 6 | — |
 
 ## Dependency graph
 

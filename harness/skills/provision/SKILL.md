@@ -81,10 +81,57 @@ All subsequent references to `<port>` in this skill use this resolved value.
         secret; never echo or log it.
 
         **Account name path**: prompt for:
-        - Storage account name (e.g. `mystorageaccount`) — write `AZURE_STORAGE_ACCOUNT_NAME=<value>` to `.env`
-        - Confirm that the executing identity (Managed Identity, Azure CLI login)
-          has the **Storage Table Data Contributor** role on the storage account.
-          This is a prerequisite — DefaultAzureCredential will fail at boot without it.
+        - Storage account name (e.g. `mystorageaccount`)
+
+        **RBAC probe** — before writing to `.env`, verify the executing
+        identity can actually reach the storage account:
+
+        ```bash
+        az storage table list --account-name <name> --auth-mode login \
+          --output none 2>&1
+        ```
+
+        Interpret the exit code and output:
+
+        - **Exit 0 (success):** Print `RBAC confirmed — Storage Table Data
+          Reader (or higher) role is active for this identity. Write access
+          not verified by this probe; if credential writes fail at runtime,
+          grant Storage Table Data Contributor.` Continue to write
+          `AZURE_STORAGE_ACCOUNT_NAME=<value>` to `.env`.
+
+        - **Exit non-zero, output contains `AuthorizationPermissionMismatch`
+          or HTTP 403:** Halt with:
+          ```
+          RBAC ERROR — the current identity lacks the Storage Table Data
+          Contributor role on storage account <name>.
+
+          Identity checked: $(az ad signed-in-user show --query userPrincipalName -o tsv 2>/dev/null || az account show --query user.name -o tsv 2>/dev/null || "unknown (run: az account show)")
+
+          Fix command:
+            az role assignment create \
+              --role "Storage Table Data Contributor" \
+              --assignee <identity> \
+              --scope "/subscriptions/<subscription-id>/resourceGroups/<rg>/providers/Microsoft.Storage/storageAccounts/<name>"
+
+          Re-run /provision after the role assignment propagates (~2 min).
+          ```
+          Do NOT write to `.env`. Do NOT continue to step c.
+
+        - **`az` not found (`command not found` / exit 127):** Warn:
+          `az CLI not found — skipping RBAC probe. Ensure the executing
+          identity has Storage Table Data Contributor before first boot.`
+          Continue to write `AZURE_STORAGE_ACCOUNT_NAME=<value>` to `.env`.
+
+        - **Not authenticated (output contains `az login` or
+          `AzureCliCredentialError`):** Warn:
+          `az CLI not authenticated — skipping RBAC probe. Run \`az login\`
+          and re-run /provision to verify RBAC, or ensure Managed Identity
+          has Storage Table Data Contributor.`
+          Continue to write `AZURE_STORAGE_ACCOUNT_NAME=<value>` to `.env`.
+
+        - **Any other non-zero exit:** Warn with the raw error output and
+          continue (graceful degradation — do not block on unexpected az
+          errors).
 
      c. Ask: "Table prefix? [default: `<agent_name>`]"
         The SDK creates a table named `{prefix}credentials` in the storage account.

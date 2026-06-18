@@ -67,7 +67,7 @@ function buildScenarioPrompt(s, a) {
   const transports     = a.transports || ['a2a', 'agui']
   const runA2A         = transports.indexOf('a2a') !== -1
   const runAGUI        = transports.indexOf('agui') !== -1
-  const runKey         = s.id + '-' + globalThis.crypto.randomUUID()
+  const runKey         = s.id + '-' + require('crypto').randomUUID()
 
   return (
     'You are running an acceptance test for the agent "' + a.agentContext.name + '".\n\n' +

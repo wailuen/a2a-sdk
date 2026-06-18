@@ -53,3 +53,4 @@ Codified bugs, gotchas, and validated patterns from SDK development and downstre
 | LRN-047 | Terminal re-message rule violated — _continue_from_terminal creates new task instead of returning error | protocol | critical | 2026-06-17 |
 | LRN-048 | Inbound Message mutated with server-assigned taskId/contextId before archiving in history | protocol | high | 2026-06-17 |
 | LRN-049 | AG-UI CUSTOM events wrongly gated on catalog membership — must emit freely | protocol | medium | 2026-06-18 |
+| LRN-050 | CLAUDE.md/gitignore consistency gap — credential globs missing from .gitignore | security | critical | 2026-06-18 |

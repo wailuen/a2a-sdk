@@ -4,6 +4,55 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.16] — 2026-06-18
+
+### 🟠 Security
+
+- **harness: ADR credential gitignore globs were entirely absent (GH-66)** —
+  `harness/.gitignore` did not exist; neither `workspace/adr/ADR-000-*-credentials.md`
+  nor `workspace/adr/ADR-001-*-credentials.md` was gitignored anywhere, despite
+  `CLAUDE.md` asserting both are protected. Created `harness/.gitignore` with both
+  globs so `/provision`-written credential inventory files are never accidentally committed.
+
+### ✅ Features
+
+- **sdk/models: `metadata` escape hatch on all ContentModel profile types (GH-63)** —
+  Added `metadata: dict[str, Any] | None = None` to the 13 `ContentModel` subclasses
+  that previously lacked it (`KpiCard`, `ComparisonTable`, `BarChart`, `EntityList`,
+  `MarketBriefing`, `WaterfallChart`, `MultiCategoryChart`, `FundPerformance`,
+  `EmailList`, `CalendarEvents`, `UserProfile`, `UserList`, `DocumentList`), matching
+  the existing pattern on `TimeSeriesChart` and `CategoryValue`. Domain code can now
+  pass disclosure annotations (e.g. `coverage_note`) via `metadata={"coverage_note":
+  "Partial: 5 of 20 funds"}` without silent field loss. `extra='ignore'` preserved
+  for backward compatibility.
+
+### 🔧 Fixes
+
+- **harness/skill: `/provision` now probes Storage Table Data Contributor RBAC before writing `.env` (GH-60)** —
+  Phase 1b runs `az storage table list --auth-mode login` after collecting the account
+  name. A 403 halts with the exact `az role assignment create` fix command; success
+  prints "RBAC confirmed". Degrades gracefully when `az` is unauthenticated.
+
+- **sdk/build: `AzureTableCredentialStore` error message now mentions `pyproject.toml` (GH-62)** —
+  `_INSTALL_HINT` in `azure_utils.py` updated to include the `pyproject.toml`
+  dependency form alongside the bare `pip install` form.
+
+### 🧪 Test / CI
+
+- `tests/test_content_types.py` — metadata round-trip tests for `GH-63`.
+
+### — Other
+
+- **harness/workflow: `acceptance-api.js` now uses `require('crypto').randomUUID()` (GH-58)** —
+  Replaces `globalThis.crypto.randomUUID()` (Node 19+ only) with the Node 15.6+
+  compatible form. Fixes `TypeError` on Node 18 LTS CI hosts.
+
+- **harness/workflow: `sdk-wave.js` redteam prompts now include Dimension 5 (GH-65)** —
+  Both unit and phase redteam prompts explicitly require checking for stubs, TODOs,
+  and unmet ACs — matching `wave-cycle.js`'s "Run all 8 dimensions" instruction.
+
+---
+
 ## [0.5.15] — 2026-06-18
 
 ### 🔧 Fixes
