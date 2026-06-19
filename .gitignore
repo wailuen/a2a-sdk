@@ -1,6 +1,8 @@
 # Secrets and local state — never commit
 .env
 .env.local
+workspace/adr/ADR-000-*-credentials.md
+workspace/adr/ADR-001-*-credentials.md
 *.db
 .data/
 data/
@@ -35,3 +37,6 @@ htmlcov/
 # Nested repos — tracked independently, not by a2a-sdk
 template/
 examples/
+
+# Workflow scratch + registered git-worktrees — never commit throwaway venvs
+.claude/worktrees/

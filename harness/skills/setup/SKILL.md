@@ -133,8 +133,8 @@ remote.
 
 3. **Resolve the target SHA** (capture to a variable — do not echo raw output):
    - If `--sdk-ref` is a 40-char hex SHA: use it verbatim. Warn: "SHA `<sha7>`
-     provided — cannot validate remotely without a full fetch; `pip install` will
-     fail if this SHA does not exist in the SDK repo."
+     provided — cannot validate remotely without a full fetch; `uv sync` will fail
+     to resolve the VCS dependency if this SHA does not exist in the SDK repo."
    - If `--sdk-ref` is a tag (e.g. `v1.3.0`): resolve with
      `git ls-remote ssh://git@github.com/<path> refs/tags/v1.3.0` (or
      `git ls-remote https://github.com/<path> refs/tags/v1.3.0` for HTTPS).
@@ -218,7 +218,19 @@ SHA, wrong format). Stop: "ERROR: malformed or missing pip VCS URL in
 __pycache__
 .pytest_cache
 *.pyc
+workspace/adr/ADR-000-*-credentials.md
+workspace/adr/ADR-001-*-credentials.md
 ```
+After writing, run `git check-ignore -v workspace/adr/ADR-001-dev-credentials.md` from the repo root and confirm it returns a match before proceeding.
+
+**Generate `uv.lock`:**
+```bash
+uv lock
+```
+This must run immediately after placeholder substitution, while `pyproject.toml`
+is fresh with the real SDK SHA. Running it now means Phase 5's `uv sync --frozen`
+will never fail with "no lockfile found". Stage it with the initial commit:
+`git add uv.lock` (alongside the rest of the scaffold).
 
 ## Phase 3 — Generate MASTER_KEY
 
@@ -292,14 +304,17 @@ Then go directly to the Handoff.
 
 **Otherwise:**
 
-1. Create the venv and install:
+1. Create the venv and install from the lockfile:
    ```bash
-   python3.12 -m venv .venv
-   VIRTUAL_ENV=.venv uv pip install -e ".[dev]"
+   uv venv --python 3.12
+   uv sync --frozen --extra dev
    ```
-   If `uv` is not installed: fall back to `.venv/bin/pip install -e ".[dev]"`.
-   If install fails on auth (SDK URL unreachable), point back to Phase 1
-   remediation. Don't paper over it.
+   `--frozen` ensures the install matches the `uv.lock` generated in Phase 2
+   exactly — no silent resolution drift. `--extra dev` installs the `dev`
+   optional-dependency group (pytest, pytest-asyncio, httpx) required by step 2;
+   `uv sync` does not install optional-dependency extras by default. If install
+   fails on auth (SDK URL unreachable), point back to Phase 1 remediation. Don't
+   paper over it.
 
 2. Run the template tests:
    ```bash
@@ -343,10 +358,10 @@ Then go directly to the Handoff.
 1. **Idempotency guard** — grep for `{{` outside `.claude/`; ask before re-running.
 2. **Phase 0 — Interview** — name, domain, sources, auth, model backend + ARN, contrib; confirm before writing.
 3. **Phase 1 — Preflight git access** — confirm SDK URL, verify SSH, resolve SHA + tag via `git ls-remote` (not `git+ls-remote`); stop on failure; offer HTTPS fallback.
-4. **Phase 2 — Substitute placeholders** — all files including manifest; wire sources; grep survivors outside `.claude/`; verify pip VCS URL format.
+4. **Phase 2 — Substitute placeholders** — all files including manifest; wire sources; grep survivors outside `.claude/`; verify pip VCS URL format; run `uv lock`; `git add uv.lock` in the initial commit.
 5. **Phase 3 — Generate MASTER_KEY** — write to `.env` (create or update-in-place); write non-secret routing vars only (never LLM API keys); seed LLM key via `PUT /admin/api/credentials/__model__/<key_field>` after bootstrap; never echoed.
 6. **Phase 4 — Manifest verification** — confirm `.claude/.harness-manifest.json` has no remaining `{{`.
-7. **Phase 5 — First run** (skip with `--no-run`) — install venv; test; port check; boot; bootstrap token → admin key; tear down.
+7. **Phase 5 — First run** (skip with `--no-run`) — `uv sync --frozen`; test; port check; boot; bootstrap token → admin key; tear down.
 8. **Handoff.**
 
 ## Report format

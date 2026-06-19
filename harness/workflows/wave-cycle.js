@@ -29,12 +29,13 @@ const A2UI_SURFACE = ['src/a2ui/', 'src/models/content_types']
 
 const WAVE_SCHEMA = {
   type: 'object',
-  required: ['waveId', 'allCreates', 'groups', 'groupDeps', 'lrnNext'],
+  required: ['waveId', 'allCreates', 'allModifies', 'groups', 'groupDeps', 'lrnNext'],
   additionalProperties: false,
   properties: {
-    waveId:     { type: 'string' },
-    allCreates: { type: 'array', items: { type: 'string' } },
-    lrnNext:    { type: 'integer' },
+    waveId:      { type: 'string' },
+    allCreates:  { type: 'array', items: { type: 'string' } },
+    allModifies: { type: 'array', items: { type: 'string' } },
+    lrnNext:     { type: 'integer' },
     groupDeps: {
       type: 'object',
       description: 'Maps group label to the labels of OTHER groups it depends on (empty array = no external deps)',
@@ -44,11 +45,12 @@ const WAVE_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['label', 'creates', 'todos'],
+        required: ['label', 'creates', 'modifies', 'todos'],
         additionalProperties: false,
         properties: {
-          label:   { type: 'string' },
-          creates: { type: 'array', items: { type: 'string' } },
+          label:    { type: 'string' },
+          creates:  { type: 'array', items: { type: 'string' } },
+          modifies: { type: 'array', items: { type: 'string' } },
           todos: {
             type: 'array',
             items: {
@@ -219,7 +221,7 @@ const GATE_SCHEMA = {
 
 // GH-40: archive intent schema — git status check before archive
 // The agent runs `git status --short`, parses the output into dirty paths,
-// cross-references against wave.allCreates, and returns any offending paths.
+// cross-references against wave.allScope (Creates: ∪ Modifies:), and returns any offending paths.
 const ARCHIVE_INTENT_SCHEMA = {
   type: 'object',
   required: ['gitStatusOutput', 'dirtyPaths', 'offendingPaths'],
@@ -227,7 +229,7 @@ const ARCHIVE_INTENT_SCHEMA = {
   properties: {
     gitStatusOutput: { type: 'string', description: 'Raw stdout of git status --short' },
     dirtyPaths:      { type: 'array', items: { type: 'string' }, description: 'All paths reported dirty by git' },
-    offendingPaths:  { type: 'array', items: { type: 'string' }, description: 'Dirty paths that overlap with wave.allCreates' },
+    offendingPaths:  { type: 'array', items: { type: 'string' }, description: 'Dirty paths that overlap with wave.allScope (Creates: ∪ Modifies:)' },
   },
 }
 
@@ -257,8 +259,13 @@ const wave = await agent(
   'Extract:\n' +
   '- waveId: the w[NNN] identifier from the filename\n' +
   '- allCreates: every "Creates:" path listed across all todos in this wave\n' +
+  '- allModifies: every "Modifies:" path listed across all todos in this wave.\n' +
+  '  EXCLUDE any todo marked [~] (out-of-repo / cannot land here) and any path\n' +
+  '  that resolves to another repo — only in-repo paths count as wave scope.\n' +
+  '  A wave whose only paths are Modifies: (no Creates:) is legitimate, not a bug.\n' +
   '- lrnNext: highest existing LRN number + 1\n' +
-  '- groups: execution groups (Depends: respected).\n' +
+  '- groups: execution groups (Depends: respected). Each group MUST carry both its\n' +
+  '  own creates (Creates: paths) and modifies (Modifies: paths, in-repo only).\n' +
   '  Todos without ‖ group: get label "ungrouped-N" (N = position).\n' +
   '  Same ‖ group: label → same group entry.\n' +
   '  Do NOT impose a sequential ordering — let groupDeps express ordering instead.\n' +
@@ -276,8 +283,30 @@ if (!wave) {
   return { error: 'parse-failed' }
 }
 
+// Unified review scope = Creates: ∪ Modifies: paths. Modify-only waves (0 Creates,
+// >0 Modifies) are legitimate (e.g. skill/doc-only waves) — deriving scope from
+// Creates: alone false-aborts them here AND lands them with empty adversarial-review
+// and protocol-audit scope downstream. Always union both. (RT-001 / LRN-053)
+function uniq(xs) { return Array.from(new Set(xs || [])) }
+
+wave.allCreates  = uniq(wave.allCreates)
+wave.allModifies = uniq(wave.allModifies)
+wave.allScope    = uniq(wave.allCreates.concat(wave.allModifies))
+for (const g of wave.groups) {
+  g.creates  = uniq(g.creates)
+  g.modifies = uniq(g.modifies)
+  g.scope    = uniq(g.creates.concat(g.modifies))
+}
+
+if (wave.allScope.length === 0) {
+  log('ERROR: wave ' + wave.waveId + ' has no Creates: AND no Modifies: paths — aborting ' +
+      '(truly empty scope is a harness bug, not a clean wave)')
+  return { error: 'empty-scope', waveId: wave.waveId }
+}
+
 log('Wave ' + wave.waveId + ': ' + wave.groups.length + ' group(s), ' +
-    wave.allCreates.length + ' creates path(s), lrnNext=' + wave.lrnNext)
+    wave.allScope.length + ' scope path(s) (' + wave.allCreates.length + ' create / ' +
+    wave.allModifies.length + ' modify), lrnNext=' + wave.lrnNext)
 
 // WC-RT-005: lrnBase is a snapshot taken at Parse time. Concurrent wave runs (e.g., two
 // terminals each executing /wave with explicit waveIds) will read the same lrnNext and
@@ -477,7 +506,7 @@ for (const group of wave.groups) {
 
     const rt = await agent(
       'Adversarial review of the files created/modified by group ' + group.label + '.\n\n' +
-      'Scope (Creates: paths for this group):\n' + group.creates.join('\n') + '\n\n' +
+      'Scope (Creates: AND Modifies: paths for this group):\n' + group.scope.join('\n') + '\n\n' +
       'Also check their transitive callers and importers.\n\n' +
       'Run all 8 dimensions from agents/core/redteam.md. Include the SDK Security\n' +
       'Invariants (SI-1…SI-7) in the security dimension — fail closed.\n\n' +
@@ -549,7 +578,7 @@ for (const group of wave.groups) {
       await agent(
         'Fix-loop requires fresh-lens analysis' + (stalled ? ' (stalled: same findings across 2 rounds)' : ' (round ' + uRound + ')') + '.\n\n' +
         'Prior findings:\n' + JSON.stringify(rt.findings, null, 2) + '\n\n' +
-        'Scope:\n' + group.creates.join('\n') + '\n\n' +
+        'Scope:\n' + group.scope.join('\n') + '\n\n' +
         'Read code cold. Diagnose root cause. Fix at the root.',
         { label: 'debug:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam', agentType: 'debug' }
       )
@@ -650,8 +679,8 @@ while (true) {
 
   const rt = await agent(
     'Adversarial review of the full wave ' + wave.waveId + '.\n\n' +
-    'Scope (all Creates: paths across every group):\n' +
-    wave.allCreates.join('\n') + '\n\n' +
+    'Scope (all Creates: AND Modifies: paths across every group):\n' +
+    wave.allScope.join('\n') + '\n\n' +
     'Also check transitive callers and importers. Re-expand scope every round.\n\n' +
     'Run all 8 dimensions. SDK Security Invariants (SI-1…SI-7) fail closed.\n\n' +
     'Return structured findings.',
@@ -712,7 +741,7 @@ while (true) {
     await agent(
       'Phase fix-loop requires fresh-lens analysis' + (pStalled ? ' (stalled)' : ' (round ' + pRound + ')') + '.\n\n' +
       'Findings:\n' + JSON.stringify(rt.findings, null, 2) + '\n\n' +
-      'Scope:\n' + wave.allCreates.join('\n') + '\n\n' +
+      'Scope:\n' + wave.allScope.join('\n') + '\n\n' +
       'Read cold; diagnose; fix at root.',
       { label: 'debug:phase:r' + pRound, phase: 'Phase Redteam', agentType: 'debug' }
     )
@@ -800,22 +829,24 @@ while (true) {
 // ─── phase 5: protocol audit ──────────────────────────────────────────────────
 phase('Protocol Audit')
 
-const runA2A  = wave.allCreates.some(function(p) {
+// Protocol-surface detection must scan the full scope (Creates: ∪ Modifies:):
+// a modify-only wave that edits a route file still needs its protocol audit.
+const runA2A  = wave.allScope.some(function(p) {
   return A2A_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
 })
-const runMCP  = wave.allCreates.some(function(p) {
+const runMCP  = wave.allScope.some(function(p) {
   return MCP_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
 })
-const runAGUI = wave.allCreates.some(function(p) {
+const runAGUI = wave.allScope.some(function(p) {
   return AGUI_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
 })
-const runA2UI = wave.allCreates.some(function(p) {
+const runA2UI = wave.allScope.some(function(p) {
   return A2UI_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
 })
 const runProtocol = runA2A || runMCP || runAGUI || runA2UI
 
 if (!runProtocol) {
-  log('Protocol audit skipped — no protocol surfaces in creates list')
+  log('Protocol audit skipped — no protocol surfaces in scope (Creates: ∪ Modifies:)')
 } else {
   log('Protocol audit triggered (A2A=' + runA2A + ' MCP=' + runMCP + ' AG-UI=' + runAGUI + ' A2UI=' + runA2UI + ')')
   // AD-001: advisor agents are external (check kit). If the kit is absent they fall back to
@@ -830,7 +861,7 @@ if (!runProtocol) {
       return agent(
         'A2A v0.3.0 conformance audit.\n\n' +
         'Files to audit:\n' +
-        wave.allCreates.filter(function(p) {
+        wave.allScope.filter(function(p) {
           return A2A_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
         }).join('\n') + '\n\n' +
         'Check: agent card shape, task/message/part/artifact shapes, streaming,\n' +
@@ -846,7 +877,7 @@ if (!runProtocol) {
       return agent(
         'MCP conformance audit.\n\n' +
         'Files to audit:\n' +
-        wave.allCreates.filter(function(p) {
+        wave.allScope.filter(function(p) {
           return MCP_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
         }).join('\n') + '\n\n' +
         'Check: Streamable-HTTP transport, OAuth 2.1 discovery (/.well-known/oauth-authorization-server),\n' +
@@ -864,7 +895,7 @@ if (!runProtocol) {
       return agent(
         'AG-UI conformance audit.\n\n' +
         'Files to audit:\n' +
-        wave.allCreates.filter(function(p) {
+        wave.allScope.filter(function(p) {
           return AGUI_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
         }).join('\n') + '\n\n' +
         'Check: SSE event catalog (34 types), RunAgentInput schema, camelCase wire,\n' +
@@ -880,7 +911,7 @@ if (!runProtocol) {
       return agent(
         'A2UI v0.9.1 + Standard Profile v1 conformance audit.\n\n' +
         'Files to audit:\n' +
-        wave.allCreates.filter(function(p) {
+        wave.allScope.filter(function(p) {
           return A2UI_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
         }).join('\n') + '\n\n' +
         // LRN-012: Keep in sync with DESIGN.md §5.4 and agent_sdk/models/content_types.py — single logical unit
@@ -896,24 +927,24 @@ if (!runProtocol) {
 
   // Seam check: no specialist agentType — it reads multiple protocol surfaces together,
   // so no single advisor owns it. Uses the default agent with full cross-surface context.
-  // RT-005: derive seam paths from allCreates rather than hardcoding — hardcoded paths
-  // silently produce empty results when routes live at different paths or are not yet created.
+  // RT-005: derive seam paths from allScope (Creates: ∪ Modifies:) rather than hardcoding —
+  // hardcoded paths silently produce empty results when routes live at different paths or are not yet created.
   // WC-007: leading-slash anchors each marker to a path-segment boundary, preventing
   // false positives from names like 'mcptools.py' or 'pseudoa2a.py' matching 'mcp'/'a2a'.
   // 'routes/' is kept as-is — the trailing slash already anchors it to a directory name.
   const SEAM_ROUTE_MARKERS = ['routes/', '/a2a', '/mcp', '/oauth', '/agent_card', '/ag_ui', '/a2ui']
-  const seamPaths = wave.allCreates.filter(function(p) {
+  const seamPaths = wave.allScope.filter(function(p) {
     return SEAM_ROUTE_MARKERS.some(function(m) { return p.indexOf(m) !== -1 })
   })
   if (seamPaths.length === 0) {
-    log('Seam audit skipped — no route files in creates list')
+    log('Seam audit skipped — no route files in scope (Creates: ∪ Modifies:)')
   } else {
     advisorTasks.push(function() {
       return agent(
         'Cross-protocol seam audit — consistency ACROSS A2A, MCP, AG-UI, A2UI surfaces.\n\n' +
-        'Route files to audit (derived from wave creates list):\n' +
+        'Route files to audit (derived from wave scope):\n' +
         seamPaths.join('\n') + '\n\n' +
-        'Wave creates paths:\n' + wave.allCreates.join('\n') + '\n\n' +
+        'Wave scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n\n' +
         'Check:\n' +
         '- Agent card skills array contains one entry per @tool in the ToolRegistry (no tool advertised in the card is absent from the registry).\n' +
         '- src/skills/*.md files are reachable via the load_skill tool (skills_dir is wired in the Agent constructor); these are separate from the card\'s skills[] and no 1:1 count match is required.\n' +
@@ -1024,7 +1055,7 @@ if (!runProtocol) {
       recheckTasks.push(function() {
         return agent(
           'A2A v0.3.0 re-audit after preceding fix. Check same surfaces.\n' +
-          'Creates paths:\n' + wave.allCreates.join('\n') + '\n' +
+          'Scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n' +
           'Focus on previously-critical findings. Return structured findings.',
           { schema: PROTO_SCHEMA, agentType: 'a2a-advisor', label: 'proto:recheck:a2a', phase: 'Protocol Audit' }
         )
@@ -1034,7 +1065,7 @@ if (!runProtocol) {
       recheckTasks.push(function() {
         return agent(
           'MCP re-audit after preceding fix. Check same surfaces.\n' +
-          'Creates paths:\n' + wave.allCreates.join('\n') + '\n' +
+          'Scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n' +
           'Focus on previously-critical findings (Streamable-HTTP, OAuth 2.1, PKCE, initialize echo, tools/list). ' +
           'Return structured findings.',
           { schema: PROTO_SCHEMA, agentType: 'mcp-advisor', label: 'proto:recheck:mcp', phase: 'Protocol Audit' }
@@ -1045,7 +1076,7 @@ if (!runProtocol) {
       recheckTasks.push(function() {
         return agent(
           'AG-UI re-audit after preceding fix.\n' +
-          'Creates paths:\n' + wave.allCreates.join('\n') + '\n' +
+          'Scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n' +
           'Focus on previously-critical findings. Return structured findings.',
           { schema: PROTO_SCHEMA, agentType: 'ag-ui-advisor', label: 'proto:recheck:agui', phase: 'Protocol Audit' }
         )
@@ -1055,7 +1086,7 @@ if (!runProtocol) {
       recheckTasks.push(function() {
         return agent(
           'A2UI re-audit after preceding fix.\n' +
-          'Creates paths:\n' + wave.allCreates.join('\n') + '\n' +
+          'Scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n' +
           'Focus on previously-critical findings. Return structured findings.',
           { schema: PROTO_SCHEMA, agentType: 'a2ui-advisor', label: 'proto:recheck:a2ui', phase: 'Protocol Audit' }
         )
@@ -1068,7 +1099,7 @@ if (!runProtocol) {
         return agent(
           'Cross-protocol seam re-audit after preceding fix.\n' +
           'Route files to audit:\n' + seamPaths.join('\n') + '\n' +
-          'Creates paths:\n' + wave.allCreates.join('\n') + '\n' +
+          'Scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n' +
           'Focus on previously-critical SEAM findings. Return structured findings.',
           { schema: PROTO_SCHEMA, label: 'proto:recheck:seam', phase: 'Protocol Audit' }
         )
@@ -1246,21 +1277,21 @@ if (!preArchiveGate) {
   log('Fix the failing tests and re-run /wave ' + wave.waveId)
 }
 
-// GH-40: pre-archive commit check — all Creates: files must be committed before archive.
-// A wave that archives with deliverables only in the working tree will silently lose them
-// on `git checkout`. Run git status --short and cross-reference against wave.allCreates.
+// GH-40: pre-archive commit check — all scope files (Creates: ∪ Modifies:) must be
+// committed before archive. A wave that archives with deliverables only in the working
+// tree will silently lose them on `git checkout`.
 if (!protocolBlocked) {
   const archiveIntent = await agent(
     'Run `git status --short` and parse the output.\n\n' +
-    'Creates paths for this wave:\n' + wave.allCreates.join('\n') + '\n\n' +
+    'Scope paths for this wave (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n\n' +
     'Steps:\n' +
     '1. Run: git status --short\n' +
     '2. Collect ALL paths that appear in the output (dirty or untracked).\n' +
-    '3. Cross-reference dirty paths against the Creates: list above.\n' +
+    '3. Cross-reference dirty paths against the scope list above.\n' +
     '   A dirty path is an offender when:\n' +
-    '   a. It exactly matches a Creates: entry, OR\n' +
-    '   b. It starts with a Creates: entry (the Creates: entry is a directory prefix), OR\n' +
-    '   c. A Creates: entry starts with the dirty path (dirty parent directory).\n' +
+    '   a. It exactly matches a scope entry, OR\n' +
+    '   b. It starts with a scope entry (the scope entry is a directory prefix), OR\n' +
+    '   c. A scope entry starts with the dirty path (dirty parent directory).\n' +
     '4. Return all three fields.\n\n' +
     'If the working tree is completely clean, gitStatusOutput is empty string,\n' +
     'dirtyPaths is [], offendingPaths is [].',
@@ -1274,11 +1305,11 @@ if (!protocolBlocked) {
     log('WARNING: archive-commit gate agent returned null — archive BLOCKED (unknown commit state). Re-run /wave ' + wave.waveId)
   } else if (archiveIntent.offendingPaths && archiveIntent.offendingPaths.length > 0) {
     protocolBlocked = true
-    log('Archive BLOCKED — ' + archiveIntent.offendingPaths.length + ' Creates: file(s) are uncommitted:')
+    log('Archive BLOCKED — ' + archiveIntent.offendingPaths.length + ' scope file(s) are uncommitted:')
     archiveIntent.offendingPaths.forEach(function(p) { log('  [uncommitted] ' + p) })
     log('Commit or stage the files above, then re-run /wave ' + wave.waveId)
   } else {
-    log('Commit check passed — all Creates: files are committed')
+    log('Commit check passed — all scope files are committed')
   }
 }
 
@@ -1300,13 +1331,14 @@ if (protocolBlocked) {
     'Archive wave ' + wave.waveId + '. Perform in order:\n\n' +
     '1. Move `' + WAVE_FILE + '` → `workspace/todos/completed/` (same filename).\n\n' +
     '2. In `workspace/todos/plan.md`, find the row for ' + wave.waveId + ':\n' +
-    '   - Change [ ] to [x]\n' +
-    '   - Append ✅ ' + TODAY + ' after the wave title\n\n' +
-    '3. For each path in the creates list, find the matching FR in workspace/prd/.\n' +
+    '   - If a row already exists: change [ ] to [x] and append ✅ ' + TODAY + ' after the wave title.\n' +
+    '   - If NO row exists (GH-issue waves are not pre-seeded): append a new row to the Wave summary table:\n' +
+    '     `| ' + wave.waveId.toUpperCase() + ' [x] ✅ ' + TODAY + ' | ' + WAVE_FILE.replace('workspace/todos/', '') + ' | G | — | — |`\n' +
+    '     Adjust the Slices column if you can determine the count from the file.\n\n' +
+    '3. For each path in the scope list, find the matching FR in workspace/prd/ if any.\n' +
     '   If Implementation: says [pending], replace with the real src/path:symbol.\n' +
-    '   Creates paths:\n' +
-    wave.allCreates.join('\n') + '\n\n' +
-    'Report: file moved, plan.md updated, FR fields updated.',
+    '   Scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n\n' +
+    'Report: file moved, plan.md updated (row updated or appended), FR fields updated.',
     { label: 'archive', phase: 'Archive' }
   )
 

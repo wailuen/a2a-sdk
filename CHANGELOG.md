@@ -4,6 +4,34 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.17] — 2026-06-19
+
+### ✅ Features
+
+- **harness/skills: standardise on `uv sync --frozen` + `uv.lock` across upgrade, setup, new-agent (GH-70)** —
+  `harness/skills/upgrade/SKILL.md` now runs `uv lock` after every SHA bump and uses
+  `uv sync --frozen --extra dev` for the reinstall; `harness/skills/setup/SKILL.md`
+  generates `uv.lock` in Phase 2 and uses `uv sync --frozen` for the first install;
+  `harness/skills/new-agent/SKILL.md` adds a `uv lock` generation step before the
+  first install. All three skills now commit `uv.lock` alongside `pyproject.toml`.
+  `template/Dockerfile` updated in `wailuen/a2a-agent-template` — uses
+  `uv sync --frozen` with uv from `ghcr.io/astral-sh/uv:latest`.
+
+### 🔧 Fixes
+
+- **harness: two wave-cycle.js copies reconciled into byte-identical superset** —
+  `.claude/workflows/wave-cycle.js` was a stale fork missing every fail-closed null-gate
+  hardening that `harness/workflows/wave-cycle.js` carried. The copies are now unified;
+  `tests/test_workflow_sync.py` asserts byte-identity to prevent future drift.
+
+### 🧪 Test / CI
+
+- **tests: `test_learning_index.py` guards LRN file ↔ index consistency** —
+  Any LRN file written to `workspace/learning/` without a corresponding index row in
+  `README.md` is now caught by CI (the redteam learning-check loop would otherwise
+  miss it).
+- 1600572 chore: track uv.lock — resolves RT-004 ambiguous lockfile
+
 ## [0.5.16] — 2026-06-18
 
 ### 🟠 Security

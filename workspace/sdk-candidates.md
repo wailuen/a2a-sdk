@@ -1,75 +1,81 @@
-# SDK issue candidates — w015 (2026-06-15)
+# SDK issue candidates — undefined ((see context date))
 
 Run `/sdk-issue-scan` to review and file as GitHub issues on `wailuen/a2a-sdk`.
 
-## Candidate 1: MarketBriefing structuredContent emits raw field dict instead of markdown string. In _handle_tools_call, artifact.wire() is called for all ContentModel subclasses including MarketBriefing, but DESIGN §4.3 mandates that MarketBriefing wire data must be the to_markdown() string. The A2UI translator correctly guards isinstance(artifact, MarketBriefing) before calling to_markdown(), but mcp.py has no such guard. Additionally, the outputSchema advertised in tools/list is a dict schema, contradicting the string-typed structuredContent that DESIGN requires.
-- Severity: high
-- Component: protocol/mcp
-- File: agent_sdk/routes/mcp.py
-- Rationale: This is a bug in the SDK's MCP protocol route (agent_sdk/routes/mcp.py), an SDK internal. The fix touches SDK source only — no agent-specific tool code or domain adapter. The MCP route is explicitly listed under 'protocol routes (agent_sdk/routes/)' in the SDK-level scope.
-
-## Candidate 2: Null gate response treated as pass (fail-open) at all four gate checkpoints in the template wave-cycle workflow: unitGate (line 538), phaseGate (line 630), protoFixGate (line 799), and preArchiveGate (line 1015) all use 'if (gate && gate.exitCode !== 0)'. When the gate agent returns null the condition is false and execution continues silently, violating LRN-017 RT-001 fail-closed invariant. The harness version correctly handles null with explicit null-checks and break/block.
-- Severity: critical
-- Component: harness/template
-- File: template/.claude/workflows/wave-cycle.js
-- Rationale: This is a template scaffold defect in template/.claude/workflows/wave-cycle.js, which is part of the SDK's template scaffold. All agent projects derived from the template inherit the fail-open bug. Fixing the template is an SDK responsibility. Component is harness/template per the classification map.
-
-## Candidate 3: Null redteam response in the unit redteam loop treated as clean (line 468: 'if (!rt || rt.findingsCount === 0) { break }'). A null agent response means the redteam agent crashed — the code cannot distinguish a clean pass from a crashed reviewer. The harness version (RT-004) correctly handles null by logging a warning, resetting prevSigs, and continuing so debug can engage next round instead of declaring the group clean.
-- Severity: critical
-- Component: harness/template
-- File: template/.claude/workflows/wave-cycle.js
-- Rationale: Template scaffold defect inherited by all downstream agent projects. Null-vs-clean conflation in the unit redteam loop is a workflow correctness issue in the SDK-owned template scaffold, not agent domain code.
-
-## Candidate 4: Null redteam response in the phase redteam loop also treated as clean (line 571: 'if (!rt || rt.findingsCount === 0) { break }'). Same RT-004 violation as the unit loop but in the phase redteam loop. A crashing phase redteam agent causes the wave to skip to Protocol Audit as if the full phase passed cleanly.
-- Severity: critical
-- Component: harness/template
-- File: template/.claude/workflows/wave-cycle.js
-- Rationale: Same class of template scaffold defect as WC-002 (unit loop), applied to the phase redteam loop. SDK-owned template scaffold; not agent-specific.
-
-## Candidate 5: After a gate RED in both unit redteam (lines 538-547) and phase redteam (lines 630-639), a fix agent is dispatched but no re-gate follows. The loop continues to the next round without confirming the fix succeeded. LRN-017 RT-002 mandates a re-gate after every test-fix agent. The harness version adds unitReGate and phaseReGate checks with deferred-note on second failure.
-- Severity: high
-- Component: harness/template
-- File: template/.claude/workflows/wave-cycle.js
-- Rationale: Missing re-gate-after-fix discipline in the template scaffold workflow. This is a structural gap in the SDK-owned template that all downstream agent projects inherit. The fix is confined to template/.claude/workflows/wave-cycle.js.
-
-## Candidate 6: The seam audit runs unconditionally for every protocol wave regardless of whether any route files appear in the creates list (line 739 pushes to advisorTasks with no guard). This wastes an agent call on non-route waves and produces vacuous results. The harness version (RT-005) derives seamPaths from allCreates using SEAM_ROUTE_MARKERS and skips the seam audit when seamPaths.length === 0.
-- Severity: high
-- Component: harness/template
-- File: template/.claude/workflows/wave-cycle.js
-- Rationale: Unconditional seam-audit dispatch is a template scaffold efficiency and correctness gap. The missing SEAM_ROUTE_MARKERS guard exists in the harness but was not ported to the template. SDK-level template scaffold responsibility.
-
-## Candidate 7: Null protoFixGate response is treated as a pass (line 799: 'if (protoFixGate && protoFixGate.exitCode !== 0)'). When the gate agent crashes after a protocol fix, the recheck dispatch proceeds even though the test suite state is unknown. The harness version explicitly checks 'if (!protoFixGate)' and sets both testsRed=true and protocolBlocked=true, blocking archive.
-- Severity: high
-- Component: harness/template
-- File: template/.claude/workflows/wave-cycle.js
-- Rationale: This is WC-007, a template-only fail-open null check on the protoFixGate. Same RT-001 class as the four gate checkpoints. Template scaffold scope, SDK-owned.
-
-## Candidate 8: Null archiveIntent response (GH-40 commit guard) silently passes as clean in both the harness and template wave-cycle workflows. When the archive-commit-check agent returns null, the condition 'if (archiveIntent && archiveIntent.offendingPaths && ...)' is false so the else branch fires and logs 'Commit check passed — all Creates: files are committed'. This is a false positive: the gate agent failed but archive proceeds with no block. All other null-agent responses carry explicit RT-001 handling; this one does not.
+## Candidate 1: Wave w020 is entirely unimplemented: git diff shows no changes to any of the four Creates/Modifies targets, worktree branches point to a stale older commit, and no AC of GH-70a/b/c/d is satisfied in landed code.
 - Severity: high
 - Component: harness/workflow
-- File: harness/workflows/wave-cycle.js
-- Rationale: This defect is present in both harness/workflows/wave-cycle.js and template/.claude/workflows/wave-cycle.js. Because the harness is the source of truth that the template is derived from, the primary component is harness/workflow. Fixing the harness and re-syncing the template is the correct remediation path.
+- File: workspace/todos/active/w020-gh-issues.md
+- Rationale: The finding is about the sdk-wave.js wave runner phase-review gate failing to detect an empty implementation diff — a harness/workflow invariant defect, not agent-domain logic.
 
-## Candidate 9: Persistent null redteam agent responses bypass the budget cap and can cause unbounded looping in both the unit redteam loop (max 5 rounds) and phase redteam loop (max 8 rounds). The null-rt path resets prevSigs and continues, but the budget-exit check ('if (uRound >= 5)' / 'if (pRound >= 8)') appears AFTER the continue statement. A redteam agent that repeatedly returns null will loop indefinitely at runtime cost until an external timeout fires.
-- Severity: high
-- Component: harness/workflow
-- File: harness/workflows/wave-cycle.js
-- Rationale: Affects both harness/workflows/wave-cycle.js and template/.claude/workflows/wave-cycle.js. The harness is the source of truth, so the component is harness/workflow. The unbounded loop risk is a harness correctness issue that the template inherits.
-
-## Candidate 10: Phase redteam null-response handler resets 'prevSigs = new Set()' (line 657), defeating stall detection in both harness and template files. The unit redteam null handler explicitly preserves prevSigs with a detailed comment explaining why: clearing prevSigs means a null round followed by a round with the same findings as the prior real round will not trigger sigsEqual. The phase loop silently violates the same invariant without comment.
-- Severity: high
-- Component: harness/workflow
-- File: harness/workflows/wave-cycle.js
-- Rationale: Present identically in harness/workflows/wave-cycle.js (line 657) and template/.claude/workflows/wave-cycle.js (line 656). Harness is the source of truth — component is harness/workflow. The prevSigs preservation rule is a harness-level stall-detection invariant.
-
-## Candidate 11: Missing findingsCount cross-validation in both Unit Redteam and Phase Redteam loops in the template. The harness guards against an agent returning findingsCount=0 while findings.length > 0 (which would break clean despite real findings). The template is missing both checks, meaning an agent that misreports findingsCount=0 with a non-empty array would silently pass the zero-tolerance gate in all projects derived from the template.
+## Candidate 2: template/Dockerfile build stage still uses bare pip install; uv is never installed; no COPY uv.lock exists; template/uv.lock is absent. The four GH-70 todos are a coupled dependency set that the wave header incorrectly marks as parallel-independent.
 - Severity: high
 - Component: harness/template
-- File: template/.claude/workflows/wave-cycle.js
-- Rationale: Template-only gap: the findingsCount cross-validation block present in harness/workflows/wave-cycle.js (lines 510-513 and 680-683) was not ported to the template scaffold. SDK-owned template scaffold responsibility.
+- File: template/Dockerfile
+- Rationale: template/Dockerfile is the scaffold seed for every new agent — this is a harness/template issue, not an agent-specific implementation concern.
 
-## Candidate 12: Missing re-gate after proto:fix test-fix in the template. When the proto:fix gate returns RED and a test-fix agent is dispatched, the template proceeds directly to the protocol recheck without verifying the test-fix succeeded. The harness adds a gate:proto:fix:recheck agent call and blocks the recheck (setting protocolBlocked=true) if tests remain red. Agent projects using the template can silently proceed to a protocol recheck with a red test suite.
+## Candidate 3: harness/skills/setup/SKILL.md Phase 5 step 1 runs uv sync --frozen (no --extra dev), then step 2 immediately runs pytest. The template's test deps live under [project.optional-dependencies].dev which uv sync does not install by default, so pytest is missing and the test step fails.
+- Severity: high
+- Component: harness/skill
+- File: harness/skills/setup/SKILL.md
+- Rationale: The setup skill is a harness/skill that scaffolds or configures agent repos; the missing --extra dev is a defect in the skill's install procedure, not in any agent's domain logic.
+
+## Candidate 4: harness/skills/new-agent/SKILL.md Phase 5 step 1 runs uv venv --python 3.12 && uv sync --frozen (no --extra dev), then step 2 runs pytest. pytest/pytest-asyncio/httpx are only in the dev optional-dependency extra, so the green-baseline test step breaks on every freshly scaffolded agent.
+- Severity: high
+- Component: harness/skill
+- File: harness/skills/new-agent/SKILL.md
+- Rationale: new-agent is a harness/skill responsible for scaffolding new agents; the missing --extra dev is a defect in the skill's install step, not agent-domain code.
+
+## Candidate 5: harness/.gitignore only matches paths relative to harness/ itself, not the agent repo root where /provision writes credential inventory files. The template/.gitignore seeded by /new-agent still lacks the ADR-001-*-credentials.md glob, so every scaffolded agent can silently commit credential files.
+- Severity: high
+- Component: security
+- File: harness/.gitignore
+- Rationale: Credential-protection gitignore globs are a security concern spanning scaffold skills (new-agent, setup) and the template seed; misplacement of the glob in harness/.gitignore leaves the real agent repos unprotected.
+
+## Candidate 6: template/ is gitignored and fully untracked in a2a-sdk (commit e7bf0a1 stopped tracking it), so GH-70d's Creates/Modifies path under template/ can never be committed or propagated from this repo. The canonical Dockerfile lives in the separate wailuen/agent-template repo.
 - Severity: high
 - Component: harness/template
-- File: template/.claude/workflows/wave-cycle.js
-- Rationale: Template-only gap: the proto:fix re-gate discipline present in harness/workflows/wave-cycle.js (lines 989-1010) was not ported to the template scaffold. SDK-owned template scaffold responsibility, same class as WC-004 (unit/phase re-gate).
+- File: template/Dockerfile
+- Rationale: This is a wave-planning defect where the planner placed a todo target under a gitignored/untracked tree; it directly affects harness/template provenance and propagation, not agent-domain logic.
+
+## Candidate 7: .claude/workflows/sdk-wave.js wave-parse prompt captures only Creates: paths into allCreates/group.creates. The empty-scope guard (line 267) false-aborts every legitimate modify-only wave, and unit/phase redteam scope plus protocol-audit detection are all derived from allCreates alone, silently skipping review for modify-only waves.
+- Severity: critical
+- Component: harness/workflow
+- File: .claude/workflows/sdk-wave.js
+- Rationale: sdk-wave.js is the SDK wave runner harness workflow; scope derivation from Creates-only is a structural defect in the wave orchestration engine.
+
+## Candidate 8: .claude/workflows/wave-cycle.js and harness/workflows/wave-cycle.js both derive every scope set (unit/phase redteam, protocol detection, audit filters, seam paths, archive FR-map) from wave.allCreates/group.creates only, with no allModifies/allScope handling and no empty-scope guard. An edit-only agent wave lands with empty adversarial-review scope and no protocol audit — a silent gate bypass.
+- Severity: critical
+- Component: harness/workflow
+- File: .claude/workflows/wave-cycle.js
+- Rationale: wave-cycle.js is the agent-wave counterpart to sdk-wave.js; the Creates-only scope defect is a harness/workflow structural issue that must be fixed in both runner copies.
+
+## Candidate 9: harness/skills/setup/SKILL.md 'Create .gitignore (if absent)' block omits the workspace/adr/ADR-000-*-credentials.md and ADR-001-*-credentials.md globs mandated by LRN-050/GH-66, and has no git check-ignore verification probe. A clone whose .gitignore is missing the credential globs silently commits credential inventory files.
+- Severity: critical
+- Component: security
+- File: harness/skills/setup/SKILL.md
+- Rationale: Missing credential-protection globs in the setup skill's .gitignore block is a security defect in a harness/skill that must mirror the fix already applied to new-agent.
+
+## Candidate 10: sdk-wave.js/wave-cycle.js archive step 2 only marks an existing plan.md row; when no row exists for the waveId (GH-issue waves have no pre-seeded row) the archive agent silently no-ops, leaving the wave invisible in the plan ledger. w020 is archived to completed/ but has no W20 row in plan.md.
+- Severity: high
+- Component: harness/workflow
+- File: workspace/todos/plan.md
+- Rationale: The archive step behaviour is defined inside sdk-wave.js and wave-cycle.js (harness workflows); the missing append-new-row logic is a defect in the wave runner's archive phase, not in agent-domain code.
+
+## Candidate 11: .claude/workflows/wave-cycle.js null archive-commit gate response falls through to the else branch ('Commit check passed'), allowing wave archive even when the gate agent crashed and commit state is unknown — a fail-open regression of the null-gate fail-closed invariant. The harness copy already guards with if (!archiveIntent) { protocolBlocked = true }.
+- Severity: critical
+- Component: harness/workflow
+- File: .claude/workflows/wave-cycle.js
+- Rationale: Null-gate fail-open is a harness/workflow control-flow defect in the wave runner's archive gate; the fix must be ported from harness/workflows/wave-cycle.js to .claude/workflows/wave-cycle.js.
+
+## Candidate 12: .claude/workflows/wave-cycle.js dispatches protocol recheck agents even after a red proto re-gate sets protocolBlocked=true, because there is no if (!protocolBlocked) guard around the recheck block at line 993. The harness copy correctly wraps the recheck in if (!protocolBlocked).
+- Severity: high
+- Component: harness/workflow
+- File: .claude/workflows/wave-cycle.js
+- Rationale: Missing conditional guard around a protocol-recheck dispatch is a harness/workflow control-flow defect in the active wave runner.
+
+## Candidate 13: The active runtime .claude/workflows/wave-cycle.js and template/distribution harness/workflows/wave-cycle.js have diverged across ~10 behaviours (null-gate hardening, deferred notes, recheck guard, archive row-append, etc.). Each copy has fixes the other lacks, making harness/CLAUDE.md's guarantee that harness/ is the propagation source false.
+- Severity: high
+- Component: harness/workflow
+- File: .claude/workflows/wave-cycle.js
+- Rationale: Divergence between the runtime and template wave-cycle.js copies is a harness/workflow maintenance defect; both are SDK-level orchestration files, not agent-domain code.

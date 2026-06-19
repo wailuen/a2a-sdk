@@ -69,17 +69,36 @@ sync harness files in `.claude/` — showing every diff before writing anything.
    update it if the changelog surfaces a tag for the new commit).
    If HTTPS transport is in use, ensure the scheme matches.
 
+6a. **Regenerate the lockfile.**
+   `uv lock`
+   This must run immediately after the `pyproject.toml` SHA bump so that `uv.lock`
+   is consistent with the new pin before any install step reads it.
+   If `uv lock` fails, revert `pyproject.toml` and stop — do not proceed to step 7
+   with a stale or diverged lockfile.
+
 7. **Reinstall.**
-   Check whether the SDK dependency line reads `agent-sdk[obo] @` (i.e. `[obo]`
-   between the package name and the `@`). If so, use `".[obo]"`, otherwise `".[dev]"`.
-   `VIRTUAL_ENV=.venv uv pip install -e ".[dev or obo]"`
+   Run `uv sync --frozen --extra dev` — this installs exactly the packages recorded in
+   the `uv.lock` regenerated in step 6a, with no version resolution. The `--frozen`
+   flag is required here; omitting it would allow uv to silently re-resolve against the
+   network instead of the just-committed lock.
+   > **Note — extras are not additive across the default set.** Passing a feature extra
+   > selects *only* that extra unless you also pass `--extra dev`. Always include
+   > `--extra dev` so step 8's `pytest` has its deps (pytest/pytest-asyncio/httpx live
+   > in the `[dev]` extra). Check whether the SDK dependency line reads `agent-sdk[obo] @`
+   > (i.e. `[obo]` between the package name and the `@`); if so, also pass `--extra obo`
+   > (uv accepts repeated `--extra` flags):
+   > `uv sync --frozen --extra dev --extra obo`
    If install fails:
    - Revert `pyproject.toml` to the previous SHA.
-   - Re-run `VIRTUAL_ENV=.venv uv pip install -e ".[dev]"` against the reverted file
-     to restore the venv to the known-good state.
+   - Restore `uv.lock` to its pre-bump state — but only if it was tracked before the
+     bump: if `git ls-files --error-unmatch uv.lock` succeeds, `git checkout -- uv.lock`;
+     otherwise (step 6a generated the first-ever lockfile) `rm -f uv.lock`, since there
+     is no committed state to restore.
+   - Re-run the same `uv sync --frozen --extra dev` (plus `--extra obo` if present)
+     against the reverted files to restore the venv to the known-good state.
    - If the rollback reinstall also fails, emit a Critical warning: "The venv is in
      an unknown state — advise the user to delete `.venv/` and reinstall from the
-     reverted `pyproject.toml`." Stop.
+     reverted `pyproject.toml` and `uv.lock`." Stop.
 
 8. **Run tests.**
    `pytest -q` — confirm green baseline before declaring success.
@@ -260,6 +279,9 @@ Next:      review any kept conflicts manually; commit when satisfied
   Use `/agent-verify --no-stack-check` (step 9). Run `/agent-stack-check` manually
   only when you suspect a conformance issue specific to this agent's own wiring.
 - **No commit is made by this skill.** The user reviews, then commits.
+  When committing, stage both `pyproject.toml` and `uv.lock` together:
+  `git add pyproject.toml uv.lock` — committing one without the other leaves the
+  lockfile out of sync with the declared dependency.
 - If the upgrade surfaces a **breaking change** in the changelog (tagged `BREAKING`),
   emit a prominent warning before the confirm prompt.
 - **Never silently overwrite a locally-modified file.** The conflict detection in

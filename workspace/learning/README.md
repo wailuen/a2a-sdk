@@ -1,56 +1,76 @@
-# Learnings
+# Learning index
 
-Codified bugs, gotchas, and validated patterns from SDK development and downstream agent operation.
+Entries ordered by LRN number.
 
-| ID | Title | Category | Severity | Date |
-|----|-------|----------|----------|------|
-| LRN-001 | Protocol wire tests must verify HTTP headers, not just response bodies | testing | high | 2026-06-14 |
-| LRN-002 | Pre-release redteam must run at full scope, not wave scope | ops | high | 2026-06-14 |
-| LRN-003 | WWW-Authenticate must include resource_metadata on all protected routes | protocol | medium | 2026-06-14 |
-| LRN-004 | CORS preflight must include Access-Control-Expose-Headers | protocol | medium | 2026-06-14 |
-| LRN-005 | MCP version header must match negotiated body version on initialize | protocol | high | 2026-06-14 |
-| LRN-006 | ContentModel A2A artifacts must always emit DataPart | protocol | high | 2026-06-14 |
-| LRN-007 | Bootstrap endpoint is POST /admin/api/keys not POST /admin/bootstrap | harness | high | 2026-06-14 |
-| LRN-008 | Source health check uses GET /admin/api/overview, not a per-source POST endpoint | harness | high | 2026-06-14 |
-| LRN-009 | Anthropic model backend documented as functional but unimplemented in the SDK | docs | high | 2026-06-14 |
-| LRN-010 | SDK bootstrap token is emitted to stderr, not stdout; boot capture must use 2>&1 | ops | high | 2026-06-14 |
-| LRN-011 | Bootstrap token goes to stderr; agent-verify boot command must use 2>&1 | ops | high | 2026-06-14 |
-| LRN-012 | wave-cycle.js A2UI audit prompt misstated Standard Profile type counts | harness | high | 2026-06-14 |
-| LRN-013 | AC "integration note" wording targets the Integration section, not step bodies | harness | high | 2026-06-14 |
-| LRN-014 | pytest -q tests/ bypasses addopts ignore exclusions — always use bare pytest -q | testing | high | 2026-06-14 |
-| LRN-015 | MCP tools/call — emits coercion failure must return isError:True, never except:pass | protocol | high | 2026-06-14 |
-| LRN-016 | SSRF IP-block logic must live in agent_sdk/common/http.py — never duplicated | security | high | 2026-06-14 |
-| LRN-017 | wave-cycle.js — schema-gated gate agents required at redteam and proto-fix checkpoints | harness | high | 2026-06-14 |
-| LRN-018 | MCP route bypasses per-type wire dispatch, emitting raw field dict instead of markdown string | protocol | high | 2026-06-15 |
-| LRN-019 | Null gate response treated as pass (fail-open) | security | high | 2026-06-15 |
-| LRN-020 | Null redteam response treated as clean pass in unit loop | testing | critical | 2026-06-15 |
-| LRN-021 | Shared block flag emits wrong remediation instruction | ops | high | 2026-06-15 |
-| LRN-022 | Null gate response silently permits archive (fail-open) | testing | critical | 2026-06-15 |
-| LRN-023 | Null redteam response treated as clean (fail-open) | testing | critical | 2026-06-15 |
-| LRN-024 | Proto-fix gate null treated as pass in wave-cycle | ops | high | 2026-06-15 |
-| LRN-025 | Null agent response in archive commit guard silently passes as clean | protocol | high | 2026-06-15 |
-| LRN-026 | Null proto-fix gate fails open — crashed gate must set protocolBlocked | testing | high | 2026-06-15 |
-| LRN-027 | Hardcoded seam-audit route paths bypass dynamic allCreates derivation | testing | high | 2026-06-15 |
-| LRN-028 | Redteam findingsCount can contradict findings array, bypassing zero-tolerance gate | testing | high | 2026-06-15 |
-| LRN-029 | Null gate crash allows fail-open progression in fix loops | testing | high | 2026-06-15 |
-| LRN-030 | Null redteam response silently treated as clean pass | testing | critical | 2026-06-15 |
-| LRN-031 | Null pytest gate response treated as GREEN (fail-open) | testing | critical | 2026-06-15 |
-| LRN-032 | Archive-blocked log message must distinguish test failure from protocol block | ops | critical | 2026-06-15 |
-| LRN-033 | Wave-cycle missing re-gate after test-fix dispatch | testing | high | 2026-06-15 |
-| LRN-034 | Unconditional seam audit fires on every protocol wave | ops | high | 2026-06-15 |
-| LRN-035 | Test-fix agent result must be verified with a re-gate pytest pass | testing | high | 2026-06-15 |
-| LRN-036 | Phase redteam null-response must not reset prevSigs | testing | high | 2026-06-17 |
-| LRN-037 | Protocol test-fix path missing re-gate before recheck | testing | high | 2026-06-15 |
-| LRN-038 | Unconditional seam audit dispatch on empty seam paths | testing | high | 2026-06-15 |
-| LRN-039 | SC-F1 emits annotation validator must skip — not raise — when eval_str resolution fails | sdk | high | 2026-06-16 |
-| LRN-040 | Deterministic THREAD_ID in acceptance-api.js causes concurrent-run contamination | testing | high | 2026-06-17 |
-| LRN-041 | Protocol-fix loop missing re-gate before recheck | testing | high | 2026-06-15 |
-| LRN-042 | buildScenarioPrompt silently drops followUpTurns via JS destructuring default | testing | high | 2026-06-17 |
-| LRN-043 | MCP tier-1 tools missing openWorldHint annotation causes client over-restriction | protocol | high | 2026-06-17 |
-| LRN-044 | ValidationError swallowed by catch-all loop — SI-2 requires explicit enrichment | security | critical | 2026-06-17 |
-| LRN-045 | JSON parse failure must return -32700, not -32602 (invalid-params) | protocol | high | 2026-06-17 |
-| LRN-046 | A2UI DataPart emitted unconditionally — requires X-A2A-Extensions opt-in gate | protocol | critical | 2026-06-17 |
-| LRN-047 | Terminal re-message rule violated — _continue_from_terminal creates new task instead of returning error | protocol | critical | 2026-06-17 |
-| LRN-048 | Inbound Message mutated with server-assigned taskId/contextId before archiving in history | protocol | high | 2026-06-17 |
-| LRN-049 | AG-UI CUSTOM events wrongly gated on catalog membership — must emit freely | protocol | medium | 2026-06-18 |
-| LRN-050 | CLAUDE.md/gitignore consistency gap — credential globs missing from .gitignore | security | critical | 2026-06-18 |
+| LRN | Description | File |
+|-----|-------------|------|
+| LRN-001 | Protocol wire tests must verify HTTP headers, not just response bodies | [LRN-001](LRN-001-protocol-wire-tests-check-headers.md) |
+| LRN-002 | Pre-release redteam must run at full scope, not wave scope | [LRN-002](LRN-002-pre-release-redteam-full-scope.md) |
+| LRN-003 | WWW-Authenticate must include resource_metadata on ALL protected routes | [LRN-003](LRN-003-www-authenticate-resource-metadata-all-routes.md) |
+| LRN-004 | CORS preflight (OPTIONS 204) must include Access-Control-Expose-Headers | [LRN-004](LRN-004-cors-preflight-expose-headers.md) |
+| LRN-005 | MCP Mcp-Protocol-Version response header must match negotiated body version on initialize | [LRN-005](LRN-005-mcp-version-header-body-sync.md) |
+| LRN-006 | ContentModel artifacts must always emit DataPart on A2A, not only when A2UI extension activated | [LRN-006](LRN-006-contentmodel-datapart-always-emit.md) |
+| LRN-007 | Bootstrap endpoint is POST /admin/api/keys not POST /admin/bootstrap | [LRN-007](LRN-007-harness-skills-provision-SKILL-md.md) |
+| LRN-008 | Source health check uses GET /admin/api/overview, not a per-source POST endpoint | [LRN-008](LRN-008-harness-skills-provision-SKILL-md.md) |
+| LRN-009 | Anthropic model backend documented as functional but unimplemented in the SDK | [LRN-009](LRN-009-harness-skills-setup-SKILL-md.md) |
+| LRN-010 | SDK bootstrap token is emitted to stderr, not stdout; boot capture must use 2>&1 | [LRN-010](LRN-010-bootstrap-token-emitted-to-stderr.md) |
+| LRN-011 | Bootstrap token goes to stderr; agent-verify boot command must use 2>&1 | [LRN-011](LRN-011--Users-wailuen-Development-a2a-sdk-harness-skills-agent-verify-SKILL-md.md) |
+| LRN-012 | wave-cycle.js A2UI audit prompt misstated Standard Profile type counts as Core 7 + Extended 11 instead of Core 6 + Extended 8 | [LRN-012](LRN-012-harness-workflows-wave-cycle-js.md) |
+| LRN-013 | AC "integration note" wording targets the Integration section, not step bodies | [LRN-013](LRN-013-harness-skills-upgrade-SKILL-md.md) |
+| LRN-014 | pytest -q tests/ bypasses addopts ignore exclusions — always use bare pytest -q | [LRN-014](LRN-014-pytest-explicit-path-bypasses-addopts.md) |
+| LRN-015 | MCP tools/call — coercion failure must return isError:True, never except:pass | [LRN-015](LRN-015-mcp-coercion-failure-must-return-iserror.md) |
+| LRN-016 | SSRF IP-block logic must live in agent_sdk/common/http.py — never duplicated | [LRN-016](LRN-016-ssrf-single-predicate-common-http.md) |
+| LRN-017 | wave-cycle.js — schema-gated gate agents required at redteam and proto-fix checkpoints | [LRN-017](LRN-017-wave-cycle-gate-agents-at-checkpoints.md) |
+| LRN-018 | MCP route bypasses per-type wire dispatch, emitting raw field dict instead of markdown string | [LRN-018](LRN-018-mcp-wire-type-dispatch-bypass.md) |
+| LRN-019 | Null gate response treated as pass (fail-open) | [LRN-019](LRN-019-null-gate-fail-open.md) |
+| LRN-020 | Null redteam response treated as clean pass in unit loop | [LRN-020](LRN-020-null-redteam-treated-as-clean.md) |
+| LRN-021 | Shared block flag emits wrong remediation instruction | [LRN-021](LRN-021-shared-flag-misdirected-remediation.md) |
+| LRN-022 | Null gate response silently permits archive (fail-open) | [LRN-022](LRN-022-null-gate-fail-open-archive.md) |
+| LRN-023 | Null redteam response treated as clean (fail-open) | [LRN-023](LRN-023-null-redteam-fail-open.md) |
+| LRN-024 | Proto-fix gate null treated as pass in wave-cycle | [LRN-024](LRN-024-proto-fix-gate-null-fail-open.md) |
+| LRN-025 | Null agent response in archive commit guard silently passes as clean | [LRN-025](LRN-025-null-agent-fail-open-archive-guard.md) |
+| LRN-026 | Null proto-fix gate fails open — crashed gate must set protocolBlocked | [LRN-026](LRN-026-null-gate-fails-open.md) |
+| LRN-027 | Hardcoded seam-audit route paths bypass dynamic allCreates derivation | [LRN-027](LRN-027-hardcoded-seam-route-paths.md) |
+| LRN-028 | Redteam findingsCount can contradict findings array, bypassing zero-tolerance gate | [LRN-028](LRN-028-redteam-findings-count-mismatch.md) |
+| LRN-029 | Null gate crash allows fail-open progression in fix loops | [LRN-029](LRN-029-null-gate-fail-open-loop.md) |
+| LRN-030 | Null redteam response silently treated as clean pass | [LRN-030](LRN-030-null-redteam-fail-open.md) |
+| LRN-031 | Null pytest gate response treated as GREEN (fail-open) | [LRN-031](LRN-031-null-gate-fail-open.md) |
+| LRN-032 | Archive-blocked log message must distinguish test failure from protocol block | [LRN-032](LRN-032-archive-block-message-misdirection.md) |
+| LRN-033 | Wave-cycle missing re-gate after test-fix dispatch | [LRN-033](LRN-033-wave-cycle-test-fix-missing-regate.md) |
+| LRN-034 | Unconditional seam audit fires on every protocol wave | [LRN-034](LRN-034-unconditional-seam-audit-no-guard.md) |
+| LRN-035 | Test-fix agent result must be verified with a re-gate pytest pass | [LRN-035](LRN-035-test-fix-agent-missing-regate-verify.md) |
+| LRN-036 | Phase redteam null-response must not reset prevSigs | [LRN-036](LRN-036-phase-redteam-null-must-not-reset-prevsigs.md) |
+| LRN-037 | Protocol test-fix path missing re-gate before recheck | [LRN-037](LRN-037-proto-testfix-missing-regate.md) |
+| LRN-038 | Unconditional seam audit dispatch on empty seam paths | [LRN-038](LRN-038-unconditional-seam-audit-dispatch.md) |
+| LRN-039 | SC-F1 emits annotation validator must skip — not raise — when eval_str resolution fails | [LRN-039](LRN-039-sc-f1-emits-annotation-unresolvable-string-skip.md) |
+| LRN-040 | Deterministic THREAD_ID in acceptance-api.js causes concurrent-run contamination | [LRN-040](LRN-040-thread-id-acceptance-api-contamination-risk.md) |
+| LRN-041 | Protocol-fix loop missing re-gate before recheck | [LRN-041](LRN-041-proto-fix-loop-missing-regate-before-recheck.md) |
+| LRN-042 | buildScenarioPrompt silently drops followUpTurns via JS destructuring default | [LRN-042](LRN-042-buildscenariopromt-followupturns-silent-drop.md) |
+| LRN-043 | MCP tier-1 tools missing openWorldHint annotation causes client over-restriction | [LRN-043](LRN-043-mcp-tier1-tools-openworldhint-missing.md) |
+| LRN-044 | ValidationError swallowed by catch-all loop — SI-2 requires explicit enrichment | [LRN-044](LRN-044-validationerror-swallowed-in-catch-all.md) |
+| LRN-045 | JSON parse failure must return -32700, not -32602 (invalid-params) | [LRN-045](LRN-045-json-parse-error-wrong-jsonrpc-code.md) |
+| LRN-046 | A2UI DataPart emitted unconditionally — requires X-A2A-Extensions opt-in gate | [LRN-046](LRN-046-a2ui-datapart-emitted-without-extension-optin.md) |
+| LRN-047 | Terminal re-message rule violated — _continue_from_terminal creates new task instead of returning error | [LRN-047](LRN-047-terminal-re-message-creates-task-instead-of-error.md) |
+| LRN-048 | Inbound Message mutated with server-assigned taskId/contextId before archiving in history | [LRN-048](LRN-048-inbound-message-contextid-mutation-in-history.md) |
+| LRN-049 | AG-UI CUSTOM events wrongly gated on catalog membership — must emit freely | [LRN-049](LRN-049-agui-custom-emit-freely-catalog-gate-wrong.md) |
+| LRN-050 | CLAUDE.md/gitignore consistency gap — credential globs missing from .gitignore | [LRN-050](LRN-050-claudemd-gitignore-consistency-gap.md) |
+| LRN-051 | uv --no-dev is a silent no-op on extras-only ([project.optional-dependencies]) layouts | [LRN-051](LRN-051-uv-no-dev-silent-noop-on-extras-only-layouts.md) |
+| LRN-052 | Gitignored/untracked path cannot land in a wave todo — verify with git ls-files at plan time | [LRN-052](LRN-052-gitignored-path-cannot-land-in-wave-todo.md) |
+| LRN-053 | Wave scope must union Creates: AND Modifies: paths — Creates-only derivation silently bypasses modify-only waves | [LRN-053](LRN-053-wave-scope-must-union-creates-and-modifies.md) |
+| LRN-054 | Dockerfile lockfile COPY requires lockfile-producer todos in same wave | [LRN-054](LRN-054-dockerfile-lockfile-producer-consumer-coupling.md) |
+| LRN-055 | gitignore placed in wrong directory fails to protect credential files | [LRN-055](LRN-055-gitignore-wrong-directory-scope.md) |
+| LRN-056 | Wave todo path under gitignored/untracked tree is silently undeliverable | [LRN-056](LRN-056-gitignored-tree-todo-path.md) |
+| LRN-057 | uv sync extra flags are not additive across invocations | [LRN-057](LRN-057-uv-sync-extras-not-additive.md) |
+| LRN-058 | Duplicate LRN ID orphans one learning from the redteam check loop | [LRN-058](LRN-058-duplicate-lrn-id-orphans-learning.md) |
+| LRN-059 | Wave scope derived from Creates-only silently bypasses review for modify-only waves | [LRN-059](LRN-059-wave-scope-creates-only-bypass.md) |
+| LRN-068 | Phase redteam scores ACs against unimplemented wave targets (empty diff false-pass) | [LRN-068](LRN-068-phase-redteam-empty-diff-false-pass.md) |
+| LRN-069 | uv sync without --extra dev breaks pytest steps | [LRN-069](LRN-069-uv-sync-missing-dev-extra-before-pytest.md) |
+| LRN-070 | uv sync without --extra dev omits test deps and breaks pytest | [LRN-070](LRN-070-uv-sync-missing-extra-dev-drops-pytest.md) |
+| LRN-060 | Wave-runner scope fix not propagated to sibling runners | [LRN-060](LRN-060-wave-runner-scope-fix-not-propagated.md) |
+| LRN-061 | Credential gitignore globs missing from secondary scaffold path | [LRN-061](LRN-061-scaffold-gitignore-partial-coverage.md) |
+| LRN-062 | Wave archive silently skips plan.md when no pre-seeded row exists | [LRN-062](LRN-062-wave-archive-missing-row-append.md) |
+| LRN-063 | Null gate response fails open in wave-cycle archive path | [LRN-063](LRN-063-null-gate-fail-open-wave.md) |
+| LRN-064 | Comment claiming guard is not a control-flow guard | [LRN-064](LRN-064-comment-only-control-flow-guard.md) |
+| LRN-065 | Runtime and template workflow copies diverge silently | [LRN-065](LRN-065-workflow-runtime-template-drift.md) |
+| LRN-066 | Learning narrative must match landed code at codify time | [LRN-066](LRN-066-learning-narrative-code-drift.md) |
+| LRN-067 | Wave state split-brain — plan.md and todo file disagree on critical item status | [LRN-067](LRN-067-wave-state-split-brain.md) |
