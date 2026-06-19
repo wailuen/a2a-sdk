@@ -219,17 +219,20 @@ const GATE_SCHEMA = {
   },
 }
 
-// GH-40: archive intent schema — git status check before archive
+// GH-40 / GH-84: archive intent schema — git status check before archive
 // The agent runs `git status --short`, parses the output into dirty paths,
 // cross-references against wave.allScope (Creates: ∪ Modifies:), and returns any offending paths.
+// GH-84 adds offendingHarnessPaths for dirty/untracked files under harness deliverable directories
+// (tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/).
 const ARCHIVE_INTENT_SCHEMA = {
   type: 'object',
-  required: ['gitStatusOutput', 'dirtyPaths', 'offendingPaths'],
+  required: ['gitStatusOutput', 'dirtyPaths', 'offendingPaths', 'offendingHarnessPaths'],
   additionalProperties: false,
   properties: {
-    gitStatusOutput: { type: 'string', description: 'Raw stdout of git status --short' },
-    dirtyPaths:      { type: 'array', items: { type: 'string' }, description: 'All paths reported dirty by git' },
-    offendingPaths:  { type: 'array', items: { type: 'string' }, description: 'Dirty paths that overlap with wave.allScope (Creates: ∪ Modifies:)' },
+    gitStatusOutput:      { type: 'string', description: 'Raw stdout of git status --short' },
+    dirtyPaths:           { type: 'array', items: { type: 'string' }, description: 'All paths reported dirty or untracked by git' },
+    offendingPaths:       { type: 'array', items: { type: 'string' }, description: 'Dirty paths that overlap with wave.allScope (Creates: ∪ Modifies:)' },
+    offendingHarnessPaths: { type: 'array', items: { type: 'string' }, description: 'Dirty/untracked paths under tests/, workspace/learning/, workspace/scenarios/results/, or workspace/prd/ even if not in allScope' },
   },
 }
 
@@ -1277,9 +1280,9 @@ if (!preArchiveGate) {
   log('Fix the failing tests and re-run /wave ' + wave.waveId)
 }
 
-// GH-40: pre-archive commit check — all scope files (Creates: ∪ Modifies:) must be
-// committed before archive. A wave that archives with deliverables only in the working
-// tree will silently lose them on `git checkout`.
+// GH-40 / GH-84: pre-archive commit check — all scope files (Creates: ∪ Modifies:) plus any
+// harness deliverable directories must be committed before archive. A wave that archives
+// with deliverables only in the working tree will silently lose them on `git checkout`.
 if (!protocolBlocked) {
   const archiveIntent = await agent(
     'Run `git status --short` and parse the output.\n\n' +
@@ -1287,14 +1290,17 @@ if (!protocolBlocked) {
     'Steps:\n' +
     '1. Run: git status --short\n' +
     '2. Collect ALL paths that appear in the output (dirty or untracked).\n' +
-    '3. Cross-reference dirty paths against the scope list above.\n' +
+    '3. Cross-reference dirty paths against the scope list above for offendingPaths.\n' +
     '   A dirty path is an offender when:\n' +
     '   a. It exactly matches a scope entry, OR\n' +
     '   b. It starts with a scope entry (the scope entry is a directory prefix), OR\n' +
     '   c. A scope entry starts with the dirty path (dirty parent directory).\n' +
-    '4. Return all three fields.\n\n' +
+    '4. Separately, collect any dirty/untracked paths whose relative path starts with\n' +
+    '   tests/, workspace/learning/, workspace/scenarios/results/, or workspace/prd/\n' +
+    '   — put these in offendingHarnessPaths even if they do not appear in the scope list.\n' +
+    '5. Return all four fields.\n\n' +
     'If the working tree is completely clean, gitStatusOutput is empty string,\n' +
-    'dirtyPaths is [], offendingPaths is [].',
+    'dirtyPaths is [], offendingPaths is [], offendingHarnessPaths is [].',
     { schema: ARCHIVE_INTENT_SCHEMA, label: 'gate:archive-commit', phase: 'Archive' }
   )
 
@@ -1303,13 +1309,20 @@ if (!protocolBlocked) {
   if (!archiveIntent) {
     protocolBlocked = true
     log('WARNING: archive-commit gate agent returned null — archive BLOCKED (unknown commit state). Re-run /wave ' + wave.waveId)
-  } else if (archiveIntent.offendingPaths && archiveIntent.offendingPaths.length > 0) {
+  } else if ((archiveIntent.offendingPaths && archiveIntent.offendingPaths.length > 0) ||
+             (archiveIntent.offendingHarnessPaths && archiveIntent.offendingHarnessPaths.length > 0)) {
     protocolBlocked = true
-    log('Archive BLOCKED — ' + archiveIntent.offendingPaths.length + ' scope file(s) are uncommitted:')
-    archiveIntent.offendingPaths.forEach(function(p) { log('  [uncommitted] ' + p) })
+    if (archiveIntent.offendingPaths && archiveIntent.offendingPaths.length > 0) {
+      log('Archive BLOCKED — ' + archiveIntent.offendingPaths.length + ' scope file(s) are uncommitted:')
+      archiveIntent.offendingPaths.forEach(function(p) { log('  [uncommitted] ' + p) })
+    }
+    if (archiveIntent.offendingHarnessPaths && archiveIntent.offendingHarnessPaths.length > 0) {
+      log('Archive BLOCKED — ' + archiveIntent.offendingHarnessPaths.length + ' harness deliverable(s) are uncommitted:')
+      archiveIntent.offendingHarnessPaths.forEach(function(p) { log('  [uncommitted] ' + p) })
+    }
     log('Commit or stage the files above, then re-run /wave ' + wave.waveId)
   } else {
-    log('Commit check passed — all scope files are committed')
+    log('Commit check passed — all scope files and harness deliverables are committed')
   }
 }
 

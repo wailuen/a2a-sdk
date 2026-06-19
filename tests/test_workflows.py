@@ -115,17 +115,19 @@ def test_dual_blocking_condition_present(wf_path: Path) -> None:
     offendingHarnessPaths. A single-field check silently misses harness deliverables.
     """
     content = _read(wf_path)
-    # The dual condition appears as: offendingPaths ... offendingHarnessPaths
-    # within the same if-expression. Check both names appear near each other in an
-    # elif/else-if block (within 300 chars of each other after 'archiveIntent').
-    archive_intent_idx = content.find("archiveIntent.offendingPaths")
-    assert archive_intent_idx != -1, (
-        f"{wf_path.name}: 'archiveIntent.offendingPaths' not found — "
-        "archive blocking condition is missing"
+    # The dual condition must use an OR (||) between offendingPaths and offendingHarnessPaths
+    # so that either list alone can block archive. A substring-proximity heuristic is too
+    # weak — it would pass if offendingHarnessPaths appeared only in a comment nearby.
+    # This regex matches the actual JS boolean condition structure.
+    dual_condition_re = re.compile(
+        r'offendingPaths\s*&&\s*archiveIntent\.offendingPaths\.length\s*>\s*0'
+        r'\s*\)\s*\|\|\s*\('
+        r'\s*archiveIntent\.offendingHarnessPaths\s*&&\s*archiveIntent\.offendingHarnessPaths\.length\s*>\s*0',
+        re.DOTALL,
     )
-    window = content[archive_intent_idx: archive_intent_idx + 300]
-    assert "offendingHarnessPaths" in window, (
-        f"{wf_path.name}: 'offendingHarnessPaths' not found within 300 chars of "
-        f"'archiveIntent.offendingPaths' — dual blocking condition is missing or split. "
-        f"Window: {window!r}"
+    assert dual_condition_re.search(content), (
+        f"{wf_path.name}: dual blocking condition with '||' between offendingPaths and "
+        f"offendingHarnessPaths not found — the OR leg may have been accidentally removed. "
+        "Expected pattern: (archiveIntent.offendingPaths && ... > 0) || "
+        "(archiveIntent.offendingHarnessPaths && ... > 0)"
     )

@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from agent_sdk import Agent, BaseAgentSettings, CredentialField, SourceAdapter
 from agent_sdk.agent.registry import ToolSet
+from agent_sdk.credentials.card import credential_forwarding_extension
 from agent_sdk.testing import FakeModelClient, reply, tool_call
 
 probe_tools = ToolSet()
@@ -159,7 +160,7 @@ async def test_card_advertises_credential_extension(probe_app):
             card = (await c.get("/.well-known/agent-card.json")).json()
 
     exts = {e["uri"]: e for e in card["capabilities"]["extensions"]}
-    cred = exts["urn:agent-sdk:credential-forwarding:v1"]
+    cred = exts["https://agent-sdk.dev/extensions/credential-forwarding/v1"]
     assert cred["required"] is False
     assert cred["params"]["header"] == "X-Agent-Credentials"
     assert cred["params"]["sources"] == {"probe": ["api_key"]}
@@ -239,7 +240,7 @@ async def test_no_credential_sources_omits_surfaces(tmp_path):
             result = (await c.post("/mcp", json=_init_body())).json()["result"]
 
     uris = [e["uri"] for e in card["capabilities"]["extensions"]]
-    assert "urn:agent-sdk:credential-forwarding:v1" not in uris
+    assert "https://agent-sdk.dev/extensions/credential-forwarding/v1" not in uris
     assert "instructions" not in result
 
 
@@ -284,3 +285,22 @@ async def test_mcp_tools_call_forwarded(probe_app):
             )
             assert r.json()["result"]["isError"] is False
             assert adapter.observations[-1] is True
+
+
+# ── GH-79: extension URI must use https:// scheme ────────────────────────────
+
+
+def test_credential_forwarding_extension_uri_uses_https_scheme():
+    """GH-79: EXTENSION_URI must use https:// so consumer allowlists accept it."""
+    fields = {"probe": [CredentialField(name="api_key", label="Probe API Key", env_var="PROBE_API_KEY")]}
+    ext = credential_forwarding_extension(fields)
+    assert ext is not None
+    assert ext.uri.startswith("https://"), (
+        f"extension URI must use https:// scheme, got: {ext.uri!r}"
+    )
+
+
+def test_credential_forwarding_extension_no_sources_returns_none():
+    """AC-3 (None branch): credential_forwarding_extension({}) must return None
+    when there are no credential sources — no extension should be advertised."""
+    assert credential_forwarding_extension({}) is None

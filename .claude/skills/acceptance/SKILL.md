@@ -233,12 +233,12 @@ and an incremented `runId`.
 
 ```
 // Using scriptPath instead of name: Workflow({name}) drops args in Claude Code's named-workflow resolver; remove once upstream bug is fixed.
-// Path note: when running from an agent repo (seeded via /new-agent or /upgrade),
-// this skill lives at .claude/skills/acceptance/SKILL.md and acceptance-api.js is
-// seeded to .claude/workflows/acceptance-api.js — use that path:
+// Path note: when running from the SDK repo (the normal context for /acceptance),
+// git rev-parse --show-toplevel gives the repo root regardless of CWD subdirectory.
+// When running from an agent repo (seeded via /new-agent or /upgrade), this skill
+// lives at .claude/skills/acceptance/SKILL.md and acceptance-api.js is seeded to
+// .claude/workflows/acceptance-api.js — use that path instead:
 //   scriptPath: `${require('child_process').execSync('git rev-parse --show-toplevel').toString().trim()}/.claude/workflows/acceptance-api.js`
-// When running from the SDK repo (the normal context for /acceptance),
-// acceptance-api.js lives at harness/workflows/acceptance-api.js.
 Workflow({
   scriptPath: `${require('child_process').execSync('git rev-parse --show-toplevel').toString().trim()}/.claude/workflows/acceptance-api.js`,
   args: {

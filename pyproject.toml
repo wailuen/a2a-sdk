@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-sdk"
-version = "0.5.21"
+version = "0.5.23"
 description = "SDK for building A2A/AG-UI/A2UI agents with an OAuth-protected MCP server"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -28,6 +28,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "httpx>=0.27",
+    "mypy>=1.10",
 ]
 
 [tool.hatch.build.targets.wheel]

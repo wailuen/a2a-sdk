@@ -95,6 +95,23 @@ def _skill_for(entry: Any) -> AgentSkill:
     })
 
 
+def task_error_extension() -> AgentExtension:
+    """SDK extension: TaskStatus carries an optional WireError on failure.
+
+    This field is not part of the A2A v0.3.0 spec; spec-compliant consumers
+    may safely ignore it.  Declared so clients that understand it can surface
+    structured error detail without polling or guessing.
+    """
+    return AgentExtension(
+        uri="https://agent-sdk.dev/extensions/task-error/v1",
+        required=False,
+        description=(
+            "TaskStatus carries an optional error field (WireError) on failure"
+            " — not in A2A v0.3.0 spec; safe to ignore if unknown"
+        ),
+    )
+
+
 def build_agent_card(
     settings: BaseAgentSettings,
     registry: ToolRegistry,
@@ -120,6 +137,7 @@ def build_agent_card(
             required=False,
             params={"endpoint": f"{base_url}/ag-ui/run"},
         ),
+        task_error_extension(),
     ]
     cred_ext = credential_forwarding_extension(credential_fields or {})
     if cred_ext is not None:

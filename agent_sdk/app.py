@@ -134,9 +134,11 @@ class Agent:
                         lifespan_extras=[heartbeat_lifespan],
                     )
 
-                Do **not** import ``agent_sdk.scheduler``; no such module
-                exists.  ``lifespan_extras`` is the single scheduling
-                entry point.
+                Use ``from agent_sdk.contrib import Scheduler`` for
+                background jobs; see ``agent_sdk/contrib/scheduler.py``
+                for usage.  Note: there is no ``agent_sdk.scheduler``
+                module — ``agent_sdk.scheduler`` does not exist; use
+                the ``agent_sdk.contrib`` path above.
         """
         if persona is None and artifacts_dir is None:
             raise ValueError("Agent requires either persona= or artifacts_dir=")

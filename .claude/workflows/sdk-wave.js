@@ -315,9 +315,10 @@ log('Wave ' + wave.waveId + ': ' + wave.groups.length + ' group(s), ' +
 
 const lrnBase         = wave.lrnNext
 const allHighFindings = []
-let   protocolBlocked = false
-let   testsRed        = false
-let   totalTodos      = 0
+let   protocolBlocked    = false
+let   testsBlockedArchive = false   // RT-003: tracks when a red test suite (not protocol) blocks archive
+let   testsRed            = false
+let   totalTodos          = 0
 
 // ─── phase 1: todos redteam ───────────────────────────────────────────────────
 phase('Todos Redteam')
@@ -999,11 +1000,14 @@ if (!preArchiveGate) {
   // RT-001: gate agent failed — archive must not proceed on unknown state.
   testsRed = true
   protocolBlocked = true
+  testsBlockedArchive = true
   log('WARNING: pre-archive gate agent failed (null response) — archive BLOCKED (gate agent failed; unknown test state)')
   log('Re-run /wave ' + wave.waveId + ' to retry the pre-archive gate.')
 } else if (preArchiveGate.exitCode !== 0) {
+  // RT-003: track the cause separately so the archive-skip message is accurate.
   testsRed = true
   protocolBlocked = true
+  testsBlockedArchive = true
   log('Suite is RED (' + preArchiveGate.failCount + ' failing) — archive BLOCKED.')
   log('Fix the failing tests and re-run /wave ' + wave.waveId)
 }
@@ -1035,6 +1039,15 @@ if (!protocolBlocked) {
   if (!archiveIntent) {
     protocolBlocked = true
     log('WARNING: archive-commit gate agent returned null — archive BLOCKED (unknown commit state). Re-run /wave ' + wave.waveId)
+    // WC-001 mirror: write a durable deferred note so the operator can inspect why archive
+    // was blocked even after the console output scrolls away.
+    await agent(
+      'Write workspace/todos/deferred/' + wave.waveId + '-archive-commit-null.md\n\n' +
+      'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '),\n' +
+      'reason: archive-commit gate agent returned null (unknown working tree state).\n' +
+      'Instruction: "Re-run /wave ' + wave.waveId + ' to retry the archive-commit gate."',
+      { label: 'defer:archive-commit-null', phase: 'Archive' }
+    )
   } else if ((archiveIntent.offendingPaths && archiveIntent.offendingPaths.length > 0) ||
              (archiveIntent.offendingHarnessPaths && archiveIntent.offendingHarnessPaths.length > 0)) {
     protocolBlocked = true
@@ -1053,8 +1066,18 @@ if (!protocolBlocked) {
 }
 
 if (protocolBlocked) {
-  log('Archive SKIPPED — wave ' + wave.waveId + ' blocked')
-  log('Fix issues, then re-run /wave ' + wave.waveId)
+  // RT-003: use the actual block cause in the message — misdirected remediation wastes developer time.
+  if (testsBlockedArchive) {
+    const failCount = (preArchiveGate && preArchiveGate.failCount != null) ? preArchiveGate.failCount : '?'
+    if (!preArchiveGate) {
+      log('Archive SKIPPED — pre-archive gate agent failed (null response). Re-run /wave ' + wave.waveId + ' to retry.')
+    } else {
+      log('Archive BLOCKED — test suite RED (' + failCount + ' failing). Fix failing tests and re-run /wave ' + wave.waveId + '.')
+    }
+  } else {
+    log('Archive SKIPPED — wave ' + wave.waveId + ' blocked by critical protocol findings')
+    log('Fix protocol issues, run /agent-verify, then re-run /wave ' + wave.waveId)
+  }
 } else {
   await agent(
     'Archive wave ' + wave.waveId + '. Perform in order:\n\n' +

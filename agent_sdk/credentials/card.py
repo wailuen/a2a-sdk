@@ -24,7 +24,7 @@ from ..models.a2a import AgentExtension
 from .fields import CredentialField
 from .forwarding import HEADER_NAME
 
-EXTENSION_URI = "urn:agent-sdk:credential-forwarding:v1"
+EXTENSION_URI = "https://agent-sdk.dev/extensions/credential-forwarding/v1"
 
 _CredFields = Mapping[str, Sequence[CredentialField]]
 
