@@ -13,25 +13,26 @@ An AgentExtension was declared with a URN-scheme URI (e.g., `urn:example:extensi
 
 ## Root cause
 
-Consumer allowlist implementations filter AgentExtension URIs for the `https://` scheme. A URN-scheme URI does not match this filter and is silently discarded. No error is returned; the extension simply does not appear in the negotiated extension set.
+A2A v0.3.0 places no scheme constraint on `AgentExtension.uri` — the field is typed as `string`. However, real-world consumer allowlist heuristics (e.g. Claude.ai and several open-source A2A clients) filter for `https://` scheme and silently skip non-http URIs. The spec does not require this behaviour, but the consumer ecosystem has converged on it. Note: `urn:agui:run:v1` is a deliberate spec-mandated exception (GH-85 deferral) — do not "fix" it to https://.
 
 ## Check
 
-Inspect the negotiated extensions in the task lifecycle or agent card response. If an extension you declared is absent:
 ```bash
-# Check the agent card extensions field
-curl -s <agent-url>/.well-known/agent.json | jq '.capabilities.extensions'
+# Grep agent_sdk/ for any AgentExtension URI using urn: scheme (flag these)
+grep -rn 'uri=.urn:' agent_sdk/ --include="*.py"
+# Expected: zero matches for SDK-owned extensions (urn:agui:run:v1 is a spec-mandated exception)
+
+# Confirm the served card carries https:// URIs for SDK-owned extensions
+curl -s <agent-url>/.well-known/agent.json | jq '.capabilities.extensions[].uri'
 ```
-If the URI scheme is not `https://`, the consumer will drop it.
 
 ## Prevention
 
-Always use `https://` scheme URIs for AgentExtension declarations:
+Use `https://` scheme for all SDK-owned `AgentExtension` URIs. Do NOT change `urn:agui:run:v1` — that is a normative URI defined by the AG-UI spec. When in doubt, confirm with `a2a-advisor` whether a given URI is spec-mandated or SDK-invented.
 ```python
-# Correct
-extension_uri = "https://example.com/extensions/my-feature/v1"
+# Correct for SDK-owned extensions
+extension_uri = "https://agent-sdk.dev/extensions/my-feature/v1"
 
-# Will be silently dropped by consumers
+# Risky for SDK-owned extensions (silently dropped by most consumers)
 extension_uri = "urn:example:extension:my-feature:v1"
 ```
-Treat URN-scheme extension identifiers as not supported in interoperable A2A deployments until the consumer ecosystem broadens its allowlist.

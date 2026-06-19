@@ -2,7 +2,7 @@
 id: LRN-098
 title: "Scheduler-as-lifespan-extra pattern — import agent_sdk.scheduler does not exist"
 category: sdk
-severity: medium
+severity: high
 source: implement
 date: 2026-06-20
 ---
@@ -30,15 +30,23 @@ python -c "import agent_sdk.scheduler"
 Use the correct import path and integration pattern:
 ```python
 from agent_sdk.contrib import Scheduler
+from agent_sdk import Agent
 
-scheduler = Scheduler()
+sched = Scheduler()
 
-@scheduler.cron("0 * * * *")
-async def hourly_job(ctx):
+@sched.cron(interval_seconds=3600)   # integer seconds, NOT a cron string
+async def hourly_job():              # zero arguments — no ctx parameter
     ...
 
-# Register as a lifespan extra — do NOT try to import as agent_sdk.scheduler
-app = build_app(..., lifespan_extras=[scheduler])
+# Pass sched.lifespan (the property), NOT sched itself
+agent = Agent(..., lifespan_extras=[sched.lifespan])
 ```
+
+Key pitfalls:
+- `cron()` takes `interval_seconds: int`, not a cron-style string like `"0 * * * *"`.
+- The decorated function must take **zero arguments** — `_run_loop` calls `fn()` with no args.
+- Wire `sched.lifespan` (the context-manager factory) into `lifespan_extras`, not the `Scheduler` instance.
+- First run occurs **after** the first interval, not at startup. For immediate execution, call the function once before wiring up the scheduler.
+- Register **all** jobs before accessing `sched.lifespan` — the property snapshots `_jobs` at access time; later registrations are ignored.
 
 Never attempt `import agent_sdk.scheduler`. Document the `lifespan_extras` pattern in domain agent scaffolding so authors discover it before reaching for a direct import.

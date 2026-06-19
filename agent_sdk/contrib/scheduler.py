@@ -76,6 +76,11 @@ class Scheduler:
             A decorator that stores the callable and returns it unchanged, so
             the function can still be called directly in tests.
 
+        Note:
+            The first execution occurs **after** the first full interval, not at
+            startup.  If an immediate initial run is required, call the function
+            once before registering it with ``cron()``.
+
         Example::
 
             @sched.cron(interval_seconds=300)
@@ -107,6 +112,11 @@ class Scheduler:
         # registered *after* this point will NOT be included — register all
         # jobs before accessing .lifespan.
         jobs_snapshot = list(self._jobs)
+        if not jobs_snapshot:
+            logger.warning(
+                "Scheduler.lifespan accessed with no registered jobs — "
+                "ensure all @cron decorators run before accessing .lifespan"
+            )
 
         @asynccontextmanager
         async def _lifespan(app: FastAPI):  # noqa: ARG001
