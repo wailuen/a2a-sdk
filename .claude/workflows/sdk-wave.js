@@ -9,7 +9,7 @@ export const meta = {
     { title: 'Phase Redteam',  detail: 'Full-wave zero-tolerance fix loop (max 8 rounds; debug fires after >3 failed rounds and on stall)' },
     { title: 'Protocol Audit', detail: 'a2a-advisor / mcp-advisor / ag-ui-advisor / a2ui-advisor in parallel (only for touched protocol surfaces) + seam check' },
     { title: 'Codify',         detail: 'SDK issue scan → parallel LRN capture → README index → C-NNN registration' },
-    { title: 'Archive',        detail: 'Pre-archive pytest gate + commit-intent guard (GH-40) → move to completed/ → update plan.md' },
+    { title: 'Archive',        detail: 'Pre-archive pytest gate + commit-intent guard (GH-40/GH-84) → move to completed/ → update plan.md' },
   ],
 }
 
@@ -214,6 +214,23 @@ const GATE_SCHEMA = {
     passCount: { type: 'number' },
     failCount: { type: 'number' },
     failures:  { type: 'array', items: { type: 'string' } },
+  },
+}
+
+// GH-84: archive intent schema — git status check before archive
+// The agent runs `git status --short` in the SDK repo, parses the output into dirty paths,
+// cross-references against wave.allScope (Creates: ∪ Modifies:) for offendingPaths, and
+// separately flags any dirty/untracked paths under harness deliverable directories
+// (tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/) as offendingHarnessPaths.
+const ARCHIVE_INTENT_SCHEMA = {
+  type: 'object',
+  required: ['gitStatusOutput', 'dirtyPaths', 'offendingPaths', 'offendingHarnessPaths'],
+  additionalProperties: false,
+  properties: {
+    gitStatusOutput:      { type: 'string', description: 'Raw stdout of git status --short' },
+    dirtyPaths:           { type: 'array', items: { type: 'string' }, description: 'All paths reported dirty or untracked by git' },
+    offendingPaths:       { type: 'array', items: { type: 'string' }, description: 'Dirty paths that overlap with wave.allScope (Creates: ∪ Modifies:)' },
+    offendingHarnessPaths: { type: 'array', items: { type: 'string' }, description: 'Dirty/untracked paths under tests/, workspace/learning/, workspace/scenarios/results/, or workspace/prd/ even if not in allScope' },
   },
 }
 
@@ -978,16 +995,62 @@ const preArchiveGate = await agent(
   'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, failures. Return all fields.',
   { schema: GATE_SCHEMA, label: 'gate:pre-archive', phase: 'Archive' }
 )
-if (preArchiveGate && preArchiveGate.exitCode !== 0) {
+if (!preArchiveGate) {
+  // RT-001: gate agent failed — archive must not proceed on unknown state.
+  testsRed = true
+  protocolBlocked = true
+  log('WARNING: pre-archive gate agent failed (null response) — archive BLOCKED (gate agent failed; unknown test state)')
+  log('Re-run /wave ' + wave.waveId + ' to retry the pre-archive gate.')
+} else if (preArchiveGate.exitCode !== 0) {
   testsRed = true
   protocolBlocked = true
   log('Suite is RED (' + preArchiveGate.failCount + ' failing) — archive BLOCKED.')
   log('Fix the failing tests and re-run /wave ' + wave.waveId)
 }
 
-// SDK context: commits happen via /sdk-release after the wave archives.
-// The commit-intent guard (GH-40) is in the harness version for agent waves only.
-// Here we rely on the pre-archive pytest gate above to catch correctness issues.
+// GH-84: pre-archive commit check — all scope files (Creates: ∪ Modifies:) plus any
+// harness deliverable directories must be committed before archive. A wave that archives
+// with deliverables only in the working tree will silently lose them on `git checkout`.
+if (!protocolBlocked) {
+  const archiveIntent = await agent(
+    'Run `git status --short` and parse the output.\n\n' +
+    'Scope paths for this wave (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n\n' +
+    'Steps:\n' +
+    '1. Run: git status --short\n' +
+    '2. Collect ALL paths that appear in the output (dirty or untracked).\n' +
+    '3. Cross-reference dirty paths against the scope list above for offendingPaths.\n' +
+    '   A dirty path is an offender when:\n' +
+    '   a. It exactly matches a scope entry, OR\n' +
+    '   b. It starts with a scope entry (the scope entry is a directory prefix), OR\n' +
+    '   c. A scope entry starts with the dirty path (dirty parent directory).\n' +
+    '4. Separately, collect any dirty/untracked paths whose relative path starts with\n' +
+    '   tests/, workspace/learning/, workspace/scenarios/results/, or workspace/prd/\n' +
+    '   — put these in offendingHarnessPaths even if they do not appear in the scope list.\n' +
+    '5. Return all four fields.\n\n' +
+    'If the working tree is completely clean, gitStatusOutput is empty string,\n' +
+    'dirtyPaths is [], offendingPaths is [], offendingHarnessPaths is [].',
+    { schema: ARCHIVE_INTENT_SCHEMA, label: 'gate:archive-commit', phase: 'Archive' }
+  )
+
+  if (!archiveIntent) {
+    protocolBlocked = true
+    log('WARNING: archive-commit gate agent returned null — archive BLOCKED (unknown commit state). Re-run /wave ' + wave.waveId)
+  } else if ((archiveIntent.offendingPaths && archiveIntent.offendingPaths.length > 0) ||
+             (archiveIntent.offendingHarnessPaths && archiveIntent.offendingHarnessPaths.length > 0)) {
+    protocolBlocked = true
+    if (archiveIntent.offendingPaths && archiveIntent.offendingPaths.length > 0) {
+      log('Archive BLOCKED — ' + archiveIntent.offendingPaths.length + ' scope file(s) are uncommitted:')
+      archiveIntent.offendingPaths.forEach(function(p) { log('  [uncommitted] ' + p) })
+    }
+    if (archiveIntent.offendingHarnessPaths && archiveIntent.offendingHarnessPaths.length > 0) {
+      log('Archive BLOCKED — ' + archiveIntent.offendingHarnessPaths.length + ' harness deliverable(s) are uncommitted:')
+      archiveIntent.offendingHarnessPaths.forEach(function(p) { log('  [uncommitted] ' + p) })
+    }
+    log('Commit or stage the files above, then re-run /wave ' + wave.waveId)
+  } else {
+    log('Commit check passed — all scope files and harness deliverables are committed')
+  }
+}
 
 if (protocolBlocked) {
   log('Archive SKIPPED — wave ' + wave.waveId + ' blocked')
