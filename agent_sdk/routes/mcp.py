@@ -18,8 +18,8 @@ else our highest), ``ping``, ``tools/list`` (Tier 1 only — surface parity rule
 (text block always + ``structuredContent`` only under a declared output
 schema; tool failures are ``isError: true`` results, NEVER JSON-RPC errors).
 ``notifications/*`` → 202 empty, never answered. ``MCP-Protocol-Version``
-header validated when present (unrecognized → 400); absent → assume
-2025-03-26.
+header required on non-initialize requests (absent → 400, spec §10);
+present but unrecognized → 400.
 
 Auth: ``Depends(require_identity)`` — api_key and oauth kinds both accepted;
 401s carry the PRM-pointing ``WWW-Authenticate`` via auth/middleware. OAuth
@@ -71,10 +71,11 @@ assert SUPPORTED_PROTOCOL_VERSIONS == tuple(
 # until that can be re-tested live. Omitting an optional field is spec-valid.
 # REVIEWS.md Round 4 documents this as a deferred spec-annotation finding.
 _TITLE_MIN_VERSION = "2025-11-25"
-# Header absent on a post-init request → the spec says assume the older
-# baseline, NOT the server's preferred version.
-_DEFAULT_PROTOCOL_VERSION = "2025-03-26"
 _PROTOCOL_VERSION_HEADER = "MCP-Protocol-Version"
+# Sentinel returned by _negotiated_version when the MCP-Protocol-Version header
+# is absent.  Distinct from None (unrecognized version) so call sites can
+# enforce MCP spec §10 — absent header on a non-initialize request → 400.
+_HEADER_ABSENT = object()
 _SESSION_ID_HEADER = "Mcp-Session-Id"
 
 SESSION_TTL_SECONDS = 30 * 60  # idle TTL
@@ -168,12 +169,18 @@ def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
-def _negotiated_version(request: Request) -> str | None:
-    """Validate ``MCP-Protocol-Version`` when present; None means the caller
-    must answer 400 (present but unrecognized)."""
+def _negotiated_version(request: Request) -> "str | object | None":
+    """Validate ``MCP-Protocol-Version``.
+
+    Returns:
+    - ``_HEADER_ABSENT`` sentinel — header not present at all; caller must 400
+      on non-initialize requests (MCP spec §10).
+    - A version string — header present and recognized; use this version.
+    - ``None`` — header present but unrecognized; caller must 400.
+    """
     value = request.headers.get(_PROTOCOL_VERSION_HEADER)
     if value is None:
-        return _DEFAULT_PROTOCOL_VERSION
+        return _HEADER_ABSENT
     if value in SUPPORTED_PROTOCOL_VERSIONS:
         return value
     return None
@@ -470,16 +477,21 @@ async def mcp_post(
     # response body is authoritative, so even a future/unsupported header value
     # is not grounds for 400 here.
     version = _negotiated_version(request)
-    if version is None and not is_initialize:
-        # advertise a version we DO support so the client can retry (spec)
+    if (version is None or version is _HEADER_ABSENT) and not is_initialize:
+        # MCP spec §10: absent or unrecognized version header on a non-initialize
+        # request → 400; advertise a version we support so the client can retry.
         return JSONResponse(
             status_code=400,
-            content={"error": "unsupported MCP-Protocol-Version"},
+            content={"error": "MCP-Protocol-Version header required"},
             headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
         )
-    # For initialize with an unrecognized header, fall back to our highest so
-    # base_headers is always a valid version string.
-    effective_version = version if version is not None else SUPPORTED_PROTOCOL_VERSIONS[0]
+    # For initialize with an absent/unrecognized header, fall back to our
+    # highest so base_headers is always a valid version string.
+    effective_version = (
+        version
+        if isinstance(version, str)
+        else SUPPORTED_PROTOCOL_VERSIONS[0]
+    )
     base_headers = {_PROTOCOL_VERSION_HEADER: effective_version}
 
     # Session lifecycle: an unknown/expired Mcp-Session-Id is a 404 — except
@@ -665,15 +677,10 @@ async def mcp_messages(
         return JSONResponse(status_code=404, content={"error": "session not found"})
     queue = rec[0]
 
-    version = _negotiated_version(request)
-    if version is None:
-        # advertise a version we DO support so the client can retry (spec)
-        return JSONResponse(
-            status_code=400,
-            content={"error": "unsupported MCP-Protocol-Version"},
-            headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
-        )
-
+    # RT-001/RTGA-006: parse the body FIRST so is_initialize can be detected
+    # before the MCP-Protocol-Version gate — mirroring mcp_post (lines 451-487).
+    # An initialize request on the legacy HTTP+SSE path carries no version header
+    # on first contact and must not be rejected with 400 before negotiation.
     raw = await request.body()
     if len(raw) > _MAX_BODY_BYTES:
         return JSONResponse(
@@ -695,6 +702,18 @@ async def mcp_messages(
         except asyncio.QueueFull:
             return Response(status_code=503, content=b"session queue full")
         return Response(status_code=202)
+
+    is_initialize = message.get("method") == "initialize"
+
+    version = _negotiated_version(request)
+    if (version is None or version is _HEADER_ABSENT) and not is_initialize:
+        # MCP spec §10: absent or unrecognized version header on a non-initialize
+        # request → 400; advertise a version we support so the client can retry.
+        return JSONResponse(
+            status_code=400,
+            content={"error": "MCP-Protocol-Version header required"},
+            headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
+        )
 
     token = forwarding.bind(forwarding.parse_header(request.headers.get(forwarding.HEADER_NAME)))
     try:

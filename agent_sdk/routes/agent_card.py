@@ -22,7 +22,7 @@ from ..common.wire_errors import a2a_error
 from ..config import BaseAgentSettings
 from ..credentials.card import credential_forwarding_extension
 from ..credentials.fields import CredentialField
-from ..models.a2a import AgentCapabilities, AgentCard, AgentSkill
+from ..models.a2a import AgentCapabilities, AgentCard, AgentExtension, AgentSkill
 from ..models.errors import A2A_AUTHENTICATED_EXTENDED_CARD_NOT_CONFIGURED
 
 router = APIRouter()
@@ -50,7 +50,7 @@ _CUSTOM_EVENT_SCHEMAS = [
         "valueSchema": {
             "type": "object",
             "properties": {
-                "messages": {"type": "array"},
+                "messages": {"type": "array", "items": {"type": "object"}},
             },
         },
     },
@@ -114,11 +114,12 @@ def build_agent_card(
     base_url = settings.resolved_base_url
     extensions = [
         a2ui_extension(allowed_components),
-        # AG-UI is advertised via x-agui.endpoint below. The AG-UI spec
-        # (ag-ui-protocol/ag-ui) defines no canonical agent-card advertisement
-        # slot — neither x-agui nor capabilities.extensions is mandated.
-        # x-agui is used here as a vendor extension; capabilities.extensions
-        # is reserved for A2A-defined extensions (A2UI, credential-forwarding).
+        AgentExtension(
+            uri="urn:agui:run:v1",
+            description="AG-UI streaming run endpoint (SSE)",
+            required=False,
+            params={"endpoint": f"{base_url}/ag-ui/run"},
+        ),
     ]
     cred_ext = credential_forwarding_extension(credential_fields or {})
     if cred_ext is not None:

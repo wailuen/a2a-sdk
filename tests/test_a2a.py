@@ -210,3 +210,103 @@ async def test_tasks_list_isolation(client, fake_model):
     assert r.status_code == 200
     assert r.json()["totalSize"] == 0
     assert r.json()["tasks"] == []
+
+
+async def test_inbound_message_not_mutated_in_history(client, fake_model):
+    """LRN-048: inbound client Message must not be mutated when building task history.
+
+    Params.message must retain its original task_id/context_id values after
+    _create_task_record and _resume_or_error; server-assigned ids belong only
+    on the archived history copy, never written back onto the inbound object.
+    """
+    fake_model.script(reply("done"))
+    mid = uuid.uuid4().hex
+    body = {
+        "message": {
+            "role": "user",
+            "parts": [{"kind": "text", "text": "hello"}],
+            "messageId": mid,
+        }
+    }
+    r = await client.post("/v1/message:send", json=body)
+    assert r.status_code == 200
+    task = r.json()
+    task_id = task["id"]
+    context_id = task["contextId"]
+
+    # The history entry must have the server-assigned contextId but MUST NOT
+    # be the same object mutation of what the client sent (task_id was None).
+    done = await wait_for_state(client, task_id)
+    history = done.get("history", [])
+    assert len(history) >= 1
+    user_entry = history[0]
+    # Server-assigned contextId is present on the history copy.
+    assert user_entry["contextId"] == context_id
+    # The original client message had no taskId — the history entry must not
+    # carry a server-assigned taskId on a role='user' entry (A2A §3).
+    assert user_entry.get("taskId") is None, (
+        f"role='user' history entry must not carry server-assigned taskId; got {user_entry.get('taskId')!r}"
+    )
+
+
+async def test_resume_message_not_mutated_in_history(client, fake_model):
+    """LRN-048 resume path: inbound resume Message must not be mutated in place.
+
+    The resume body carries no contextId; the route must NOT write-back the
+    server contextId onto params.message — it must archive a model_copy instead.
+    The history entry must carry the server contextId (filled in from the task),
+    but the client-supplied taskId is preserved verbatim (it was client-sent,
+    not server-assigned, so it is not a LRN-048 violation).
+    """
+    fake_model.script(
+        tool_call("publish_note", {"note": "hello"}),
+        reply("published!"),
+    )
+    r = await client.post("/v1/message:send", json=send_body("publish hello"))
+    task_id = r.json()["id"]
+    await wait_for_state(client, task_id, states=("input-required",))
+
+    # Resume — original message has no contextId; route must not mutate msg in-place
+    resume_mid = uuid.uuid4().hex
+    resume_body = {
+        "message": {
+            "role": "user",
+            "parts": [{"kind": "text", "text": "approved"}],
+            "messageId": resume_mid,
+            "taskId": task_id,
+        }
+    }
+    r = await client.post("/v1/message:send", json=resume_body)
+    assert r.status_code == 200, r.text
+    done = await wait_for_state(client, task_id)
+    assert done["status"]["state"] == "completed"
+
+    history = done.get("history", [])
+    resume_entries = [h for h in history if h.get("messageId") == resume_mid]
+    assert len(resume_entries) == 1
+    resume_entry = resume_entries[0]
+    # The history copy must have the server contextId filled in (from the task).
+    assert resume_entry.get("contextId") == done["contextId"], (
+        f"history copy must carry server contextId; got {resume_entry.get('contextId')!r}"
+    )
+    # The client-supplied taskId must be preserved on the copy (it was client-sent).
+    assert resume_entry.get("taskId") == task_id
+
+
+async def test_tasks_list_total_size_reflects_full_count(client, fake_model):
+    """totalSize must equal the total matching tasks, not the page length.
+
+    RT-005: when nextPageToken is non-empty, totalSize was equal to pageSize,
+    understating the true total.
+    """
+    for _ in range(3):
+        fake_model.script(reply("done"))
+        r = await client.post("/v1/message:send", json=send_body("hi"))
+        await wait_for_state(client, r.json()["id"])
+
+    r = await client.get("/v1/tasks?pageSize=2")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["nextPageToken"] != "", "expected a next page — increase task count or reduce pageSize"
+    assert len(body["tasks"]) == 2
+    assert body["totalSize"] == 3, f"totalSize should be 3 (total), not {body['totalSize']} (page length)"

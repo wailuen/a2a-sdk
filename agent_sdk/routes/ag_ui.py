@@ -273,7 +273,7 @@ class _RunMapper:
                 )
             ]
             if isinstance(payload, ContentModel):
-                a2ui_messages = translate(payload, capabilities=self.capabilities)
+                a2ui_messages = translate(payload, capabilities=self.capabilities.for_custom_emit())
                 if a2ui_messages is not None:
                     # Named envelope so consumers can key on value.messages
                     # (spec: CUSTOM.value carries the A2UI message array).
@@ -313,9 +313,10 @@ class _RunMapper:
 
 
 def _capabilities(body: dict[str, Any]) -> A2uiCapabilities:
-    forwarded = body.get("forwardedProps") or {}
-    raw = forwarded.get("a2uiClientCapabilities") if isinstance(forwarded, dict) else None
-    return A2uiCapabilities.from_metadata(raw)
+    forwarded = body.get("forwardedProps")
+    if not isinstance(forwarded, dict) or "a2uiClientCapabilities" not in forwarded:
+        return A2uiCapabilities(tier="none")
+    return A2uiCapabilities.from_metadata(forwarded["a2uiClientCapabilities"])
 
 
 def _start_worker(request: Request, record: TaskRecord, capabilities: A2uiCapabilities) -> None:

@@ -13,8 +13,8 @@ identically across protocols.
 | `POST /v1/message:stream` | SSE; first frame is the **full Task**, then status/artifact frames until `final: true` |
 | `GET /v1/tasks/{id}` | Task; `historyLength` truncates (0 → `[]`) |
 | `POST /v1/tasks/{id}:cancel` | 200 + canceled Task; 404/409 per table |
-| `POST /v1/tasks/{id}:subscribe` | re-attach SSE |
-| `GET /v1/tasks` | 501 `-32004` (not supported) |
+| `POST /v1/tasks/{id}:resubscribe` | re-attach SSE |
+| `GET /v1/tasks` | 200; identity-scoped paginated list — query params `pageSize` (1–100, default 50) and `pageToken`; response `{tasks, totalSize, pageSize, nextPageToken}` |
 
 Error table (body `{"error": {code, message}}`): unknown/foreign task →
 404 `-32001`; terminal-task resume or cancel → 409 `-32002`; push config →
@@ -28,10 +28,7 @@ Supported output modes: `text`, `text/plain`, `application/json`,
 activated subset (the A2UI extension URI).
 
 A severed stream **without** a `final: true` frame means re-subscribe via
-`tasks/{id}:subscribe` — that is the documented recovery signal. Note: the
-HTTP+JSON binding path is `:subscribe` (A2A spec §11.3.2); the operation is
-sometimes called "resubscribe" in informal descriptions but the spec-correct
-path is `:subscribe` for both initial and re-attach subscriptions.
+`tasks/{id}:resubscribe` — that is the documented recovery signal (A2A §5.3).
 
 ## AG-UI (`POST /ag-ui/run`, SSE)
 

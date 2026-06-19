@@ -75,6 +75,18 @@ class A2uiCapabilities:
             return self.extended
         return True
 
+    def for_custom_emit(self) -> "A2uiCapabilities":
+        """Capabilities for AG-UI CUSTOM event gating (LRN-049).
+
+        Per spec, CUSTOM events are suppressed only when tier=='none'.
+        Extended/catalog membership is irrelevant on the AG-UI path because
+        consumers silently ignore unknown CUSTOM types — suppressing them
+        breaks discovery without any security benefit.
+        """
+        if self.tier == "none":
+            return self
+        return A2uiCapabilities(tier="core+extended", catalogs=list(self.catalogs))
+
 
 def translate(
     payload: ContentModel,

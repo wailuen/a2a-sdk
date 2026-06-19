@@ -1,5 +1,5 @@
 ---
-id: LRN-075
+id: LRN-083
 title: Reverse HTTP→A2A error map must not attribute generic 404s to TaskNotFound
 category: correctness
 severity: medium

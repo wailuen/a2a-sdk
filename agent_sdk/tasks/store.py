@@ -128,9 +128,10 @@ class TaskStore(abc.ABC):
     @abc.abstractmethod
     def list_tasks_for_identity(
         self, identity: Identity, page_size: int = 50, page_token: str | None = None
-    ) -> tuple[list[Task], str | None]:
+    ) -> tuple[list[Task], str | None, int]:
         """Return up to ``page_size`` tasks owned by ``identity``, sorted by
-        task id, plus an opaque ``nextPageToken`` when more remain."""
+        task id, plus an opaque ``nextPageToken`` when more remain, and the
+        total count of all matching tasks regardless of cursor."""
 
     def context_messages(
         self, context_id: str, identity: Identity | None = None

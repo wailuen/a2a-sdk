@@ -48,7 +48,8 @@ async def test_frame_order_and_steps(client, fake_model):
 
 async def test_tool_and_custom_events(client, fake_model):
     fake_model.script(tool_call("demo_kpis", {"title": "Q2"}), reply("done"))
-    frames = await run(client, run_body("kpis"))
+    body = run_body("kpis", forwardedProps={"a2uiClientCapabilities": {"tier": "core"}})
+    frames = await run(client, body)
     types = [f["type"] for f in frames]
     for t in ("TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_END", "TOOL_CALL_RESULT"):
         assert t in types, types

@@ -46,9 +46,12 @@ When planning any AG-UI CUSTOM event emit path:
 ## Check
 
 ```
-grep -n 'catalogs\|A2UI_UPDATE\|tier' agent_sdk/a2ui/emit.py
+grep -n 'translate\|allows\|tier' agent_sdk/a2ui/translator.py agent_sdk/routes/ag_ui.py
 ```
 
-Confirm that any conditional wrapping an AG-UI CUSTOM emit checks `tier == "none"`
-(or equivalent absence-of-support flag) and NOT `type in self.catalogs` or any
-catalog-membership predicate.
+Confirm that the `A2UI_UPDATE` emit in `agent_sdk/routes/ag_ui.py` is gated only
+on `tier == "none"` (via `caps.allows()` in `translator.py`) and NOT on
+`type in self.catalogs` or any catalog-membership predicate. The `allows()` method
+in `translator.py` must return `False` only when `self.tier == "none"`, and must
+emit domain types freely (consumers silently ignore unknown CUSTOM events per the
+AG-UI spec) — never suppress based on catalog membership.

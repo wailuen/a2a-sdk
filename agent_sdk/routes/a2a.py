@@ -162,9 +162,10 @@ def _start_worker(request: Request, record: TaskRecord, capabilities: A2uiCapabi
 def _create_task_record(request: Request, params: MessageSendParams, identity: Identity) -> TaskRecord:
     msg = params.message
     task = new_task(msg.context_id)
-    msg.task_id = task.id
-    msg.context_id = task.context_id
-    task.history = [msg]
+    # LRN-048: never mutate the inbound Message; archive a copy with server-assigned
+    # contextId only (A2A §3 — role='user' entries do not carry server taskId).
+    history_entry = msg.model_copy(update={"context_id": task.context_id})
+    task.history = [history_entry]
     record = request.app.state.task_store.create(task, identity)
     # A2A §3 contextId continuation: carry prior conversation history into the
     # new task so the model can reference entities from earlier turns.
@@ -191,16 +192,16 @@ def _resume_or_error(
     if state not in INTERRUPT_STATES:
         # working task not awaiting input: continuing it is not a supported op
         return a2a_error(A2A_UNSUPPORTED_OPERATION, "task is not awaiting input")
-    # reject a contextId that contradicts the task BEFORE we mutate anything
     if msg.context_id and msg.context_id != record.task.context_id:
         return a2a_invalid_params("contextId does not match the task")
-    msg.context_id = record.task.context_id
     delivered = store.deliver_resume(record.task.id, _message_text(msg))
     if not delivered:
         # lost the race: interrupt was consumed/expired between check and deliver
         return a2a_error(A2A_TASK_NOT_FOUND, "task not found")
-    # record the resume message only once it is actually accepted (race fix)
-    record.task.history = (record.task.history or []) + [msg]
+    # LRN-048: never mutate the inbound Message; archive a copy with server-assigned
+    # contextId only (role='user' entries do not carry server taskId per A2A §3).
+    history_entry = msg.model_copy(update={"context_id": record.task.context_id})
+    record.task.history = (record.task.history or []) + [history_entry]
     return record
 
 
@@ -341,12 +342,12 @@ async def tasks_list(
     identity: Identity = Depends(require_identity),
 ) -> Any:
     size = min(max(pageSize, 1), 100)
-    tasks, next_token = request.app.state.task_store.list_tasks_for_identity(
+    tasks, next_token, total = request.app.state.task_store.list_tasks_for_identity(
         identity, page_size=size, page_token=pageToken
     )
     body: dict[str, Any] = {
         "tasks": [t.model_dump(by_alias=True, mode="json", exclude_none=True) for t in tasks],
-        "totalSize": len(tasks),
+        "totalSize": total,
         "pageSize": size,
         "nextPageToken": next_token or "",
     }
@@ -397,8 +398,8 @@ async def tasks_cancel(
     return JSONResponse(_task_wire(record))
 
 
-@router.post("/v1/tasks/{task_id}:subscribe")
-async def tasks_subscribe(
+@router.post("/v1/tasks/{task_id}:resubscribe")
+async def tasks_resubscribe(
     task_id: str, request: Request, response: Response, identity: Identity = Depends(require_identity)
 ) -> Any:
     record = request.app.state.task_store.get(task_id, identity)

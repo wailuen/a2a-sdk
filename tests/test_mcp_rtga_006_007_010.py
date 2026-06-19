@@ -110,7 +110,6 @@ async def test_non_initialize_with_future_version_header_returns_400(
     )
 
 
-# ---------------------------------------------------------------------------
 # RTGA-007 — trailing-slash CORS origin normalization
 # ---------------------------------------------------------------------------
 
