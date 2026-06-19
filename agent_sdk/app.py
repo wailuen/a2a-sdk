@@ -36,7 +36,7 @@ from .common.cors import CorsMiddleware
 from .common.limits import RateLimiter
 from .config import BaseAgentSettings
 from .credentials.fields import CredentialField
-from .credentials.store import NS_MODEL, CredentialStore, resolver_for_source, validate_namespace
+from .credentials.store import NS_BEDROCK, NS_MODEL, CredentialStore, resolver_for_source, validate_namespace
 from .credentials.encrypted_sqlite import EncryptedSqliteStore
 from .models.content_types import ContentModel, content_type_for
 from .observability import configure_logging, request_id_middleware
@@ -238,8 +238,16 @@ class Agent:
             ret = resolved.get("return")
             # Accept: no annotation (None), typing.Any, exact emits type, or a
             # superclass of emits.  Reject any other concrete type.
+            #
+            # RT-002: inspect.get_annotations collapses `-> None` and a missing
+            # return annotation to the same Python None.  Check __annotations__
+            # to distinguish: only skip when the key is genuinely absent.
             if ret is None:
-                continue  # unannotated — permitted
+                raw = getattr(fn, "__annotations__", {})
+                if "return" not in raw:
+                    continue  # unannotated — permitted
+                # explicit `-> None` with a non-None emits is a clear mismatch;
+                # fall through to the ValueError below
             # SI-4: if the annotation could not be eval'd (e.g. NameError for a
             # type imported only inside a fixture/closure), ret may be a raw
             # string.  We cannot validate it — log a warning and skip rather
@@ -322,6 +330,10 @@ class Agent:
         return BedrockModelClient(
             region=s.bedrock_region,
             model_arn=s.bedrock_model_arn,
+            bearer_token=credential_store.get(NS_BEDROCK, "bearer_token"),
+            aws_access_key_id=credential_store.get(NS_BEDROCK, "aws_access_key_id"),
+            aws_secret_access_key=credential_store.get(NS_BEDROCK, "aws_secret_access_key"),
+            aws_session_token=credential_store.get(NS_BEDROCK, "aws_session_token"),
         )
 
     def _build_credential_store(self) -> CredentialStore:
@@ -404,6 +416,7 @@ class Agent:
             max_turns=settings.max_turns,
             deadline_seconds=float(settings.task_deadline_seconds),
             token_budget=settings.task_token_budget,
+            max_output_tokens=settings.max_output_tokens,
         )
 
         if self.artifacts_dir is not None:
@@ -508,9 +521,16 @@ class Agent:
         from fastapi.responses import JSONResponse as _JSONResponse
         from starlette.exceptions import HTTPException as _StarletteHTTPException
 
+        # 404 is intentionally absent: application routes explicitly call
+        # a2a_error(A2A_TASK_NOT_FOUND) when a task is missing, so a 404
+        # HTTPException here is always an unknown-route miss → -32603.
+        # 405 → -32004 (UnsupportedOperation): "method not allowed" is
+        # semantically an unsupported operation on that resource. The forward
+        # A2A_HTTP_STATUS maps -32004 → 501 for capability-absent cases; the
+        # asymmetry is intentional (HTTP method mismatch ≠ missing capability).
         _A2A_CODE: dict[int, int] = {
             401: -32000, 403: -32000,
-            404: -32001, 405: -32004, 415: -32005,
+            405: -32004, 415: -32005,
         }
 
         @app.exception_handler(_StarletteHTTPException)

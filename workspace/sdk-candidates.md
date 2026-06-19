@@ -1,81 +1,51 @@
-# SDK issue candidates — undefined ((see context date))
+# SDK issue candidates — w021 ((see context date))
 
 Run `/sdk-issue-scan` to review and file as GitHub issues on `wailuen/a2a-sdk`.
 
-## Candidate 1: Wave w020 is entirely unimplemented: git diff shows no changes to any of the four Creates/Modifies targets, worktree branches point to a stale older commit, and no AC of GH-70a/b/c/d is satisfied in landed code.
+## Candidate 1: Store-sourced Bedrock bearer token written into os.environ["AWS_BEARER_TOKEN_BEDROCK"] — a process-global credential mutation that persists for the process lifetime and is inherited by any subprocess, re-introducing the SI-6 env-leak risk the credential store was meant to eliminate.
+- Severity: high
+- Component: sdk/credentials
+- File: agent_sdk/agent/bedrock.py:50
+- Rationale: This is an SDK-internal credential handling violation in the Bedrock client — not agent-domain tool code. The credential store and its invariants (SI-6: upstream vendor keys must never land in env) are SDK responsibilities. The fix (scope the token to the boto3 session/config, not os.environ) belongs entirely in the SDK's bedrock.py client.
+
+## Candidate 2: Acceptance A2A probe reads only part["metadata"]["mimeType"] for content-type extraction, but the SDK runner emits {data_type, tool_name} (no mimeType) for ContentModel DataParts when X-A2A-Extensions is absent, causing contentTypes=[] for every A2A artifact and systematically under-scoring A2A transport.
 - Severity: high
 - Component: harness/workflow
-- File: workspace/todos/active/w020-gh-issues.md
-- Rationale: The finding is about the sdk-wave.js wave runner phase-review gate failing to detect an empty implementation diff — a harness/workflow invariant defect, not agent-domain logic.
+- File: harness/workflows/acceptance-api.js:138-141
+- Rationale: The probe logic lives in harness/workflows/acceptance-api.js and is an SDK harness workflow concern — it defines how acceptance scoring works across transports. The SDK runner's ContentModel DataPart metadata contract (runner.py:171) is also SDK-internal. Neither is agent-domain code.
 
-## Candidate 2: template/Dockerfile build stage still uses bare pip install; uv is never installed; no COPY uv.lock exists; template/uv.lock is absent. The four GH-70 todos are a coupled dependency set that the wave header incorrectly marks as parallel-independent.
+## Candidate 3: template/.claude/workflows/acceptance-api.js is a stale fork retaining all GH-71 bugs: slash path /v1/message/stream, JSON-RPC envelope wrapper, missing messageId, stale taskStatusUpdated/taskArtifactUpdated event parsing, bare thread-ID paths, missing followUpTurns handling, and missing harness-contamination enum value.
 - Severity: high
 - Component: harness/template
-- File: template/Dockerfile
-- Rationale: template/Dockerfile is the scaffold seed for every new agent — this is a harness/template issue, not an agent-specific implementation concern.
+- File: template/.claude/workflows/acceptance-api.js
+- Rationale: This is explicitly a template scaffold sync gap — the harness/workflows/ fix was not propagated to the template peer repo. New agents scaffolded from template ship the broken acceptance runner. The template scaffold is a defined SDK component boundary.
 
-## Candidate 3: harness/skills/setup/SKILL.md Phase 5 step 1 runs uv sync --frozen (no --extra dev), then step 2 immediately runs pytest. The template's test deps live under [project.optional-dependencies].dev which uv sync does not install by default, so pytest is missing and the test step fails.
+## Candidate 4: harness/skills/acceptance/SKILL.md still documents the pre-fix wire protocol: POST /v1/message/stream (slash) with JSON-RPC envelope, POST /ag-ui/run, deterministic threadId, missing messageId, and stale SSE event shape (method/params) — re-documenting the four GH-71 bugs the workflow fix corrected and the LRN-040 concurrent-run contamination.
 - Severity: high
 - Component: harness/skill
-- File: harness/skills/setup/SKILL.md
-- Rationale: The setup skill is a harness/skill that scaffolds or configures agent repos; the missing --extra dev is a defect in the skill's install procedure, not in any agent's domain logic.
+- File: harness/skills/acceptance/SKILL.md:144-211
+- Rationale: SKILL.md is the canonical caller specification for the acceptance skill — it is an SDK harness/skill artifact. Drift between SKILL.md and the corrected acceptance-api.js workflow is an SDK-level runtime/spec gap, not agent-domain.
 
-## Candidate 4: harness/skills/new-agent/SKILL.md Phase 5 step 1 runs uv venv --python 3.12 && uv sync --frozen (no --extra dev), then step 2 runs pytest. pytest/pytest-asyncio/httpx are only in the dev optional-dependency extra, so the green-baseline test step breaks on every freshly scaffolded agent.
+## Candidate 5: bedrock.py calls botocore.tokens.ScopedEnvTokenProvider / TokenProviderChain, added in botocore 1.39 (boto3 1.39.0), but pyproject.toml pins only boto3>=1.34. Any consumer on the permitted 1.34-1.38 floor crashes with AttributeError at first Bedrock bearer-token call. The 18 GH-72 tests are masked by monkeypatching; uv.lock carries 1.43 masking the bug from CI.
+- Severity: critical
+- Component: sdk/build
+- File: agent_sdk/agent/bedrock.py:60-79
+- Rationale: This is an SDK dependency floor and build/packaging correctness issue — pyproject.toml is an SDK build artifact, and bedrock.py is SDK internals. The gap between the declared lower bound and the code's runtime requirements is a pure SDK/build concern, not agent-domain.
+
+## Candidate 6: acceptance-api.js silently drops null scenario results via .filter(Boolean), removing crashed/timed-out scenarios from the denominator and reporting e.g. '3/3 passed' when 2 of 5 crashed — a false-pass against the 100% acceptance gate. With all-null results the reduce returns its initial value over zero scenarios.
+- Severity: high
+- Component: harness/workflow
+- File: harness/workflows/acceptance-api.js:282
+- Rationale: The null-result drop is in the SDK harness workflow orchestrator (acceptance-api.js). The fail-open scoring anti-pattern (LRN-019/020/030/063) is an SDK harness invariant. wave-cycle.js already guards against this pattern; acceptance-api.js must match. No agent-domain logic is involved.
+
+## Candidate 7: LRN-073 ## Check clause greps .claude/workflows/acceptance-api.js, a path that does not exist in this repo — acceptance-api.js has no .claude/workflows/ copy and lives only at harness/workflows/ and template/.claude/workflows/. The grep silently passes on a missing file, making the codified guard a dead no-op.
 - Severity: high
 - Component: harness/skill
-- File: harness/skills/new-agent/SKILL.md
-- Rationale: new-agent is a harness/skill responsible for scaffolding new agents; the missing --extra dev is a defect in the skill's install step, not agent-domain code.
+- File: workspace/learning/LRN-073-acceptance-filter-boolean-nan-denominator.md
+- Rationale: The learning file is owned by the /codify skill (harness/skills/codify/) and its Check clause is the mechanism by which the redteam loop enforces the learning. A wrong file path in ## Check is an SDK harness/skill authoring defect, not agent-domain code.
 
-## Candidate 5: harness/.gitignore only matches paths relative to harness/ itself, not the agent repo root where /provision writes credential inventory files. The template/.gitignore seeded by /new-agent still lacks the ADR-001-*-credentials.md glob, so every scaffolded agent can silently commit credential files.
+## Candidate 8: LRN-073 ## Fix code block documents failureClass: 'harness-contamination' for null agent results, but the landed acceptance-api.js:299 uses failureClass: 'code-bug'. The w021 deferred ledger explicitly states harness-contamination is wrong for null results. The learning teaches the wrong enum value (LRN-066 anti-pattern).
 - Severity: high
-- Component: security
-- File: harness/.gitignore
-- Rationale: Credential-protection gitignore globs are a security concern spanning scaffold skills (new-agent, setup) and the template seed; misplacement of the glob in harness/.gitignore leaves the real agent repos unprotected.
-
-## Candidate 6: template/ is gitignored and fully untracked in a2a-sdk (commit e7bf0a1 stopped tracking it), so GH-70d's Creates/Modifies path under template/ can never be committed or propagated from this repo. The canonical Dockerfile lives in the separate wailuen/agent-template repo.
-- Severity: high
-- Component: harness/template
-- File: template/Dockerfile
-- Rationale: This is a wave-planning defect where the planner placed a todo target under a gitignored/untracked tree; it directly affects harness/template provenance and propagation, not agent-domain logic.
-
-## Candidate 7: .claude/workflows/sdk-wave.js wave-parse prompt captures only Creates: paths into allCreates/group.creates. The empty-scope guard (line 267) false-aborts every legitimate modify-only wave, and unit/phase redteam scope plus protocol-audit detection are all derived from allCreates alone, silently skipping review for modify-only waves.
-- Severity: critical
-- Component: harness/workflow
-- File: .claude/workflows/sdk-wave.js
-- Rationale: sdk-wave.js is the SDK wave runner harness workflow; scope derivation from Creates-only is a structural defect in the wave orchestration engine.
-
-## Candidate 8: .claude/workflows/wave-cycle.js and harness/workflows/wave-cycle.js both derive every scope set (unit/phase redteam, protocol detection, audit filters, seam paths, archive FR-map) from wave.allCreates/group.creates only, with no allModifies/allScope handling and no empty-scope guard. An edit-only agent wave lands with empty adversarial-review scope and no protocol audit — a silent gate bypass.
-- Severity: critical
-- Component: harness/workflow
-- File: .claude/workflows/wave-cycle.js
-- Rationale: wave-cycle.js is the agent-wave counterpart to sdk-wave.js; the Creates-only scope defect is a harness/workflow structural issue that must be fixed in both runner copies.
-
-## Candidate 9: harness/skills/setup/SKILL.md 'Create .gitignore (if absent)' block omits the workspace/adr/ADR-000-*-credentials.md and ADR-001-*-credentials.md globs mandated by LRN-050/GH-66, and has no git check-ignore verification probe. A clone whose .gitignore is missing the credential globs silently commits credential inventory files.
-- Severity: critical
-- Component: security
-- File: harness/skills/setup/SKILL.md
-- Rationale: Missing credential-protection globs in the setup skill's .gitignore block is a security defect in a harness/skill that must mirror the fix already applied to new-agent.
-
-## Candidate 10: sdk-wave.js/wave-cycle.js archive step 2 only marks an existing plan.md row; when no row exists for the waveId (GH-issue waves have no pre-seeded row) the archive agent silently no-ops, leaving the wave invisible in the plan ledger. w020 is archived to completed/ but has no W20 row in plan.md.
-- Severity: high
-- Component: harness/workflow
-- File: workspace/todos/plan.md
-- Rationale: The archive step behaviour is defined inside sdk-wave.js and wave-cycle.js (harness workflows); the missing append-new-row logic is a defect in the wave runner's archive phase, not in agent-domain code.
-
-## Candidate 11: .claude/workflows/wave-cycle.js null archive-commit gate response falls through to the else branch ('Commit check passed'), allowing wave archive even when the gate agent crashed and commit state is unknown — a fail-open regression of the null-gate fail-closed invariant. The harness copy already guards with if (!archiveIntent) { protocolBlocked = true }.
-- Severity: critical
-- Component: harness/workflow
-- File: .claude/workflows/wave-cycle.js
-- Rationale: Null-gate fail-open is a harness/workflow control-flow defect in the wave runner's archive gate; the fix must be ported from harness/workflows/wave-cycle.js to .claude/workflows/wave-cycle.js.
-
-## Candidate 12: .claude/workflows/wave-cycle.js dispatches protocol recheck agents even after a red proto re-gate sets protocolBlocked=true, because there is no if (!protocolBlocked) guard around the recheck block at line 993. The harness copy correctly wraps the recheck in if (!protocolBlocked).
-- Severity: high
-- Component: harness/workflow
-- File: .claude/workflows/wave-cycle.js
-- Rationale: Missing conditional guard around a protocol-recheck dispatch is a harness/workflow control-flow defect in the active wave runner.
-
-## Candidate 13: The active runtime .claude/workflows/wave-cycle.js and template/distribution harness/workflows/wave-cycle.js have diverged across ~10 behaviours (null-gate hardening, deferred notes, recheck guard, archive row-append, etc.). Each copy has fixes the other lacks, making harness/CLAUDE.md's guarantee that harness/ is the propagation source false.
-- Severity: high
-- Component: harness/workflow
-- File: .claude/workflows/wave-cycle.js
-- Rationale: Divergence between the runtime and template wave-cycle.js copies is a harness/workflow maintenance defect; both are SDK-level orchestration files, not agent-domain code.
+- Component: harness/skill
+- File: workspace/learning/LRN-073-acceptance-filter-boolean-nan-denominator.md
+- Rationale: Same as above — the learning file is a /codify skill artifact. The mismatch between the LRN ## Fix snippet and the landed code is an SDK harness/skill documentation integrity issue (LRN-066 class), not agent-domain.

@@ -1,6 +1,6 @@
 export const meta = {
   name: 'acceptance-api',
-  description: 'Parallel acceptance runner: fan-out 30+ scenario conversations over BOTH A2A (message/stream) and AG-UI (POST /run SSE) transports, judge-score each turn 1–10 per transport, classify failures, return structured dual-path results',
+  description: 'Parallel acceptance runner: fan-out 30+ scenario conversations over BOTH A2A (message/stream) and AG-UI (POST /ag-ui/run SSE) transports, judge-score each turn 1–10 per transport, classify failures, return structured dual-path results',
   phases: [
     { title: 'Run', detail: 'One agent per scenario: drive 3–5 turn conversation on A2A + AG-UI transports, judge-score per transport' },
   ],
@@ -64,7 +64,7 @@ function buildScenarioPrompt(s, a) {
   const toolCatalog    = (a.agentContext.tools || [])
     .map(function(t) { return '  • ' + t.name + (t.emits ? ' → emits ' + t.emits : '') + (t.description ? '  (' + t.description + ')' : '') })
     .join('\n') || '  (read from src/tools/)'
-  const transports     = a.transports || ['a2a', 'agui']
+  const transports     = (a.transports && a.transports.length > 0) ? a.transports : ['a2a', 'agui']
   const runA2A         = transports.indexOf('a2a') !== -1
   const runAGUI        = transports.indexOf('agui') !== -1
   const runKey         = s.id + '-' + require('crypto').randomUUID()
@@ -101,8 +101,8 @@ function buildScenarioPrompt(s, a) {
 
     // ── A2A transport ──────────────────────────────────────────────────────────
     (runA2A ? (
-    '══ PART 1 — A2A transport (POST /v1/message/stream) ══════════════════════\n\n' +
-    'Drive ' + maxTurns + '-turn maximum (minimum 3 turns) via the A2A JSON-RPC streaming endpoint.\n\n' +
+    '══ PART 1 — A2A transport (POST /v1/message:stream) ══════════════════════\n\n' +
+    'Drive ' + maxTurns + '-turn maximum (minimum 3 turns) via the A2A streaming endpoint.\n\n' +
 
     'For EACH A2A turn:\n\n' +
 
@@ -119,39 +119,45 @@ function buildScenarioPrompt(s, a) {
     '   async def main():\n' +
     '       headers = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}\n' +
     '       task_id = TASKID_F.read_text().strip() if TASKID_F.exists() else None\n' +
-    '       params  = {"message": {"role": "user", "parts": [{"kind": "text", "text": QUERY}]}}\n' +
+    '       import uuid as _uuid\n' +
+    '       msg = {"role": "user", "messageId": _uuid.uuid4().hex, "parts": [{"kind": "text", "text": QUERY}]}\n' +
     '       if task_id:\n' +
-    '           params["taskId"] = task_id\n' +
-    '       reply_parts, tools, ctypes = [], [], []\n' +
+    '           msg["taskId"] = task_id\n' +
+    '       body = {"message": msg}\n' +
+    '       reply_parts, ctypes = [], []\n' +
     '       async with httpx.AsyncClient(base_url=BASE_URL, headers=headers, timeout=180) as c:\n' +
-    '           async with c.stream("POST", "/v1/message/stream", json={\n' +
-    '               "jsonrpc": "2.0", "method": "message/stream",\n' +
-    '               "id": f"{RUN_KEY}-a2a", "params": params\n' +
-    '           }) as r:\n' +
+    '           async with c.stream("POST", "/v1/message:stream", json=body) as r:\n' +
     '               r.raise_for_status()\n' +
     '               async for line in r.aiter_lines():\n' +
     '                   if not line.startswith("data:"): continue\n' +
     '                   ev = json.loads(line[5:].strip())\n' +
-    '                   method, p = ev.get("method",""), ev.get("params",{})\n' +
-    '                   if method == "taskStatusUpdated":\n' +
-    '                       if not task_id: task_id = p.get("id","")\n' +
-    '                       for part in (p.get("message") or {}).get("parts",[]):\n' +
-    '                           if part.get("kind") == "text": reply_parts.append(part["text"])\n' +
-    '                   elif method == "taskArtifactUpdated":\n' +
-    '                       for part in (p.get("artifact") or {}).get("parts",[]):\n' +
-    '                           if part.get("kind") == "data" and part.get("mimeType"):\n' +
-    '                               ctypes.append(part["mimeType"])\n' +
+    '                   if ev.get("kind") == "task":\n' +
+    '                       if not task_id: task_id = ev.get("id","")\n' +
+    '                   elif ev.get("kind") == "status-update":\n' +
+    '                       if not task_id: task_id = ev.get("taskId","")\n' +
+    '                       if ev.get("final") or (ev.get("status",{}).get("state") == "completed"):\n' +
+    '                           reply_parts = [p["text"] for p in (ev.get("status",{}).get("message") or {}).get("parts",[]) if p.get("kind") == "text"]\n' +
+    '                   elif ev.get("kind") == "artifact-update":\n' +
+    '                       art = ev.get("artifact") or {}\n' +
+    '                       art_name = art.get("name")\n' +
+    '                       art_meta = art.get("metadata") or {}\n' +
+    '                       art_dtype = art_meta.get("data_type") or art_name\n' +
+    '                       for part in art.get("parts",[]):\n' +
+    '                           if part.get("kind") == "data":\n' +
+    '                               meta = part.get("metadata") or {}\n' +
+    '                               ctype = art_dtype or meta.get("data_type") or meta.get("mimeType")\n' +
+    '                               if ctype and ctype not in ctypes: ctypes.append(ctype)\n' +
     '       if task_id: TASKID_F.write_text(task_id)\n' +
-    '       print(json.dumps({"reply": "\\n".join(reply_parts), "tools": tools, "contentTypes": ctypes}))\n\n' +
+    '       print(json.dumps({"reply": "\\n".join(reply_parts), "contentTypes": ctypes}))\n\n' +
     '   asyncio.run(main())\n' +
     '   ─────────────────────────────────────────────\n\n' +
 
     '   Run it:   ACC_QUERY="QUERY_TEXT" .venv/bin/python3 /tmp/acc-' + runKey + '-a2a-turn.py\n' +
-    '   Parse:    {reply, tools, contentTypes}\n\n' +
+    '   Parse:    {reply, contentTypes}\n\n' +
 
-    '   Note: tool names are not directly observable on the A2A stream (the protocol\n' +
-    '   surfaces text/data artifacts, not tool call events). Infer tool usage from\n' +
-    '   the reply content and the matched content types.\n\n' +
+    '   Note: tool names are not observable on the A2A stream (the protocol surfaces\n' +
+    '   text/data artifacts, not tool call events). Infer tool usage from the reply\n' +
+    '   content and the matched content types.\n\n' +
 
     '2. Score the A2A reply 1–10 (content coherency):\n' +
     '   9–10 Correct content type emitted + reply directly addresses the query\n' +
@@ -173,7 +179,7 @@ function buildScenarioPrompt(s, a) {
 
     // ── AG-UI transport ────────────────────────────────────────────────────────
     (runAGUI ? (
-    '══ PART ' + (runA2A ? '2' : '1') + ' — AG-UI transport (POST /run SSE) ════════════════════════════\n\n' +
+    '══ PART ' + (runA2A ? '2' : '1') + ' — AG-UI transport (POST /ag-ui/run SSE) ════════════════════════\n\n' +
     'Drive ' + maxTurns + '-turn maximum (minimum 3 turns) via the AG-UI run endpoint.\n' +
     'Start a FRESH conversation — do not reuse A2A task state.\n\n' +
 
@@ -207,12 +213,12 @@ function buildScenarioPrompt(s, a) {
     '               }\n' +
     '           )\n' +
     '       MSGS_FILE.write_text(json.dumps(msgs))\n' +
-    '       print(json.dumps({"reply": reply, "tools": tools, "contentTypes": ctypes}))\n\n' +
+    '       print(json.dumps({"reply": reply, "toolsCalled": tools, "contentTypes": ctypes}))\n\n' +
     '   asyncio.run(main())\n' +
     '   ─────────────────────────────────────────────\n\n' +
 
     '   Run it:   ACC_QUERY="QUERY_TEXT" .venv/bin/python3 /tmp/acc-' + runKey + '-agui-turn.py\n' +
-    '   Parse:    {reply, tools, contentTypes}\n\n' +
+    '   Parse:    {reply, toolsCalled, contentTypes}\n\n' +
 
     '2. Score the AG-UI reply 1–10 (content coherency):\n' +
     '   9–10 Correct tool called + correct content type + reply directly addresses query\n' +
@@ -259,7 +265,7 @@ function buildScenarioPrompt(s, a) {
 
 phase('Run')
 
-const transports = args.transports || ['a2a', 'agui']
+const transports = (args.transports && args.transports.length > 0) ? args.transports : ['a2a', 'agui']
 
 const scenarios = (args.onlyIds && args.onlyIds.length > 0)
   ? args.scenarios.filter(function(s) { return args.onlyIds.indexOf(s.id) !== -1 })
@@ -269,7 +275,7 @@ log('Running ' + scenarios.length + ' scenario(s) in parallel  |  transports: ' 
 
 const enrichedArgs = Object.assign({}, args, { transports: transports })
 
-const results = (await pipeline(
+const rawResults = await pipeline(
   scenarios,
   function(s) {
     return agent(
@@ -277,16 +283,43 @@ const results = (await pipeline(
       { label: 'scenario:' + s.id, phase: 'Run', schema: SCENARIO_RESULT_SCHEMA }
     )
   }
-)).filter(Boolean)
+)
+
+// Failure reification must honor the same per-transport N/A scoring rule the
+// live path uses (FINAL SCORING / IMPORTANT RULES: an un-run transport scores
+// 10, not 1).  A crashed agent only fails the transports that were actually
+// active for this run; transports not in `transports` were never exercised and
+// must not drag the summary aggregate to 1.
+const ranA2A  = transports.indexOf('a2a') !== -1
+const ranAGUI = transports.indexOf('agui') !== -1
+const results = rawResults.map(function(r, i) {
+  if (r != null) return r
+  const s = scenarios[i]
+  return {
+    scenarioId:    s.id,
+    name:          s.name,
+    passed:        false,
+    a2aMinScore:   ranA2A ? 1 : 10,
+    aguiMinScore:  ranAGUI ? 1 : 10,
+    a2aTurns:      [],
+    aguiTurns:     [],
+    failureClass:  'code-bug',
+    failureDetail: 'agent returned null (crash or timeout)',
+  }
+})
+
+if (results.length !== scenarios.length) {
+  throw new Error('acceptance-api: results.length (' + results.length + ') !== scenarios.length (' + scenarios.length + ') — pipeline dropped results must be reified as failures')
+}
 
 const passed     = results.filter(function(r) { return r.passed }).length
 const failed     = results.filter(function(r) { return !r.passed }).length
-const a2aMin     = results.reduce(function(m, r) { return Math.min(m, r.a2aMinScore) }, 10)
-const aguiMin    = results.reduce(function(m, r) { return Math.min(m, r.aguiMinScore) }, 10)
+const a2aMin     = results.length > 0 ? results.reduce(function(m, r) { return Math.min(m, r.a2aMinScore) }, 10) : 0
+const aguiMin    = results.length > 0 ? results.reduce(function(m, r) { return Math.min(m, r.aguiMinScore) }, 10) : 0
 const diverged   = results.filter(function(r) { return r.failureClass === 'transport-divergence' }).length
 
 log(
-  passed + '/' + results.length + ' passed' +
+  (results.length > 0 ? passed + '/' + results.length + ' passed' : '0/0 scenarios (empty run)') +
   '  |  A2A min: ' + a2aMin + '/10' +
   '  |  AG-UI min: ' + aguiMin + '/10' +
   (diverged ? '  |  transport-divergence: ' + diverged : '') +

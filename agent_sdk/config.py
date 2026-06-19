@@ -95,6 +95,7 @@ class BaseAgentSettings(BaseSettings):
         default=30, alias="AGENT_SDK_UNAUTH_RATE_LIMIT"
     )
     max_turns: int = Field(default=20, alias="AGENT_SDK_MAX_TURNS")
+    max_output_tokens: int = Field(default=8192, alias="AGENT_SDK_MAX_OUTPUT_TOKENS")
 
     # ── A2UI component allow-list (SC-D2) ──
     # None (default) = all registered component types are available.

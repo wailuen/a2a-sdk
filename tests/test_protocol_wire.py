@@ -343,3 +343,88 @@ def test_file_part_both_bytes_and_uri_raises():
 
     with pytest.raises(ValidationError):
         FilePart(kind="file", file={"bytes": "aGVsbG8=", "uri": "https://example.com/file.pdf"})
+
+
+# ===========================================================================
+# Group 7 — Bedrock admin-credential HTTP seam (RT-001 / GH-72)
+# ===========================================================================
+#
+# GH-72 added the aws_session_token Bedrock CredentialField, but the only
+# operator-reachable path to seed it — PUT /admin/api/credentials/__bedrock__/
+# aws_session_token through _resolve_credential_field → set_credential → store
+# — was unverified.  Backend-layer tests (test_bedrock_credential_store.py)
+# stop at BedrockModelClient / _build_model_client.  A typo in _BEDROCK_FIELDS,
+# an _resolve_credential_field regression, or the field.secret flag drifting
+# would pass the whole GH-72 set silently (LRN-077/LRN-078: wire-up/UI changes
+# need an integration test at the seam they add).
+
+
+async def test_admin_put_bedrock_session_token_round_trips(client):
+    """PUT to the Bedrock session-token field must store the value and the
+    credential store must round-trip it under (NS_BEDROCK, aws_session_token)."""
+    from agent_sdk.credentials.store import NS_BEDROCK
+
+    token = "FwoGZXIvYXdzEXAMPLEsessiontoken"
+    r = await client.put(
+        "/admin/api/credentials/__bedrock__/aws_session_token",
+        json={"value": token},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body == {"source": "__bedrock__", "field": "aws_session_token", "set": True}
+
+    store = client.app.state.credential_store  # type: ignore[attr-defined]
+    assert store.get(NS_BEDROCK, "aws_session_token") == token, (
+        "PUT /admin/api/credentials/__bedrock__/aws_session_token did not "
+        "round-trip into the credential store"
+    )
+
+
+async def test_admin_get_bedrock_credentials_lists_session_token(client):
+    """The credentials listing must surface aws_session_token as a Bedrock
+    field marked secret (the field the admin form renders)."""
+    r = await client.get("/admin/api/credentials")
+    assert r.status_code == 200, r.text
+    bedrock = r.json()["bedrock"]
+    assert bedrock["source_name"] == "__bedrock__"
+    by_name = {f["name"]: f for f in bedrock["fields"]}
+    assert "aws_session_token" in by_name, (
+        f"aws_session_token missing from Bedrock fields: {sorted(by_name)}"
+    )
+    assert by_name["aws_session_token"]["secret"] is True, (
+        "aws_session_token must be marked secret=True (it is an STS credential)"
+    )
+
+
+async def test_admin_put_unknown_bedrock_field_returns_404(client):
+    """PUT to an unknown __bedrock__ field must 404 (negative-path guard for
+    _resolve_credential_field — a field-name typo must not silently 200)."""
+    r = await client.put(
+        "/admin/api/credentials/__bedrock__/not_a_real_field",
+        json={"value": "x"},
+    )
+    assert r.status_code == 404, r.text
+
+
+async def test_admin_delete_bedrock_session_token(client):
+    """DELETE through the same seam must clear a previously-set session token."""
+    from agent_sdk.credentials.store import NS_BEDROCK
+
+    store = client.app.state.credential_store  # type: ignore[attr-defined]
+    store.set(NS_BEDROCK, "aws_session_token", "FwoGZXIvYXdzEXAMPLE")
+
+    r = await client.delete("/admin/api/credentials/__bedrock__/aws_session_token")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"source": "__bedrock__", "field": "aws_session_token", "set": False}
+    assert store.get(NS_BEDROCK, "aws_session_token") is None
+
+
+async def test_admin_put_bedrock_session_token_requires_admin(client):
+    """The seam must enforce admin auth (SI: must not widen to bypass auth).
+    A request with the admin bearer stripped must be rejected (401/403)."""
+    r = await client.put(
+        "/admin/api/credentials/__bedrock__/aws_session_token",
+        json={"value": "FwoGZXIvYXdzEXAMPLE"},
+        headers={"Authorization": ""},
+    )
+    assert r.status_code in (401, 403), r.text

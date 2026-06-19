@@ -119,3 +119,57 @@ async def test_deadline_suspended_clock():
     assert not d.exceeded()  # 5 + 4 consumed < 10
     t["now"] = 102.0 + 10.0
     assert d.exceeded()
+
+
+async def test_max_output_tokens_threaded_to_converse():
+    """LoopPolicies.max_output_tokens must be forwarded to every converse call."""
+    model = FakeModelClient([reply("done")])
+    await collect(model, policies=LoopPolicies(max_output_tokens=8192))
+    assert model.calls[0]["max_tokens"] == 8192
+
+
+async def test_max_output_tokens_default_is_named_constant():
+    """Default max_output_tokens must match the SDK-level named constant."""
+    from agent_sdk.agent.loop import DEFAULT_MAX_OUTPUT_TOKENS
+
+    assert LoopPolicies().max_output_tokens == DEFAULT_MAX_OUTPUT_TOKENS
+    assert DEFAULT_MAX_OUTPUT_TOKENS > 0
+
+
+def test_settings_max_output_tokens_default_matches_loop_constant():
+    """BaseAgentSettings.max_output_tokens default must equal DEFAULT_MAX_OUTPUT_TOKENS."""
+    from agent_sdk import BaseAgentSettings
+    from agent_sdk.agent.loop import DEFAULT_MAX_OUTPUT_TOKENS
+
+    cfg = BaseAgentSettings(DEV_MODE=True)
+    assert cfg.max_output_tokens == DEFAULT_MAX_OUTPUT_TOKENS
+
+
+def test_settings_max_output_tokens_env_override():
+    """AGENT_SDK_MAX_OUTPUT_TOKENS env var must override the default."""
+    from agent_sdk import BaseAgentSettings
+
+    cfg = BaseAgentSettings(DEV_MODE=True, AGENT_SDK_MAX_OUTPUT_TOKENS=4096)
+    assert cfg.max_output_tokens == 4096
+
+
+def test_build_app_wires_max_output_tokens_into_loop_policies(tmp_path):
+    """build_app() must wire settings.max_output_tokens into LoopPolicies.
+
+    This is the integration seam: app.state.loop_policies.max_output_tokens
+    must equal the value set in BaseAgentSettings, not the LoopPolicies default.
+    """
+    from agent_sdk import BaseAgentSettings
+    from agent_sdk.example.agent import make_agent
+    from agent_sdk.testing import FakeModelClient
+
+    custom_tokens = 3072
+    settings = BaseAgentSettings(
+        DEV_MODE=True,
+        DATA_DIR=str(tmp_path / "data"),
+        AGENT_SDK_MAX_OUTPUT_TOKENS=custom_tokens,
+    )
+    agent = make_agent(settings, model_client=FakeModelClient([]))
+    app = agent.build_app()
+
+    assert app.state.loop_policies.max_output_tokens == custom_tokens

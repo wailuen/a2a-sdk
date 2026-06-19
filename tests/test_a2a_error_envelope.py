@@ -62,15 +62,21 @@ async def test_no_auth_401_a2a_envelope(client):
 
 
 async def test_unknown_v1_route_404_a2a_envelope(client):
-    """GET /v1/bogus (unknown route) must return 404 with A2A envelope,
-    never FastAPI's {"detail": "Not Found"}."""
+    """GET /v1/bogus (unknown route) must return 404 with A2A envelope and
+    generic server-error code -32603, NOT -32001 (TaskNotFound).
+
+    -32001 must only appear on known task-lookup paths (/v1/tasks/{id}) when
+    the referenced task is absent. A bare unknown-route 404 is not a task miss.
+    """
     r = await client.get("/v1/bogus")
     assert r.status_code == 404
     body = r.json()
     assert "detail" not in body, f"'detail' key must not appear in A2A envelope; got {body}"
     assert "error" in body
-    assert isinstance(body["error"]["code"], int)
-    assert isinstance(body["error"]["message"], str)
+    assert body["error"]["code"] == -32603, (
+        f"Unknown-route 404 must emit -32603 (generic), not -32001 (TaskNotFound); "
+        f"got {body['error']['code']}"
+    )
 
 
 async def test_invalid_query_param_400_no_value_echo(client):

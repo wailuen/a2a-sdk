@@ -127,6 +127,13 @@ _BEDROCK_FIELDS: tuple[CredentialField, ...] = (
         required=False,
         help_text="Pairs with the access key ID. Falls back to the default AWS chain when unset.",
     ),
+    CredentialField(
+        name="aws_session_token",
+        label="AWS session token",
+        secret=True,
+        required=False,
+        help_text="Required only for STS / temporary credentials; pairs with the access key ID + secret. Leave blank for long-lived IAM keys.",
+    ),
 )
 
 _jinja = Environment(

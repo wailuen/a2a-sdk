@@ -1,7 +1,7 @@
 ---
 name: acceptance
 category: quality
-description: "Autonomous acceptance gate: generate 30+ scenario seed files, drive live multi-turn conversations against a provisioned agent on BOTH A2A (message/send) and AG-UI (POST /run SSE) transports in parallel, judge-score each turn 1–10 for content coherency per transport, self-heal failures (classify → fix → restart → re-test), and reach 100% pass on both paths before returning. Optional --ux path runs the same scenarios sequentially through the admin test console via Playwright, adding a rendering fidelity score per A2UI component type. Requires /provision to have run (reads admin key from workspace/adr/ADR-000-<env>-credentials.md). Never exits with open failures."
+description: "Autonomous acceptance gate: generate 30+ scenario seed files, drive live multi-turn conversations against a provisioned agent on BOTH A2A (POST /v1/message:stream SSE) and AG-UI (POST /ag-ui/run SSE) transports in parallel, judge-score each turn 1–10 for content coherency per transport, self-heal failures (classify → fix → restart → re-test), and reach 100% pass on both paths before returning. Optional --ux path runs the same scenarios sequentially through the admin test console via Playwright, adding a rendering fidelity score per A2UI component type. Requires /provision to have run (reads admin key from workspace/adr/ADR-000-<env>-credentials.md). Never exits with open failures."
 ---
 
 # /acceptance — Autonomous acceptance gate
@@ -141,69 +141,84 @@ when **both** paths score ≥ 7. Use `--transport a2a|agui` to restrict to one.
 
 ### A2A transport (per scenario, parallel)
 
-Drive each scenario via `POST /v1/message/stream` (SSE) or `POST /v1/message/send`
-(non-streaming), authenticated with `Authorization: Bearer <admin_key>`.
+Drive each scenario via `POST /v1/message:stream` (colon, SSE) or
+`POST /v1/message:send` (colon, non-streaming), authenticated with
+`Authorization: Bearer <admin_key>`. The body is a **flat** `MessageSendParams`
+object — there is **no** JSON-RPC envelope (`jsonrpc`/`method`/`id`/`params`).
+The path separator is a colon (`:stream`), not a slash; the slash form is not
+a routed endpoint and returns 404/405. (See `tests/test_gh71_acceptance_api_stream.py`.)
 
 **Turn 1 — A2A request:**
 ```json
-POST /v1/message/stream
+POST /v1/message:stream
 Authorization: Bearer <admin_key>
 Content-Type: application/json
 
 {
-  "jsonrpc": "2.0",
-  "method": "message/stream",
-  "id": "<scenario-id>-t1",
-  "params": {
-    "message": {
-      "role": "user",
-      "parts": [{"kind": "text", "text": "<seed_query>"}]
-    }
+  "message": {
+    "role": "user",
+    "messageId": "<uuid4-hex>",
+    "parts": [{"kind": "text", "text": "<seed_query>"}]
   }
 }
 ```
-Parse the SSE stream: collect `TaskStatusUpdateEvent` and `TaskArtifactUpdateEvent`
-events. Extract:
-- Reply text: text parts from message artifacts with `role: "agent"`
-- A2UI artifacts: `DataPart` artifacts with MIME type matching the A2UI extension
-- Tool usage: `TaskStatusUpdateEvent` with `state: "working"` carrying a
-  `TaskCallLog` (if present) to verify `expected_tools`
+`messageId` is **required** — omitting it returns `-32602` (invalid params).
+Use a fresh UUID per turn.
+
+Parse the SSE stream line-by-line (`data:` frames). Each frame is a flat event
+carrying a `kind` field (no `method`/`params` wrapper). Extract:
+- Reply text: from `kind: "status-update"` events, read
+  `status.message.parts[]` and collect `kind: "text"` parts' `text`.
+- A2UI / content types: from `kind: "artifact-update"` events, read
+  `artifact.parts[]`; for `kind: "data"` parts, the content type is
+  `metadata.data_type` (or `metadata.mimeType`, or the artifact `name`).
+- Task id: from the first `status-update` event's `taskId` (or the initial
+  `kind: "task"` event); reuse it on later turns.
+- Tool usage is **not** observable on the A2A stream (the protocol surfaces
+  text/data artifacts, not tool-call events) — infer tools from the reply
+  content and matched content types.
 
 **Score A2A turn (1–10):**
-- 9–10: reply is relevant, complete, tools match `expected_tools`, A2UI types match `expected_content_types`
-- 7–8: relevant and complete; minor tool or type mismatch
-- 5–6: partial answer; key tool not called or content type missing
-- 3–4: off-topic or wrong tool; task errored but recovered
-- 1–2: task failed (`state: "failed"`); no useful output
+- 9–10: reply is relevant, complete, A2UI types match `expected_content_types`
+- 7–8: relevant and complete; minor type mismatch
+- 5–6: partial answer; expected content type missing
+- 3–4: off-topic; task errored but recovered
+- 1–2: task status `failed`, timeout, or no useful output
 
 **Multi-turn A2A:** For turns 2–N (up to `maxTurns`), send the follow-up
-message in the same task context by including the `taskId` from the first
-response in the next `message/stream` call:
+message in the same task context by including the `taskId` from the prior
+response (and a fresh `messageId`):
 ```json
-"params": { "taskId": "<task-id-from-turn-1>", "message": { ... } }
+{ "message": { "role": "user", "messageId": "<new-uuid4-hex>", "taskId": "<task-id>", "parts": [ ... ] } }
 ```
 
 ### AG-UI transport (per scenario, parallel)
 
-Drive each scenario via `POST /run` SSE, authenticated with
-`Authorization: Bearer <admin_key>`.
+Drive each scenario via `POST /ag-ui/run` SSE, authenticated with
+`Authorization: Bearer <admin_key>`. Start a **fresh** conversation — do not
+reuse A2A task state.
 
 **Turn 1 — AG-UI request:**
 ```json
-POST /run
+POST /ag-ui/run
 Authorization: Bearer <admin_key>
 Content-Type: application/json
 Accept: text/event-stream
 
 {
-  "threadId": "<scenario-id>",
-  "runId": "<scenario-id>-t1",
+  "threadId": "<scenario-id>-<uuid4-hex>",
+  "runId": "<scenario-id>-<uuid4-hex>-t1",
   "messages": [{"role": "user", "content": "<seed_query>"}]
 }
 ```
+Use a **per-invocation UUID suffix** on `threadId` (not a bare deterministic
+`<scenario-id>`) so concurrent runs of the same scenario do not share thread
+state and contaminate each other (LRN-040).
+
 Parse the SSE stream: collect AG-UI events. Extract:
-- Reply text: concatenate `content` from all `TEXT_MESSAGE_CONTENT` events
-- A2UI artifacts: `AGENT_ARTIFACT` events with A2UI MIME type and `data` payload
+- Reply text: concatenate `delta`/`content` from all `TEXT_MESSAGE_CONTENT` events
+- A2UI artifacts: `CUSTOM` events carrying the A2UI payload (or `tool_start`
+  / `artifact` callbacks when driven via `ChatDriver.agui_turn`)
 - Tool usage: `TOOL_CALL_START` events to verify `expected_tools`
 
 **Score AG-UI turn (1–10):** same 1–10 scale as A2A transport.
@@ -211,7 +226,8 @@ Map AG-UI events to the same criteria — `RUN_ERROR` = 1–2;
 partial TEXT with no artifact when one is expected = 5–6; full match = 9–10.
 
 **Multi-turn AG-UI:** For turns 2–N, append the agent's reply to `messages`
-and send a new `/run` request with the same `threadId` and an incremented `runId`.
+and send a new `/ag-ui/run` request with the **same** per-invocation `threadId`
+and an incremented `runId`.
 
 ### Workflow invocation
 
@@ -283,12 +299,12 @@ Round N:
 
 **`transport-divergence`** — one transport path passed but the other failed for
 the same scenario. The domain logic is correct; the wire format diverges:
-- If A2A passed but AG-UI failed: inspect the AG-UI `/run` SSE event stream.
-  Common causes: missing `TEXT_MESSAGE_CONTENT` events, wrong `AGENT_ARTIFACT`
-  MIME type, or `RUN_ERROR` emitted instead of graceful reply.
-- If AG-UI passed but A2A failed: inspect the A2A `message/stream` SSE events.
-  Common causes: `TaskArtifactUpdateEvent` MIME mismatch, `state: "failed"` on
-  the task, or reply text buried in a non-text Part.
+- If A2A passed but AG-UI failed: inspect the AG-UI `/ag-ui/run` SSE event stream.
+  Common causes: missing `TEXT_MESSAGE_CONTENT` events, wrong `CUSTOM` A2UI
+  payload, or `RUN_ERROR` emitted instead of graceful reply.
+- If AG-UI passed but A2A failed: inspect the A2A `message:stream` SSE events.
+  Common causes: `kind: "artifact-update"` MIME/`data_type` mismatch,
+  `status.state: "failed"` on the task, or reply text buried in a non-text Part.
 - Spawn an implementer targeting the route that failed
   (`agent_sdk/routes/ag_ui.py` or `agent_sdk/routes/a2a.py`). No domain code changes.
 - Server restart required before re-test.

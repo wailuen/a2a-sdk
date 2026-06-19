@@ -1,6 +1,6 @@
 """SC-F1: _validate_emits return-type enforcement at build_app() time.
 
-Seven cases:
+Eight cases:
   (a) tool annotated -> KpiCard           with emits=KpiCard  → passes build_app()
   (b) tool annotated -> Any               with emits=KpiCard  → passes
   (c) unannotated tool                    with emits=KpiCard  → passes
@@ -8,6 +8,7 @@ Seven cases:
   (e) tool annotated -> Optional[KpiCard] with emits=KpiCard  → passes  (RTGA-002)
   (f) tool annotated -> list[KpiCard]     with emits=KpiCard  → raises ValueError (RT-SC-F1-LIST)
   (g) Agent(persona=..., artifacts_dir=...) both supplied     → raises ValueError (RT-AGENT-PERSONA-EXCLUSIVE)
+  (h) tool annotated -> None              with emits=KpiCard  → raises ValueError (RT-002)
 """
 
 from __future__ import annotations
@@ -144,6 +145,27 @@ def test_emits_list_annotation_raises(tmp_path):
     async def my_tool() -> list[KpiCard]:  # type: ignore[return-value]
         """Returns a list — not permitted for emits=KpiCard."""
         return []
+
+    with pytest.raises(ValueError, match="return annotation"):
+        _agent(tmp_path, [tools]).build_app()
+
+
+# ── (h) annotated -> None, emits=KpiCard — must raise ValueError (RT-002) ───────
+# RT-002: inspect.get_annotations collapses `-> None` and no-annotation to the
+# same Python None.  Without a __annotations__ presence check the explicit-None
+# case is silently permitted, bypassing SC-F1 for the most obvious contradiction.
+
+def test_emits_explicit_none_annotation_raises(tmp_path):
+    """Explicit `-> None` annotation contradicts a non-None emits and must raise.
+
+    Regression guard for RT-002: before the fix, `ret is None: continue` treated
+    `-> None` and no annotation identically, silently skipping the SC-F1 check.
+    """
+    tools = ToolSet()
+
+    @tools.tool(emits=KpiCard)
+    async def my_tool() -> None:  # type: ignore[return-value]
+        """Explicitly annotated None — contradicts emits=KpiCard."""
 
     with pytest.raises(ValueError, match="return annotation"):
         _agent(tmp_path, [tools]).build_app()

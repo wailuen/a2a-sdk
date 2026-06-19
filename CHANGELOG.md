@@ -4,6 +4,67 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.19] — 2026-06-19
+
+### ✅ Features
+
+- **loop: `max_output_tokens` configurable via `LoopPolicies` (GH-73)** —
+  `LoopPolicies` gains `max_output_tokens: int = 8192` (`DEFAULT_MAX_OUTPUT_TOKENS`).
+  Every `model.converse()` call now forwards `max_tokens=policies.max_output_tokens`,
+  preventing silent model-side truncation on long completions. Default 8 192 matches
+  Bedrock Converse defaults; callers can override at `Agent` construction.
+
+### 🔧 Fixes
+
+- **harness/acceptance-api.js: A2A transport four-bug fix (GH-71)** —
+  1. URL corrected to `POST /v1/message:stream` (colon path, not `/v1/message/stream`).
+  2. JSON-RPC envelope removed — the HTTP+JSON binding takes a flat `MessageSendParams`
+     body, not a `{jsonrpc,method,id,params}` wrapper.
+  3. `messageId` added to every outgoing message (A2A v0.3.0 §4.1 MUST).
+  4. SSE event parsing switched to `ev["kind"]` (`"task"` / `"status-update"` /
+     `"artifact-update"`) — the A2A HTTP+JSON binding emits kind-discriminated objects,
+     not JSON-RPC method frames. `taskId` now harvested from the first `kind == "task"`
+     frame (authoritative) before the `status-update` fallback.
+
+- **sdk/agent: Bedrock credentials from credential store (GH-72)** —
+  `BedrockModelClient.__init__` accepts four kwargs: `bearer_token`,
+  `aws_access_key_id`, `aws_secret_access_key`, and `aws_session_token`.
+  `Agent._build_model_client()` resolves all four from `NS_BEDROCK` in the
+  encrypted credential store and forwards them; none are read from `os.environ`
+  (SI-6). `aws_session_token` is forwarded alongside the access/secret pair only
+  when present — it is required for STS / temporary credentials; long-lived IAM
+  keys omit it. Absence of all four falls through to the boto3 default chain
+  (env vars / instance-profile IAM). Thread-safe double-checked locking added to
+  `_boto_client()`. (Targeted 0.5.18; shipped under 0.5.19.)
+
+- **sdk/build: `-> None` return annotation no longer skips emits mismatch check (RT-002)** —
+  `inspect.get_annotations` collapses an explicit `-> None` and a missing annotation
+  to the same Python `None`. `app.py` now checks `fn.__annotations__` directly:
+  the emits/return-type validation is skipped only when `"return"` is absent from
+  `__annotations__`; an explicit `-> None` with a non-`None` `emits=` now raises
+  `ValueError` as intended.
+
+- **sdk/a2a: unknown-route 404 now emits -32603 not -32001 (RT-003)** —
+  `_A2A_CODE` previously mapped `404 → -32001` (TaskNotFound), mislabelling every
+  unrouted `/v1/` hit. The `404` entry is removed; the `.get(status, -32603)` fallback
+  applies instead. `-32001` is still raised explicitly by task routes when a task is
+  absent. `test_a2a_error_envelope.py::test_unknown_v1_route_404_a2a_envelope` tightened
+  to assert exactly `-32603`.
+
+### 🧪 Test / CI
+
+- `tests/test_gh71_acceptance_api_stream.py` — four AC tests covering the corrected
+  A2A streaming path: colon URL, flat body, `messageId` presence, `kind`-based SSE
+  event parsing.
+- `tests/test_bedrock_credential_store.py` — credential-store injection tests for
+  `BedrockModelClient` (`bearer_token`, IAM static keys, default-chain fallback).
+- `tests/test_emits_return_type.py` — case (h): explicit `-> None` with `emits=` raises
+  `ValueError` (was silently skipped).
+- `tests/test_a2a_error_envelope.py` — `test_unknown_v1_route_404_a2a_envelope` now
+  asserts `error.code == -32603` exactly.
+
+---
+
 ## [0.5.17] — 2026-06-19
 
 ### ✅ Features

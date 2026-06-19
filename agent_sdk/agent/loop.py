@@ -43,6 +43,7 @@ from ..sources import SourceAdapter
 
 TIER_TIMEOUTS = {1: 130.0, 2: 180.0}
 LOAD_SKILL_TOOL = "load_skill"
+DEFAULT_MAX_OUTPUT_TOKENS = 8192
 
 
 class ToolInterrupt(Exception):
@@ -74,6 +75,7 @@ class LoopPolicies:
     max_turns: int = 20
     deadline_seconds: float = 600.0
     token_budget: int = 200_000
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     tool_timeouts: dict[int, float] = field(default_factory=lambda: dict(TIER_TIMEOUTS))
 
 
@@ -306,7 +308,10 @@ async def run_loop(
 
         try:
             response = await model.converse(
-                system=system, messages=messages, tools=tool_specs
+                system=system,
+                messages=messages,
+                tools=tool_specs,
+                max_tokens=policies.max_output_tokens,
             )
         except AgentError as err:
             yield DoneEvent(ok=False, error=err.message)
