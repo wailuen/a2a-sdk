@@ -232,8 +232,15 @@ and an incremented `runId`.
 ### Workflow invocation
 
 ```
+// Using scriptPath instead of name: Workflow({name}) drops args in Claude Code's named-workflow resolver; remove once upstream bug is fixed.
+// Path note: when running from an agent repo (seeded via /new-agent or /upgrade),
+// this skill lives at .claude/skills/acceptance/SKILL.md and acceptance-api.js is
+// seeded to .claude/workflows/acceptance-api.js — use that path:
+//   scriptPath: `${require('child_process').execSync('git rev-parse --show-toplevel').toString().trim()}/.claude/workflows/acceptance-api.js`
+// When running from the SDK repo (the normal context for /acceptance),
+// acceptance-api.js lives at harness/workflows/acceptance-api.js.
 Workflow({
-  name: 'acceptance-api',
+  scriptPath: `${require('child_process').execSync('git rev-parse --show-toplevel').toString().trim()}/.claude/workflows/acceptance-api.js`,
   args: {
     scenarios: <parsed scenarios array>,
     baseUrl: <base_url>,
