@@ -43,9 +43,10 @@ Target: 0.5.21.
   - GH: https://github.com/wailuen/a2a-sdk/issues/78
 
 - [ ] `GH-81` sdk/loop: add agent_sdk.contrib.scheduler — domain schedulers silently non-functional ‖ group:G
-  - Creates: `agent_sdk/contrib/scheduler.py`, `tests/test_scheduler.py`
-  - Modifies: `agent_sdk/contrib/__init__.py`, `agent_sdk/__init__.py`
+  - Creates: `agent_sdk/contrib/scheduler.py`, `agent_sdk/scheduler.py`, `tests/test_scheduler.py`
+  - Modifies: `agent_sdk/contrib/__init__.py`, `agent_sdk/app.py`
   - Reads: `agent_sdk/app.py`, `agent_sdk/contrib/__init__.py`, `agent_sdk/__init__.py`
+  - Note: `agent_sdk/__init__.py` was declared in Modifies: but was not modified — the stub-module strategy (`agent_sdk/scheduler.py` raising ImportError) satisfied the migration-guide AC without needing an __init__.py re-export.
   - Severity: high
   - Root cause: `agent_sdk.scheduler` does not exist. Domain agents that write `from agent_sdk import scheduler` crash with `ModuleNotFoundError`. If wrapped in `try/except ImportError`, the agent boots normally but the scheduled job is permanently dead with no observable signal. The SDK has a canonical scheduling hook — `lifespan_extras` passed to `Agent()` — but it is only documented in a buried docstring at `app.py:137–139` and requires manual async plumbing that most domain authors won't write. The fix is a `contrib.scheduler` module that wraps `lifespan_extras` into a decorator-based API matching what domain authors already reach for.
   - AC:
