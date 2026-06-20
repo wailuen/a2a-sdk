@@ -58,6 +58,8 @@ Fix 5 protocol conformance bugs surfaced by downstream agents after the 0.4.0 re
 | W19 [x] ✅ 2026-06-18 (GH-66 carved → W19b, closed 2026-06-18) | w019-gh-issues.md | G | 6 | — |
 | W19b [x] ✅ 2026-06-18 GH-66 --from-github gitignore gap | w019b-gh66-reopened.md | G | 1 | — |
 | W20 [x] ✅ 2026-06-18 | w020-gh-issues.md | G | 4 | — |
+| W20b [x] ✅ 2026-06-20 | w020b-workflow-hardening.md | G | 3 | W20 |
+| W22 [x] ✅ 2026-06-20 | w022-gh-issues.md | G | 5 | — |
 
 ## Dependency graph
 
