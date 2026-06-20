@@ -4,6 +4,43 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.24] — 2026-06-20
+
+### 🟡 Protocol surface changes
+- eb303e5 feat(w023): TaskStatus.error extension declared with `https://` URI in agent card (GH-78)
+- eb303e5 feat(w023): credential-forwarding extension URI corrected to `https://` scheme (GH-79)
+- 2f5786b feat(w022): AG-UI transport made fail-closed — A2UI_UPDATE suppressed unless client sends `forwardedProps.a2uiClientCapabilities` (GH-74)
+- 2f5786b feat(w022): MCP absent-header behaviour: Streamable HTTP 400s on absent `Mcp-Protocol-Version`; legacy SSE exempted per spec §10 SHOULD (GH-77)
+- 2f5786b feat(w022): `POST /v1/tasks/{id}:subscribe` route confirmed correct per A2A v0.3.0 §2 binding table (GH-75, LRN-099)
+- 2f5786b feat(w022): `urn:agui:run:v1` extension URI corrected to `https://agent-sdk.dev/extensions/ag-ui-run/v1` (GH-85, LRN-097)
+- 6f5af70 fix(w022-redteam3): agent card now uses `registry.tier1()` — Tier-2 (A2A-only) tools no longer appear in card `skills` section (LRN-094)
+- bbfe353 fix(w022-redteam): `ag_ui_run` Content-Type 415 guard added; reject present non-JSON body before SSE stream opens (LRN-093 parity)
+
+### ✅ Features
+- eb303e5 feat(w023): `agent_sdk.contrib.Scheduler` — `@cron(interval_seconds)` decorator + `sched.lifespan` context manager for background jobs; `agent_sdk.scheduler` stub raises `ImportError` with migration guide (GH-81)
+- eb303e5 feat(w023): `/acceptance` skill wired to named workflow via `scriptPath` form (GH-83 workaround, LRN-096)
+- 2f5786b feat(w022): `A2uiCapabilities.for_custom_emit()` — per-transport A2UI capability resolver; `ag_ui.py` uses it to gate `A2UI_UPDATE` emission
+- 2f5786b feat(w022): `urn:agui:run:v1` → `https://` extension added to `capabilities.extensions` (GH-73)
+- 2f5786b feat(w022): `A2UI_UPDATE` valueSchema `messages.items.type='object'` added (GH-76)
+- 2f5786b feat(w022): `TaskStore.list_tasks_for_identity` returns `tuple[list[Task], str|None, int]`; third element is total match count for correct `totalSize` in `GET /v1/tasks` (GH-75)
+
+### 🔧 Fixes
+- eb303e5 feat(w023): wave-cycle archive gate extended to cover `tests/`, `workspace/learning/`, `workspace/scenarios/results/`, `workspace/prd/` paths via `offendingHarnessPaths` (GH-84)
+- f08214c fix(GH-83): acceptance skill `scriptPath` resolution hardened
+- f5249d8 fix(GH-84): archive null guard + commit gate hardened
+- 2f5786b feat(w022): `_create_task_record`/`_resume_or_error` archive `model_copy` of inbound `Message` — eliminates `contextId` mutation side-effect (LRN-048)
+- bbfe353 fix(w022-redteam): reference binding tables, `docs/protocols.md`, `DESIGN.md` corrected to `POST /v1/tasks/{id}:subscribe` (was `:resubscribe`)
+- bbfe353 fix(w022-redteam): `agent_sdk/routes/mcp.py` module docstring corrected to document Streamable vs legacy SSE absent-header divergence
+
+### 🧪 Test / CI
+- 993e2c5 fix(w023-redteam4): LRN frontmatter consistency guard test added; 8 id mismatches corrected
+- 6f5af70 fix(w022-redteam3): `test_card_mcp_surface_parity.py` — live card vs MCP `tools/list` parity test
+- 2f5786b feat(w022): tests for GH-73/74/75/76/77 (ag-ui caps, card extensions, MCP version gate, route, schema)
+
+### — Other
+- 986894a docs(w023): LRN-096/097/098 codified — named-workflow args drop, extension URI scheme, scheduler pattern
+- 25bb71a chore(w022): plan.md updated; w020b + w022 archived
+
 ## [0.5.19] — 2026-06-19
 
 ### ✅ Features
