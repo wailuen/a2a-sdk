@@ -18,9 +18,9 @@ A2A v0.3.0 places no scheme constraint on `AgentExtension.uri` — the field is 
 ## Check
 
 ```bash
-# Grep agent_sdk/ for any AgentExtension URI using urn: scheme (flag these)
-grep -rn 'uri=.urn:' agent_sdk/ --include="*.py"
-# Expected: zero matches for SDK-owned extensions (urn:agui:run:v1 is a spec-mandated exception)
+# Grep agent_sdk/ for any AgentExtension URI using urn: scheme, excluding the spec-mandated urn:agui:run:v1
+grep -rn 'uri=.urn:' agent_sdk/ --include="*.py" | grep -v 'urn:agui:run:v1'
+# Expected: zero matches
 
 # Confirm the served card carries https:// URIs for SDK-owned extensions
 curl -s <agent-url>/.well-known/agent.json | jq '.capabilities.extensions[].uri'

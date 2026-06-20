@@ -9,11 +9,11 @@ date: 2026-06-20
 
 ## What happened
 
-A domain agent tried to `from agent_sdk.scheduler import Scheduler` (or `import agent_sdk.scheduler`). This raised `ModuleNotFoundError` at startup. The author expected a top-level `scheduler` module analogous to other SDK utilities.
+A domain agent tried to `from agent_sdk.scheduler import Scheduler` (or `import agent_sdk.scheduler`). Pre-fix, this raised `ModuleNotFoundError` at startup because the module did not exist. Post-fix (GH-81, v0.5.21), `agent_sdk/scheduler.py` exists as a deliberate stub that raises `ImportError` with a migration message pointing to the correct import path.
 
 ## Root cause
 
-The Scheduler is not a standalone top-level module. It is part of `agent_sdk.contrib` and is wired in via the `lifespan_extras` mechanism. There is no `agent_sdk.scheduler` module — the import path simply does not exist.
+The Scheduler is not a top-level module — it is part of `agent_sdk.contrib`. `agent_sdk/scheduler.py` is an intentional stub: it exists so the import path is discovered rather than missing, but it immediately raises `ImportError` with a clear message directing authors to `from agent_sdk.contrib import Scheduler`.
 
 ## Check
 
@@ -22,7 +22,7 @@ python -c "from agent_sdk.contrib import Scheduler; print('ok')"
 # Should print: ok
 
 python -c "import agent_sdk.scheduler"
-# Should raise: ModuleNotFoundError
+# Should raise: ImportError (not ModuleNotFoundError — the stub module exists but raises ImportError)
 ```
 
 ## Prevention
