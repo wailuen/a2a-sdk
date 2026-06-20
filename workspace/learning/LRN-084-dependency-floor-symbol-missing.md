@@ -1,5 +1,5 @@
 ---
-id: LRN-077
+id: LRN-084
 title: Dependency floor too low — mocked tests hide AttributeError on permitted versions
 category: sdk
 severity: critical

@@ -1,5 +1,5 @@
 ---
-id: LRN-080
+id: LRN-086
 title: Companion SKILL.md re-documents broken wire protocol after workflow fix
 category: protocol
 severity: high

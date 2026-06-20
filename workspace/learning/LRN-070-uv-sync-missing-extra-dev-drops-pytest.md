@@ -1,5 +1,5 @@
 ---
-id: LRN-054
+id: LRN-070
 title: uv sync without --extra dev omits test deps and breaks pytest
 category: ops
 severity: high

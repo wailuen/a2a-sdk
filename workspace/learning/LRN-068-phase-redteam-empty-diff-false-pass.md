@@ -1,5 +1,5 @@
 ---
-id: LRN-054
+id: LRN-068
 title: Phase redteam scores ACs against unimplemented wave targets
 category: testing
 severity: high

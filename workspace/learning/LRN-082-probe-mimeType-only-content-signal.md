@@ -1,5 +1,5 @@
 ---
-id: LRN-074
+id: LRN-082
 title: A2A probes using only mimeType miss ContentModel DataPart content-type signals
 category: testing
 severity: high
