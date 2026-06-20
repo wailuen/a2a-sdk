@@ -55,6 +55,7 @@ Target: 0.5.20.
     - **Breaking interface change (TaskStore):** `TaskStore.list_tasks_for_identity()` return type extended from `tuple[list[Task], str | None]` to `tuple[list[Task], str | None, int]`; the third element is the total count of all matching tasks regardless of cursor position. This fixes `totalSize` in `GET /v1/tasks` responses, which previously returned `len(page)` (current page only) instead of the full match count. The abstract method in `store.py`, concrete implementation in `memory.py`, and the sole caller at `a2a.py:345` are all updated together. External `TaskStore` subclass implementors must update their `list_tasks_for_identity` return to include the total count.
     - LRN-048 hardening in `a2a.py`: `_create_task_record` and `_resume_or_error` now archive a `model_copy` of the inbound `Message` with server-assigned `contextId` rather than mutating the original object, eliminating the contextId mutation side-effect on caller-held references.
   - GH: https://github.com/wailuen/a2a-sdk/issues/75
+  - **REVERTED per LRN-099:** The route-rename AC above (`:subscribe` → `:resubscribe`) was superseded during w022. A2A v0.3.0 §2 transport table maps `tasks/resubscribe` method to REST path `POST /v1/tasks/{id}:subscribe` — the rename direction in GH-75 was a spec misread. Landed: `:subscribe` retained; `totalSize`/LRN-048 fixes shipped as planned.
 
 - [x] `GH-76` agent_card: A2UI_UPDATE valueSchema messages missing items definition ‖ group:G
   - Modifies: `agent_sdk/routes/agent_card.py`
