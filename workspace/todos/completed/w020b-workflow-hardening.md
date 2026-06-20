@@ -24,7 +24,7 @@ All paths confirmed git-tracked (LRN-052). Run in parallel (group:G).
     - `tests/test_workflow_sync.py` asserts the two copies are byte-identical and fails on any future drift
   - Resolves: RT-001, RT-002, RT-003
 
-- [ ] `WH-2` Review the landed sdk-wave.js scope-union + redteam-dimension changes ‖ group:G
+- [x] `WH-2` Review the landed sdk-wave.js scope-union + redteam-dimension changes ‖ group:G
   - Modifies: `.claude/workflows/sdk-wave.js`
   - Reads: `.claude/workflows/sdk-wave.js`, `.claude/agents/core/redteam.md`
   - Severity: high
@@ -33,7 +33,7 @@ All paths confirmed git-tracked (LRN-052). Run in parallel (group:G).
     - `grep -nE 'allCreates|group\.creates' .claude/workflows/sdk-wave.js` returns only schema / parse-prompt / derivation-block lines
     - The unit AND phase redteam prompts each carry an explicit Dimension 5 (no stubs/placeholders/unmet ACs)
 
-- [ ] `WH-3` Review the .gitignore worktrees + ADR-glob additions and the harness/CLAUDE.md reduction ‖ group:G
+- [x] `WH-3` Review the .gitignore worktrees + ADR-glob additions and the harness/CLAUDE.md reduction ‖ group:G
   - Modifies: `.gitignore`, `harness/CLAUDE.md`
   - Reads: `.gitignore`, `harness/CLAUDE.md`, `template/CLAUDE.md`
   - Severity: medium

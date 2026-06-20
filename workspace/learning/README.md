@@ -102,3 +102,4 @@ Entries ordered by LRN number.
 | LRN-096 | Workflow({name, args}) drops args — named-workflow resolver has undefined args global | [LRN-096](LRN-096-workflow-named-args-dropped.md) |
 | LRN-097 | AgentExtension URIs must use https:// scheme — URN-scheme URIs silently dropped by consumer allowlists | [LRN-097](LRN-097-agent-extension-uri-must-be-https.md) |
 | LRN-098 | Scheduler-as-lifespan-extra pattern — import agent_sdk.scheduler does not exist | [LRN-098](LRN-098-scheduler-as-lifespan-extra-pattern.md) |
+| LRN-099 | A2A REST action suffix can differ from JSON-RPC method name — tasks/resubscribe maps to :subscribe path | [LRN-099](LRN-099-a2a-rest-suffix-differs-from-method-name.md) |

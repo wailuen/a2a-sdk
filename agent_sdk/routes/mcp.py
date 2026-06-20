@@ -706,14 +706,14 @@ async def mcp_messages(
     is_initialize = message.get("method") == "initialize"
 
     version = _negotiated_version(request)
-    if (version is None or version is _HEADER_ABSENT) and not is_initialize:
-        # MCP spec §10: absent or unrecognized version header on a non-initialize
-        # request → 400; advertise a version we support so the client can retry.
+    if version is None and not is_initialize:
         return JSONResponse(
             status_code=400,
             content={"error": "MCP-Protocol-Version header required"},
             headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
         )
+    if version is _HEADER_ABSENT:
+        version = SUPPORTED_PROTOCOL_VERSIONS[-1]
 
     token = forwarding.bind(forwarding.parse_header(request.headers.get(forwarding.HEADER_NAME)))
     try:

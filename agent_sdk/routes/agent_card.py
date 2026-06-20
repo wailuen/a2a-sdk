@@ -132,7 +132,7 @@ def build_agent_card(
     extensions = [
         a2ui_extension(allowed_components),
         AgentExtension(
-            uri="urn:agui:run:v1",
+            uri="https://agent-sdk.dev/extensions/ag-ui-run/v1",
             description="AG-UI streaming run endpoint (SSE)",
             required=False,
             params={"endpoint": f"{base_url}/ag-ui/run"},

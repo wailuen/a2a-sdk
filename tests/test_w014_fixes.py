@@ -13,12 +13,16 @@ from .conftest import wait_for_state
 
 
 # ---------------------------------------------------------------------------
-# GH-32 / GH-75: POST /v1/tasks/{id}:resubscribe (A2A §5.3)
+# GH-32 / GH-75 (corrected): POST /v1/tasks/{id}:subscribe (A2A §2 + §3.5.6)
+# REST action suffix is :subscribe; JSON-RPC method name is tasks/resubscribe.
 # ---------------------------------------------------------------------------
 
 
-async def test_resubscribe_route_exists(client, fake_model):
-    """GH-75 AC: POST /v1/tasks/{task_id}:resubscribe must return SSE, not 404."""
+async def test_subscribe_route_exists(client, fake_model):
+    """GH-75 AC (corrected): POST /v1/tasks/{task_id}:subscribe must return SSE, not 404.
+
+    A2A §2 transport table and §3.5.6 confirm the REST path is :subscribe.
+    """
     fake_model.script(reply("done"))
     r = await client.post(
         "/v1/message:send",
@@ -34,18 +38,15 @@ async def test_resubscribe_route_exists(client, fake_model):
     task_id = r.json()["id"]
     await wait_for_state(client, task_id)
 
-    r2 = await client.post(f"/v1/tasks/{task_id}:resubscribe")
+    r2 = await client.post(f"/v1/tasks/{task_id}:subscribe")
     assert r2.status_code != 404, (
-        f"POST /v1/tasks/{{id}}:resubscribe returned 404 — route must be :resubscribe per A2A §5.3"
+        f"POST /v1/tasks/{{id}}:subscribe returned 404 — route must be :subscribe per A2A §2/§3.5.6"
     )
-    # The route exists (SSE or the task already closed — either is acceptable).
     assert r2.status_code in (200, 400, 410), f"Unexpected status: {r2.status_code}"
 
 
-async def test_subscribe_route_gone(client, fake_model):
-    """GH-75: :subscribe path must not succeed — clients must use :resubscribe.
-    FastAPI returns 405 (task_id captures the ':subscribe' suffix as a GET route match)
-    or 404 when no route matches at all; either is acceptable as "not a working endpoint"."""
+async def test_resubscribe_route_gone(client, fake_model):
+    """GH-75 (corrected): :resubscribe path must 404 — it was a misread of the spec."""
     fake_model.script(reply("done"))
     r = await client.post(
         "/v1/message:send",
@@ -59,9 +60,9 @@ async def test_subscribe_route_gone(client, fake_model):
     )
     task_id = r.json()["id"]
     await wait_for_state(client, task_id)
-    r2 = await client.post(f"/v1/tasks/{task_id}:subscribe")
+    r2 = await client.post(f"/v1/tasks/{task_id}:resubscribe")
     assert r2.status_code in (404, 405), (
-        f":subscribe should be 404 or 405 (route removed); got {r2.status_code}"
+        f":resubscribe should be 404 or 405 (route never existed); got {r2.status_code}"
     )
 
 

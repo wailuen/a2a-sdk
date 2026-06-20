@@ -168,12 +168,13 @@ async def test_legacy_initialize_with_version_header_returns_202(
         _cleanup_sse_session(app, session_id)
 
 
-async def test_legacy_non_initialize_absent_version_header_returns_400(
+async def test_legacy_non_initialize_absent_version_header_returns_202(
     client: httpx.AsyncClient, app
 ) -> None:
     """POST a non-initialize method to /mcp/messages with no MCP-Protocol-Version
-    header must still return 400 — the carve-out must not weaken the header
-    requirement for post-handshake requests (MCP spec §10)."""
+    header must return 202 on the legacy SSE transport — MCP spec §10 says
+    absent header SHOULD assume 2025-03-26 (a SHOULD, not a MUST), so the
+    legacy path proceeds with the assumed default rather than rejecting."""
     bearer = client.headers["authorization"].removeprefix("Bearer ")
     owner = _owner_for_client(app, bearer)
     session_id, queue = _register_sse_session(app, owner)
@@ -182,10 +183,33 @@ async def test_legacy_non_initialize_absent_version_header_returns_400(
             "/mcp/messages",
             params={"session_id": session_id},
             json={"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}},
-            # deliberately no MCP-Protocol-Version header
+        )
+        assert r.status_code == 202, (
+            f"legacy non-initialize with absent version header must return 202; "
+            f"got {r.status_code}: {r.text}"
+        )
+    finally:
+        _cleanup_sse_session(app, session_id)
+
+
+async def test_legacy_non_initialize_unrecognized_version_returns_400(
+    client: httpx.AsyncClient, app
+) -> None:
+    """POST a non-initialize method to /mcp/messages with a present but
+    unrecognized MCP-Protocol-Version header must return 400 — the None
+    branch (present-but-unrecognized) is still rejected."""
+    bearer = client.headers["authorization"].removeprefix("Bearer ")
+    owner = _owner_for_client(app, bearer)
+    session_id, queue = _register_sse_session(app, owner)
+    try:
+        r = await client.post(
+            "/mcp/messages",
+            params={"session_id": session_id},
+            json={"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}},
+            headers={"MCP-Protocol-Version": "9999-99-99"},
         )
         assert r.status_code == 400, (
-            f"legacy non-initialize with absent version header must return 400; "
+            f"legacy non-initialize with unrecognized version must return 400; "
             f"got {r.status_code}: {r.text}"
         )
     finally:

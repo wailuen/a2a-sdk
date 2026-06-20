@@ -6,7 +6,7 @@ Target: 0.5.20.
 
 ---
 
-- [ ] `GH-74` ag_ui: A2UI_UPDATE must not fire without client opt-in — make AG-UI transport fail-closed ‖ group:G
+- [x] `GH-74` ag_ui: A2UI_UPDATE must not fire without client opt-in — make AG-UI transport fail-closed ‖ group:G
   - Modifies: `agent_sdk/routes/ag_ui.py`, `agent_sdk/a2ui/translator.py`
   - Reads: `agent_sdk/routes/ag_ui.py`, `agent_sdk/a2ui/translator.py`
   - Severity: high
@@ -19,7 +19,7 @@ Target: 0.5.20.
     - `A2uiCapabilities.for_custom_emit()` added to `translator.py`: returns self when `tier=='none'`, otherwise returns a `core+extended` caps instance — allows the AG-UI emit path to bypass catalog-membership gating (LRN-049) without changing the A2A DataPart gate; `ag_ui.py` uses this instead of passing `self.capabilities` directly to `translate()`
   - GH: https://github.com/wailuen/a2a-sdk/issues/74
 
-- [ ] `GH-73` agent_card: add urn:agui:run:v1 to capabilities.extensions ‖ group:G
+- [x] `GH-73` agent_card: add urn:agui:run:v1 to capabilities.extensions ‖ group:G
   - Modifies: `agent_sdk/routes/agent_card.py`
   - Reads: `agent_sdk/routes/agent_card.py`
   - Severity: medium
@@ -30,7 +30,7 @@ Target: 0.5.20.
     - A unit test asserts the built card's `capabilities.extensions` contains `urn:agui:run:v1`
   - GH: https://github.com/wailuen/a2a-sdk/issues/73
 
-- [ ] `GH-77` mcp: return 400 when MCP-Protocol-Version absent on post-init requests ‖ group:G
+- [x] `GH-77` mcp: return 400 when MCP-Protocol-Version absent on post-init requests ‖ group:G
   - Modifies: `agent_sdk/routes/mcp.py`
   - Reads: `agent_sdk/routes/mcp.py`
   - Severity: medium
@@ -43,7 +43,7 @@ Target: 0.5.20.
     - Regression test: POST to `initialize` with no `MCP-Protocol-Version` header still proceeds normally
   - GH: https://github.com/wailuen/a2a-sdk/issues/77
 
-- [ ] `GH-75` a2a: rename tasks/:subscribe route to :resubscribe per A2A HTTP+JSON binding ‖ group:G
+- [x] `GH-75` a2a: rename tasks/:subscribe route to :resubscribe per A2A HTTP+JSON binding ‖ group:G
   - Modifies: `agent_sdk/routes/a2a.py`, `agent_sdk/tasks/store.py`, `agent_sdk/tasks/memory.py`
   - Reads: `agent_sdk/routes/a2a.py`, `agent_sdk/tasks/store.py`, `agent_sdk/tasks/memory.py`
   - Severity: low
@@ -56,7 +56,7 @@ Target: 0.5.20.
     - LRN-048 hardening in `a2a.py`: `_create_task_record` and `_resume_or_error` now archive a `model_copy` of the inbound `Message` with server-assigned `contextId` rather than mutating the original object, eliminating the contextId mutation side-effect on caller-held references.
   - GH: https://github.com/wailuen/a2a-sdk/issues/75
 
-- [ ] `GH-76` agent_card: A2UI_UPDATE valueSchema messages missing items definition ‖ group:G
+- [x] `GH-76` agent_card: A2UI_UPDATE valueSchema messages missing items definition ‖ group:G
   - Modifies: `agent_sdk/routes/agent_card.py`
   - Reads: `agent_sdk/routes/agent_card.py`
   - Severity: low
