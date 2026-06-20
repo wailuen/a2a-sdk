@@ -343,6 +343,9 @@ def _start_worker(request: Request, record: TaskRecord, capabilities: A2uiCapabi
 async def ag_ui_run(
     request: Request, identity: Identity = Depends(require_identity)
 ) -> Response:
+    ct = request.headers.get("content-type", "")
+    if ct and "application/json" not in ct:
+        return Response(status_code=415)
     raw = await request.body()
     if len(raw) > _MAX_BODY_BYTES:
         return Response(status_code=413, content=b"request body too large")

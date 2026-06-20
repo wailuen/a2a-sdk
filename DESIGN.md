@@ -93,7 +93,7 @@ agent_sdk/
 │   ├── skills.py           # SkillsRegistry: SKILL.md scan, catalog, load_skill tool
 │   └── events.py           # typed loop events
 ├── routes/
-│   ├── a2a.py              # message:send/stream, tasks/{id}, :cancel, :resubscribe
+│   ├── a2a.py              # message:send/stream, tasks/{id}, :cancel, :subscribe
 │   ├── agent_card.py       # /.well-known/agent-card.json (+ legacy agent.json), ETag
 │   ├── ag_ui.py            # POST /ag-ui/run (SSE)
 │   ├── mcp.py              # /mcp Streamable HTTP (POST+GET+DELETE) + legacy SSE pair
@@ -253,14 +253,14 @@ Endpoints:
 
 - `POST /v1/message:send` → **HTTP 200**, result is **`Task | Message`**: a `Message` when the agent completes synchronously without creating a task (supported by the SDK for trivial/echo flows), a `Task` snapshot otherwise.
 - `POST /v1/message:stream` → SSE: first frame full Task, then `TaskStatusUpdateEvent` / `TaskArtifactUpdateEvent`, last frame carries `final: true`.
-- `GET /v1/tasks/{id}`; `POST /v1/tasks/{id}:cancel` — success returns **HTTP 200 with the full `Task` in `canceled` state** (spec-required result, not an empty body); unknown id → 404 + `-32001`; terminal state → 409 + `-32002`; `POST /v1/tasks/{id}:resubscribe` (unknown id → 404 + `-32001`).
+- `GET /v1/tasks/{id}`; `POST /v1/tasks/{id}:cancel` — success returns **HTTP 200 with the full `Task` in `canceled` state** (spec-required result, not an empty body); unknown id → 404 + `-32001`; terminal state → 409 + `-32002`; `POST /v1/tasks/{id}:subscribe` (unknown id → 404 + `-32001`).
 - `GET /v1/tasks` → 200, identity-scoped paginated list. Query params: `pageSize` (default 50, clamped 1–100), `pageToken` (opaque cursor). Response: `{tasks, totalSize, pageSize, nextPageToken}`. Identity binding same as `GET /v1/tasks/{id}`.
 
 Inbound `Message` validation: `messageId` is required (spec REQ); missing → 400 invalid params.
 
 `MessageSendParams.configuration` is a typed **`MessageSendConfiguration`** model (`acceptedOutputModes?, historyLength?, pushNotificationConfig?, blocking?`) — never a raw dict. The SDK honors `acceptedOutputModes` and `historyLength`; `pushNotificationConfig` present → `-32003 PushNotificationNotSupported` (capability is false); `blocking: true` the server can't honor → `-32004` (the spec leaves this code unspecified; -32004 is the documented local convention).
 
-**Task identity binding (security):** every task records its creating identity (`kind` + id, §6). `GET`, `:resubscribe`, `:cancel`, and resume require the same identity (admin `api_key` identities may override); mismatch → 404 + `-32001` — existence is not leaked. Without this, anyone who learns a taskId from a log or trace could read it or, worse, confirm another identity's pending action_gate proposal.
+**Task identity binding (security):** every task records its creating identity (`kind` + id, §6). `GET`, `:subscribe`, `:cancel`, and resume require the same identity (admin `api_key` identities may override); mismatch → 404 + `-32001` — existence is not leaked. Without this, anyone who learns a taskId from a log or trace could read it or, worse, confirm another identity's pending action_gate proposal.
 
 **Interrupt / resume flow** (required by `contrib.action_gate` and spec lifecycle): `input-required` and `auth-required` are non-terminal interrupt states; the stream MAY close `final: true` while the task is interrupted. A `message/send` (or `:stream`) whose `message.taskId` references an existing task: terminal state → error; `input-required`/`auth-required` → **resume that task** (same `contextId`, same identity, message handed to the paused worker via the task store's resume channel) — never create a new task. While interrupted, the per-task wall-clock deadline is **suspended** (§8) and the interrupted-task TTL (§5.2) governs expiry instead.
 
@@ -294,7 +294,7 @@ Lifecycle rules the implementation must honor:
 - **Interrupted tasks** get their own TTL (`AGENT_SDK_INTERRUPT_TTL`, default 30 min — a confirmation window, distinct from the general 1h task TTL) and are excluded from LRU pressure-eviction while waiting — bounded by `AGENT_SDK_MAX_INTERRUPTED` (default 100): at the cap, a new interrupt becomes a typed task failure instead of pinning another worker (each interrupted task holds a paused coroutine; without the cap an interrupt flood bypasses the LRU bound). On interrupt-TTL expiry or any eviction, the store **cancels the paused worker coroutine, closes the resume channel, and sentinel-closes all subscriber queues** — nothing leaks; a later resume gets 404 + -32001.
 - **Subscriber queue overflow** (slow consumer hits maxsize 256): that subscriber's stream is terminated without a `final` frame — never silent frame-dropping, which could swallow `final: true` and hang the consumer forever. Termination engages the documented re-subscribe path.
 
-Documented consumer contract: a stream severed without a `final` frame → re-`:resubscribe` (A2A HTTP+JSON binding §5.3); 404 → task expired (restart, TTL, or confirmation window elapsed).
+Documented consumer contract: a stream severed without a `final` frame → re-`:subscribe` (A2A HTTP+JSON binding §5.3); 404 → task expired (restart, TTL, or confirmation window elapsed).
 
 ### 5.3 AG-UI
 

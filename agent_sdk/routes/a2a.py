@@ -398,6 +398,7 @@ async def tasks_cancel(
     return JSONResponse(_task_wire(record))
 
 
+# Handler name reflects JSON-RPC method tasks/resubscribe; REST path is :subscribe per A2A v0.3.0 §2 binding table (see LRN-099).
 @router.post("/v1/tasks/{task_id}:subscribe")
 async def tasks_resubscribe(
     task_id: str, request: Request, response: Response, identity: Identity = Depends(require_identity)

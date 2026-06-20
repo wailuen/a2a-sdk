@@ -18,8 +18,10 @@ else our highest), ``ping``, ``tools/list`` (Tier 1 only — surface parity rule
 (text block always + ``structuredContent`` only under a declared output
 schema; tool failures are ``isError: true`` results, NEVER JSON-RPC errors).
 ``notifications/*`` → 202 empty, never answered. ``MCP-Protocol-Version``
-header required on non-initialize requests (absent → 400, spec §10);
-present but unrecognized → 400.
+header handling differs by path: Streamable HTTP (``POST /mcp``) — absent
+→ 400, present-but-unrecognized → 400 (spec §10 MUST); Legacy SSE
+(``POST /mcp/messages``) — absent → allowed, assume 2025-03-26 per §10
+SHOULD back-compat carve-out, present-but-unrecognized → 400.
 
 Auth: ``Depends(require_identity)`` — api_key and oauth kinds both accepted;
 401s carry the PRM-pointing ``WWW-Authenticate`` via auth/middleware. OAuth
@@ -706,6 +708,8 @@ async def mcp_messages(
     is_initialize = message.get("method") == "initialize"
 
     version = _negotiated_version(request)
+    # Legacy path: _HEADER_ABSENT (header omitted) → assume oldest supported version (§10 SHOULD
+    # back-compat); None (header present but unrecognized) → 400. Streamable path rejects both.
     if version is None and not is_initialize:
         return JSONResponse(
             status_code=400,

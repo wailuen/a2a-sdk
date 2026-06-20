@@ -64,7 +64,7 @@ portable across transports.
 | `message/stream` | POST `/v1/message:stream` | `MessageSendParams` → stream | **yes** (cap `streaming`) |
 | `tasks/get` | GET `/v1/tasks/{id}?historyLength=` | `TaskQueryParams` → `Task` | no |
 | `tasks/cancel` | POST `/v1/tasks/{id}:cancel` | `TaskIdParams` → `Task` | no |
-| `tasks/resubscribe` | POST `/v1/tasks/{id}:resubscribe` | `TaskIdParams` → stream | **yes** |
+| `tasks/resubscribe` | POST `/v1/tasks/{id}:subscribe` | `TaskIdParams` → stream | **yes** |
 | `tasks/pushNotificationConfig/set` | POST `/v1/tasks/{id}/pushNotificationConfigs` | `TaskPushNotificationConfig` → same | no (cap `pushNotifications`) |
 | `…/get` `…/list` `…/delete` | GET/GET/DELETE on `…/pushNotificationConfigs[/{cfgId}]` | — | no |
 | `agent/getAuthenticatedExtendedCard` | GET `/v1/card` | → `AgentCard` | no |

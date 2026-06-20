@@ -13,7 +13,7 @@ identically across protocols.
 | `POST /v1/message:stream` | SSE; first frame is the **full Task**, then status/artifact frames until `final: true` |
 | `GET /v1/tasks/{id}` | Task; `historyLength` truncates (0 → `[]`) |
 | `POST /v1/tasks/{id}:cancel` | 200 + canceled Task; 404/409 per table |
-| `POST /v1/tasks/{id}:resubscribe` | re-attach SSE |
+| `POST /v1/tasks/{id}:subscribe` | re-attach SSE |
 | `GET /v1/tasks` | 200; identity-scoped paginated list — query params `pageSize` (1–100, default 50) and `pageToken`; response `{tasks, totalSize, pageSize, nextPageToken}` |
 
 Error table (body `{"error": {code, message}}`): unknown/foreign task →
@@ -28,7 +28,7 @@ Supported output modes: `text`, `text/plain`, `application/json`,
 activated subset (the A2UI extension URI).
 
 A severed stream **without** a `final: true` frame means re-subscribe via
-`tasks/{id}:resubscribe` — that is the documented recovery signal (A2A §5.3).
+`tasks/{id}:subscribe` — that is the documented recovery signal (A2A §5.3).
 
 ## AG-UI (`POST /ag-ui/run`, SSE)
 
