@@ -1,5 +1,5 @@
 ---
-id: LRN-079
+id: LRN-085
 title: Wave todos touching harness/workflows/*.js must list the template/.claude/workflows/ peer-repo runtime copy as a deliverable
 category: ops
 severity: low
