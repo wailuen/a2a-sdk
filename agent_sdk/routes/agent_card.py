@@ -154,7 +154,9 @@ def build_agent_card(
         ),
         "defaultInputModes": ["text/plain"],
         "defaultOutputModes": ["text/plain", "application/json", "application/a2ui+json"],
-        "skills": [_skill_for(e) for e in registry.all()],
+        # Tier-2 tools are A2A-only (§5.6); MCP tools/list exposes tier-1 only.
+        # The card must not advertise tools MCP consumers cannot call (LRN-094).
+        "skills": [_skill_for(e) for e in registry.tier1()],
         "supportsAuthenticatedExtendedCard": False,
         "securitySchemes": {"bearer": {"type": "http", "scheme": "bearer"}},
         "security": [{"bearer": []}],

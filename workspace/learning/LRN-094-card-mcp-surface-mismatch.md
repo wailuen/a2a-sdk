@@ -15,10 +15,10 @@ The card build path and the MCP dispatch path use different registry filters (`a
 
 ## Check
 ```
-grep -n "registry\.all()" src/agent_sdk/agent_card.py
-grep -n "registry\.tier1()" src/agent_sdk/mcp.py
+grep -n "registry\.all()" agent_sdk/routes/agent_card.py
+grep -n "registry\.tier1()" agent_sdk/routes/mcp.py
 ```
-Confirm that `build_agent_card` does NOT call `registry.all()` (or if it does, every tier-2 tool in the result carries a machine-readable `surfaces` restriction). Also verify: `pytest -k "card_skills_match_mcp_tools"` passes.
+Confirm that `build_agent_card` does NOT call `registry.all()` (or if it does, every tier-2 tool in the result carries a machine-readable `surfaces` restriction). Also verify: `pytest tests/test_card_mcp_surface_parity.py` passes.
 
 ## Prevention
 When planning any feature that adds a new tool tier or surface filter, ensure the agent-card build path is updated in the same unit of work to match the MCP dispatch filter. A test asserting that every unrestricted card skill has a matching entry in MCP `tools/list` must be added or remain green.
