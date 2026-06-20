@@ -355,6 +355,15 @@ class Agent:
         if self.settings.azure_storage_account_name is not None:
             from .credentials.azure_table import AzureTableCredentialStore
 
+            if self.settings.dev_mode:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "Credential store: AZURE_STORAGE_ACCOUNT_NAME is set but "
+                    "AZURE_STORAGE_CONNECTION_STRING is absent. In dev, this requires "
+                    "`az login` (DefaultAzureCredential). Use Azurite instead: "
+                    "set AZURE_STORAGE_CONNECTION_STRING=UseDevelopmentStorage=true "
+                    "and start Azurite (`azurite --silent --location /tmp/azurite`)."
+                )
             return AzureTableCredentialStore(
                 master_key,
                 account_name=self.settings.azure_storage_account_name,
