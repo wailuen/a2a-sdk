@@ -4,6 +4,17 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.28] — 2026-06-21
+
+### ✅ Features
+- acd28c9 feat(w024/GH-86): emit boot warning + ValueError when AGENT_NAME is placeholder at boot
+
+### 🔧 Fixes
+- 9c8e8d4 fix(azure-dev): warn at boot when AZURE_STORAGE_ACCOUNT_NAME set without connection string in DEV_MODE
+
+### 📖 Docs
+- 6798bbb docs(harness): add no-mock rule for SDK tests in tests/
+
 ## [0.5.24] — 2026-06-20
 
 ### 🟡 Protocol surface changes
