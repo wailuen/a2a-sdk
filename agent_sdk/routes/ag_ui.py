@@ -40,6 +40,7 @@ from ..agent.events import (
     ProgressEvent,
     TextEvent,
     ToolCallEvent,
+    ToolProgressEvent,
     ToolResultEvent,
     TurnStartedEvent,
 )
@@ -251,6 +252,13 @@ class _RunMapper:
                 }
             )
             return frames
+
+        if isinstance(event, ToolProgressEvent):
+            # GH-88: interim event from an async-generator tool.
+            return [self._custom(
+                "TOOL_PROGRESS",
+                {"message": event.message, "toolName": event.tool_name},
+            )]
 
         if isinstance(event, ProgressEvent):
             return [self._custom("AGENT_PROGRESS", {"message": event.message})]

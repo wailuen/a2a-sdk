@@ -17,6 +17,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+# RT-W025-004: module-level set that holds strong references to deferred
+# background tasks, following the same pattern as contrib/webhooks/dispatch.py.
+# Python 3.12+ event-loop keeps only *weak* references to tasks; without a
+# strong reference the GC can silently discard a running background task and
+# leave the A2A task stuck in WORKING state forever.
+_background_tasks: set[asyncio.Task[Any]] = set()
+
 from pydantic import BaseModel
 
 from ..a2ui.translator import A2uiCapabilities, translate
@@ -34,6 +41,7 @@ from ..models.a2a import (
 from ..models.content_types import A2UI_MIME_TYPE, ContentModel
 from ..models.errors import AgentError, ErrorCategory, WireError
 from ..tasks.store import TaskRecord, TaskStore
+from .deferred import DeferredEvent
 from .events import (
     ArtifactEvent,
     DoneEvent,
@@ -41,6 +49,8 @@ from .events import (
     NoteEvent,
     ProgressEvent,
     TextEvent,
+    ToolProgressEvent,
+    ToolResultEvent,
     UsageEvent,
 )
 from .loop import LoopPolicies, run_loop
@@ -196,6 +206,97 @@ def build_artifact(
     )
 
 
+async def _run_deferred_background(
+    *,
+    store: "TaskStore",
+    record: "TaskRecord",
+    event: DeferredEvent,
+    capabilities: "A2uiCapabilities",
+) -> None:
+    """GH-87: Background awaiter for a deferred tool result.
+
+    Awaits ``event.deferred.handle`` under ``event.timeout_seconds`` and
+    transitions the A2A task to COMPLETED (with a terminal artifact) or
+    FAILED (on timeout / exception).  The runner calls this via
+    ``asyncio.create_task`` immediately after receiving a ``DeferredEvent``;
+    the main loop has already exited and the record is in WORKING state.
+
+    SI-2: exception text from the handle is not echoed — only a fixed
+    "deferred job timed out" / "deferred job failed" string is published.
+    """
+
+    def publish(frame: dict[str, Any] | None, ev: Any, *, final: bool = False) -> None:
+        store.publish(record.task.id, StreamItem(frame=frame, event=ev, final=final))
+
+    try:
+        raw_result = await asyncio.wait_for(
+            event.deferred.handle,
+            timeout=event.timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        error_msg = "deferred job timed out"
+        wire_err = WireError(code=-32603, message=error_msg)
+        _set_status(record, TaskState.FAILED, _agent_message(record, error_msg), error=wire_err)
+        done_ev = DoneEvent(ok=False, error=error_msg)
+        publish(_status_frame(record, final=True), done_ev, final=True)
+        store.close_streams(record.task.id)
+        return
+    except asyncio.CancelledError:
+        # W025-GH87-CANCEL-001: transition to FAILED and close streams so that
+        # a persistent store never sees a stuck-WORKING task after cancellation,
+        # and SSE subscribers are unblocked before the CancelledError propagates.
+        error_msg = "deferred job cancelled"
+        wire_err = WireError(code=-32603, message=error_msg)
+        _set_status(record, TaskState.FAILED, _agent_message(record, error_msg), error=wire_err)
+        publish(_status_frame(record, final=True), DoneEvent(ok=False, error=error_msg), final=True)
+        store.close_streams(record.task.id)
+        raise
+    except Exception:
+        error_msg = "deferred job failed"
+        wire_err = WireError(code=-32603, message=error_msg)
+        _set_status(record, TaskState.FAILED, _agent_message(record, error_msg), error=wire_err)
+        done_ev = DoneEvent(ok=False, error=error_msg)
+        publish(_status_frame(record, final=True), done_ev, final=True)
+        store.close_streams(record.task.id)
+        return
+
+    # Build and deliver the terminal artifact, then transition to COMPLETED.
+    artifact_ev = ArtifactEvent(
+        data_type=getattr(event.emits, "data_type", event.tool_name)
+        if event.emits is not None
+        else event.tool_name,
+        tool_name=event.tool_name,
+        model=raw_result,
+    )
+    artifact = build_artifact(artifact_ev, capabilities)
+    record.task.artifacts = (record.task.artifacts or []) + [artifact]
+    artifact_frame = TaskArtifactUpdateEvent(
+        taskId=record.task.id,
+        contextId=record.task.context_id,
+        artifact=artifact,
+        lastChunk=True,
+    ).wire()
+    publish(artifact_frame, artifact_ev)
+
+    # RT-W025-003: emit a synthetic ToolResultEvent so the AG-UI RunMapper can
+    # produce a TOOL_CALL_RESULT frame to close the tool-call lifecycle that was
+    # opened by the ToolCallEvent / TOOL_CALL_START emitted before the loop
+    # yielded the DeferredEvent.  Without this, strict AG-UI clients receive a
+    # TOOL_CALL_START with no matching TOOL_CALL_RESULT, violating the protocol.
+    tool_result_ev = ToolResultEvent(
+        tool_call_id=event.tool_call_id,
+        tool_name=event.tool_name,
+        ok=True,
+        result=raw_result,
+    )
+    publish(None, tool_result_ev)
+
+    _set_status(record, TaskState.COMPLETED)
+    done_ev = DoneEvent(ok=True)
+    publish(_status_frame(record, final=True), done_ev, final=True)
+    store.close_streams(record.task.id)
+
+
 async def run_task_worker(
     *,
     store: TaskStore,
@@ -212,6 +313,10 @@ async def run_task_worker(
     ``record.messages`` must already contain the folded user turn."""
     task = record.task
     text_segments: list[str] = []
+    # GH-87: set to True when a DeferredEvent is received; prevents the
+    # `else: store.close_streams(task.id)` from closing the stream before
+    # the background awaiter finishes.
+    deferred_launched: bool = False
 
     async def wait_resume(interrupt_id: str) -> Any:
         # the InterruptEvent handler below registered the future already
@@ -249,6 +354,36 @@ async def run_task_worker(
                 text = event.message if isinstance(event, ProgressEvent) else event.note
                 _set_status(record, TaskState.WORKING, _agent_message(record, text))
                 publish(_status_frame(record), event)
+            elif isinstance(event, ToolProgressEvent):
+                # GH-88: interim tool progress — A2A TaskStatusUpdateEvent{state:"working",
+                # final:false} + raw event for AG-UI CUSTOM "TOOL_PROGRESS" frame.
+                _set_status(record, TaskState.WORKING, _agent_message(record, event.message))
+                publish(_status_frame(record), event)
+            elif isinstance(event, DeferredEvent):
+                # GH-87: long-running tool returned DeferredResult — keep the
+                # task WORKING and launch a background asyncio.Task that awaits
+                # the handle.  The background task owns all subsequent status
+                # transitions (COMPLETED / FAILED) and stream closure.
+                # RT-W025-004: hold a strong reference in the module-level set so
+                # the GC cannot discard the task before it finishes (Python 3.12+
+                # event-loop keeps only *weak* references to tasks).  Same pattern
+                # as contrib/webhooks/dispatch.py: add → callback discards on done.
+                deferred_launched = True
+                _bg_task = asyncio.get_running_loop().create_task(
+                    _run_deferred_background(
+                        store=store,
+                        record=record,
+                        event=event,
+                        capabilities=capabilities,
+                    )
+                )
+                # W025-GH87-SHUTDOWN-TRACK-001: expose the background task on
+                # the record so evict() can cancel it during shutdown.
+                record.bg_task = _bg_task
+                _background_tasks.add(_bg_task)
+                _bg_task.add_done_callback(_background_tasks.discard)
+                # Exit the for-loop; the background task takes over from here.
+                break
             elif isinstance(event, ArtifactEvent):
                 artifact = build_artifact(event, capabilities)
                 task.artifacts = (task.artifacts or []) + [artifact]
@@ -328,7 +463,11 @@ async def run_task_worker(
         publish(_status_frame(record, final=True), DoneEvent(ok=False, error=msg), final=True)
         store.close_streams(task.id)
     else:
-        store.close_streams(task.id)
+        if not deferred_launched:
+            # Normal completion: close streams now.
+            # GH-87: if deferred_launched is True, the background task owns
+            # stream closure — do NOT close here.
+            store.close_streams(task.id)
 
 
 def new_task(context_id: str | None = None) -> Task:

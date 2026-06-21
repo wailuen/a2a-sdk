@@ -186,6 +186,11 @@ class InMemoryTaskStore(TaskStore):
             record.resume_future = None
         if record.worker is not None and not record.worker.done():
             record.worker.cancel()
+        # GH-87 / W025-GH87-SHUTDOWN-TRACK-001: cancel the deferred background
+        # awaiter if it is still running so it can transition the task to FAILED
+        # and close streams deterministically before adapter teardown.
+        if record.bg_task is not None and not record.bg_task.done():
+            record.bg_task.cancel()
         for sub in record.subscriptions:
             sub.close()
         record.subscriptions.clear()

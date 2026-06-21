@@ -4,6 +4,21 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.31] — 2026-06-21
+
+### ✅ Features
+- GH-88: async-generator tool contract — `@tools.tool` now accepts `AsyncGenerator` functions; tools may `yield ToolProgressEvent(...)` for interim progress and `return` their terminal artifact. Backward-compatible: existing coroutine tools unchanged. (`agent_sdk/agent/registry.py`, `loop.py`, `events.py`)
+- GH-87: first-class long-running / deferred-task delivery — a tool can return `DeferredResult(handle)` to register a background job; the A2A task stays `WORKING` and streams `TaskStatusUpdateEvent{state:"working"}` until the handle resolves, then delivers the artifact and transitions to `COMPLETED`; timeout → `FAILED`. New `agent_sdk/agent/deferred.py`. (`agent_sdk/agent/loop.py`, `runner.py`, `registry.py`, `routes/a2a.py`)
+- GH-87: `@tool(long_running=True, tool_timeout_override=N)` decorator kwargs — per-tool timeout override independent of global `TIER_TIMEOUTS`.
+
+### 🔧 Fixes
+- GH-89: `harness/workflows/acceptance-api.js` — `require('crypto').randomUUID()` replaced with caller-provided `args.runId` (minted in the skill where `require` is available); `/acceptance` gate is now functional on all agents.
+- GH-88: `ToolProgressEvent` wired to AG-UI `CUSTOM{name:"TOOL_PROGRESS"}` and A2A `TaskStatusUpdateEvent{state:"working",final:false}` so long-running tools emit visible progress on both transports.
+
+### 🧪 Test / CI
+- `tests/test_gh88_tool_interim_emit.py` — async-generator tool interim-emit coverage
+- `tests/test_gh87_deferred_task.py` — deferred-task resolve, timeout, and working-state coverage
+
 ## [0.5.28] — 2026-06-21
 
 ### ⚠️ Breaking changes

@@ -71,6 +71,7 @@ class TaskRecord:
     created_at: float
     updated_at: float
     worker: asyncio.Task[Any] | None = None
+    bg_task: asyncio.Task[Any] | None = None  # GH-87: deferred background awaiter
     subscriptions: list[Subscription] = field(default_factory=list)
     # interrupt state
     interrupted: bool = False

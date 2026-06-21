@@ -105,3 +105,4 @@ Entries ordered by LRN number.
 | LRN-099 | A2A REST action suffix can differ from JSON-RPC method name — tasks/resubscribe maps to :subscribe path | [LRN-099](LRN-099-a2a-rest-suffix-differs-from-method-name.md) |
 | LRN-100 | Budget-exhausted deferred marker must be relocated to completed/ once all findings are resolved — leaving it in deferred/ creates a contradictory state signal | [LRN-100](LRN-100-budget-exhausted-deferred-must-be-relocated.md) |
 | LRN-101 | Agent card description field must never fall back to empty string — use display_name sentinel instead | [LRN-101](LRN-101-agent-card-description-empty-string-fallback.md) |
+| LRN-102 | TOOL_PROGRESS CUSTOM event emitted in ag_ui.py but absent from CUSTOM_EVENTS tuple, card schema, DESIGN.md §5.3 table, and console router — parity guard silent because both sides missing | [LRN-102](LRN-102-tool-progress-custom-event-parity-gap.md) |

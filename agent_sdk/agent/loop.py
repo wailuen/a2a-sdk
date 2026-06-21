@@ -18,26 +18,32 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable, Union, get_args, get_origin
 
+logger = logging.getLogger(__name__)
+
 from pydantic import BaseModel, ValidationError
 
 from ..models.errors import AgentError, ErrorCategory
+from .deferred import DeferredEvent, DeferredResult
 from .events import (
     ArtifactEvent,
     DoneEvent,
     InterruptEvent,
+    LoopEvent,
     TextEvent,
     ToolCallEvent,
+    ToolProgressEvent,
     ToolResultEvent,
     TurnStartedEvent,
     UsageEvent,
 )
 from .model_client import ModelClient
-from .registry import ToolRegistry
+from .registry import ToolRegistry, _ToolTerminalResult
 from .skills import SkillsRegistry
 from ..sources import SourceAdapter
 
@@ -77,6 +83,11 @@ class LoopPolicies:
     token_budget: int = 200_000
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     tool_timeouts: dict[int, float] = field(default_factory=lambda: dict(TIER_TIMEOUTS))
+    # GH-87: per-tool timeout override map (tool name → seconds).
+    # Entries here take precedence over ``tool_timeouts`` (tier-based defaults).
+    # Populated automatically from ToolDecl.tool_timeout_override at invocation
+    # time; callers may also pass explicit overrides for testing.
+    per_tool_timeouts: dict[str, float] = field(default_factory=dict)
 
 
 class Deadline:
@@ -395,18 +406,72 @@ async def run_loop(
                 continue
 
             cache_key = (tc.name, json.dumps(tc.arguments, sort_keys=True, default=str))
-            timeout = policies.tool_timeouts.get(entry.tier, TIER_TIMEOUTS[2])
+            # GH-87: resolve effective timeout — per-tool override wins over
+            # per-tier default.  Sources (priority order):
+            #   1. policies.per_tool_timeouts[tc.name] (explicit caller override)
+            #   2. entry.decl.tool_timeout_override (@tool decorator kwarg)
+            #   3. policies.tool_timeouts[tier] (tier default)
+            #   4. TIER_TIMEOUTS[2] (hard fallback)
+            if tc.name in policies.per_tool_timeouts:
+                timeout = policies.per_tool_timeouts[tc.name]
+            elif entry.decl.tool_timeout_override is not None:
+                timeout = entry.decl.tool_timeout_override
+            else:
+                timeout = policies.tool_timeouts.get(entry.tier, TIER_TIMEOUTS[2])
 
             ok, result, error = True, None, None
+            deferred: DeferredResult | None = None  # GH-87
             interrupted: ToolInterrupt | None = None
             if cache_key in result_cache:
                 result = result_cache[cache_key]
+            elif entry.decl.is_generator:
+                # GH-88: async-generator tool — drain under a single timeout
+                # budget; forward interim ToolProgressEvent items downstream.
+                try:
+                    async with asyncio.timeout(timeout):
+                        async for gen_item in entry.invoke_gen(tc.arguments, adapters):
+                            if isinstance(gen_item, _ToolTerminalResult):
+                                result = gen_item.value
+                            elif isinstance(gen_item, ToolProgressEvent):
+                                yield gen_item  # forward interim event downstream
+                            elif isinstance(gen_item, LoopEvent):
+                                # Contract: only ToolProgressEvent is forwarded from
+                                # gen-tool drains; all other LoopEvent subclasses
+                                # (TextEvent, NoteEvent, ProgressEvent, …) are silently
+                                # dropped.  Warn so gen-tool authors can catch routing
+                                # mistakes early rather than debugging missing events.
+                                logger.warning(
+                                    "gen-tool %r yielded %s which is not forwarded "
+                                    "downstream; only ToolProgressEvent is routed from "
+                                    "async-generator tools — yielded event dropped",
+                                    tc.name,
+                                    type(gen_item).__name__,
+                                )
+                    result_cache[cache_key] = result
+                except ToolInterrupt as intr:
+                    interrupted = intr
+                except asyncio.TimeoutError:
+                    ok, error = False, f"tool '{tc.name}' timed out after {int(timeout)}s"
+                except AgentError as err:
+                    ok, error = False, err.message
+                except ValidationError as exc:
+                    ok, error = False, _safe_validation_message(
+                        tc.name, exc, entry.decl.input_model
+                    )
+                except Exception:
+                    ok, error = False, f"tool '{tc.name}' failed"
             else:
                 try:
                     result = await asyncio.wait_for(
                         entry.invoke(tc.arguments, adapters), timeout=timeout
                     )
-                    result_cache[cache_key] = result
+                    # GH-87: detect DeferredResult — hand off to runner for
+                    # background awaiting; skip cache and normal result path.
+                    if isinstance(result, DeferredResult):
+                        deferred = result
+                        result = None  # runner owns resolution
+                    else:
+                        result_cache[cache_key] = result
                 except ToolInterrupt as intr:
                     interrupted = intr
                 except asyncio.TimeoutError:
@@ -422,6 +487,18 @@ async def run_loop(
                     )
                 except Exception:
                     ok, error = False, f"tool '{tc.name}' failed"
+
+            # GH-87: deferred tool — emit DeferredEvent, do NOT emit DoneEvent
+            # or ToolResultEvent here; the runner's background awaiter takes over.
+            if deferred is not None:
+                yield DeferredEvent(
+                    deferred=deferred,
+                    tool_name=tc.name,
+                    tool_call_id=tc.tool_call_id,
+                    emits=entry.decl.emits,
+                    timeout_seconds=timeout,
+                )
+                return  # loop exits; runner drives the task to completion
 
             if interrupted is not None:
                 interrupt_id = uuid.uuid4().hex

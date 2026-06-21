@@ -36,6 +36,21 @@ class NoteEvent(LoopEvent):
 
 
 @dataclass(slots=True)
+class ToolProgressEvent(LoopEvent):
+    """Interim progress notification yielded by an async-generator tool (GH-88).
+
+    Generator tools may yield ``ToolProgressEvent`` instances during a
+    long-running call; the loop forwards each one downstream before the
+    terminal result.  A2A consumers see ``TaskStatusUpdateEvent{state:"working",
+    final:false}``; AG-UI consumers see a ``CUSTOM`` frame with
+    ``name="TOOL_PROGRESS"``.
+    """
+
+    message: str
+    tool_name: str
+
+
+@dataclass(slots=True)
 class ToolCallEvent(LoopEvent):
     tool_call_id: str
     tool_name: str

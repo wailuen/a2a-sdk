@@ -11,16 +11,34 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Callable, Optional, Union, cast
 
 from pydantic import BaseModel
 
 from ..sources import SourceAdapter
 
 
+# ── GH-88 sentinel types ──
+
+# Unique object used as "no item buffered yet" placeholder in invoke_gen.
+_SENTINEL = object()
+
+
+@dataclass(slots=True)
+class _ToolTerminalResult:
+    """Sentinel yielded by ``ToolEntry.invoke_gen()`` as the last item.
+
+    Wraps the terminal result from an async-generator tool so the drain loop
+    in ``loop.py`` can distinguish it from interim ``LoopEvent`` items without
+    type-checking every yielded value.
+    """
+
+    value: Any
+
+
 @dataclass(slots=True)
 class ToolDecl:
-    fn: Callable[..., Awaitable[Any]]
+    fn: Union[Callable[..., Awaitable[Any]], Callable[..., AsyncGenerator[Any, None]]]
     name: str
     description: str
     tier: int
@@ -35,6 +53,18 @@ class ToolDecl:
     annotations: dict[str, Any] | None = None
     # Consumer-facing discoverability tags (A2A §1). Tier is in x-sdk, not here.
     tags: list[str] = field(default_factory=list)
+    # GH-88: True when the tool function is an async generator (yields interim
+    # LoopEvent items before returning its terminal result via StopAsyncIteration).
+    is_generator: bool = False
+    # GH-87: long-running / deferred-task support.
+    # long_running=True marks the tool as capable of returning DeferredResult;
+    # the loop skips the per-tier hard timeout for these tools and delegates
+    # deadline enforcement to the runner's background awaiter.
+    long_running: bool = False
+    # Per-tool timeout override (seconds).  Applies to both the synchronous
+    # invocation path and the background deferred-job awaiter in the runner.
+    # None → use the tier default from LoopPolicies.tool_timeouts.
+    tool_timeout_override: float | None = None
 
 
 class ToolSet:
@@ -54,6 +84,8 @@ class ToolSet:
         read_only: bool = False,
         annotations: dict[str, Any] | None = None,
         tags: list[str] | None = None,
+        long_running: bool = False,
+        tool_timeout_override: float | None = None,
     ) -> Callable:
         if tier not in (1, 2):
             raise ValueError("tier must be 1 (query: A2A+MCP) or 2 (composite: A2A only)")
@@ -68,8 +100,11 @@ class ToolSet:
         ann.update(annotations or {})
         merged_annotations = ann or None
 
-        def decorator(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
-            if not inspect.iscoroutinefunction(fn):
+        def decorator(
+            fn: Union[Callable[..., Awaitable[Any]], Callable[..., AsyncGenerator[Any, None]]],
+        ) -> Union[Callable[..., Awaitable[Any]], Callable[..., AsyncGenerator[Any, None]]]:
+            _is_generator = inspect.isasyncgenfunction(fn)
+            if not _is_generator and not inspect.iscoroutinefunction(fn):
                 raise TypeError(f"tool {fn.__name__!r} must be async")
             _tool_name = name or fn.__name__
             if len(_tool_name) > 64:
@@ -136,6 +171,9 @@ class ToolSet:
                     title=resolved_title,
                     annotations=merged_annotations,
                     tags=list(tags or []),
+                    is_generator=_is_generator,
+                    long_running=long_running,
+                    tool_timeout_override=tool_timeout_override,
                 )
             )
             return fn
@@ -200,13 +238,79 @@ class ToolEntry:
         arguments: dict[str, Any],
         adapters: dict[type[SourceAdapter], SourceAdapter],
     ) -> Any:
+        """Invoke a coroutine tool and return its result.
+
+        For async-generator tools (GH-88) use ``invoke_gen()`` instead.
+        This method raises TypeError when called on a generator tool to ensure
+        callers always check ``decl.is_generator`` first.
+        """
+        if self.decl.is_generator:
+            raise TypeError(
+                f"tool {self.decl.name!r} is an async-generator; use invoke_gen() instead"
+            )
         kwargs: dict[str, Any] = {
             pname: adapters[cls] for pname, cls in self.decl.adapter_params.items()
         }
+        coro_fn = cast(Callable[..., Awaitable[Any]], self.decl.fn)
         if self.decl.input_model is not None:
             inp = self.decl.input_model.model_validate(arguments)
-            return await self.decl.fn(inp, **kwargs)
-        return await self.decl.fn(**kwargs)
+            return await coro_fn(inp, **kwargs)
+        return await coro_fn(**kwargs)
+
+    async def invoke_gen(
+        self,
+        arguments: dict[str, Any],
+        adapters: dict[type[SourceAdapter], SourceAdapter],
+    ) -> AsyncGenerator[Any, None]:
+        """GH-88: drain an async-generator tool.
+
+        Contract for async-generator tools:
+        - Yield ``ToolProgressEvent`` (or any ``LoopEvent`` subclass) for
+          interim notifications.
+        - Yield the terminal result (a non-``LoopEvent`` value, e.g. a Pydantic
+          model) as the LAST ``yield`` statement.
+
+        This method yields each item from the generator in order; the LAST item
+        is always wrapped in a ``_ToolTerminalResult`` sentinel so the loop can
+        distinguish interim events from the terminal result without inspecting
+        every item's type. Callers check ``isinstance(item, _ToolTerminalResult)``
+        to detect the terminal result.
+
+        Python async generators cannot use ``return <value>`` — the terminal
+        result must be the final ``yield`` from the generator function.
+
+        Raises TypeError when called on a non-generator tool.
+        """
+        from .events import LoopEvent  # local import to avoid circulars
+
+        if not self.decl.is_generator:
+            raise TypeError(
+                f"tool {self.decl.name!r} is a coroutine, not an async-generator; "
+                "use invoke() instead"
+            )
+        kwargs: dict[str, Any] = {
+            pname: adapters[cls] for pname, cls in self.decl.adapter_params.items()
+        }
+        gen_fn = cast(Callable[..., AsyncGenerator[Any, None]], self.decl.fn)
+        if self.decl.input_model is not None:
+            inp = self.decl.input_model.model_validate(arguments)
+            agen = gen_fn(inp, **kwargs)
+        else:
+            agen = gen_fn(**kwargs)
+
+        # Drain the generator; buffer the last item to wrap it as the terminal
+        # result.  All items EXCEPT the last are yielded as-is (interim events);
+        # the last item is wrapped in _ToolTerminalResult so the loop can detect
+        # the boundary without type-checking every event.
+        prev: Any = _SENTINEL  # sentinel: "no item yet"
+        async for item in agen:
+            if prev is not _SENTINEL:
+                yield prev  # emit the previous (interim) item
+            prev = item     # buffer current item
+
+        # prev now holds the last (terminal) item — wrap it.
+        terminal = None if prev is _SENTINEL else prev
+        yield _ToolTerminalResult(value=terminal)
 
 
 class ToolRegistry:

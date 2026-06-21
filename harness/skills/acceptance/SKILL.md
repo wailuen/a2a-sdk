@@ -239,17 +239,29 @@ and an incremented `runId`.
 // lives at .claude/skills/acceptance/SKILL.md and acceptance-api.js is seeded to
 // .claude/workflows/acceptance-api.js — use that path instead:
 //   scriptPath: `${require('child_process').execSync('git rev-parse --show-toplevel').toString().trim()}/.claude/workflows/acceptance-api.js`
+
+// Secret externalisation (GH-89 / SI-2): the workflow sandbox has no CommonJS
+// require(), so the key file must be written HERE (in the skill caller context)
+// before Workflow() is invoked.  Pass only the file path; never pass the raw key.
+const _runId  = require('crypto').randomUUID()
+const _keyFile = `/tmp/acc-key-${_runId}.txt`
+require('fs').writeFileSync(_keyFile, <admin_key>, { mode: 0o600 })
+
 Workflow({
   scriptPath: `${require('child_process').execSync('git rev-parse --show-toplevel').toString().trim()}/harness/workflows/acceptance-api.js`,
   args: {
     scenarios: <parsed scenarios array>,
     baseUrl: <base_url>,
-    adminKey: <admin_key>,
+    keyFile: _keyFile,   // path to chmod-600 temp file containing the admin key
     agentContext: {name, description, tools: [{name, emits, description}]},
     onlyIds: <[] for full run, or list of IDs for --rerun-failing>,
-    transports: ["a2a", "agui"]   // or ["a2a"] / ["agui"] with --transport flag
+    transports: ["a2a", "agui"],  // or ["a2a"] / ["agui"] with --transport flag
+    runId: _runId,
   }
 })
+
+// Clean up the temp key file after the workflow returns.
+try { require('fs').unlinkSync(_keyFile) } catch (_e) { /* already gone — ignore */ }
 ```
 
 The workflow fans out all scenarios × transports in parallel. Each scenario

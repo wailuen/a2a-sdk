@@ -556,8 +556,14 @@ Next:  /acceptance --ux (if dual-path API just passed)
 
 - **Never exit with open failures.** The fix loop runs until all scenarios pass
   or 5 rounds are exhausted. Partial success is not a success.
-- **No secrets in output.** The admin key is read from ADR-000 but never
-  printed to the terminal.
+- **No secrets in output.** The admin key is read from ADR-000 and written to
+  a chmod-600 temp file (`/tmp/acc-key-<random>.txt`) by the workflow before
+  sub-agents are spawned. Sub-agents receive the path to that file, not the key
+  value itself. The key is therefore absent from the prompt strings that appear
+  in harness transcripts. Never print or log the resolved key value to the
+  terminal or to any workspace file. Never share harness transcript output
+  externally — the resolved token is not embedded in prompts but the temp-file
+  path is, which still constitutes an indirect reference.
 - **Persona-gap escalations do not block.** If a scenario is escalated as
   `persona-gap`, the rest continue toward 100%.
 - **Server restart is safe.** The credential store persists; the admin key in
