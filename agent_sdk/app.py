@@ -136,9 +136,9 @@ class Agent:
 
                 Use ``from agent_sdk.contrib import Scheduler`` for
                 background jobs; see ``agent_sdk/contrib/scheduler.py``
-                for usage.  Note: there is no ``agent_sdk.scheduler``
-                module — ``agent_sdk.scheduler`` does not exist; use
-                the ``agent_sdk.contrib`` path above.
+                for usage.  Note: ``agent_sdk.scheduler`` is a stub that
+                raises ``ImportError`` on import; use
+                ``from agent_sdk.contrib import Scheduler`` instead.
         """
         if persona is None and artifacts_dir is None:
             raise ValueError("Agent requires either persona= or artifacts_dir=")
@@ -382,9 +382,43 @@ class Agent:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         return EncryptedSqliteStore(db_path, master_key)
 
+    def _check_agent_name(self) -> None:
+        name = self.settings.agent_name
+        if not self.settings.is_placeholder_name:
+            return
+        is_blank = not name.strip()
+        if is_blank:
+            dev_msg = (
+                "AGENT_NAME is empty or whitespace — set AGENT_NAME in the "
+                "environment to a meaningful identifier before deploying"
+            )
+            exc_msg = (
+                "AGENT_NAME is empty or whitespace. "
+                "Set AGENT_NAME in the environment before running in production."
+            )
+        else:
+            dev_msg = (
+                "AGENT_NAME is the placeholder default %r — set AGENT_NAME in the "
+                "environment to a meaningful identifier before deploying"
+            )
+            exc_msg = (
+                f"AGENT_NAME is the placeholder default {name!r}. "
+                "Set AGENT_NAME in the environment before running in production."
+            )
+        if self.settings.dev_mode:
+            if is_blank:
+                logger.warning(dev_msg)
+            else:
+                logger.warning(dev_msg, name)
+        else:
+            raise ValueError(exc_msg)
+
     def build_app(self) -> FastAPI:
         settings = self.settings
         base_url = settings.resolved_base_url
+
+        configure_logging()
+        self._check_agent_name()
 
         registry = ToolRegistry(self.toolsets, dict(self._sources))
         allowed_components = settings.a2ui_allowed_components
@@ -503,12 +537,12 @@ class Agent:
                 except Exception:
                     logger.warning("credential_store.close failed", exc_info=True)
 
+        app_title = settings.display_name
         app = FastAPI(
-            title=settings.agent_name,
+            title=app_title,
             version=settings.agent_version,
             lifespan=lifespan,
         )
-        configure_logging()
         app.middleware("http")(request_id_middleware)
         # RTGA-007: strip trailing slashes so the defense-in-depth origin guards
         # in MCP routes match the same normalized form that CorsMiddleware stores

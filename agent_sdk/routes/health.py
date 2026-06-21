@@ -19,7 +19,10 @@ def _payload(request: Request) -> dict[str, str]:
     settings = request.app.state.settings
     return {
         "status": "ok",
-        "agent": settings.agent_name,
+        # display_name normalizes placeholder/blank consistently with MCP
+        # serverInfo — build_app() blocks the placeholder in production but
+        # DEV_MODE allows it; normalize here so all surfaces are consistent.
+        "agent": settings.display_name,
         "version": settings.agent_version,
     }
 

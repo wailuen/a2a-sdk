@@ -15,6 +15,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
+PLACEHOLDER_AGENT_NAME = "agent"
+
 
 def _is_local(url: str) -> bool:
     try:
@@ -29,7 +31,7 @@ class BaseAgentSettings(BaseSettings):
     )
 
     # ── identity ──
-    agent_name: str = Field(default="agent", alias="AGENT_NAME")
+    agent_name: str = Field(default=PLACEHOLDER_AGENT_NAME, alias="AGENT_NAME")
     agent_description: str = Field(default="", alias="AGENT_DESCRIPTION")
     agent_version: str = Field(default="0.1.0", alias="AGENT_VERSION")
 
@@ -154,6 +156,47 @@ class BaseAgentSettings(BaseSettings):
                 "mutually exclusive (ambiguous auth): set one or the other, not both."
             )
         return self
+
+    @property
+    def is_placeholder_name(self) -> bool:
+        """True when agent_name is the placeholder default or blank/whitespace.
+
+        Single source of truth for the placeholder-or-blank predicate used by
+        ``_check_agent_name`` (app boot), ``display_name`` (identity surfaces),
+        and ``build_agent_card`` (A2A agent card).  Centralised here so the
+        three call-sites cannot drift back to inconsistent implementations.
+
+        **Reserved name (RT-007)**: the literal string ``"agent"``
+        (case-insensitive, with or without surrounding whitespace) is
+        permanently reserved as the unset-placeholder sentinel.  There is no
+        escape hatch: an operator who sets ``AGENT_NAME=agent`` explicitly
+        receives the same normalization and warning / production ``ValueError``
+        as if the variable were absent.  Choose any other name (e.g.
+        ``"my-agent"``) to avoid this treatment.
+        """
+        name = self.agent_name.strip()
+        return not name or name.lower() == PLACEHOLDER_AGENT_NAME
+
+    @property
+    def display_name(self) -> str:
+        """Normalized agent name for all identity-bearing protocol surfaces.
+
+        Returns the configured ``agent_name`` unchanged when it is a real name.
+        When ``agent_name`` is the placeholder default (``"agent"``, matched
+        case-insensitively) or blank — possible in DEV_MODE, blocked by
+        ``build_app()``'s ``ValueError`` in production — returns the neutral
+        sentinel ``"agent-sdk-agent"`` so that no protocol surface (MCP
+        serverInfo, health, agent card) ever advertises the raw placeholder.
+        Apply this everywhere instead of ``agent_name`` directly: MCP
+        serverInfo.name/title, the health ``agent`` field, and the agent card
+        ``name`` (``build_agent_card``) — the REQUIRED A2A identity surface,
+        which must be normalized alongside the others (RT-001).
+
+        See ``is_placeholder_name`` for the reserved-name limitation (RT-007).
+        """
+        if self.is_placeholder_name:
+            return "agent-sdk-agent"
+        return self.agent_name.strip()
 
     @property
     def resolved_base_url(self) -> str:

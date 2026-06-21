@@ -142,9 +142,20 @@ def build_agent_card(
     cred_ext = credential_forwarding_extension(credential_fields or {})
     if cred_ext is not None:
         extensions.append(cred_ext)
+    _is_placeholder = settings.is_placeholder_name
+    _desc_stripped = settings.agent_description.strip()
+    _description = (
+        ""
+        if not _desc_stripped and _is_placeholder
+        else _desc_stripped or settings.display_name
+    )
     card = AgentCard.model_validate({
-        "name": settings.agent_name,
-        "description": settings.agent_description or settings.agent_name,
+        # name is an A2A v0.3.0 REQUIRED identity field — normalize the
+        # placeholder/blank/whitespace agent_name via display_name, identically
+        # to MCP serverInfo.name/title and /health, so the card never advertises
+        # the raw placeholder (RT-001).
+        "name": settings.display_name,
+        "description": _description,
         "url": base_url,  # HTTP+JSON transport: clients append /v1/message:send per §2 (not /)
         "version": settings.agent_version,
         "capabilities": AgentCapabilities(

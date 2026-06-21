@@ -24,12 +24,13 @@ to request context, so it could not perform the gate check.
 
 ## Check
 ```
-grep -n 'DataPart\|a2ui\|X-A2A-Extensions' agent_sdk/a2ui/emit.py
-# The emit function must check for opt-in before constructing or returning a
-# DataPart. Acceptable patterns:
-#   if not request_context.extensions.a2ui: return None
-#   if 'a2ui' not in extensions: skip DataPart construction
-# A DataPart construction path with no conditional guard is non-compliant.
+grep -n 'x-a2a-extensions\|A2UI_EXTENSION_URI\|a2uiClientCapabilities' agent_sdk/routes/a2a.py
+# The _capabilities() function must gate A2UI on the X-A2A-Extensions opt-in
+# header. Required patterns:
+#   request.headers.get("x-a2a-extensions", ...)
+#   if A2UI_EXTENSION_URI not in [...]: return A2uiCapabilities(tier="none", ...)
+#   (message.metadata or {}).get("a2uiClientCapabilities")
+# Absence of these lines means the opt-in gate has been removed — fail-open.
 ```
 
 ## Prevention

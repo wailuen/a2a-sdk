@@ -22,7 +22,7 @@ deviation, not a bug. The code comment at lines 69-73 documents this.
 
 ## Check
 ```
-grep -n "_TITLE_MIN_VERSION" agent_sdk/mcp.py
+grep -n "_TITLE_MIN_VERSION" agent_sdk/routes/mcp.py
 # Must show "2025-11-25"; any lower value requires GH-43 re-validation first.
 ```
 

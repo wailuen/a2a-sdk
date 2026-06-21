@@ -23,7 +23,7 @@ own branch. The two error classes look similar from the outside (both produce
 
 ## Check
 ```
-grep -n '\-32602\|\-32700\|ParseError\|parse_error' agent_sdk/server/jsonrpc.py
+grep -n '\-32602\|\-32700\|ParseError\|parse_error' agent_sdk/common/wire_errors.py agent_sdk/routes/a2a.py
 # The JSON decode exception handler must emit code -32700.
 # The -32602 code must only appear in the parameter-validation branch.
 # Verify with: python3 -c "import requests,json; r=requests.post('<url>',

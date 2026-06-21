@@ -245,8 +245,13 @@ def _handle_initialize(app: Any, params: dict[str, Any]) -> dict[str, Any]:
         else SUPPORTED_PROTOCOL_VERSIONS[0]
     )
     settings = app.state.settings
+    # display_name normalizes the placeholder/blank to a neutral sentinel so
+    # DEV_MODE sessions with AGENT_NAME unset don't advertise "agent" verbatim.
+    # In production build_app()'s ValueError prevents the placeholder from
+    # reaching here, but DEV_MODE allows it — so normalize consistently.
+    display_name = settings.display_name
     server_info: dict[str, Any] = {
-        "name": settings.agent_name,
+        "name": display_name,
         "version": settings.agent_version,
     }
     # title was added in 2025-11-25; only emit it when the negotiated version
@@ -256,7 +261,7 @@ def _handle_initialize(app: Any, params: dict[str, Any]) -> dict[str, Any]:
         SUPPORTED_PROTOCOL_VERSIONS.index(version)
         <= SUPPORTED_PROTOCOL_VERSIONS.index(_TITLE_MIN_VERSION)
     ):
-        server_info["title"] = settings.agent_name
+        server_info["title"] = display_name
     result: dict[str, Any] = {
         "protocolVersion": version,
         "capabilities": {"tools": {"listChanged": False}},

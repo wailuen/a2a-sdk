@@ -6,6 +6,9 @@ LRN file absent from the index is invisible to it.
 RT-017 fix: frontmatter `id:` must match the filename LRN-NNN (LRN-058 invariant).
 Supports both YAML-frontmatter format (`id: LRN-NNN` on its own line) and the
 legacy heading format (`# LRN-NNN` as the first non-blank line).
+
+RT-005 fix: every LRN Check clause that greps a repo path must reference a file
+that actually exists — a dead path is a fail-open guard (LRN-079 pattern).
 """
 
 from __future__ import annotations
@@ -122,4 +125,75 @@ def test_learning_frontmatter_id_matches_filename() -> None:
     )
     assert not mismatches, (
         f"LRN files whose declared id does not match their filename: {mismatches}"
+    )
+
+
+# Matches the path argument on a simple (non-piped) grep line inside a Check block:
+#   grep -n "SYMBOL" agent_sdk/routes/mcp.py
+#   grep -rn "PATTERN" agent_sdk/
+# Rules:
+#   - Only considers the portion before the first "|" (pipes produce separate commands)
+#   - Captures the last whitespace-delimited token
+#   - The token must contain "/" or end in a source extension (.py/.js/.ts/.md/.json/.yaml)
+#     so bare shell flags (-u, -v, -20) and words like "test" are excluded
+_SOURCE_EXT = re.compile(r"\.(py|js|ts|md|json|yaml|yml|toml|sh|txt|cfg|ini)$")
+_GREP_LINE = re.compile(r"^\s*grep\b")
+
+REPO_ROOT = Path(__file__).parent.parent
+
+
+def _extract_check_grep_paths(path: Path) -> list[tuple[str, str]]:
+    """Return (lrn_id, grep_path) pairs for every grep line inside a ## Check block."""
+    text = path.read_text()
+    m = LRN_FILE_PATTERN.match(path.name)
+    lrn_id = m.group(1) if m else path.name
+
+    results: list[tuple[str, str]] = []
+    in_check = False
+    in_fence = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if re.match(r"^##\s+Check", stripped):
+            in_check = True
+            in_fence = False
+            continue
+        if in_check:
+            if stripped.startswith("```"):
+                in_fence = not in_fence
+                if not in_fence:
+                    in_check = False
+                continue
+            if in_fence and _GREP_LINE.match(line):
+                # Only inspect the segment before any pipe
+                segment = line.split("|")[0]
+                tokens = segment.split()
+                for token in reversed(tokens):
+                    # Skip flags, shell redirects, and quoted pattern strings
+                    if token.startswith(("-", "'", '"', "2>", ">")):
+                        continue
+                    # Must look like a repo path: only word chars, dots, slashes, hyphens
+                    if not re.fullmatch(r"[\w./\-]+", token):
+                        continue
+                    if "/" in token or _SOURCE_EXT.search(token):
+                        # Strip trailing slashes for directory paths
+                        results.append((lrn_id, token.rstrip("/")))
+                        break
+    return results
+
+
+def test_lrn_check_grep_paths_exist() -> None:
+    """Every grep path in an LRN ## Check block must reference an existing repo path.
+
+    A dead path (e.g. agent_sdk/mcp.py after a file move) is a fail-open guard
+    that silently passes even when the guarded symbol is absent (LRN-079 / RT-005).
+    """
+    dead: list[str] = []
+    for lrn_file in sorted(LEARNING_DIR.glob("LRN-*.md")):
+        for lrn_id, grep_path in _extract_check_grep_paths(lrn_file):
+            resolved = REPO_ROOT / grep_path
+            if not resolved.exists():
+                dead.append(f"{lrn_id}: grep path does not exist: {grep_path}")
+    assert not dead, (
+        "LRN Check clauses reference nonexistent paths (fail-open guards):\n"
+        + "\n".join(dead)
     )

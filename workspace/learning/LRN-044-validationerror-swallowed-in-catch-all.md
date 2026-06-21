@@ -23,7 +23,7 @@ of `Exception`, it was silently swallowed every time.
 
 ## Check
 ```
-grep -n 'except Exception' agent_sdk/core/loop.py agent_sdk/common/dispatch.py
+grep -n 'except Exception' agent_sdk/agent/loop.py agent_sdk/agent/runner.py
 # Each bare `except Exception` block must either:
 #   (a) re-raise ValidationError explicitly before the generic handler, OR
 #   (b) enrich the caught exception with exc.__class__.__name__ in the error body.
