@@ -144,11 +144,11 @@ def build_agent_card(
         extensions.append(cred_ext)
     _is_placeholder = settings.is_placeholder_name
     _desc_stripped = settings.agent_description.strip()
-    _description = (
-        ""
-        if not _desc_stripped and _is_placeholder
-        else _desc_stripped or settings.display_name
-    )
+    # A2A §3.1 requires description to be a human-readable string — "" is
+    # spec-marginal. When description is blank, fall back to display_name for
+    # all cases: placeholder names get the neutral sentinel ("agent-sdk-agent"),
+    # real names get the name itself. Never emit empty-string or raw placeholder.
+    _description = _desc_stripped or settings.display_name
     card = AgentCard.model_validate({
         # name is an A2A v0.3.0 REQUIRED identity field — normalize the
         # placeholder/blank/whitespace agent_name via display_name, identically

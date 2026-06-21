@@ -6,8 +6,8 @@ internals, `contrib/`) may change in minors with notice here.
 
 ## [0.5.28] — 2026-06-21
 
-### ✅ Features
-- acd28c9 feat(w024/GH-86): emit boot warning + ValueError when AGENT_NAME is placeholder at boot
+### ⚠️ Breaking changes
+- acd28c9 feat(w024/GH-86): `build_app()` now raises `ValueError` at boot in production (`DEV_MODE=false`) when `AGENT_NAME` is unset or set to the reserved placeholder `"agent"`. Previously such agents booted with the degraded `"agent"` identity. **Migration:** production agents must set `AGENT_NAME` to a non-placeholder value or `build_app()` now fails; set `DEV_MODE=true` to retain the prior warn-only behavior. Note: `"agent"` (case-insensitive) is permanently reserved as the unset sentinel — choose any other name.
 
 ### 🔧 Fixes
 - 9c8e8d4 fix(azure-dev): warn at boot when AZURE_STORAGE_ACCOUNT_NAME set without connection string in DEV_MODE

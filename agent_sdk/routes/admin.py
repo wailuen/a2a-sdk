@@ -337,6 +337,10 @@ async def overview(request: Request) -> dict[str, Any]:
     health = await asyncio.gather(*(_adapter_health(a) for a in adapters))
     return {
         "agent": {
+            # RT-002: admin diagnostics intentionally surface the operator's
+            # literal configured AGENT_NAME (not the normalized display_name) so
+            # an unset/placeholder value is visible here for debugging. Protocol
+            # surfaces (agent card, MCP serverInfo, /health) use display_name.
             "name": settings.agent_name,
             "description": settings.agent_description,
             "version": settings.agent_version,
@@ -560,6 +564,9 @@ async def selfcheck_info(request: Request) -> dict[str, Any]:
     """Base URLs + endpoint list the selfcheck JS probes (§7 Self-check)."""
     settings = request.app.state.settings
     return {
+        # RT-002: self-check intentionally shows the operator's literal configured
+        # AGENT_NAME (not display_name) so an unset/placeholder value surfaces in
+        # the admin console probe for debugging. Protocol surfaces use display_name.
         "agent": settings.agent_name,
         "version": settings.agent_version,
         "base_url": settings.resolved_base_url,

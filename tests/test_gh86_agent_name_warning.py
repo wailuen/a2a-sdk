@@ -134,17 +134,20 @@ def test_real_agent_name_no_warning(tmp_path):
 # agent_card description fallback: placeholder → "" not "agent"
 # ---------------------------------------------------------------------------
 
-def test_card_description_empty_when_placeholder_name(tmp_path):
+def test_card_description_uses_display_name_when_placeholder(tmp_path):
     settings = _dev_settings(tmp_path)
     # agent_description is blank (default ""), agent_name is "agent" (placeholder)
+    # A2A §3.1: description must be non-empty — use display_name sentinel, not "".
     app = _build(settings).build_app()
     card = app.state.agent_card
     app.state.credential_store.close()
     gc.collect()
 
-    assert card["description"] == "", (
-        f"Card description must be '' when agent_name is placeholder; got {card['description']!r}"
+    assert card["description"] == settings.display_name, (
+        f"Card description must be display_name sentinel when agent_name is placeholder; "
+        f"got {card['description']!r}, expected {settings.display_name!r}"
     )
+    assert card["description"].strip(), "Card description must not be blank"
 
 
 def test_card_description_uses_real_name_as_fallback(tmp_path):
@@ -215,7 +218,7 @@ def test_prod_mode_padded_placeholder_name_raises(tmp_path, padded_name):
 
 
 @pytest.mark.parametrize("padded_name", ["agent ", " agent", "  agent"])
-def test_card_description_empty_when_padded_placeholder_name(tmp_path, padded_name):
+def test_card_description_uses_display_name_for_padded_placeholder(tmp_path, padded_name):
     from agent_sdk.routes.agent_card import build_agent_card
     from agent_sdk.agent.registry import ToolRegistry
 
@@ -223,16 +226,17 @@ def test_card_description_empty_when_padded_placeholder_name(tmp_path, padded_na
     registry = ToolRegistry([], {})
     card = build_agent_card(settings, registry)
 
-    assert card["description"] == "", (
-        f"Card description must be '' for padded placeholder {padded_name!r}; "
-        f"got {card['description']!r}"
+    assert card["description"] == settings.display_name, (
+        f"Card description must be display_name sentinel for padded placeholder {padded_name!r}; "
+        f"got {card['description']!r}, expected {settings.display_name!r}"
     )
+    assert card["description"].strip(), "Card description must not be blank"
 
 
 @pytest.mark.parametrize("blank_name", ["   ", "\t"])
-def test_card_description_empty_when_blank_name(tmp_path, blank_name):
+def test_card_description_uses_display_name_for_blank_name(tmp_path, blank_name):
     """build_agent_card() must treat blank/whitespace agent_name identically to
-    the placeholder: emit description='' rather than the raw whitespace string."""
+    the placeholder: use display_name sentinel, never emit the raw whitespace."""
     from agent_sdk.routes.agent_card import build_agent_card
     from agent_sdk.agent.registry import ToolRegistry
 
@@ -240,10 +244,11 @@ def test_card_description_empty_when_blank_name(tmp_path, blank_name):
     registry = ToolRegistry([], {})
     card = build_agent_card(settings, registry)
 
-    assert card["description"] == "", (
-        f"Card description must be '' for blank agent_name {blank_name!r}; "
-        f"got {card['description']!r}"
+    assert card["description"] == settings.display_name, (
+        f"Card description must be display_name for blank agent_name {blank_name!r}; "
+        f"got {card['description']!r}, expected {settings.display_name!r}"
     )
+    assert card["description"].strip(), "Card description must not be blank"
 
 
 # ---------------------------------------------------------------------------
@@ -307,9 +312,71 @@ def test_explicitly_set_agent_name_still_treated_as_placeholder(tmp_path, explic
     assert card["name"] == "agent-sdk-agent", (
         f"card name must be normalised for explicitly-set {explicit_agent_name!r}"
     )
-    assert card["description"] == "", (
-        f"card description must be '' for explicitly-set {explicit_agent_name!r}"
+    assert card["description"] == settings.display_name, (
+        f"card description must be display_name sentinel for explicitly-set {explicit_agent_name!r}; "
+        f"got {card['description']!r}, expected {settings.display_name!r}"
     )
+    assert card["description"].strip(), "card description must not be blank"
+
+
+# ---------------------------------------------------------------------------
+# RT-003: warning message must not falsely assert cause ("default") when the
+# same predicate is reached via multiple paths (unset vs explicitly-set-to-sentinel).
+# The message must say "unset or set to the reserved placeholder" — never
+# "placeholder default" — so an operator who deliberately set AGENT_NAME=agent
+# is not misled into thinking the variable was unread.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("explicit_agent_name", ["agent", "Agent", "AGENT", "aGeNt"])
+def test_explicitly_set_placeholder_warning_does_not_claim_default(tmp_path, explicit_agent_name):
+    """When AGENT_NAME is explicitly set to the reserved sentinel (any case), the
+    warning must NOT say 'placeholder default' — that wording falsely implies the
+    env var was unread.  The message must use 'unset or set to the reserved
+    placeholder' to cover both paths without asserting a single cause."""
+    settings = _dev_settings(tmp_path, agent_name=explicit_agent_name)
+    agent = _build(settings)
+    with capture_sdk_warnings() as warnings:
+        app = agent.build_app()
+    app.state.credential_store.close()
+    gc.collect()
+
+    agent_name_warnings = [t for t in warnings if "AGENT_NAME" in t]
+    assert agent_name_warnings, (
+        f"Expected an AGENT_NAME warning for explicitly-set {explicit_agent_name!r}; got: {warnings}"
+    )
+    for msg in agent_name_warnings:
+        assert "placeholder default" not in msg, (
+            f"Warning must not say 'placeholder default' when AGENT_NAME={explicit_agent_name!r} "
+            f"was explicitly set; got: {msg!r}"
+        )
+        assert "unset or set" in msg, (
+            f"Warning must say 'unset or set' to cover both the unset and "
+            f"explicitly-set-to-sentinel paths; got: {msg!r}"
+        )
+
+
+def test_unset_placeholder_warning_does_not_claim_default(tmp_path):
+    """When AGENT_NAME is left at the default (unset), the warning must also use
+    'unset or set to the reserved placeholder' — consistent with the explicitly-set
+    path and not anchored to a single cause."""
+    settings = _dev_settings(tmp_path)  # AGENT_NAME left at default "agent"
+    agent = _build(settings)
+    with capture_sdk_warnings() as warnings:
+        app = agent.build_app()
+    app.state.credential_store.close()
+    gc.collect()
+
+    agent_name_warnings = [t for t in warnings if "AGENT_NAME" in t]
+    assert agent_name_warnings, (
+        f"Expected an AGENT_NAME warning for default AGENT_NAME; got: {warnings}"
+    )
+    for msg in agent_name_warnings:
+        assert "placeholder default" not in msg, (
+            f"Warning must not say 'placeholder default'; got: {msg!r}"
+        )
+        assert "unset or set" in msg, (
+            f"Warning must say 'unset or set'; got: {msg!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

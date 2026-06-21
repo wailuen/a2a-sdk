@@ -398,12 +398,15 @@ class Agent:
             )
         else:
             dev_msg = (
-                "AGENT_NAME is the placeholder default %r — set AGENT_NAME in the "
-                "environment to a meaningful identifier before deploying"
+                "AGENT_NAME is unset or set to the reserved placeholder %r — set "
+                "AGENT_NAME in the environment to a meaningful identifier before "
+                "deploying (note: 'agent' is a reserved placeholder name; choose "
+                "any other name)"
             )
             exc_msg = (
-                f"AGENT_NAME is the placeholder default {name!r}. "
-                "Set AGENT_NAME in the environment before running in production."
+                f"AGENT_NAME is unset or set to the reserved placeholder {name!r}. "
+                "Set AGENT_NAME in the environment before running in production. "
+                "Note: 'agent' is a reserved placeholder name; choose any other name."
             )
         if self.settings.dev_mode:
             if is_blank:
