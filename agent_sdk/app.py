@@ -281,7 +281,32 @@ class Agent:
             # check the Union unwrap path below would silently pass list[T].
             # Any annotation with a concrete __origin__ that is not Union is
             # an immediate mismatch (SC-F1 false-positive fix, RT-SC-F1-LIST).
+            #
+            # GH-91: Before the generic-origin rejection, handle async-generator
+            # return annotations.  For is_generator tools the honest annotation
+            # is AsyncIterator[T] or AsyncGenerator[T, None]; both have a non-Union
+            # __origin__, so without this branch they fall into the ValueError below.
+            import collections.abc as _abc
             _origin = getattr(ret, "__origin__", None)
+            if entry.decl.is_generator and _origin in (
+                _abc.AsyncIterator,
+                _abc.AsyncGenerator,
+            ):
+                _gen_args = _typing.get_args(ret)
+                # AsyncIterator[T] → args=(T,); AsyncGenerator[T, None] → args=(T, None).
+                # In both forms the yield type is the first argument.
+                yield_type = _gen_args[0] if _gen_args else None
+                if yield_type is None or yield_type is _typing.Any:
+                    continue  # unannotated yield type or Any — permitted
+                # Validate yield_type against emits using the same rule as coroutines:
+                # emits must be yield_type itself or a subclass of it.
+                if inspect.isclass(yield_type) and issubclass(emits, yield_type):
+                    continue  # emits satisfies the yield type — permitted
+                raise ValueError(
+                    f"tool {fn.__name__!r} async-generator return annotation {ret!r} "
+                    f"yields {yield_type!r} but emits={emits!r} — "
+                    f"the yield type must be a superclass of (or equal to) emits"
+                )
             if _origin is not None and _origin is not _typing.Union:
                 raise ValueError(
                     f"tool {fn.__name__!r} return annotation {ret!r} does not match "

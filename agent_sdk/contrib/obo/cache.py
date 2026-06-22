@@ -69,11 +69,32 @@ class MsalTokenCache:
         key_makers = getattr(_msal_cls, "key_makers", None)
     del _msal_cls
 
-    def __init__(self, store: "CredentialStore | None", namespace: str) -> None:
+    def __init__(
+        self,
+        store: "CredentialStore | None",
+        namespace: str,
+        _cache_factory=None,
+    ) -> None:
+        """Construct a MsalTokenCache.
+
+        Parameters
+        ----------
+        store:
+            SDK CredentialStore for persistence, or ``None`` for an ephemeral
+            (in-memory) cache.
+        namespace:
+            Key prefix used when reading/writing the blob in *store*.
+        _cache_factory:
+            Optional zero-argument callable that returns a duck-typed
+            ``msal.SerializableTokenCache``.  Intended for unit tests that want
+            to inject a fake inner cache without patching module-level
+            ``_make_msal_cache``.  Production code must not pass this argument.
+        """
         self._store = store
         self._namespace = namespace
         self._lock = threading.Lock()
-        self._cache = _make_msal_cache()
+        factory = _cache_factory if _cache_factory is not None else _make_msal_cache
+        self._cache = factory()
 
         if store is None:
             logger.debug("obo.cache: no store — cache is ephemeral")

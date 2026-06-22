@@ -96,12 +96,21 @@ class GraphSource(SourceAdapter):
         self._token_cache: Any = None
 
     # ── OBO plumbing ──
-    def _bind_credential_store(self, store: Any) -> None:
+    def _bind_credential_store(self, store: Any, _cache_factory=None) -> None:
         """Create the persistent MSAL token cache from the SDK credential store.
-        Called by build_app() after __init__; do not call from user code."""
+
+        Called by build_app() after __init__; do not call from user code.
+
+        Parameters
+        ----------
+        _cache_factory:
+            Optional zero-argument callable injected by tests to supply a fake
+            inner cache without patching module-level symbols.  Must be ``None``
+            in production.
+        """
         super()._bind_credential_store(store)
         from .cache import MsalTokenCache
-        self._token_cache = MsalTokenCache(store, self.source_name)
+        self._token_cache = MsalTokenCache(store, self.source_name, _cache_factory=_cache_factory)
 
     def _credentials_provider(self) -> OboCredentials | None:
         tenant = self.credential_or_none("azure_tenant_id")

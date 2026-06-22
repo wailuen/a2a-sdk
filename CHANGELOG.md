@@ -4,6 +4,17 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.34] — 2026-06-22
+
+### ✅ Features
+- GH-91: `_validate_emits` (SC-F1) now accepts `AsyncIterator[T]` and `AsyncGenerator[T, None]` return annotations on async-generator tools with `emits=T`; wrong yield type raises `ValueError` with a clear message at boot. (`agent_sdk/app.py`)
+
+### 🔧 Fixes
+- GH-90: harness A2A multi-turn driver now continues via `contextId` (not `taskId`) when the prior turn's task was completed; `taskId` reuse is correctly gated to `input-required` / `auth-required` continuations only. Eliminates false `transport-divergence` failures on multi-turn `/acceptance` runs. (`harness/workflows/acceptance-api.js`, `harness/skills/acceptance/SKILL.md`)
+
+### 🧪 Test / CI
+- `tests/test_gh91_generator_emits_validation.py` — 4 cases: `AsyncIterator[T]` passes, `AsyncGenerator[T, None]` passes, wrong type raises, no annotation passes
+
 ## [0.5.31] — 2026-06-21
 
 ### ✅ Features

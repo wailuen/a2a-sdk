@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import gc
 import ipaddress
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -220,80 +219,76 @@ def test_gh24_is_non_public_ip(addr, expected):
 # ---------------------------------------------------------------------------
 
 
+def _fake_resolver(ip: str):
+    """Return an async callable that always resolves to *ip* — no asyncio patching."""
+
+    async def _resolve(host: str) -> list:
+        return [(None, None, None, None, (ip, 0))]
+
+    return _resolve
+
+
 async def test_gh24_safe_get_blocks_loopback():
-    with patch("agent_sdk.common.http.asyncio") as mock_asyncio:
-        loop = MagicMock()
-        mock_asyncio.get_running_loop.return_value = loop
-        loop.getaddrinfo = AsyncMock(return_value=[(None, None, None, None, ("127.0.0.1", 0))])
-        with pytest.raises(AgentError) as exc_info:
-            await safe_get("http://localhost/secret")
+    with pytest.raises(AgentError) as exc_info:
+        await safe_get("http://localhost/secret", _resolver=_fake_resolver("127.0.0.1"))
     assert exc_info.value.category == ErrorCategory.VALIDATION
     assert "non-public" in str(exc_info.value)
 
 
 async def test_gh24_safe_get_blocks_imds():
-    with patch("agent_sdk.common.http.asyncio") as mock_asyncio:
-        loop = MagicMock()
-        mock_asyncio.get_running_loop.return_value = loop
-        loop.getaddrinfo = AsyncMock(
-            return_value=[(None, None, None, None, ("169.254.169.254", 0))]
+    with pytest.raises(AgentError) as exc_info:
+        await safe_get(
+            "http://169.254.169.254/latest/meta-data/",
+            _resolver=_fake_resolver("169.254.169.254"),
         )
-        with pytest.raises(AgentError) as exc_info:
-            await safe_get("http://169.254.169.254/latest/meta-data/")
     assert exc_info.value.category == ErrorCategory.VALIDATION
 
 
 async def test_gh24_safe_get_blocks_rfc1918():
-    with patch("agent_sdk.common.http.asyncio") as mock_asyncio:
-        loop = MagicMock()
-        mock_asyncio.get_running_loop.return_value = loop
-        loop.getaddrinfo = AsyncMock(
-            return_value=[(None, None, None, None, ("192.168.0.1", 0))]
-        )
-        with pytest.raises(AgentError):
-            await safe_get("http://internal.corp/api")
+    with pytest.raises(AgentError):
+        await safe_get("http://internal.corp/api", _resolver=_fake_resolver("192.168.0.1"))
 
 
 async def test_gh24_safe_get_passes_public_url():
-    mock_response = MagicMock(spec=httpx.Response)
-    mock_response.status_code = 200
+    """Passes for a public IP; uses httpx.MockTransport — no AsyncClient patching."""
 
-    with patch("agent_sdk.common.http.asyncio") as mock_asyncio:
-        loop = MagicMock()
-        mock_asyncio.get_running_loop.return_value = loop
-        loop.getaddrinfo = AsyncMock(
-            return_value=[(None, None, None, None, ("8.8.8.8", 0))]
-        )
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.get = AsyncMock(return_value=mock_response)
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)
 
-        with patch("agent_sdk.common.http.httpx.AsyncClient", return_value=mock_client):
-            result = await safe_get("https://dns.google/")
-
+    transport = httpx.MockTransport(handler)
+    result = await safe_get(
+        "https://dns.google/",
+        _resolver=_fake_resolver("8.8.8.8"),
+        _transport=transport,
+    )
     assert result.status_code == 200
 
 
 async def test_gh24_safe_get_no_follow_redirects():
-    """safe_get must not follow redirects (open-redirect SSRF vector)."""
-    with patch("agent_sdk.common.http.asyncio") as mock_asyncio:
-        loop = MagicMock()
-        mock_asyncio.get_running_loop.return_value = loop
-        loop.getaddrinfo = AsyncMock(
-            return_value=[(None, None, None, None, ("8.8.8.8", 0))]
-        )
-        captured = {}
+    """safe_get must not follow redirects (open-redirect SSRF vector).
 
-        def capture_client(**kwargs):
-            captured.update(kwargs)
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.get = AsyncMock(return_value=MagicMock(spec=httpx.Response))
-            return mock_client
+    Verified by inspecting that the MockTransport receives the request without
+    a redirect being followed; ``httpx.MockTransport`` raises
+    ``httpx.RemoteProtocolError`` if a response with ``follow_redirects=True``
+    would loop — but the simpler check is that safe_get itself passes
+    ``follow_redirects=False`` into the AsyncClient constructor.  We confirm
+    this by issuing a 301 response and asserting no second request is made.
+    """
+    calls: list[str] = []
 
-        with patch("agent_sdk.common.http.httpx.AsyncClient", side_effect=capture_client):
-            await safe_get("https://dns.google/")
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if len(calls) == 1:
+            # Return a redirect — safe_get must NOT follow it
+            return httpx.Response(301, headers={"location": "https://evil.example.com/"})
+        return httpx.Response(200)
 
-    assert captured.get("follow_redirects") is False
+    transport = httpx.MockTransport(handler)
+    result = await safe_get(
+        "https://dns.google/",
+        _resolver=_fake_resolver("8.8.8.8"),
+        _transport=transport,
+    )
+    # Only one call — the redirect was not followed
+    assert len(calls) == 1
+    assert result.status_code == 301

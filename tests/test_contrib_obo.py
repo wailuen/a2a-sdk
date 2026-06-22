@@ -24,7 +24,7 @@ import time
 import httpx
 import pytest
 
-from unittest.mock import patch
+from unittest.mock import patch  # retained for OboExchanger.__init__ introspection test only
 
 from agent_sdk.models.errors import AgentError, ErrorCategory
 from agent_sdk.contrib.obo import (
@@ -626,10 +626,12 @@ class FakeStore:
 
 
 def _make_cache(store=None, namespace="graph") -> MsalTokenCache:
-    """Construct a MsalTokenCache with a FakeSerializableCache patched in."""
+    """Construct a MsalTokenCache with a FakeSerializableCache injected via _cache_factory.
+
+    Uses the constructor's _cache_factory seam — no module-level patching needed.
+    """
     fake_inner = FakeSerializableCache()
-    with patch("agent_sdk.contrib.obo.cache._make_msal_cache", return_value=fake_inner):
-        cache = MsalTokenCache(store, namespace)
+    cache = MsalTokenCache(store, namespace, _cache_factory=lambda: fake_inner)
     cache._cache = fake_inner  # keep a direct reference for assertions
     return cache
 
@@ -645,16 +647,14 @@ def test_cache_ephemeral_when_no_store():
 def test_cache_loads_blob_from_store_on_construction():
     store = FakeStore(initial={("graph", "msal_token_cache"): "existing-blob"})
     fake_inner = FakeSerializableCache()
-    with patch("agent_sdk.contrib.obo.cache._make_msal_cache", return_value=fake_inner):
-        MsalTokenCache(store, "graph")
+    MsalTokenCache(store, "graph", _cache_factory=lambda: fake_inner)
     assert fake_inner._state == "existing-blob"
 
 
 def test_cache_skips_load_when_no_blob_in_store():
     store = FakeStore()  # empty
     fake_inner = FakeSerializableCache()
-    with patch("agent_sdk.contrib.obo.cache._make_msal_cache", return_value=fake_inner):
-        MsalTokenCache(store, "graph")
+    MsalTokenCache(store, "graph", _cache_factory=lambda: fake_inner)
     assert fake_inner._state == ""  # deserialize never called
 
 
@@ -698,8 +698,7 @@ def test_graphsource_bind_credential_store_creates_cache():
     fake_inner = FakeSerializableCache()
     src = GraphSource(object(), _resolver({}), exchanger=StubExchanger())
     assert src._token_cache is None
-    with patch("agent_sdk.contrib.obo.cache._make_msal_cache", return_value=fake_inner):
-        src._bind_credential_store(store)
+    src._bind_credential_store(store, _cache_factory=lambda: fake_inner)
     assert src._token_cache is not None
     assert src._token_cache._namespace == "graph"
     assert src._store is store
@@ -715,8 +714,7 @@ def test_graphsource_get_exchanger_uses_token_cache():
         "azure_client_id": "cid",
         "azure_client_secret": "sec",
     }))
-    with patch("agent_sdk.contrib.obo.cache._make_msal_cache", return_value=fake_inner):
-        src._bind_credential_store(store)
+    src._bind_credential_store(store, _cache_factory=lambda: fake_inner)
     # The exchanger is built lazily on first access; intercept the factory call.
     built_with: dict = {}
 

@@ -394,8 +394,9 @@ def _run_extraction_algorithm(raw_sse: str) -> tuple[str, list[str]]:
             # Intermediate working status-updates each carry only one text
             # segment; the final completed event joins all segments into the
             # complete reply.  Collecting from every event causes duplication.
-            # Mirrors: if ev.get("final") or ev.get("status",{}).get("state") == "completed"
-            if ev.get("final") or (ev.get("status", {}).get("state") == "completed"):
+            # Mirrors: acceptance-api.js GH-90 st-variable form
+            st = ev.get("status", {}).get("state") or ""
+            if ev.get("final") or st == "completed":
                 reply_parts = [
                     p["text"]
                     for p in (ev.get("status", {}).get("message") or {}).get("parts", [])
@@ -503,8 +504,8 @@ async def test_extraction_algorithm_content_types_from_artifact(client, fake_mod
 _EXTRACTION_INVARIANTS = (
     # (1) final / completed reply guard
     (
-        'if ev.get("final") or (ev.get("status",{}).get("state") == "completed"):',
-        'if ev.get("final") or (ev.get("status", {}).get("state") == "completed"):',
+        'if ev.get("final") or st == "completed":',
+        'if ev.get("final") or st == "completed":',
     ),
     # (2) art_dtype = metadata.data_type or name
     (
@@ -516,6 +517,46 @@ _EXTRACTION_INVARIANTS = (
 
 def _collapse_ws(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
+
+
+def test_template_continuation_state_gating(a2a_script_block: str) -> None:
+    """The A2A script must gate taskId vs contextId on prior task state (GH-90).
+
+    On turn 2+ the script reads the prior task state from STATE_F
+    (a2a-state.txt).  It must:
+      (1) check ``last_state in ("input-required", "auth-required")`` before
+          deciding to inject ``taskId``;
+      (2) read the state from STATE_F / a2a-state.txt, not assume a fixed state;
+      (3) fall back to injecting ``contextId`` (not ``taskId``) when the prior
+          state is terminal (completed / failed).
+
+    A regression that drops the gating and unconditionally reuses taskId would
+    cause every turn 2+ to re-enter a completed task instead of starting a new
+    one — this test makes such a regression immediately visible.
+    """
+    # (1) state-gating condition
+    assert 'last_state in ("input-required", "auth-required")' in a2a_script_block or (
+        "last_state in ('input-required', 'auth-required')" in a2a_script_block
+    ), (
+        "acceptance-api.js A2A script block does not gate taskId reuse on "
+        '`last_state in ("input-required", "auth-required")` — GH-90 requires '
+        "state-conditional continuation logic."
+    )
+
+    # (2) prior state is read from STATE_F / a2a-state.txt before the decision
+    has_state_file_read = "STATE_F" in a2a_script_block or "a2a-state.txt" in a2a_script_block
+    assert has_state_file_read, (
+        "acceptance-api.js A2A script block does not read STATE_F / a2a-state.txt "
+        "before deciding which field to send on turn 2+ — GH-90 requires the prior "
+        "task state to be loaded from the state file."
+    )
+
+    # (3) contextId is the fallback when the prior state is terminal
+    assert '"contextId"' in a2a_script_block or "'contextId'" in a2a_script_block, (
+        "acceptance-api.js A2A script block does not inject contextId as the "
+        "fallback for non-interrupt terminal states — GH-90 requires contextId "
+        "(not taskId) to be sent when the prior state is completed or failed."
+    )
 
 
 def test_extraction_mirror_matches_js_block(a2a_script_block: str) -> None:

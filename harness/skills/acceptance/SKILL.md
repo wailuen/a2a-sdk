@@ -185,12 +185,28 @@ carrying a `kind` field (no `method`/`params` wrapper). Extract:
 - 3–4: off-topic; task errored but recovered
 - 1–2: task status `failed`, timeout, or no useful output
 
-**Multi-turn A2A:** For turns 2–N (up to `maxTurns`), send the follow-up
-message in the same task context by including the `taskId` from the prior
-response (and a fresh `messageId`):
-```json
-{ "message": { "role": "user", "messageId": "<new-uuid4-hex>", "taskId": "<task-id>", "parts": [ ... ] } }
-```
+**Multi-turn A2A:** For turns 2–N (up to `maxTurns`), the correct field to
+include depends on the state of the prior task:
+
+- If the prior task ended in `input-required` OR `auth-required` state (non-terminal
+  interrupt states per A2A spec §interrupt, task is still live and waiting), send
+  `taskId` to continue that specific task:
+  ```json
+  { "message": { "role": "user", "messageId": "<new-uuid4-hex>", "taskId": "<task-id>", "parts": [ ... ] } }
+  ```
+- Otherwise (prior task ended `completed`, `failed`, or any other terminal state),
+  send `contextId` (captured from the turn-1 SSE stream) with **no `taskId`**,
+  so the server creates a new task within the same conversation context instead of
+  re-addressing a terminal task (which would return 404 / -32001):
+  ```json
+  { "message": { "role": "user", "messageId": "<new-uuid4-hex>", "contextId": "<context-id>", "parts": [ ... ] } }
+  ```
+
+The harness Python script captures `contextId` from `kind:"task"` and
+`kind:"status-update"` SSE events on turn 1, persists it to
+`/tmp/acc-{RUN_KEY}-a2a-ctx.txt`, and persists the last observed `state` to
+`/tmp/acc-{RUN_KEY}-a2a-state.txt`. On turns 2+, it reads both files to
+determine which field to send.
 
 ### AG-UI transport (per scenario, parallel)
 

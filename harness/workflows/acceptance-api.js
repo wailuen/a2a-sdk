@@ -117,16 +117,29 @@ function buildScenarioPrompt(s, a) {
     '   TOKEN    = Path("' + a._keyFile + '").read_text().strip()\n' +
     '   RUN_KEY  = "' + runKey + '"\n' +
     '   QUERY    = os.environ["ACC_QUERY"]\n' +
-    '   TASKID_F = Path(f"/tmp/acc-{RUN_KEY}-a2a-task.txt")\n\n' +
+    '   TASKID_F = Path(f"/tmp/acc-{RUN_KEY}-a2a-task.txt")\n' +
+    '   CTXID_F  = Path(f"/tmp/acc-{RUN_KEY}-a2a-ctx.txt")\n' +
+    '   STATE_F  = Path(f"/tmp/acc-{RUN_KEY}-a2a-state.txt")\n\n' +
     '   async def main():\n' +
     '       headers = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}\n' +
-    '       task_id = TASKID_F.read_text().strip() if TASKID_F.exists() else None\n' +
+    '       task_id    = TASKID_F.read_text().strip() if TASKID_F.exists() else None\n' +
+    '       context_id = CTXID_F.read_text().strip()  if CTXID_F.exists()  else None\n' +
+    '       last_state = STATE_F.read_text().strip()   if STATE_F.exists()  else None\n' +
     '       import uuid as _uuid\n' +
     '       msg = {"role": "user", "messageId": _uuid.uuid4().hex, "parts": [{"kind": "text", "text": QUERY}]}\n' +
-    '       if task_id:\n' +
+    '       # Turn 2+: reuse taskId only when the prior task is still input-required or\n' +
+    '       # auth-required (both are non-terminal interrupt states per A2A spec §interrupt);\n' +
+    '       # for completed/failed tasks send contextId so the server starts a new task\n' +
+    '       # in the same conversation context instead of re-addressing a terminal task.\n' +
+    '       if task_id and last_state in ("input-required", "auth-required"):\n' +
     '           msg["taskId"] = task_id\n' +
+    '       elif context_id:\n' +
+    '           msg["contextId"] = context_id\n' +
     '       body = {"message": msg}\n' +
     '       reply_parts, ctypes = [], []\n' +
+    '       cur_task_id = None\n' +
+    '       cur_ctx_id  = None\n' +
+    '       cur_state   = None\n' +
     '       async with httpx.AsyncClient(base_url=BASE_URL, headers=headers, timeout=180) as c:\n' +
     '           async with c.stream("POST", "/v1/message:stream", json=body) as r:\n' +
     '               r.raise_for_status()\n' +
@@ -134,10 +147,14 @@ function buildScenarioPrompt(s, a) {
     '                   if not line.startswith("data:"): continue\n' +
     '                   ev = json.loads(line[5:].strip())\n' +
     '                   if ev.get("kind") == "task":\n' +
-    '                       if not task_id: task_id = ev.get("id","")\n' +
+    '                       if not cur_task_id: cur_task_id = ev.get("id", "")\n' +
+    '                       if not cur_ctx_id:  cur_ctx_id  = ev.get("contextId", "")\n' +
     '                   elif ev.get("kind") == "status-update":\n' +
-    '                       if not task_id: task_id = ev.get("taskId","")\n' +
-    '                       if ev.get("final") or (ev.get("status",{}).get("state") == "completed"):\n' +
+    '                       if not cur_task_id: cur_task_id = ev.get("taskId", "")\n' +
+    '                       if not cur_ctx_id:  cur_ctx_id  = ev.get("contextId", "")\n' +
+    '                       st = ev.get("status", {}).get("state") or ""\n' +
+    '                       if st: cur_state = st\n' +
+    '                       if ev.get("final") or st == "completed":\n' +
     '                           reply_parts = [p["text"] for p in (ev.get("status",{}).get("message") or {}).get("parts",[]) if p.get("kind") == "text"]\n' +
     '                   elif ev.get("kind") == "artifact-update":\n' +
     '                       art = ev.get("artifact") or {}\n' +
@@ -149,7 +166,9 @@ function buildScenarioPrompt(s, a) {
     '                               meta = part.get("metadata") or {}\n' +
     '                               ctype = art_dtype or meta.get("data_type") or meta.get("mimeType")\n' +
     '                               if ctype and ctype not in ctypes: ctypes.append(ctype)\n' +
-    '       if task_id: TASKID_F.write_text(task_id)\n' +
+    '       if cur_task_id: TASKID_F.write_text(cur_task_id)\n' +
+    '       if cur_ctx_id:  CTXID_F.write_text(cur_ctx_id)\n' +
+    '       if cur_state:   STATE_F.write_text(cur_state)\n' +
     '       print(json.dumps({"reply": "\\n".join(reply_parts), "contentTypes": ctypes}))\n\n' +
     '   asyncio.run(main())\n' +
     '   ─────────────────────────────────────────────\n\n' +
@@ -176,7 +195,7 @@ function buildScenarioPrompt(s, a) {
     '   from the prior A2A reply (not generic).\n\n' +
 
     'After all A2A turns: compute a2aMinScore = min of all turn scores.\n' +
-    'Clean up /tmp/acc-' + runKey + '-a2a-* files.\n\n'
+    'Clean up /tmp/acc-' + runKey + '-a2a-* files (task, ctx, and state files).\n\n'
     ) : '') +
 
     // ── AG-UI transport ────────────────────────────────────────────────────────
