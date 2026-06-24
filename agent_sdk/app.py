@@ -333,6 +333,13 @@ class Agent:
         s = self.settings
         # OpenAI / Azure OpenAI backend: non-secret vars in .env; API key from store.
         if s.openai_model or s.azure_openai_endpoint:
+            try:
+                import openai as _openai_pkg  # noqa: F401
+            except ModuleNotFoundError:
+                raise ImportError(
+                    "openai package is required for the OpenAI/Azure OpenAI backend — "
+                    "install it with: pip install 'agent-sdk[openai]'"
+                ) from None
             from .agent.openai_client import OpenAIModelClient
 
             api_key = (

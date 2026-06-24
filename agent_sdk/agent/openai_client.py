@@ -98,6 +98,8 @@ class OpenAIModelClient:
 
         try:
             raw = await self._openai_client().chat.completions.create(**request)
+        except ModuleNotFoundError:
+            raise
         except Exception as exc:  # openai raises dynamic error classes
             raise AgentError(
                 ErrorCategory.UPSTREAM, "model invocation failed", source="openai"

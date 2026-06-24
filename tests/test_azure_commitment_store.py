@@ -1,8 +1,7 @@
-"""AzureTableCommitmentStore — unit tests using mocked Azure Table SDK.
+"""AzureTableCommitmentStore — unit tests using in-memory fakes for the Azure Table SDK.
 
-All Azure SDK calls are mocked so these tests run without azure-data-tables
-or azure-identity installed (the guard in require_azure_packages is bypassed by
-patching at the module level before the class is instantiated).
+All Azure SDK calls are intercepted via in-memory fake clients so these tests
+run without azure-data-tables or azure-identity installed.
 
 Coverage:
   1. add() happy path; secret-in-args raises ValueError
@@ -19,13 +18,13 @@ Coverage:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import ModuleType, SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -154,38 +153,287 @@ def _make_entity(
     )
 
 
+# ── lightweight call-tracking spy ─────────────────────────────────────────────
+
+
+class _CallArgs:
+    """Minimal stand-in for unittest.mock.call returned by call_args.
+
+    Supports both attribute-style (.args, .kwargs) and index-style access:
+    - call_args[0]  → positional args tuple  (mirroring MagicMock.call_args[0])
+    - call_args[1]  → keyword args dict      (mirroring MagicMock.call_args[1])
+    - call_args.args    → positional args tuple
+    - call_args.kwargs  → keyword args dict
+    """
+
+    def __init__(self, args: tuple, kwargs: dict) -> None:
+        self._args = args
+        self._kwargs = kwargs
+
+    def __getitem__(self, index: int) -> Any:
+        if index == 0:
+            return self._args
+        if index == 1:
+            return self._kwargs
+        raise IndexError(f"_CallArgs index out of range: {index}")
+
+    @property
+    def args(self) -> tuple:
+        return self._args
+
+    @property
+    def kwargs(self) -> dict:
+        return self._kwargs
+
+
+class _MethodSpy:
+    """Callable that records calls and supports side_effect / return_value.
+
+    Compatible subset of unittest.mock.MagicMock's call-inspection API:
+    - call_count
+    - call_args (last call)
+    - assert_not_called()
+    - side_effect: Exception instance/class → raise; list → pop front each call;
+                   callable → call with same args
+    - return_value: returned when no side_effect raises
+    """
+
+    def __init__(self, return_value: Any = None, side_effect: Any = None) -> None:
+        self.call_count: int = 0
+        self.call_args: _CallArgs | None = None
+        self._all_call_args: list[_CallArgs] = []
+        self.return_value = return_value
+        self.side_effect = side_effect
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.call_count += 1
+        ca = _CallArgs(args, kwargs)
+        self.call_args = ca
+        self._all_call_args.append(ca)
+
+        effect = self.side_effect
+        if effect is not None:
+            if isinstance(effect, list):
+                item = effect.pop(0)
+                if isinstance(item, BaseException) or (
+                    isinstance(item, type) and issubclass(item, BaseException)
+                ):
+                    raise item if isinstance(item, BaseException) else item()
+                elif callable(item):
+                    return item(*args, **kwargs)
+                else:
+                    return item
+            elif isinstance(effect, BaseException):
+                raise effect
+            elif isinstance(effect, type) and issubclass(effect, BaseException):
+                raise effect()
+            elif callable(effect):
+                return effect(*args, **kwargs)
+        return self.return_value
+
+    def assert_not_called(self) -> None:
+        if self.call_count != 0:
+            raise AssertionError(
+                f"Expected not called, but was called {self.call_count} time(s)."
+            )
+
+
+# ── in-memory fake Azure Table client ────────────────────────────────────────
+
+
+class _FakeTableClient:
+    """In-memory dict-backed Azure Table client with call recording.
+
+    Supports create_entity, get_entity, update_entity, delete_entity, and
+    query_entities. All methods record calls for assertion inspection.
+
+    ETag concurrency: update_entity checks the etag kwarg against the stored
+    entity's etag; if mismatched, raises ResourceModifiedError (only when
+    match_condition is set). Tests can pre-configure side_effect on individual
+    methods to override behaviour for specific scenarios.
+    """
+
+    def __init__(self, initial_entities: list[_FakeEntity] | None = None) -> None:
+        # Keyed by RowKey.
+        self._store: dict[str, _FakeEntity] = {}
+        self._etag_counter: int = 0
+
+        # Per-method spies — tests can set .side_effect / .return_value on them.
+        self.create_entity = _MethodSpy(side_effect=self._do_create_entity)
+        self.get_entity = _MethodSpy(side_effect=self._do_get_entity)
+        self.update_entity = _MethodSpy(side_effect=self._do_update_entity)
+        self.delete_entity = _MethodSpy(side_effect=self._do_delete_entity)
+        self.query_entities = _MethodSpy(side_effect=self._do_query_entities)
+
+        if initial_entities:
+            for e in initial_entities:
+                self._store[e["RowKey"]] = e
+
+    # ── internal implementations ──
+
+    def _new_etag(self) -> str:
+        self._etag_counter += 1
+        return f"W/\"etag-{self._etag_counter}\""
+
+    def _not_found(self) -> Exception:
+        exc_cls = sys.modules["azure.core.exceptions"].ResourceNotFoundError
+        return exc_cls("not found")
+
+    def _do_create_entity(self, entity: dict, **kwargs: Any) -> None:
+        key = entity["RowKey"]
+        etag = self._new_etag()
+        stored = _FakeEntity(entity, etag=etag)
+        self._store[key] = stored
+
+    def _do_get_entity(self, partition_key: str, row_key: str, **kwargs: Any) -> _FakeEntity:
+        if row_key not in self._store:
+            raise self._not_found()
+        return self._store[row_key]
+
+    def _do_update_entity(self, entity: dict, *, etag: str | None = None,
+                          match_condition: Any = None, mode: Any = None, **kwargs: Any) -> None:
+        key = entity["RowKey"]
+        if key not in self._store:
+            exc_cls = sys.modules["azure.core.exceptions"].ResourceNotFoundError
+            raise exc_cls("not found")
+        if etag is not None and match_condition is not None:
+            stored_etag = self._store[key].metadata.get("etag", "")
+            if etag != stored_etag:
+                exc_cls = sys.modules["azure.core.exceptions"].ResourceModifiedError
+                raise exc_cls("ETag mismatch")
+        new_etag = self._new_etag()
+        stored = _FakeEntity(entity, etag=new_etag)
+        self._store[key] = stored
+
+    def _do_delete_entity(self, partition_key: str, row_key: str, **kwargs: Any) -> None:
+        if row_key not in self._store:
+            raise self._not_found()
+        del self._store[row_key]
+
+    def _do_query_entities(self, filter_str: str, *, parameters: dict | None = None,
+                           results_per_page: int | None = None, **kwargs: Any):
+        # Return a copy of all stored entities (OData filtering is not simulated;
+        # the store returns everything and the real code applies limits/sorting).
+        return iter(list(self._store.values()))
+
+    # ── override helpers for conflict-simulation tests ────────────────────────
+
+    def set_query_result(self, entities: list[_FakeEntity]) -> None:
+        """Override query_entities to return a fixed list (for conflict tests)."""
+        captured = list(entities)
+
+        def _fixed_query(filter_str: str, *, parameters: dict | None = None,
+                         results_per_page: int | None = None, **kwargs: Any):
+            return iter(captured)
+
+        self.query_entities = _MethodSpy(side_effect=_fixed_query)
+
+    def set_update_side_effect(self, effects: list | Exception | None) -> None:
+        """Configure update_entity side_effect for conflict-simulation tests."""
+        if isinstance(effects, list):
+            self.update_entity = _MethodSpy(side_effect=list(effects))
+        else:
+            self.update_entity = _MethodSpy(side_effect=effects)
+
+    def set_get_side_effect(self, effect: Exception) -> None:
+        """Configure get_entity to raise on next call."""
+        self.get_entity = _MethodSpy(side_effect=effect)
+
+    def set_get_return_value(self, entity: _FakeEntity) -> None:
+        """Configure get_entity to return a fixed entity."""
+        self.get_entity = _MethodSpy(return_value=entity)
+
+
+class _FakeServiceClient:
+    """In-memory Azure TableServiceClient fake."""
+
+    def __init__(self, table_client: _FakeTableClient | None = None) -> None:
+        self._table_client = table_client or _FakeTableClient()
+        self.create_table = _MethodSpy(side_effect=self._do_create_table)
+        self.get_table_client = _MethodSpy(return_value=self._table_client)
+
+    def _do_create_table(self, table_name: str, **kwargs: Any) -> None:
+        pass  # no-op; tables always "exist" in memory
+
+
 # ── factory for the store under test ─────────────────────────────────────────
 
-def _make_store(table_client: MagicMock, service_client: MagicMock | None = None):
-    """Return an AzureTableCommitmentStore with mocked Azure clients.
+def _make_store(
+    table_client: _FakeTableClient,
+    service_client: _FakeServiceClient | None = None,
+):
+    """Return an AzureTableCommitmentStore wired to in-memory fake clients.
 
-    We bypass require_azure_packages() and the TableServiceClient constructor by
-    patching at import time.
+    Uses __new__ to bypass __init__ (and the Azure SDK constructor chain),
+    then manually injects _table and _service.
     """
-    with (
-        patch("agent_sdk.contrib.azure_utils.require_azure_packages"),
-        patch(
-            "azure.data.tables.TableServiceClient.from_connection_string",
-            return_value=service_client or MagicMock(
-                get_table_client=MagicMock(return_value=table_client)
-            ),
-        ),
-    ):
-        from agent_sdk.contrib.commitments.azure_table import AzureTableCommitmentStore
+    from agent_sdk.contrib.commitments.azure_table import AzureTableCommitmentStore
 
-        store = AzureTableCommitmentStore.__new__(AzureTableCommitmentStore)
-        store._table_name = "agentcommitments"
-        store._table = table_client
-        # Provide a minimal _service for initialize()
-        svc = service_client or MagicMock()
-        store._service = svc
-        return store
+    store = AzureTableCommitmentStore.__new__(AzureTableCommitmentStore)
+    store._table_name = "agentcommitments"
+    store._table = table_client
+    store._service = service_client or _FakeServiceClient(table_client)
+    return store
+
+
+# ── context manager for factory tests (replaces patch for constructor-level intercepts) ──
+
+
+@contextlib.contextmanager
+def _stub_azure_constructors(
+    service_client: _FakeServiceClient | None = None,
+    stub_require: bool = True,
+):
+    """Temporarily replace Azure SDK constructors in sys.modules so that
+    AzureTableCommitmentStore.__init__ uses our fakes instead of real Azure clients.
+
+    Restores originals on exit.
+    """
+    svc = service_client or _FakeServiceClient()
+    tables_mod = sys.modules.get("azure.data.tables")
+    identity_mod = sys.modules.get("azure.identity")
+    azure_utils_mod = sys.modules.get("agent_sdk.contrib.azure_utils")
+
+    # Save originals
+    orig_tsc = getattr(tables_mod, "TableServiceClient", None) if tables_mod else None
+    orig_dac = getattr(identity_mod, "DefaultAzureCredential", None) if identity_mod else None
+    orig_req = getattr(azure_utils_mod, "require_azure_packages", None) if azure_utils_mod else None
+
+    class _FakeTSC:
+        @staticmethod
+        def from_connection_string(cs: str, **kwargs: Any) -> _FakeServiceClient:
+            return svc
+
+        def __init__(self, endpoint: str = "", credential: Any = None, **kwargs: Any) -> None:
+            pass
+
+        def get_table_client(self, table_name: str) -> _FakeTableClient:
+            return svc.get_table_client(table_name)
+
+    class _FakeDAC:
+        pass
+
+    try:
+        if tables_mod and orig_tsc is not None:
+            tables_mod.TableServiceClient = _FakeTSC  # type: ignore[attr-defined]
+        if identity_mod and orig_dac is not None:
+            identity_mod.DefaultAzureCredential = _FakeDAC  # type: ignore[attr-defined]
+        if stub_require and azure_utils_mod and orig_req is not None:
+            azure_utils_mod.require_azure_packages = lambda: None  # type: ignore[attr-defined]
+        yield svc
+    finally:
+        if tables_mod and orig_tsc is not None:
+            tables_mod.TableServiceClient = orig_tsc
+        if identity_mod and orig_dac is not None:
+            identity_mod.DefaultAzureCredential = orig_dac
+        if stub_require and azure_utils_mod and orig_req is not None:
+            azure_utils_mod.require_azure_packages = orig_req
 
 
 # ── 1. add() ──────────────────────────────────────────────────────────────────
 
 def test_add_happy_path_calls_create_entity():
-    table = MagicMock()
+    table = _FakeTableClient()
     store = _make_store(table)
 
     cid = store.add(tool="send", args={"x": 1}, fire_at=_future())
@@ -201,7 +449,7 @@ def test_add_happy_path_calls_create_entity():
 
 
 def test_add_secret_in_args_raises_valueerror():
-    table = MagicMock()
+    table = _FakeTableClient()
     store = _make_store(table)
 
     with pytest.raises(ValueError, match="secret"):
@@ -211,7 +459,7 @@ def test_add_secret_in_args_raises_valueerror():
 
 
 def test_add_normalizes_fire_at_to_utc():
-    table = MagicMock()
+    table = _FakeTableClient()
     store = _make_store(table)
 
     store.add(tool="t", args={}, fire_at="2099-06-01T10:00:00+05:00")
@@ -221,7 +469,7 @@ def test_add_normalizes_fire_at_to_utc():
 
 
 def test_add_blank_identity_binding_raises():
-    table = MagicMock()
+    table = _FakeTableClient()
     store = _make_store(table)
 
     for blank in ("", "   "):
@@ -230,7 +478,7 @@ def test_add_blank_identity_binding_raises():
 
 
 def test_add_auth_context_secrets_are_redacted():
-    table = MagicMock()
+    table = _FakeTableClient()
     store = _make_store(table)
 
     store.add(
@@ -257,19 +505,18 @@ def test_claim_due_race_only_one_winner():
     commitment_id = str(uuid.uuid4())
     entity = _make_entity(commitment_id, status="pending", fire_at=_past())
 
-    table = MagicMock()
-    table.query_entities.return_value = iter([entity])
-    # First update succeeds, second raises ResourceModifiedError
-    table.update_entity.side_effect = [None, ResourceModifiedError("conflict")]
+    table = _FakeTableClient()
+    # Pre-populate store with a _FakeEntity that has the same etag as entity
+    table._store[commitment_id] = entity
 
+    # First call: update succeeds normally
     store = _make_store(table)
-    # Call claim_due twice (simulating two callers with the same candidate list)
-    # First call wins:
     claimed1 = store.claim_due(now="2099-01-01T00:00:00Z")
 
-    # Reset to simulate second caller seeing same entity still
-    table.query_entities.return_value = iter([entity])
-    table.update_entity.side_effect = ResourceModifiedError("conflict")
+    # Reset to simulate second caller seeing the same original entity (now with
+    # a changed etag from the first claim). We override update_entity to raise.
+    table.set_query_result([entity])
+    table.set_update_side_effect(ResourceModifiedError("conflict"))
     claimed2 = store.claim_due(now="2099-01-01T00:00:00Z")
 
     assert len(claimed1) == 1
@@ -280,9 +527,9 @@ def test_claim_due_race_only_one_winner():
 def test_claim_due_only_returns_due_pending():
     """Entities with status != pending or fire_at in future are not returned
     (the filter_expr is forwarded to query_entities)."""
-    table = MagicMock()
+    table = _FakeTableClient()
     # query_entities returns empty list (all filtered by the OData filter)
-    table.query_entities.return_value = iter([])
+    table.set_query_result([])
 
     store = _make_store(table)
     result = store.claim_due()
@@ -302,9 +549,9 @@ def test_claim_due_increments_attempts():
     commitment_id = str(uuid.uuid4())
     entity = _make_entity(commitment_id, status="pending", fire_at=_past(), attempts=2)
 
-    table = MagicMock()
-    table.query_entities.return_value = iter([entity])
-    table.update_entity.return_value = None
+    table = _FakeTableClient()
+    table._store[commitment_id] = entity
+    table.set_query_result([entity])
 
     store = _make_store(table)
     claimed = store.claim_due()
@@ -318,9 +565,9 @@ def test_mark_fired_returns_true_on_success():
     commitment_id = str(uuid.uuid4())
     entity = _make_entity(commitment_id, status="firing")
 
-    table = MagicMock()
-    table.get_entity.return_value = entity
-    table.update_entity.return_value = None
+    table = _FakeTableClient()
+    table.set_get_return_value(entity)
+    table._store[commitment_id] = entity
 
     store = _make_store(table)
     result = store.mark_fired(commitment_id)
@@ -336,8 +583,8 @@ def test_mark_fired_returns_false_if_not_firing():
     commitment_id = str(uuid.uuid4())
     entity = _make_entity(commitment_id, status="pending")
 
-    table = MagicMock()
-    table.get_entity.return_value = entity
+    table = _FakeTableClient()
+    table.set_get_return_value(entity)
 
     store = _make_store(table)
     result = store.mark_fired(commitment_id)
@@ -349,8 +596,8 @@ def test_mark_fired_returns_false_if_not_firing():
 def test_mark_fired_returns_false_when_entity_missing():
     from azure.core.exceptions import ResourceNotFoundError
 
-    table = MagicMock()
-    table.get_entity.side_effect = ResourceNotFoundError("not found")
+    table = _FakeTableClient()
+    table.set_get_side_effect(ResourceNotFoundError("not found"))
 
     store = _make_store(table)
     result = store.mark_fired("nonexistent-id")
@@ -366,9 +613,10 @@ def test_mark_fired_returns_false_on_concurrent_update():
     commitment_id = str(uuid.uuid4())
     entity = _make_entity(commitment_id, status="firing")
 
-    table = MagicMock()
-    table.get_entity.return_value = entity
-    table.update_entity.side_effect = ResourceModifiedError("conflict")
+    table = _FakeTableClient()
+    table.set_get_return_value(entity)
+    table._store[commitment_id] = entity
+    table.set_update_side_effect(ResourceModifiedError("conflict"))
 
     store = _make_store(table)
     result = store.mark_fired(commitment_id)
@@ -382,9 +630,9 @@ def test_mark_failed_scrubs_bearer_and_truncates_reason():
     commitment_id = str(uuid.uuid4())
     entity = _make_entity(commitment_id, status="firing")
 
-    table = MagicMock()
-    table.get_entity.return_value = entity
-    table.update_entity.return_value = None
+    table = _FakeTableClient()
+    table.set_get_return_value(entity)
+    table._store[commitment_id] = entity
 
     store = _make_store(table)
     long_secret_reason = "Bearer eyJraw.super.secret extra " + "z" * 500
@@ -402,9 +650,9 @@ def test_mark_failed_accepts_none_reason():
     commitment_id = str(uuid.uuid4())
     entity = _make_entity(commitment_id, status="firing")
 
-    table = MagicMock()
-    table.get_entity.return_value = entity
-    table.update_entity.return_value = None
+    table = _FakeTableClient()
+    table.set_get_return_value(entity)
+    table._store[commitment_id] = entity
 
     store = _make_store(table)
     result = store.mark_failed(commitment_id, None)
@@ -421,8 +669,8 @@ def test_cancel_identity_mismatch_returns_false():
     commitment_id = str(uuid.uuid4())
     entity = _make_entity(commitment_id, status="pending", identity_binding="user:alice")
 
-    table = MagicMock()
-    table.get_entity.return_value = entity
+    table = _FakeTableClient()
+    table.set_get_return_value(entity)
 
     store = _make_store(table)
     result = store.cancel(commitment_id, identity_binding="user:bob")
@@ -435,9 +683,9 @@ def test_cancel_correct_identity_returns_true():
     commitment_id = str(uuid.uuid4())
     entity = _make_entity(commitment_id, status="pending", identity_binding="user:alice")
 
-    table = MagicMock()
-    table.get_entity.return_value = entity
-    table.update_entity.return_value = None
+    table = _FakeTableClient()
+    table.set_get_return_value(entity)
+    table._store[commitment_id] = entity
 
     store = _make_store(table)
     result = store.cancel(commitment_id, identity_binding="user:alice")
@@ -451,8 +699,8 @@ def test_cancel_already_not_pending_returns_false():
     commitment_id = str(uuid.uuid4())
     entity = _make_entity(commitment_id, status="firing")  # not pending
 
-    table = MagicMock()
-    table.get_entity.return_value = entity
+    table = _FakeTableClient()
+    table.set_get_return_value(entity)
 
     store = _make_store(table)
     result = store.cancel(commitment_id)
@@ -464,8 +712,8 @@ def test_cancel_already_not_pending_returns_false():
 def test_cancel_missing_entity_returns_false():
     from azure.core.exceptions import ResourceNotFoundError
 
-    table = MagicMock()
-    table.get_entity.side_effect = ResourceNotFoundError("not found")
+    table = _FakeTableClient()
+    table.set_get_side_effect(ResourceNotFoundError("not found"))
 
     store = _make_store(table)
     result = store.cancel("nonexistent-id")
@@ -484,9 +732,11 @@ def test_reap_stale_firing_skips_on_resource_modified_error():
     e1 = _make_entity(status="firing", claimed_at="2000-01-01T00:00:00Z")
     e2 = _make_entity(status="firing", claimed_at="2000-01-01T00:00:00Z")
 
-    table = MagicMock()
-    table.query_entities.return_value = iter([e1, e2])
-    table.update_entity.side_effect = [ResourceModifiedError("conflict"), None]
+    table = _FakeTableClient()
+    table._store[e1["RowKey"]] = e1
+    table._store[e2["RowKey"]] = e2
+    table.set_query_result([e1, e2])
+    table.set_update_side_effect([ResourceModifiedError("conflict"), None])
 
     store = _make_store(table)
     count = store.reap_stale_firing(lease_seconds=0)
@@ -496,8 +746,8 @@ def test_reap_stale_firing_skips_on_resource_modified_error():
 
 
 def test_reap_stale_firing_returns_zero_on_no_candidates():
-    table = MagicMock()
-    table.query_entities.return_value = iter([])
+    table = _FakeTableClient()
+    table.set_query_result([])
 
     store = _make_store(table)
     count = store.reap_stale_firing(lease_seconds=300)
@@ -510,8 +760,8 @@ def test_reap_stale_firing_returns_zero_on_no_candidates():
 def test_get_returns_none_on_missing_entity():
     from azure.core.exceptions import ResourceNotFoundError
 
-    table = MagicMock()
-    table.get_entity.side_effect = ResourceNotFoundError("not found")
+    table = _FakeTableClient()
+    table.set_get_side_effect(ResourceNotFoundError("not found"))
 
     store = _make_store(table)
     result = store.get("nonexistent-id")
@@ -523,8 +773,8 @@ def test_get_returns_commitment_when_found():
     commitment_id = str(uuid.uuid4())
     entity = _make_entity(commitment_id, tool="ping", status="pending")
 
-    table = MagicMock()
-    table.get_entity.return_value = entity
+    table = _FakeTableClient()
+    table.set_get_return_value(entity)
 
     store = _make_store(table)
     result = store.get(commitment_id)
@@ -539,8 +789,8 @@ def test_get_identity_binding_mismatch_returns_none():
     commitment_id = str(uuid.uuid4())
     entity = _make_entity(commitment_id, identity_binding="user:alice")
 
-    table = MagicMock()
-    table.get_entity.return_value = entity
+    table = _FakeTableClient()
+    table.set_get_return_value(entity)
 
     store = _make_store(table)
     result = store.get(commitment_id, identity_binding="user:bob")
@@ -554,9 +804,9 @@ def test_list_filters_by_identity_binding():
     alice_id = str(uuid.uuid4())
     alice_entity = _make_entity(alice_id, identity_binding="user:alice")
 
-    table = MagicMock()
+    table = _FakeTableClient()
     # Only alice's entity is returned (OData filter applied server-side)
-    table.query_entities.return_value = iter([alice_entity])
+    table.set_query_result([alice_entity])
 
     store = _make_store(table)
     results = store.list(identity_binding="user:alice")
@@ -575,8 +825,8 @@ def test_list_filters_by_identity_binding():
 def test_list_filters_by_status():
     entity = _make_entity(status="pending")
 
-    table = MagicMock()
-    table.query_entities.return_value = iter([entity])
+    table = _FakeTableClient()
+    table.set_query_result([entity])
 
     store = _make_store(table)
     results = store.list(status="pending")
@@ -592,8 +842,8 @@ def test_list_filters_by_status():
 
 
 def test_list_parameterizes_status_filter():
-    table = MagicMock()
-    table.query_entities.return_value = iter([])
+    table = _FakeTableClient()
+    table.set_query_result([])
 
     store = _make_store(table)
     malicious = "pending' or status ne 'pending"
@@ -611,8 +861,8 @@ def test_list_respects_limit():
     for i, e in enumerate(entities):
         e["created_at"] = f"2026-01-0{i+1}T00:00:00Z"
 
-    table = MagicMock()
-    table.query_entities.return_value = iter(entities)
+    table = _FakeTableClient()
+    table.set_query_result(entities)
 
     store = _make_store(table)
     results = store.list(limit=3)
@@ -628,8 +878,8 @@ def test_list_sorted_newest_first():
     e3 = _make_entity()
     e3["created_at"] = "2026-02-01T00:00:00Z"
 
-    table = MagicMock()
-    table.query_entities.return_value = iter([e1, e2, e3])
+    table = _FakeTableClient()
+    table.set_query_result([e1, e2, e3])
 
     store = _make_store(table)
     results = store.list()
@@ -654,14 +904,7 @@ def test_factory_returns_azure_store_when_connection_string_set():
         data_dir="./data",
     )
 
-    with (
-        patch("agent_sdk.contrib.azure_utils.require_azure_packages"),
-        patch("azure.data.tables.TableServiceClient.from_connection_string") as mock_svc_fn,
-    ):
-        mock_svc = MagicMock()
-        mock_svc.get_table_client.return_value = MagicMock()
-        mock_svc_fn.return_value = mock_svc
-
+    with _stub_azure_constructors():
         from agent_sdk.contrib.commitments.azure_table import (
             AzureTableCommitmentStore,
             create_commitment_backend,
@@ -701,15 +944,7 @@ def test_factory_returns_azure_store_when_account_name_set():
         data_dir="./data",
     )
 
-    with (
-        patch("agent_sdk.contrib.azure_utils.require_azure_packages"),
-        patch("azure.identity.DefaultAzureCredential") as mock_cred_cls,
-        patch("azure.data.tables.TableServiceClient") as mock_svc_cls,
-    ):
-        mock_svc = MagicMock()
-        mock_svc.get_table_client.return_value = MagicMock()
-        mock_svc_cls.return_value = mock_svc
-
+    with _stub_azure_constructors():
         from agent_sdk.contrib.commitments.azure_table import (
             AzureTableCommitmentStore,
             create_commitment_backend,
@@ -724,14 +959,14 @@ def test_factory_returns_azure_store_when_account_name_set():
 # ── initialize() ──────────────────────────────────────────────────────────────
 
 def test_initialize_creates_table():
-    svc = MagicMock()
-    table = MagicMock()
-    svc.get_table_client.return_value = table
+    table = _FakeTableClient()
+    svc = _FakeServiceClient(table)
 
     store = _make_store(table, service_client=svc)
     store.initialize()
 
-    svc.create_table.assert_called_once_with("agentcommitments")
+    assert svc.create_table.call_count == 1
+    assert svc.create_table.call_args[0][0] == "agentcommitments"
 
 
 def test_initialize_is_idempotent_on_already_exists():
@@ -739,9 +974,9 @@ def test_initialize_is_idempotent_on_already_exists():
     'ResourceExistsError' must be swallowed (idempotent)."""
     from azure.core.exceptions import ResourceExistsError
 
-    svc = MagicMock()
-    svc.create_table.side_effect = ResourceExistsError("already exists")
-    table = MagicMock()
+    table = _FakeTableClient()
+    svc = _FakeServiceClient(table)
+    svc.create_table = _MethodSpy(side_effect=ResourceExistsError("already exists"))
 
     store = _make_store(table, service_client=svc)
     store.initialize()  # must not raise
@@ -750,7 +985,7 @@ def test_initialize_is_idempotent_on_already_exists():
 # ── close() ───────────────────────────────────────────────────────────────────
 
 def test_close_is_noop():
-    table = MagicMock()
+    table = _FakeTableClient()
     store = _make_store(table)
     store.close()  # must not raise
     store.close()  # idempotent
@@ -803,15 +1038,15 @@ def test_get_etag_raises_runtime_error_on_missing_etag():
 def test_list_parameterizes_single_quote_in_identity_binding():
     """The SDK passes raw values via parameters dict; azure-data-tables applies
     OData escaping client-side. The raw value must not appear in the filter template."""
-    table = MagicMock()
+    table = _FakeTableClient()
     store = _make_store(table)
 
     # Return an empty list for the query
-    table.query_entities.return_value = []
+    table.set_query_result([])
 
     store.list(identity_binding="O'Brien")
 
-    assert table.query_entities.called
+    assert table.query_entities.call_count >= 1
     filter_used = table.query_entities.call_args[0][0]
     params = table.query_entities.call_args.kwargs["parameters"]
     assert "identity_binding eq @identity_binding" in filter_used

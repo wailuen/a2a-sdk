@@ -17,6 +17,7 @@ Requires: ``npx azurite`` on PATH (ships with Node.js / npm).
 from __future__ import annotations
 
 import logging
+import shutil
 import socket
 import subprocess
 import time
@@ -30,6 +31,20 @@ from agent_sdk.credentials.azure_table import AzureTableCredentialStore
 from agent_sdk.credentials.encrypted_sqlite import EncryptedSqliteStore
 
 _MASTER_KEY = "test-master-key-32-chars-minimum!!"
+
+# ---------------------------------------------------------------------------
+# Availability guard — skip the entire module when Azurite (npx azurite) is
+# not present in the environment.  This prevents infrastructure-only errors
+# from masking real test failures in CI environments without an Azure emulator.
+# Run with ``-k azurite`` (or start Azurite first) to exercise these tests.
+# ---------------------------------------------------------------------------
+
+_AZURITE_AVAILABLE = shutil.which("npx") is not None
+
+pytestmark = pytest.mark.skipif(
+    not _AZURITE_AVAILABLE,
+    reason="Azurite not available (npx not found); start Azurite or run with -k azurite",
+)
 
 # Azurite well-known devstore credentials (public, built into the emulator).
 _AZURITE_ACCOUNT = "devstoreaccount1"
@@ -79,6 +94,10 @@ def azurite_table_port():
     Uses ``--inMemoryPersistence`` so no disk I/O occurs and all data is
     discarded when the process exits.  Blob and queue services also start
     (Azurite always starts all three) but are not used by these tests.
+
+    If Azurite fails to start (e.g. the npm package is not installed) the
+    fixture skips the session rather than erroring, so infrastructure issues
+    are clearly distinguishable from code bugs.
     """
     table_port = _free_port()
     blob_port = _free_port()
@@ -100,6 +119,16 @@ def azurite_table_port():
 
     try:
         _wait_for_port("127.0.0.1", table_port)
+    except RuntimeError as exc:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        pytest.skip(f"Azurite Table service did not start: {exc}")
+
+    try:
         yield table_port
     finally:
         proc.terminate()

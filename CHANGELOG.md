@@ -4,6 +4,15 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.35] — 2026-06-24
+
+### ✅ Features
+- GH-93: `pip install "agent-sdk[openai]"` now installs the `openai` package via a declared optional extra; `build_app()` probes eagerly for `openai` when `OPENAI_MODEL` or `AZURE_OPENAI_ENDPOINT` is set and raises `ImportError` with a clear `agent-sdk[openai]` install hint if absent; `converse()` in `openai_client.py` now re-raises `ModuleNotFoundError` before the bare `except Exception` so missing-package errors are never swallowed as generic `AgentError`. (`pyproject.toml`, `agent_sdk/app.py`, `agent_sdk/agent/openai_client.py`)
+
+### 🧪 Test / CI
+- GH-93: `tests/test_gh93_openai_missing_package.py` — 2 cases: startup import probe raises `ImportError` with install hint when openai absent; `converse()` propagates `ModuleNotFoundError` unmodified
+- GH-92: replace `MagicMock` / `AsyncMock` with real in-memory fakes in `test_scheduler.py` (`types.SimpleNamespace`), `test_a2ui_group_d.py` (`_StubContentModel` concrete subclass), `test_azure_commitment_store.py` (`_FakeTableClient` dict-backed ETag-aware fake); zero `unittest.mock` usage remaining in those files
+
 ## [0.5.34] — 2026-06-22
 
 ### ✅ Features

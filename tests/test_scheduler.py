@@ -5,8 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
-from unittest.mock import AsyncMock, MagicMock, patch
-
+import types
 import pytest
 
 
@@ -108,7 +107,7 @@ def test_cron_accepts_sync_callable():
 
 
 @pytest.mark.asyncio
-async def test_lifespan_starts_background_tasks():
+async def test_lifespan_starts_background_tasks(monkeypatch):
     """Entering sched.lifespan must start one asyncio.Task per registered job."""
     from agent_sdk.contrib import Scheduler
 
@@ -123,7 +122,7 @@ async def test_lifespan_starts_background_tasks():
     async def job_b():
         started.append("b")
 
-    app = MagicMock()
+    app = types.SimpleNamespace()
     created_tasks: list[asyncio.Task] = []
     original_create_task = asyncio.create_task
 
@@ -132,14 +131,14 @@ async def test_lifespan_starts_background_tasks():
         created_tasks.append(task)
         return task
 
-    with patch("asyncio.create_task", side_effect=capturing_create_task):
-        async with sched.lifespan(app):
-            # Two tasks should have been created (one per job).
-            # Give the event loop a tick to schedule tasks.
-            await asyncio.sleep(0)
-            # Both tasks should be alive (not done) — they're sleeping for 9999s.
-            all_tasks = {t for t in asyncio.all_tasks() if "sched:" in (t.get_name() or "")}
-            assert len(all_tasks) == 2
+    monkeypatch.setattr(asyncio, "create_task", capturing_create_task)
+    async with sched.lifespan(app):
+        # Two tasks should have been created (one per job).
+        # Give the event loop a tick to schedule tasks.
+        await asyncio.sleep(0)
+        # Both tasks should be alive (not done) — they're sleeping for 9999s.
+        all_tasks = {t for t in asyncio.all_tasks() if "sched:" in (t.get_name() or "")}
+        assert len(all_tasks) == 2
 
     # After exit, the tasks should be cancelled / done.
     for task in all_tasks:
@@ -157,7 +156,7 @@ async def test_lifespan_cancels_tasks_cleanly():
     async def long_running():
         await asyncio.sleep(9999)
 
-    app = MagicMock()
+    app = types.SimpleNamespace()
     # Should not raise anything
     async with sched.lifespan(app):
         await asyncio.sleep(0)  # let the task start
@@ -171,7 +170,7 @@ async def test_lifespan_with_no_jobs():
     from agent_sdk.contrib import Scheduler
 
     sched = Scheduler()
-    app = MagicMock()
+    app = types.SimpleNamespace()
 
     async with sched.lifespan(app):
         pass  # nothing to cancel, should be fine
@@ -183,7 +182,7 @@ async def test_lifespan_is_asynccontextmanager():
     from agent_sdk.contrib import Scheduler
 
     sched = Scheduler()
-    app = MagicMock()
+    app = types.SimpleNamespace()
     cm = sched.lifespan(app)
 
     assert hasattr(cm, "__aenter__")
@@ -216,12 +215,16 @@ async def test_lifespan_job_exception_does_not_crash_shutdown():
         call_count += 1
         raise RuntimeError("boom")
 
-    app = MagicMock()
+    app = types.SimpleNamespace()
 
-    with patch.object(sched_mod, "_sleep", side_effect=controlled_sleep):
+    original_sleep = sched_mod._sleep
+    sched_mod._sleep = controlled_sleep
+    try:
         async with sched.lifespan(app):
             # Wait for the first sleep + job execution to complete.
             await asyncio.sleep(0.05)
+    finally:
+        sched_mod._sleep = original_sleep
 
     # We reach here — no unhandled exception propagated.
     assert call_count >= 1
@@ -248,11 +251,15 @@ async def test_lifespan_sync_job_runs_in_thread():
     def sync_job():
         ran.append(True)
 
-    app = MagicMock()
+    app = types.SimpleNamespace()
 
-    with patch.object(sched_mod, "_sleep", side_effect=controlled_sleep):
+    original_sleep = sched_mod._sleep
+    sched_mod._sleep = controlled_sleep
+    try:
         async with sched.lifespan(app):
             await asyncio.sleep(0.05)
+    finally:
+        sched_mod._sleep = original_sleep
 
     assert ran, "sync job should have been called at least once"
 
@@ -290,7 +297,7 @@ async def test_lifespan_snapshot_excludes_late_registrations():
     async def early_job():
         pass
 
-    app = MagicMock()
+    app = types.SimpleNamespace()
 
     # Capture the lifespan *before* registering the late job.
     lifespan_fn = sched.lifespan  # snapshot taken here — only early_job included

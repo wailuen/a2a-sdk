@@ -45,6 +45,23 @@ class _DomainBase(ContentModel):
 
 
 # ---------------------------------------------------------------------------
+# Stub ContentModel for direct _validate_a2ui_wire tests
+# ---------------------------------------------------------------------------
+
+
+class _StubContentModel(ContentModel):
+    """Minimal concrete ContentModel subclass for tests that need a payload
+    instance without exercising any real domain card logic."""
+
+    data_type: ClassVar[str] = "_stub"
+    component: ClassVar[str] = "_Stub"
+    catalog_id: ClassVar[str] = _DOMAIN_CATALOG
+
+    def to_plain_text(self) -> str:
+        return "_stub"
+
+
+# ---------------------------------------------------------------------------
 # SC-D1: Pre-wire validation in build_artifact()
 # ---------------------------------------------------------------------------
 
@@ -142,28 +159,18 @@ def test_d1_bad_domain_card_gated_off_does_not_raise(_register_d1_cards):
 
 def test_d1_validate_a2ui_wire_direct_empty_list():
     """_validate_a2ui_wire raises when given an empty list."""
-    card = _GoodDomainCard.__new__(_GoodDomainCard)
-    object.__setattr__(card, "__dict__", {})
-    # Build a stand-in with a quick mock
-    from unittest.mock import MagicMock
-    mock_payload = MagicMock(spec=ContentModel)
-    mock_payload.data_type = "mock_type"
-    mock_payload.catalog_id = _DOMAIN_CATALOG
-    type(mock_payload).catalog_id = property(lambda self: _DOMAIN_CATALOG)
+    stub_payload = _StubContentModel()
 
     with pytest.raises(ValueError, match="non-empty list"):
-        _validate_a2ui_wire(mock_payload, [])
+        _validate_a2ui_wire(stub_payload, [])
 
 
 def test_d1_validate_a2ui_wire_direct_non_list():
     """_validate_a2ui_wire raises when given a plain dict instead of list."""
-    from unittest.mock import MagicMock
-    mock_payload = MagicMock(spec=ContentModel)
-    mock_payload.data_type = "mock_type"
-    type(mock_payload).catalog_id = property(lambda self: _DOMAIN_CATALOG)
+    stub_payload = _StubContentModel()
 
     with pytest.raises(ValueError, match="non-empty list"):
-        _validate_a2ui_wire(mock_payload, {"type": "bad"})  # type: ignore[arg-type]
+        _validate_a2ui_wire(stub_payload, {"type": "bad"})  # type: ignore[arg-type]
 
 
 def test_d1_standard_profile_type_wire_not_double_validated():

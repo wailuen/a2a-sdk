@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-sdk"
-version = "0.5.34"
+version = "0.5.35"
 description = "SDK for building A2A/AG-UI/A2UI agents with an OAuth-protected MCP server"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -24,6 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 azure = ["azure-data-tables>=12.5", "azure-identity>=1.15"]
 obo = ["msal>=1.26"]
+openai = ["openai>=1.0"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

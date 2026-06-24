@@ -107,3 +107,4 @@ Entries ordered by LRN number.
 | LRN-101 | Agent card description field must never fall back to empty string — use display_name sentinel instead | [LRN-101](LRN-101-agent-card-description-empty-string-fallback.md) |
 | LRN-102 | TOOL_PROGRESS CUSTOM event emitted in ag_ui.py but absent from CUSTOM_EVENTS tuple, card schema, DESIGN.md §5.3 table, and console router — parity guard silent because both sides missing | [LRN-102](LRN-102-tool-progress-custom-event-parity-gap.md) |
 | LRN-103 | A2A multi-turn continuation must use contextId, not taskId, for completed tasks | [LRN-103](LRN-103-a2a-multiturn-contextid-continuation.md) |
+| LRN-104 | deferred imports in model clients must not be silently caught by bare except Exception | [LRN-104](LRN-104-deferred-import-silent-wrap.md) |
