@@ -96,11 +96,27 @@ class OpenAIModelClient:
         if self._max_completion_tokens is not None:
             request["max_completion_tokens"] = self._max_completion_tokens
 
+        import openai as _openai  # deferred: already loaded by _openai_client(); fast sys.modules hit
         try:
             raw = await self._openai_client().chat.completions.create(**request)
         except ModuleNotFoundError:
             raise
-        except Exception as exc:  # openai raises dynamic error classes
+        except _openai.RateLimitError as exc:
+            retry_after: int | None = None
+            if exc.response is not None:
+                raw_header = exc.response.headers.get("retry-after")
+                if raw_header is not None:
+                    try:
+                        retry_after = int(raw_header)
+                    except (ValueError, TypeError):
+                        pass
+            raise AgentError(
+                ErrorCategory.RATE_LIMITED,
+                "model rate limit exceeded; retry later",
+                source="openai",
+                detail={"retry_after": retry_after} if retry_after is not None else None,
+            ) from exc
+        except Exception as exc:
             raise AgentError(
                 ErrorCategory.UPSTREAM, "model invocation failed", source="openai"
             ) from exc

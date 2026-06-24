@@ -108,3 +108,4 @@ Entries ordered by LRN number.
 | LRN-102 | TOOL_PROGRESS CUSTOM event emitted in ag_ui.py but absent from CUSTOM_EVENTS tuple, card schema, DESIGN.md §5.3 table, and console router — parity guard silent because both sides missing | [LRN-102](LRN-102-tool-progress-custom-event-parity-gap.md) |
 | LRN-103 | A2A multi-turn continuation must use contextId, not taskId, for completed tasks | [LRN-103](LRN-103-a2a-multiturn-contextid-continuation.md) |
 | LRN-104 | deferred imports in model clients must not be silently caught by bare except Exception | [LRN-104](LRN-104-deferred-import-silent-wrap.md) |
+| LRN-105 | bare "except Exception" in model client invoke paths swallows distinct error categories (e.g. RateLimitError) as generic UPSTREAM | [LRN-105](LRN-105-broad-except-swallows-error-category.md) |

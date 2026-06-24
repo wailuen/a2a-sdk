@@ -4,6 +4,14 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.36] — 2026-06-24
+
+### 🔧 Fixes
+- GH-94: `openai.RateLimitError` now raises `AgentError(ErrorCategory.RATE_LIMITED, "model rate limit exceeded; retry later")` instead of being swallowed by the bare `except Exception` as a generic `"model invocation failed"` — callers can now distinguish transient rate-limit failures from fatal errors; `Retry-After` header is extracted into `detail={"retry_after": n}` when present. (`agent_sdk/agent/openai_client.py`)
+
+### 🧪 Test / CI
+- `tests/test_gh94_rate_limit_error.py` — 4 cases: `RateLimitError` → `RATE_LIMITED` category, message distinct from fatal, fatal errors still `UPSTREAM`, `Retry-After` header extraction
+
 ## [0.5.35] — 2026-06-24
 
 ### ✅ Features
