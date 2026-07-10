@@ -158,7 +158,6 @@ def build_agent_card(
     cred_ext = credential_forwarding_extension(credential_fields or {})
     if cred_ext is not None:
         extensions.append(cred_ext)
-    _is_placeholder = settings.is_placeholder_name
     _desc_stripped = settings.agent_description.strip()
     # A2A §3.1 requires description to be a human-readable string — "" is
     # spec-marginal. When description is blank, fall back to display_name for
