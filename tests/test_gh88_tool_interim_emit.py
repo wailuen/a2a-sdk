@@ -252,17 +252,24 @@ EMPTY_GEN_REGISTRY = ToolRegistry([empty_gen_tools], {})
 
 
 @pytest.mark.asyncio
-async def test_non_tool_progress_loop_events_dropped_with_warning(caplog):
+async def test_non_tool_progress_loop_events_dropped_with_warning(sdk_caplog):
     """RT-W025-005: non-ToolProgressEvent LoopEvent subclasses yielded by a
     gen-tool are dropped (not forwarded downstream) and a logger.warning is
     emitted for each one so gen-tool authors can detect routing mistakes.
+
+    RT-002: captures directly off ``agent_sdk.agent.loop`` via the
+    propagation-independent ``sdk_caplog`` fixture (tests/conftest.py) rather
+    than plain caplog — see that fixture's docstring for why a bare
+    ``caplog.at_level(logger="agent_sdk.agent.loop")`` is order/version-fragile
+    once ``configure_logging()`` has set ``propagate = False`` on the
+    ``agent_sdk`` root logger elsewhere in the session.
     """
     model = FakeModelClient().script(
         tool_call("mixed_event_gen_tool", {}),
         reply("finished"),
     )
 
-    with caplog.at_level(logging.WARNING, logger="agent_sdk.agent.loop"):
+    with sdk_caplog("agent_sdk.agent.loop", logging.WARNING) as records:
         events = await collect_events(model, BAD_EVENT_REGISTRY)
 
     # Only the valid ToolProgressEvent is forwarded downstream
@@ -285,7 +292,7 @@ async def test_non_tool_progress_loop_events_dropped_with_warning(caplog):
     )
 
     # A warning must have been emitted for each dropped LoopEvent
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    warnings = [r for r in records if r.levelno == logging.WARNING]
     dropped_names = {r.getMessage() for r in warnings}
     assert any("TextEvent" in msg for msg in dropped_names), (
         "Expected a warning mentioning TextEvent"

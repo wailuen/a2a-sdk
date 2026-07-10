@@ -72,6 +72,7 @@ class Agent:
         artifacts_dir: Path | None = None,
         artifact_vars: dict[str, Any] | None = None,
         skills_dir: Path | None = None,
+        exclude_from_catalog: list[str] | None = None,
         toolsets: list[ToolSet] | None = None,
         model_client: ModelClient | None = None,
         task_store: TaskStore | None = None,
@@ -89,6 +90,23 @@ class Agent:
             artifact_vars: Extra variables rendered into artifact templates.
             skills_dir: Directory of ``SKILL.md`` files added to the system
                 prompt's skill catalog.
+            exclude_from_catalog: Names of skills (from ``skills_dir``) to
+                omit from the advertised catalog text folded into the
+                system prompt, while keeping them fully invocable —
+                ``app.state.skills.load(name)`` (and the ``load_skill``
+                tool) still succeeds for an excluded name; it is simply not
+                listed. Validated at ``build_app()``: every name must
+                correspond to a discoverable skill, else raises
+                ``ValueError``.
+
+                This is the recommended pattern for always-on/guardrail
+                skills: inline the skill's content directly into
+                ``persona``/``artifacts_dir`` so it is unconditionally
+                present in the system prompt (never dependent on the model
+                choosing to call ``load_skill``), and list that same
+                skill's name here so its now-redundant catalog entry is
+                suppressed rather than duplicating instructions the model
+                already always sees.
             toolsets: ``ToolSet`` instances whose tools are registered.
             model_client: Override the auto-configured ``ModelClient``
                 (useful in tests and for non-Bedrock backends).
@@ -153,6 +171,7 @@ class Agent:
         self.artifacts_dir = artifacts_dir
         self.artifact_vars = artifact_vars or {}
         self.skills_dir = skills_dir
+        self.exclude_from_catalog = list(exclude_from_catalog or [])
         self.toolsets = list(toolsets or [])
         self._model_client = model_client
         self._task_store = task_store
@@ -491,6 +510,13 @@ class Agent:
             max_interrupted=settings.max_interrupted_tasks,
         )
         skills = SkillsRegistry(self.skills_dir)
+        if self.exclude_from_catalog:
+            unknown = [n for n in self.exclude_from_catalog if n not in skills.skills]
+            if unknown:
+                raise ValueError(
+                    "exclude_from_catalog references skill(s) not found in "
+                    f"skills_dir: {', '.join(unknown)}"
+                )
         model_client = self._build_model_client(credential_store)
         policies = LoopPolicies(
             max_turns=settings.max_turns,
@@ -511,7 +537,7 @@ class Agent:
             persona_str = self.persona  # type: ignore[assignment]
 
         system_prompt = persona_str.strip()
-        catalog = skills.catalog_text()
+        catalog = skills.catalog_text(exclude=self.exclude_from_catalog)
         if catalog:
             system_prompt = f"{system_prompt}\n\n{catalog}"
 

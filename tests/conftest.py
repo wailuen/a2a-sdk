@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import asyncio
 import gc
-from typing import AsyncIterator
+import logging
+from contextlib import contextmanager
+from typing import AsyncIterator, Iterator
 
 import httpx
 import pytest
@@ -71,6 +73,52 @@ async def client(app) -> AsyncIterator[httpx.AsyncClient]:
         ) as c:
             c.app = app  # type: ignore[attr-defined]
             yield c
+
+
+@pytest.fixture
+def sdk_caplog():
+    """Factory fixture: capture log records directly from a named ``agent_sdk.*``
+    logger, independent of caplog's root-logger propagation.
+
+    ``agent_sdk.observability.logging.configure_logging()`` sets
+    ``propagate = False`` on the ``agent_sdk`` root logger the first time any
+    test in the session builds an app. From that point on, records emitted by
+    loggers under ``agent_sdk`` may never reach the stdlib root logger that
+    plain ``caplog`` attaches to — whether they do depends on pytest-version
+    behaviour and exact test order, so a bare ``caplog.at_level(...)`` /
+    ``caplog.records`` assertion against an ``agent_sdk.*`` logger can pass in
+    isolation yet read empty at full-suite scope. Attaching a handler directly
+    to the target logger sidesteps propagation and the root logger entirely,
+    so capture is deterministic regardless of test order or pytest version.
+
+    Usage::
+
+        with sdk_caplog("agent_sdk.agent.loop", logging.WARNING) as records:
+            ...
+        assert any("foo" in r.getMessage() for r in records)
+    """
+
+    @contextmanager
+    def _capture(logger_name: str, level: int = logging.WARNING) -> Iterator[list[logging.LogRecord]]:
+        records: list[logging.LogRecord] = []
+
+        class _Collector(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        target = logging.getLogger(logger_name)
+        handler = _Collector()
+        handler.setLevel(level)
+        orig_level = target.level
+        target.setLevel(level)
+        target.addHandler(handler)
+        try:
+            yield records
+        finally:
+            target.removeHandler(handler)
+            target.setLevel(orig_level)
+
+    return _capture
 
 
 async def wait_for_state(client, task_id: str, states=("completed", "failed"), timeout=5.0):

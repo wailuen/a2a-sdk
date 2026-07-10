@@ -10,12 +10,15 @@ call time.
 from __future__ import annotations
 
 import inspect
+import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Callable, Optional, Union, cast
 
 from pydantic import BaseModel
 
 from ..sources import SourceAdapter
+
+logger = logging.getLogger(__name__)
 
 
 # ── GH-88 sentinel types ──
@@ -107,6 +110,33 @@ class ToolSet:
             if not _is_generator and not inspect.iscoroutinefunction(fn):
                 raise TypeError(f"tool {fn.__name__!r} must be async")
             _tool_name = name or fn.__name__
+            # Gate on the same falsiness the resolution above uses: any falsy
+            # override (None or "") falls through to fn.__name__, so a "_tool"
+            # suffix would silently register verbatim. `is None` alone would
+            # miss name="".
+            if not name and fn.__name__.endswith("_tool"):
+                _suggested_name = fn.__name__[: -len("_tool")]
+                if _suggested_name:
+                    logger.warning(
+                        "tool function %r has no explicit name= override, so it "
+                        "registered as tool %r — including the literal '_tool' "
+                        "suffix. If that's unintentional (e.g. a skill/persona "
+                        "expects to call %r without the suffix), pass "
+                        "name=%r to @tools.tool(...) to fix it.",
+                        fn.__name__,
+                        _tool_name,
+                        _suggested_name,
+                        _suggested_name,
+                    )
+                else:
+                    logger.warning(
+                        "tool function %r has no explicit name= override, so it "
+                        "registered as tool %r — including the literal '_tool' "
+                        "suffix. If that's unintentional, pass an explicit "
+                        "name= to @tools.tool(...) to fix it.",
+                        fn.__name__,
+                        _tool_name,
+                    )
             if len(_tool_name) > 64:
                 raise ValueError(
                     f"Tool name {_tool_name!r} exceeds 64 characters (MCP spec recommends ≤ 64)"

@@ -29,7 +29,13 @@ router = APIRouter()
 
 # Frozen §5.3 CUSTOM event names — the card's x-agui.customEvents list and
 # the console's routing table are asserted equal by a unit test.
-CUSTOM_EVENTS = ("AGENT_ARTIFACT", "A2UI_UPDATE", "AGENT_PROGRESS", "AGENT_NOTE")
+CUSTOM_EVENTS = (
+    "AGENT_ARTIFACT",
+    "A2UI_UPDATE",
+    "AGENT_PROGRESS",
+    "AGENT_NOTE",
+    "TOOL_PROGRESS",
+)
 
 # P6-01: AG-UI customEvents must be objects with name + valueSchema, not flat
 # strings.  The name set is identical to CUSTOM_EVENTS (routing table parity).
@@ -69,6 +75,16 @@ _CUSTOM_EVENT_SCHEMAS = [
             "type": "object",
             "properties": {
                 "note": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "TOOL_PROGRESS",
+        "valueSchema": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string"},
+                "toolName": {"type": "string"},
             },
         },
     },

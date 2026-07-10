@@ -103,10 +103,13 @@ async def test_resume_identity_bound(client, fake_model):
 
 
 async def test_validation_inside_generator(client):
+    # no "messages" key at all -> folds to no user message, not a threadId/runId
+    # rejection (those are synthesized before _validate runs, GH-97).
     r = await client.post("/ag-ui/run", json={"runId": "r1"})
     frames = sse_frames(r.text)
     assert [f["type"] for f in frames[:2]] == ["RUN_STARTED", "STATE_SNAPSHOT"]
     assert frames[-1]["type"] == "RUN_ERROR"
+    assert frames[-1]["message"] == "no user message in input"
 
     r = await client.post(
         "/ag-ui/run",

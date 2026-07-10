@@ -32,6 +32,14 @@ Rules the decorator enforces:
 - Tool name = `__name__` (override with `name=`); duplicates across all
   toolsets raise at boot.
 
+### Common pitfalls
+
+- Naming the function `foo_tool` registers a tool literally named
+  `foo_tool` (the `_tool` suffix is not stripped) — a frequent cause of a
+  skill or persona being authored against the wrong tool name. When this
+  happens without an explicit `name=` override, the SDK logs a `WARNING`
+  at registration time; pass `name="foo"` to `@tools.tool(...)` to fix it.
+
 ## Tiers
 
 - **Tier 1 (query):** exposed on A2A *and* MCP `tools/list`. 130s timeout.

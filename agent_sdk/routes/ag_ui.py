@@ -96,11 +96,14 @@ def _fold_history(raw_messages: list[Any]) -> list[dict[str, Any]] | None:
 
 
 def _validate(body: dict[str, Any]) -> str | None:
-    """Returns an error message (→ RUN_ERROR) or None."""
-    if not isinstance(body.get("threadId"), str) or not body["threadId"]:
-        return "threadId is required"
-    if not isinstance(body.get("runId"), str) or not body["runId"]:
-        return "runId is required"
+    """Returns an error message (→ RUN_ERROR) or None.
+
+    threadId/runId are NOT checked here: the route always synthesizes them
+    before RUN_STARTED (§5.3), so by the time _validate runs a missing or
+    malformed id has already been replaced — rejecting the original raw
+    body for those fields would emit RUN_ERROR right after a RUN_STARTED
+    that already claimed a valid id (GH-97).
+    """
     messages = body.get("messages") or []
     if not isinstance(messages, list):
         return "messages must be a list"
@@ -437,6 +440,11 @@ async def ag_ui_run(
                     break
         except StreamTerminated:
             pass
+        except Exception:
+            logger.exception("ag-ui stream failed")
+            if not mapper.terminal_sent:
+                for frame in mapper.run_error("internal error"):
+                    yield sse_data(frame)
         finally:
             if sub is not None and record is not None:
                 store.unsubscribe(record.task.id, sub)

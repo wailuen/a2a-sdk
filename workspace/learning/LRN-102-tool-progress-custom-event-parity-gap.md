@@ -28,3 +28,32 @@ The GH-88 change added `ToolProgressEvent` handling and the `_custom("TOOL_PROGR
 - `handleCustom()` console routing table entry
 
 The parity guard test must additionally verify that every name passed to `self._custom()` in ag_ui.py appears in `CUSTOM_EVENTS`, so that future additions cannot silently diverge again.
+
+## Check
+
+```
+python3 -c "
+import re
+from pathlib import Path
+src = Path('agent_sdk/routes/ag_ui.py').read_text()
+names = re.findall(r'self\._custom\(\s*([^,]+?),', src, re.DOTALL)
+print(sorted(n.strip().strip(chr(34)) for n in names))
+"
+```
+
+(a plain single-line `grep 'self\._custom(\s*"[A-Z0-9_]+"'` under-matches — several call sites split the name onto the next line, e.g. `self._custom(\n    "TOOL_PROGRESS",` — so the extraction must span lines the way the regex above and the pytest regex below do.)
+
+Every name this prints must appear in all four canonical locations:
+
+1. `CUSTOM_EVENTS` tuple — `agent_sdk/routes/agent_card.py`
+2. `_CUSTOM_EVENT_SCHEMAS` list (the `name` field of each entry) — same file
+3. The frozen contract table under `### 5.3 AG-UI` in `DESIGN.md`
+4. The `handleCustom()` routing table (`name === "<NAME>"` branches) in `agent_sdk/console/static/chat.js`
+
+This is machine-runnable end-to-end via the existing regression test, which must pass:
+
+```
+.venv/bin/pytest -q tests/test_card_console.py::test_custom_events_match_actually_emitted_events tests/test_card_console.py::test_custom_events_match_console_routing_table tests/test_card_console.py::test_card_shape
+```
+
+`test_custom_events_match_actually_emitted_events` extracts every `self._custom(` call-site name in `ag_ui.py` (rejecting non-literal arguments so the extraction itself can't be evaded) and asserts the set equals `CUSTOM_EVENTS`; `test_custom_events_match_console_routing_table` asserts every `CUSTOM_EVENTS` name has a live `handleCustom()` branch in `chat.js`; `test_card_shape` asserts the served agent card's `x-agui.customEvents` names equal `CUSTOM_EVENTS` (which is sourced from `_CUSTOM_EVENT_SCHEMAS`). The `DESIGN.md` §5.3 table has no automated check — cross-check it by hand against the grep output above whenever any of the three tests' name sets change.

@@ -51,6 +51,19 @@ TIER_TIMEOUTS = {1: 130.0, 2: 180.0}
 LOAD_SKILL_TOOL = "load_skill"
 DEFAULT_MAX_OUTPUT_TOKENS = 8192
 
+# SI-2: map every Unicode control char to a space — C0 (0x00-0x1F), DEL
+# (0x7F) and C1 (0x80-0x9F). C1 is not optional: NEL (0x85) is treated as a
+# line break by many log/terminal consumers and CSI (0x9B) is a single-byte
+# ANSI escape introducer equivalent to ESC '[', so leaving 0x7F/C1 through
+# would defeat the very log/terminal-injection guard this helper exists for.
+_CONTROL_CHAR_MAP = dict.fromkeys([*range(0x20), 0x7F, *range(0x80, 0xA0)], " ")
+
+
+def _sanitize_model_name(s: str) -> str:
+    """Strip control chars and cap length before a model-supplied name hits
+    the wire or a log line (SI-2: model output is untrusted)."""
+    return s[:64].translate(_CONTROL_CHAR_MAP)
+
 
 class ToolInterrupt(Exception):
     """Raised by a tool to pause the task (input-required / auth-required).
@@ -367,9 +380,13 @@ async def run_loop(
             )
 
             if tc.name == LOAD_SKILL_TOOL and skills is not None:
-                body = skills.load(str(tc.arguments.get("name", "")))
+                requested_name = str(tc.arguments.get("name", ""))
+                body = skills.load(requested_name)
                 ok = body is not None
-                result = body if ok else f"unknown skill {tc.arguments.get('name')!r}"
+                if ok:
+                    result = body
+                else:
+                    result = f"unknown skill {_sanitize_model_name(requested_name)!r}"
                 yield ToolResultEvent(
                     tool_call_id=tc.tool_call_id, tool_name=tc.name, ok=ok,
                     result=None, error=None if ok else result,
@@ -387,10 +404,7 @@ async def run_loop(
 
             entry = registry.get(tc.name)
             if entry is None:
-                # Sanitize the model-supplied name before logging (SI-2: model
-                # output is untrusted; prevent log injection via newlines etc.)
-                _safe = tc.name[:64].translate(dict.fromkeys(range(0x20), " "))
-                error = f"unknown tool {_safe!r}"
+                error = f"unknown tool {_sanitize_model_name(tc.name)!r}"
                 yield ToolResultEvent(
                     tool_call_id=tc.tool_call_id, tool_name=tc.name, ok=False, error=error
                 )

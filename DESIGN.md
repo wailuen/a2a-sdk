@@ -184,7 +184,9 @@ agent.register_source(EodhdAdapter, credentials=[
 app = agent.build_app()
 ```
 
-`build_app()` validation (all failures raise at boot, never at call time): every adapter annotation resolves to a registered adapter class; duplicate tool names raise; duplicate `source_name` or repeated `register_source` of the same class raises (registration is once-per-class); every `emits` type is a known Profile/domain type; declared CUSTOM event names match the console routing table (§5.3).
+`build_app()` validation (all failures raise at boot, never at call time): every adapter annotation resolves to a registered adapter class; duplicate tool names raise; duplicate `source_name` or repeated `register_source` of the same class raises (registration is once-per-class); every `emits` type is a known Profile/domain type; declared CUSTOM event names match the console routing table (§5.3); every `exclude_from_catalog` name resolves to a skill discovered under `skills_dir`.
+
+**Skills catalog exclusion:** `skills_dir` scanning folds a `name: description` catalog line per skill into the system prompt (§2), with full bodies loaded on demand through the built-in `load_skill` tool. `Agent(exclude_from_catalog=[...])` omits named skills from that catalog text — validated at `build_app()`, never a post-build mutation — while `app.state.skills.load(name)` (and `load_skill`) still resolves them; they are simply not advertised. `app.state` is otherwise frozen after `build_app()` (no `rebuild_skills_catalog()`-style hook), so this is the **recommended pattern for always-on/guardrail skills**: inline the skill's content directly into `persona`/`artifacts_dir` so it is unconditionally present in the system prompt rather than gated behind the model choosing to call `load_skill`, and list that same skill's name in `exclude_from_catalog` so its now-redundant catalog entry doesn't duplicate instructions the model already always sees.
 
 **Adapter injection and lifecycle:** the keyword-only parameter annotated with a `SourceAdapter` subclass receives the instance; a tool may declare multiple adapter parameters, each resolved by annotation using **exact-class match** (never `isinstance` — subclass relationships between registered adapters stay unambiguous). The SDK owns instantiation: one instance per registered class, constructed at **lifespan startup** with `(settings, credential_resolver)`; extra constructor kwargs pass through `register_source(EodhdAdapter, credentials=[…], init_kwargs={…})`. `source_name` is read from the adapter class — declared once.
 
@@ -321,6 +323,7 @@ Documented consumer contract: a stream severed without a `final` frame → re-`:
 | `A2UI_UPDATE` | `{messages: [<a2ui message>, …]}` (translator list wrapped under `messages`) |
 | `AGENT_PROGRESS` | `{message: str}` |
 | `AGENT_NOTE` | `{note: str}` |
+| `TOOL_PROGRESS` | `{message: str, toolName: str}` |
 
 The card's `x-agui.customEvents` list and the console's routing table are asserted equal by a unit test; adding a name to one side without the other fails the build.
 

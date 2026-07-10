@@ -118,7 +118,7 @@ async def test_agent_card_custom_events_are_objects(client):
 
     custom_events = card["x-agui"]["customEvents"]
     assert isinstance(custom_events, list), "customEvents must be a list"
-    assert len(custom_events) == 4, f"expected 4 custom events, got {len(custom_events)}"
+    assert len(custom_events) == 5, f"expected 5 custom events, got {len(custom_events)}"
 
     for evt in custom_events:
         assert isinstance(evt, dict), f"each event must be a dict, got {type(evt)}: {evt!r}"
@@ -129,7 +129,9 @@ async def test_agent_card_custom_events_are_objects(client):
         )
 
     names = {e["name"] for e in custom_events}
-    assert names == {"AGENT_ARTIFACT", "A2UI_UPDATE", "AGENT_PROGRESS", "AGENT_NOTE"}
+    assert names == {
+        "AGENT_ARTIFACT", "A2UI_UPDATE", "AGENT_PROGRESS", "AGENT_NOTE", "TOOL_PROGRESS",
+    }
 
 
 # ---------------------------------------------------------------------------

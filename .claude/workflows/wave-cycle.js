@@ -219,6 +219,19 @@ const GATE_SCHEMA = {
   },
 }
 
+// LRN-062 / RT-001: plan.md ledger row presence check — run after the archive step to verify
+// the wave's row actually landed (GH-issue waves have no pre-seeded row, so this can't be
+// assumed; w020 and w029 both archived successfully while silently skipping this append).
+const PLAN_ROW_SCHEMA = {
+  type: 'object',
+  required: ['rowPresent', 'matchCount'],
+  additionalProperties: false,
+  properties: {
+    rowPresent: { type: 'boolean' },
+    matchCount: { type: 'number' },
+  },
+}
+
 // GH-40 / GH-84: archive intent schema — git status check before archive
 // The agent runs `git status --short`, parses the output into dirty paths,
 // cross-references against wave.allScope (Creates: ∪ Modifies:), and returns any offending paths.
@@ -322,6 +335,7 @@ const allHighFindings  = []   // accumulates critical/high for codify phase
 let   protocolBlocked      = false
 let   testsRed             = false
 let   testsBlockedArchive  = false   // RT-003: tracks when a red test suite (not protocol) blocks archive
+let   archivePlanRowMissing = false  // LRN-062 / RT-001: plan.md ledger row still missing after self-heal
 let   totalTodos       = 0
 let   sdkCandidatesCount = 0   // set by sdk:scan in Codify phase
 
@@ -1351,9 +1365,52 @@ if (protocolBlocked) {
     '3. For each path in the scope list, find the matching FR in workspace/prd/ if any.\n' +
     '   If Implementation: says [pending], replace with the real src/path:symbol.\n' +
     '   Scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n\n' +
-    'Report: file moved, plan.md updated (row updated or appended), FR fields updated.',
+    '4. LRN-100 relocation sweep: for every `*-budget-exhausted.md` file in\n' +
+    '   `workspace/todos/deferred/` (including this wave\'s own, if any), check whether\n' +
+    '   ALL findings in it are marked RESOLVED (no OPEN findings remain). If so, `mv` it to\n' +
+    '   `workspace/todos/completed/` (same filename) — `deferred/` must only ever contain\n' +
+    '   files with at least one OPEN finding. Leave files with any OPEN finding in place.\n\n' +
+    'Report: file moved, plan.md updated (row updated or appended), FR fields updated,\n' +
+    'and the list of any deferred markers relocated by the step-4 sweep (or none).',
     { label: 'archive', phase: 'Archive' }
   )
+
+  // LRN-062 / RT-001: the archive agent's plan.md instructions above are not self-enforcing —
+  // verify the row actually landed instead of trusting the report. On miss, self-heal with one
+  // targeted append attempt; if that also fails, hard-block the wave as incomplete rather than
+  // let it silently vanish from the ledger (the exact recurrence this guard exists to catch).
+  const planRowCheck = await agent(
+    'Run: grep -ci "' + wave.waveId + '" workspace/todos/plan.md\n' +
+    'Report rowPresent: true if the count is >= 1, else false. Report the count as matchCount.',
+    { schema: PLAN_ROW_SCHEMA, label: 'gate:archive-plan-row', phase: 'Archive' }
+  )
+
+  if (!planRowCheck || !planRowCheck.rowPresent) {
+    log('WARNING: workspace/todos/plan.md has no row for ' + wave.waveId + ' after archive — self-healing (LRN-062 guard)')
+    await agent(
+      'workspace/todos/plan.md is missing a ledger row for wave ' + wave.waveId + ' even though it was ' +
+      'just archived to workspace/todos/completed/ (or workspace/todos/archive/). Append this exact row ' +
+      'to the end of the Wave summary table that this wave belongs to (the table with columns ' +
+      'Wave | File | Parallel group | Slices | Depends):\n' +
+      '`| ' + wave.waveId.toUpperCase() + ' [x] ✅ ' + TODAY + ' | ' + WAVE_FILE.replace('workspace/todos/', '') + ' | G | — | — |`\n' +
+      'Do not modify or remove any other row.',
+      { label: 'archive-plan-row-repair', phase: 'Archive' }
+    )
+
+    const planRowRecheck = await agent(
+      'Run: grep -ci "' + wave.waveId + '" workspace/todos/plan.md\n' +
+      'Report rowPresent: true if the count is >= 1, else false. Report the count as matchCount.',
+      { schema: PLAN_ROW_SCHEMA, label: 'gate:archive-plan-row-recheck', phase: 'Archive' }
+    )
+
+    if (!planRowRecheck || !planRowRecheck.rowPresent) {
+      archivePlanRowMissing = true
+      log('BLOCKED — workspace/todos/plan.md still has no row for ' + wave.waveId + ' after repair attempt.')
+      log('Archive is INCOMPLETE — add the row manually, then re-run /wave ' + wave.waveId + ' to confirm.')
+    } else {
+      log('plan.md row for ' + wave.waveId + ' appended by self-heal guard')
+    }
+  }
 
   log('Wave ' + wave.waveId + ' archived — ' + toCodeify.length + ' LRN(s) captured')
 }
@@ -1370,4 +1427,5 @@ return {
   protocolBlocked:      protocolBlocked,
   testsRed:             testsRed,
   testsBlockedArchive:  testsBlockedArchive,  // RT-003: distinguishes test-suite block from protocol block
+  archivePlanRowMissing: archivePlanRowMissing,  // LRN-062 / RT-001: plan.md ledger row missing after self-heal
 }

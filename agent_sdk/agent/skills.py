@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 
 @dataclass(slots=True)
@@ -57,11 +58,20 @@ class SkillsRegistry:
             skill = _parse(path, default)
             self.skills[skill.name] = skill
 
-    def catalog_text(self) -> str:
-        if not self.skills:
+    def catalog_text(self, exclude: Iterable[str] | None = None) -> str:
+        """Render the catalog, omitting any skill whose name is in ``exclude``.
+
+        Excluded skills stay fully loadable via :meth:`load` — exclusion
+        only removes them from the advertised catalog text, e.g. an
+        always-on/guardrail skill inlined via ``persona``/``artifacts_dir``
+        (see ``Agent(exclude_from_catalog=...)``).
+        """
+        excluded = set(exclude) if exclude else set()
+        entries = [s for s in self.skills.values() if s.name not in excluded]
+        if not entries:
             return ""
         lines = ["Available skills (use the load_skill tool to read one in full):"]
-        lines += [f"- {s.name}: {s.description}" for s in self.skills.values()]
+        lines += [f"- {s.name}: {s.description}" for s in entries]
         return "\n".join(lines)
 
     def load(self, name: str) -> str | None:

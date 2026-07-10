@@ -5,7 +5,8 @@
  * AG-UI mode: POST {base}/ag-ui/run with the FULL RunAgentInput (threadId,
  * runId, messages, state, tools, context, forwardedProps with
  * a2uiClientCapabilities tier "core+extended") and routes ALL frozen
- * CUSTOM events: AGENT_ARTIFACT, A2UI_UPDATE, AGENT_PROGRESS, AGENT_NOTE.
+ * CUSTOM events: AGENT_ARTIFACT, A2UI_UPDATE, AGENT_PROGRESS, AGENT_NOTE,
+ * TOOL_PROGRESS.
  *
  * Untrusted-output invariant: every model/tool string lands as a text node
  * (el() / textContent) — never markup. A raw SSE trace panel shows each
@@ -634,6 +635,9 @@ export function render(pane, ctx) {
     } else if (name === "AGENT_NOTE") {
       // {note}
       systemLine(`note: ${value.note || ""}`);
+    } else if (name === "TOOL_PROGRESS") {
+      // {message, toolName}
+      systemLine(`tool progress · ${value.toolName || "?"}: ${value.message || ""}`);
     } else {
       systemLine(`unrecognized CUSTOM event: ${String(name)}`);
     }

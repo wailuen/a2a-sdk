@@ -3,19 +3,21 @@ registration, and re-registration idempotency (DESIGN.md §4.3)."""
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pytest
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from agent_sdk.models.content_types import (
     PROFILE_TYPES,
     BarChart,
     BarItem,
+    BriefingKpiItem,
     CalendarEvent,
     CalendarEvents,
     CategoryValue,
+    ChartSection,
     ColumnDef,
     ComparisonTable,
     ContentModel,
@@ -29,12 +31,14 @@ from agent_sdk.models.content_types import (
     FirstLastRange,
     FundPerformance,
     KpiCard,
+    KpiRowSection,
     MarketBriefing,
     MetricItem,
     MultiCategoryChart,
     MultiCategorySummary,
     MultiCategoryPeriod,
     NameEmail,
+    TableSection,
     UserList,
     UserProfile,
     UserSummary,
@@ -408,3 +412,183 @@ def test_metadata_survives_wire_with_nested_dict():
     w = card.wire()
     assert w["metadata"]["flags"]["confidence"] == 0.92
     assert w["metadata"]["tags"] == ["analyst", "q2"]
+
+
+# ── finite-float validation (GH-95) ───────────────────────────────────────
+# inf/nan silently split dual-part artifacts: model_dump_json() serializes
+# them as JSON null while to_markdown()/to_plain_text() render "inf"/"nan"
+# literally. These fields must reject non-finite floats at construction time.
+
+
+def test_briefing_kpi_item_rejects_infinite_value():
+    with pytest.raises((ValueError, ValidationError)):
+        BriefingKpiItem(title="Revenue", value=float("inf"))
+
+
+def test_briefing_kpi_item_rejects_nan_delta():
+    with pytest.raises((ValueError, ValidationError)):
+        BriefingKpiItem(title="Revenue", value=100.0, delta=float("nan"))
+
+
+def test_briefing_kpi_item_rejects_negative_infinite_value():
+    with pytest.raises((ValueError, ValidationError)):
+        BriefingKpiItem(title="Revenue", value=float("-inf"))
+
+
+def test_chart_section_rejects_nested_non_finite_float():
+    with pytest.raises((ValueError, ValidationError)):
+        ChartSection(chart_type="bar_chart", data={"nested": {"deep": [float("nan")]}})
+
+
+def test_table_section_rejects_nested_non_finite_float():
+    with pytest.raises((ValueError, ValidationError)):
+        TableSection(data={"nested": {"deep": [float("inf")]}})
+
+
+def test_chart_section_rejects_top_level_non_finite_float():
+    with pytest.raises((ValueError, ValidationError)):
+        ChartSection(chart_type="time_series", data={"max": float("nan")})
+
+
+def test_briefing_kpi_item_accepts_finite_values_and_round_trips():
+    item = BriefingKpiItem(title="Revenue", value=100.5, delta=-2.3)
+    assert item.value == 100.5
+    assert item.delta == -2.3
+    dumped = item.model_dump_json()
+    assert "100.5" in dumped
+    assert "-2.3" in dumped
+
+
+def test_chart_and_table_section_accept_finite_nested_payload():
+    chart = ChartSection(chart_type="bar_chart", data={"nested": {"deep": [1.0, 2.5]}})
+    table = TableSection(data={"nested": {"deep": [3.0]}})
+    assert chart.data["nested"]["deep"] == [1.0, 2.5]
+    assert table.data["nested"]["deep"] == [3.0]
+
+
+def test_market_briefing_with_finite_sections_round_trips_consistently():
+    mb = MarketBriefing(
+        title="Weekly Update",
+        as_of="2026-06-18",
+        sections=[
+            KpiRowSection(items=[BriefingKpiItem(title="Revenue", value=100.0, delta=1.5)]),
+            ChartSection(chart_type="bar_chart", data={"title": "Q1", "values": [1.0, 2.0]}),
+            TableSection(data={"title": "Table", "rows": [{"a": 1.0}]}),
+        ],
+    )
+    text = mb.to_plain_text()
+    assert "Revenue" in text
+    json_dump = mb.model_dump_json()
+    assert "Revenue" in json_dump
+
+
+# ── finite-float validation is scoped to GH-95's AC, not SDK-wide (RT-001) ─
+# GH-95's AC (workspace/todos/active/w029-gh-issues.md) names exactly four
+# fields: BriefingKpiItem.value/.delta and ChartSection.data/TableSection.data.
+# An earlier revision broadened the guard onto a _Wire-wide model_validator,
+# which shipped a self-declared breaking change as a patch release — reverted
+# here. Fields outside this family intentionally still accept inf/nan.
+
+
+def test_metric_item_accepts_infinite_value_outside_market_briefing_scope():
+    item = MetricItem(label="price", value=float("inf"))
+    assert item.value == float("inf")
+
+
+def test_bar_item_accepts_non_finite_value_outside_scope():
+    bar = BarItem(category="Q1", value=float("-inf"))
+    assert bar.value == float("-inf")
+
+
+def test_waterfall_segment_accepts_non_finite_value_outside_scope():
+    seg = WaterfallSegment(label="Start", value=float("inf"), type="initial", cumulative=0.0)
+    assert seg.value == float("inf")
+
+
+def test_comparison_table_accepts_non_finite_row_value_outside_scope():
+    table = ComparisonTable(
+        columns=[ColumnDef(key="v", label="Value")],
+        rows=[{"v": float("inf")}],
+    )
+    assert table.rows[0]["v"] == float("inf")
+
+
+def test_kpi_card_accepts_non_finite_metadata_value_outside_scope():
+    """Free-form metadata dicts on non-MarketBriefing types are outside GH-95's
+    AC — only ChartSection.data/TableSection.data are scoped in."""
+    card = KpiCard(
+        metrics=[MetricItem(label="price", value=1.0)],
+        metadata={"confidence": float("nan")},
+    )
+    assert card.metadata is not None and card.metadata["confidence"] != card.metadata["confidence"]
+
+
+def test_fund_performance_accepts_non_finite_irr_outside_scope():
+    fp = FundPerformance(irr=float("inf"))
+    assert fp.irr == float("inf")
+
+
+def test_metric_item_accepts_finite_value_and_round_trips():
+    item = MetricItem(label="price", value=42.5)
+    assert item.value == 42.5
+    assert "42.5" in item.model_dump_json()
+
+
+def test_waterfall_segment_accepts_finite_values_and_round_trips():
+    seg = WaterfallSegment(label="Start", value=10.0, type="initial", cumulative=10.0)
+    assert seg.value == 10.0
+    assert seg.cumulative == 10.0
+
+
+# ── finite-float validation recurses into nested foreign BaseModel (RT-003) ─
+# _assert_finite must not stop at dict/list/tuple nesting: a plain (non-_Wire)
+# pydantic BaseModel value embedded inside ChartSection.data/TableSection.data
+# must be walked too, or a NaN inside it reproduces the exact dual-part
+# divergence GH-95 set out to eliminate.
+
+
+class _ForeignPayload(BaseModel):
+    score: float
+
+
+def test_chart_section_rejects_non_finite_float_nested_in_foreign_basemodel():
+    with pytest.raises((ValueError, ValidationError)):
+        ChartSection(
+            chart_type="bar_chart",
+            data={"nested": _ForeignPayload(score=float("nan"))},
+        )
+
+
+def test_table_section_rejects_non_finite_float_nested_in_foreign_basemodel():
+    with pytest.raises((ValueError, ValidationError)):
+        TableSection(data={"nested": _ForeignPayload(score=float("inf"))})
+
+
+# ── finite-float validation bounds recursion depth (RT-003) ─────────────────
+# A cyclic or pathologically deep structure passed into ChartSection.data /
+# TableSection.data must surface as a clean ValidationError, not an uncaught
+# RecursionError (a RuntimeError pydantic does not convert).
+
+
+def test_chart_section_rejects_cyclic_data_without_recursion_error():
+    cyclic: dict[str, Any] = {}
+    cyclic["self"] = cyclic
+    with pytest.raises((ValueError, ValidationError)):
+        ChartSection(chart_type="bar_chart", data=cyclic)
+
+
+def test_table_section_rejects_cyclic_data_without_recursion_error():
+    cyclic: dict[str, Any] = {}
+    cyclic["self"] = cyclic
+    with pytest.raises((ValueError, ValidationError)):
+        TableSection(data=cyclic)
+
+
+def test_chart_section_rejects_pathologically_deep_data_without_recursion_error():
+    deep: dict[str, Any] = {}
+    node = deep
+    for _ in range(5000):
+        node["nested"] = {}
+        node = node["nested"]
+    with pytest.raises((ValueError, ValidationError)):
+        ChartSection(chart_type="bar_chart", data=deep)

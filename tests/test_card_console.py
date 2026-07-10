@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from agent_sdk.routes.agent_card import CUSTOM_EVENTS
 
 CONSOLE_STATIC = Path(__file__).parent.parent / "agent_sdk" / "console" / "static"
+AG_UI_SRC = Path(__file__).parent.parent / "agent_sdk" / "routes" / "ag_ui.py"
 
 
 async def test_card_shape(client):
@@ -56,14 +58,46 @@ async def test_card_etag_and_alias(client):
 def test_custom_events_match_console_routing_table():
     """§5.3: card customEvents and the console routing table are equal."""
     chat_js = (CONSOLE_STATIC / "chat.js").read_text()
+    # Assert the executable render branch, not a bare name substring: every
+    # CUSTOM_EVENTS name is also listed in the chat.js header comment (§5.3),
+    # so `name in chat_js` alone passes on the comment even if the real
+    # handleCustom() branch is deleted (LRN-102 recurrence). Each custom event
+    # is routed by an `if (name === "<NAME>")` / `else if (name === "<NAME>")`
+    # branch in handleCustom(), so anchor on that marker.
     for name in CUSTOM_EVENTS:
-        assert name in chat_js, f"console chat.js does not route {name}"
-    # Tighter check: TOOL_CALL_ARGS and TOOL_CALL_END must appear as switch cases,
-    # not just incidentally elsewhere in the file (e.g. comments).
-    assert 'case "TOOL_CALL_ARGS"' in chat_js, \
-        "chat.js switch is missing case \"TOOL_CALL_ARGS\""
-    assert 'case "TOOL_CALL_END"' in chat_js, \
-        "chat.js switch is missing case \"TOOL_CALL_END\""
+        assert f'name === "{name}"' in chat_js, (
+            f"chat.js handleCustom() has no render branch for CUSTOM event {name} "
+            "(header-comment mention does not count)"
+        )
+    # RT-001: native (non-CUSTOM) tool-call frame handlers must stay guarded
+    # too, or their coverage silently disappears alongside the CUSTOM check.
+    assert 'case "TOOL_CALL_ARGS"' in chat_js
+    assert 'case "TOOL_CALL_END"' in chat_js
+
+
+def test_custom_events_match_actually_emitted_events():
+    """GH-98/RT-003: CUSTOM_EVENTS must equal the event names ag_ui.py actually
+    emits, not just be self-consistent with the console — card-vs-emitted
+    parity, so a new self._custom(...) call in ag_ui.py can't silently drift
+    from the card. Also guards the extraction itself: every _custom( call
+    site's name argument must be a bare string literal, so a future
+    self._custom(name_var, ...) or f-string call can't escape detection and
+    turn this into a false-green pass (the original LRN-102 drift failure
+    mode, one level removed)."""
+    ag_ui_src = AG_UI_SRC.read_text()
+    call_sites = re.findall(r"self\._custom\(\s*([^,]+?),", ag_ui_src, re.DOTALL)
+    assert call_sites, "no _custom( call sites found in ag_ui.py — regex or file moved?"
+
+    bare_literal = re.compile(r'^"[A-Z0-9_]+"$')
+    non_literal = [c.strip() for c in call_sites if not bare_literal.match(c.strip())]
+    assert not non_literal, (
+        "every self._custom(...) call site must pass a bare string-literal "
+        "name argument so it can be statically verified against "
+        f"CUSTOM_EVENTS; found non-literal argument(s): {non_literal}"
+    )
+
+    emitted = {c.strip().strip('"') for c in call_sites}
+    assert emitted == set(CUSTOM_EVENTS)
 
 
 async def test_console_page_and_health(client):

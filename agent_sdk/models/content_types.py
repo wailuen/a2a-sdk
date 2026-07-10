@@ -20,6 +20,7 @@ Domain extension: agents register their own card types with
 from __future__ import annotations
 
 import abc
+import math
 from typing import Annotated, Any, ClassVar, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
@@ -32,6 +33,41 @@ A2UI_MIME_TYPE = "application/a2ui+json"
 RESERVED_COMPONENTS = ("TradeActivity", "CompanyInfo", "DealList", "InvestorProfile")
 
 _ARROWS = {"up": "▲", "down": "▼", "flat": "→"}
+
+
+_ASSERT_FINITE_MAX_DEPTH = 100
+
+
+def _assert_finite(value: Any, _depth: int = 0) -> None:
+    """Reject inf/-inf/nan anywhere in ``value``, recursing into dict/list/tuple
+    and nested pydantic ``BaseModel`` instances. ``model_dump_json()`` serializes
+    non-finite floats as JSON ``null`` while ``to_markdown()``/``to_plain_text()``
+    render ``"inf"``/``"nan"`` literally — allowing them through would silently
+    split a dual-part artifact into two different values.
+
+    Scope (GH-95, MarketBriefing family only — see that issue's AC): callers
+    are the field validators on ``BriefingKpiItem.value``/``.delta`` and
+    ``ChartSection.data``/``TableSection.data``. It is not a general SDK-wide
+    guard; other ``_Wire``/``ContentModel`` fields intentionally accept
+    non-finite floats unless a future issue scopes them in explicitly.
+
+    ``_depth`` bounds worst-case recursion (RT-003): a cyclic or pathologically
+    deep dict/list/tuple/BaseModel structure surfaces as a clean ValueError
+    (pydantic wraps it into a ValidationError) instead of an uncaught
+    RecursionError, which is a RuntimeError pydantic does not convert."""
+    if _depth > _ASSERT_FINITE_MAX_DEPTH:
+        raise ValueError("value nesting too deep to validate (possible cyclic structure)")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"non-finite float not allowed: {value!r}")
+    if isinstance(value, BaseModel):
+        for v in value.__dict__.values():
+            _assert_finite(v, _depth + 1)
+    elif isinstance(value, dict):
+        for v in value.values():
+            _assert_finite(v, _depth + 1)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            _assert_finite(v, _depth + 1)
 
 
 class _Wire(BaseModel):
@@ -325,6 +361,12 @@ class BriefingKpiItem(_Wire):
     trend: Literal["up", "down", "flat"] | None = None
     delta: float | None = None
 
+    @field_validator("value", "delta")
+    @classmethod
+    def _reject_non_finite(cls, v: Any) -> Any:
+        _assert_finite(v)
+        return v
+
 
 class KpiRowSection(_Wire):
     type: Literal["kpi_row"] = "kpi_row"
@@ -336,10 +378,22 @@ class ChartSection(_Wire):
     chart_type: Literal["time_series", "bar_chart"]
     data: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("data")
+    @classmethod
+    def _reject_non_finite_data(cls, v: dict[str, Any]) -> dict[str, Any]:
+        _assert_finite(v)
+        return v
+
 
 class TableSection(_Wire):
     type: Literal["table"] = "table"
     data: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("data")
+    @classmethod
+    def _reject_non_finite_data(cls, v: dict[str, Any]) -> dict[str, Any]:
+        _assert_finite(v)
+        return v
 
 
 class TextSection(_Wire):

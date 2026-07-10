@@ -361,6 +361,9 @@ async def tasks_get(
     historyLength: int | None = None,
     identity: Identity = Depends(require_identity),
 ) -> Any:
+    # GH-25 AC-3 (w012, locked): a colon-bearing task_id (e.g. GET on the shape of
+    # /v1/tasks/{id}:cancel) is a wrong-HTTP-verb-on-a-mutation-path miss, not a
+    # genuinely unknown task — -32001 there would misleadingly imply "no such task".
     if ":" in task_id:
         return a2a_error(A2A_UNSUPPORTED_OPERATION, "method not found on this resource")
     record = request.app.state.task_store.get(task_id, identity)
