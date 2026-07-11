@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 import uuid
 from typing import Any, AsyncIterator
 
@@ -28,6 +29,7 @@ from ..a2ui.translator import A2uiCapabilities, translate
 from ..agent.runner import new_task, run_task_worker
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
+from ..common.iso8601 import iso_utc
 from ..common.sse import HEARTBEAT, SSE_HEADERS, sse_data
 from ..credentials import forwarding
 from ..models.content_types import ContentModel
@@ -61,7 +63,17 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 def _fold_history(raw_messages: list[Any]) -> list[dict[str, Any]] | None:
     """AG-UI messages → Converse format. Truncates (50 msgs / 4000 chars),
     skips blank assistant turns, merges consecutive same-role turns, drops
-    a leading assistant prefix. None when no user content survives."""
+    a leading assistant prefix. None when no user content survives.
+
+    Control characters are STRIPPED — never rejected — from every folded
+    string (RT-001). The AG-UI client re-submits the full conversation history
+    each turn with BOTH its own user turns and the model's streamed assistant
+    turns folded back in (chat.js). If any single control char in that replayed
+    content could hard-reject the run, one ESC/NUL/BEL emitted in the model's
+    own output would turn every subsequent turn into RUN_ERROR and permanently
+    brick the session. Stripping here — the one function that builds the model
+    input, covering str/list/coerced shapes uniformly — guarantees nothing
+    unsafe reaches the model, mirroring the loop.py unknown-tool sanitizer."""
     folded: list[dict[str, Any]] = []
     for raw in raw_messages[-MAX_HISTORY_MESSAGES:]:
         if not isinstance(raw, dict):
@@ -72,11 +84,12 @@ def _fold_history(raw_messages: list[Any]) -> list[dict[str, Any]] | None:
         content = raw.get("content") or ""
         if isinstance(content, list):
             content = "".join(
-                p.get("text", "") for p in content
+                str(p.get("text") or "") for p in content
                 if isinstance(p, dict) and p.get("type") == "text"
             )
         elif not isinstance(content, str):
             content = str(content)
+        content = _CONTROL_CHARS.sub("", content)
         if role == "assistant" and not content.strip():
             continue
         if len(content) > MAX_MESSAGE_CHARS:
@@ -98,19 +111,25 @@ def _fold_history(raw_messages: list[Any]) -> list[dict[str, Any]] | None:
 def _validate(body: dict[str, Any]) -> str | None:
     """Returns an error message (→ RUN_ERROR) or None.
 
+    Only the STRUCTURAL shape of ``messages`` is rejected here. Message CONTENT
+    is never hard-rejected — not on control characters, not on unexpected part
+    shapes (RT-001). The AG-UI client re-submits the full conversation history
+    every turn (its own user turns AND the model's streamed assistant turns,
+    folded back in by chat.js), so rejecting content would let a single control
+    char anywhere in that replayed history turn every subsequent turn into
+    RUN_ERROR and permanently brick the session. Content is sanitized instead:
+    _fold_history strips control chars from every folded string — of any shape
+    — before it reaches the model.
+
     threadId/runId are NOT checked here: the route always synthesizes them
     before RUN_STARTED (§5.3), so by the time _validate runs a missing or
     malformed id has already been replaced — rejecting the original raw
     body for those fields would emit RUN_ERROR right after a RUN_STARTED
     that already claimed a valid id (GH-97).
     """
-    messages = body.get("messages") or []
-    if not isinstance(messages, list):
+    messages = body.get("messages")
+    if messages is not None and not isinstance(messages, list):
         return "messages must be a list"
-    for raw in messages:
-        if isinstance(raw, dict) and isinstance(raw.get("content"), str):
-            if _CONTROL_CHARS.search(raw["content"]):
-                return "message content contains control characters"
     return None
 
 
@@ -305,7 +324,32 @@ class _RunMapper:
             if event.tool_call_id is not None:
                 interrupt["toolCallId"] = event.tool_call_id
             if event.expires_at is not None:
-                interrupt["expiresAt"] = int(event.expires_at * 1000)
+                # upstream ag-ui-protocol's Interrupt.expires_at is
+                # Optional[str] (ISO-8601, e.g. "2026-04-20T17:00:00Z") —
+                # NOT epoch-ms; a reference-SDK consumer would fail to
+                # parse a numeric value. Confirmed by direct package
+                # inspection of installed ag-ui-protocol==0.1.19
+                # (PyPI: https://pypi.org/project/ag-ui-protocol/0.1.19/),
+                # site-packages/ag_ui/core/types.py:259-270, class
+                # `Interrupt(ConfiguredBaseModel)` declares
+                # `expires_at: Optional[str] = None` with no further format
+                # constraint — the package itself does not mandate
+                # ISO-8601 over another string encoding, so ISO-8601 UTC
+                # is this SDK's own interoperable-default choice, not an
+                # upstream-mandated one. Full citation + reasoning:
+                # workspace/learning/LRN-111-agui-interrupt-expires-at-wire-format-citation.md
+                # (RT-002 citation).
+                #
+                # event.expires_at is seconds-remaining-until-expiry, a
+                # relative duration computed by the task store (see
+                # TaskStore.interrupt_ttl_remaining) — NOT a raw reading
+                # from whichever clock the store happens to use internally
+                # (time.monotonic for the in-memory store; a durable
+                # cross-process store may use time.time instead). Adding it
+                # to wall-clock now is therefore correct regardless of the
+                # store's clock choice (RT-001).
+                wall_deadline = time.time() + event.expires_at
+                interrupt["expiresAt"] = iso_utc(wall_deadline)
             return self.run_finished(
                 outcome={"type": "interrupt", "interrupts": [interrupt]}
             )
@@ -382,16 +426,16 @@ async def ag_ui_run(
         yield sse_data({"type": "RUN_STARTED", "threadId": thread_id, "runId": run_id})
         yield sse_data({"type": "STATE_SNAPSHOT", "snapshot": body.get("state") or {}})
 
-        if (problem := _validate(body)) is not None:
-            for frame in mapper.run_error(problem):
-                yield sse_data(frame)
-            return
-
-        resume_raw = body.get("resume")
-        resume = resume_raw if isinstance(resume_raw, list) else []
         sub = None
         record: TaskRecord | None = None
         try:
+            if (problem := _validate(body)) is not None:
+                for frame in mapper.run_error(problem):
+                    yield sse_data(frame)
+                return
+
+            resume_raw = body.get("resume")
+            resume = resume_raw if isinstance(resume_raw, list) else []
             if resume:
                 if not isinstance(resume[0], dict):
                     for frame in mapper.run_error("invalid resume entry"):

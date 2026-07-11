@@ -416,7 +416,10 @@ export function render(pane, ctx) {
         tools: [],
         context: [],
         forwardedProps: { a2uiClientCapabilities: { version: "v0.9.1", catalogs: ["urn:a2ui-profile:standard:v1"], tier: "core+extended" } },
-        resume: [{ interruptId, status: "resolved", payload: text }],
+        // payload must be an object carrying `decision` — gate.py's parse_decision()
+        // only reads a decision out of a dict payload; a bare string payload is
+        // discarded and the resume lands on Outcome.UNCLEAR regardless of intent.
+        resume: [{ interruptId, status: "resolved", payload: { decision: text } }],
       };
     } else {
       state.aguiMessages.push({ id: uuid(), role: "user", content: [{ type: "text", text: text }] });
@@ -479,7 +482,7 @@ export function render(pane, ctx) {
               const buf = textBuffers.get(json.messageId);
               if (buf) {
                 // client owns history: fold the assistant turn back in
-                state.aguiMessages.push({ id: json.messageId, role: "assistant", content: [{ type: "text", text: buf.text() }] });
+                state.aguiMessages.push({ id: json.messageId, role: "assistant", content: buf.text() });
               }
               break;
             }

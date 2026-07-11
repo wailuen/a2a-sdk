@@ -627,16 +627,22 @@ class Agent:
         from fastapi.responses import JSONResponse as _JSONResponse
         from starlette.exceptions import HTTPException as _StarletteHTTPException
 
-        # 404 is intentionally absent: application routes explicitly call
-        # a2a_error(A2A_TASK_NOT_FOUND) when a task is missing, so a 404
-        # HTTPException here is always an unknown-route miss → -32603.
+        # 404 → -32601 (Method not found): application routes explicitly call
+        # a2a_error(A2A_TASK_NOT_FOUND) when a task is missing, so a bare 404
+        # HTTPException here is always an unknown-route dispatch miss, never a
+        # task lookup miss. -32601 is the standard JSON-RPC code for exactly
+        # that and is already used identically for MCP method-dispatch misses
+        # (the `_METHOD_NOT_FOUND` fallback in routes/mcp.py `_dispatch`).
+        # This supersedes the w021/RT-003 ruling
+        # (2026-06-19), which left 404 unmapped so it fell through to the
+        # generic -32603 default without considering -32601.
         # 405 → -32004 (UnsupportedOperation): "method not allowed" is
         # semantically an unsupported operation on that resource. The forward
         # A2A_HTTP_STATUS maps -32004 → 501 for capability-absent cases; the
         # asymmetry is intentional (HTTP method mismatch ≠ missing capability).
         _A2A_CODE: dict[int, int] = {
             401: -32000, 403: -32000,
-            405: -32004, 415: -32005,
+            404: -32601, 405: -32004, 415: -32005,
         }
 
         @app.exception_handler(_StarletteHTTPException)

@@ -43,6 +43,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, List
 
+from ...common.iso8601 import iso_utc
 from ...models.errors import AgentError, ErrorCategory
 from .backend import SubscriptionBackend
 
@@ -66,7 +67,7 @@ def _utcnow() -> datetime:
 
 
 def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return iso_utc(dt)
 
 
 # ── input validation (generic errors; never echo the offending value) ──

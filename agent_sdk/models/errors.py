@@ -45,6 +45,13 @@ A2A_ERROR_NAMES: dict[int, str] = {
 }
 
 # HTTP status for each A2A error on the HTTP+JSON transport.
+# -32000 (JSON-RPC implementation-defined server error) and -32601 (JSON-RPC
+# Method not found) are reverse-only: app.py's generic HTTP exception handler
+# maps bare 401/403 -> -32000 and 404 -> -32601 for dispatch-level failures
+# that never construct a WireError here, so neither has a forward entry.
+# WireError.from_a2a_code(-32000 | -32601, ...).http_status() intentionally
+# falls back to the 500 default; do not add entries for them without also
+# reconciling the app.py dispatch-level status codes (401/403 and 404).
 A2A_HTTP_STATUS: dict[int, int] = {
     A2A_TASK_NOT_FOUND: 404,
     A2A_TASK_NOT_CANCELABLE: 409,

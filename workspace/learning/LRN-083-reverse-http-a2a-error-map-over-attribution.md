@@ -13,11 +13,16 @@ date: 2026-06-19
 Additionally, `405 → -32004` is asymmetric with the forward `A2A_HTTP_STATUS` map where `-32004` maps to 501 (capability absent). The asymmetry is intentional (FastAPI emits 405 for wrong-method, not 501), but must be documented or it appears to be a bug.
 
 ## Fix
-Remove `404` from the reverse `_A2A_CODE` map entirely. The `.get(status_code, -32603)` fallback already handles it with the generic server-error code. Document the 405/-32004 asymmetry with a comment explaining that HTTP method mismatch differs from capability absence.
+Original ruling (2026-06-19): remove `404` from the reverse `_A2A_CODE` map entirely and rely on the `.get(status_code, -32603)` fallback. Document the 405/-32004 asymmetry with a comment explaining that HTTP method mismatch differs from capability absence.
+
+**Superseded by GH-104 (2026-07-10):** `404` is now intentionally re-mapped to `-32601` (JSON-RPC "Method not found") rather than left to the generic fallback, with the rationale inlined at `agent_sdk/app.py:630-637`: application routes raise `TaskNotFound` explicitly via `a2a_error(A2A_TASK_NOT_FOUND)`, so a bare 404 reaching this handler is always an unmatched route, and `-32601` is the same code already used for MCP method-dispatch misses (`routes/mcp.py:94`). This is a deliberate, documented choice, not a regression of the original finding — do not "fix" it back to removing 404 from the map.
+
+The invariant this learning protects is unchanged and still enforced: **404 must never map to `-32001` (TaskNotFound)**. GH-104 does not violate it — it maps 404 to `-32601`, a distinct code.
 
 ## Check
 grep -n '404.*-32001\|-32001.*404' agent_sdk/app.py
 # Must return no results — 404 must NOT be mapped to -32001 in the reverse map.
+# It IS expected to be mapped to -32601 (Method not found) as of GH-104; that is not a failure.
 
 ## Prevention
 In any reverse HTTP→JSON-RPC error map:

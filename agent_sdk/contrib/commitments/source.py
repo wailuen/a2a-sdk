@@ -43,6 +43,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...common.iso8601 import iso_utc
 from ...models.errors import AgentError, ErrorCategory
 from ...sources import CredentialResolver, SourceAdapter
 from .backend import CommitmentBackend
@@ -136,9 +137,7 @@ class CommitmentsSource(SourceAdapter):
             if not isinstance(fire_at, str):
                 raise ValueError("fire_at must be an ISO 8601 string")
             parsed = _dt.datetime.fromisoformat(fire_at.replace("Z", "+00:00"))
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=_dt.timezone.utc)
-            norm = parsed.astimezone(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            norm = iso_utc(parsed)
         except ValueError as exc:
             raise AgentError(
                 ErrorCategory.VALIDATION,

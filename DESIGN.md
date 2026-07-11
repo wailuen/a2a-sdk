@@ -206,7 +206,7 @@ Base class provides: lazy `httpx.AsyncClient` (**redirect-following disabled and
 
 The SDK ships **all 14 FROZEN** Standard Profile v1 types as Pydantic models whose field shapes are **wire-isomorphic with the Profile contracts** (no adapter remapping layer to drift): Core — `KpiCard` (`metrics: [{label, value, …}]`), `TimeSeriesChart` (`x_key, y_key, data, total_count`), `ComparisonTable`, `BarChart`, `EntityList`, `MarketBriefing`; Extended — `WaterfallChart`, `MultiCategoryChart`, `FundPerformance`, `EmailList`, `CalendarEvents`, `UserProfile`, `UserList`, `DocumentList`. The 4 RESERVED types (`TradeActivity`, `CompanyInfo`, `DealList`, `InvestorProfile`) are name-allocated only — no field contract, no translator. Class names equal wire component names exactly (case-sensitive renderer lookup).
 
-Three non-obvious contracts: `MarketBriefing` is the only type whose wire `data` is a **markdown string** — the translator emits `model.to_markdown()`, never `model_dump()`; `model_dump()` of any content model is **never** placed on the wire directly — the translator (§5.4) is the sole emission path (it adds envelopes, computes nothing); and **every content model (FROZEN and domain) implements `to_plain_text() -> str`** — it is the required interface backing the A2A dual-part TextPart fallback (§5.1, §5.4), enforced by the base-model ABC.
+Three non-obvious contracts: `MarketBriefing` is the only type whose wire `data` is a **markdown string** — the translator emits `model.to_markdown()`, never `model_dump()`; `model_dump()` of any content model is **never** placed on the wire directly — the translator (§5.4) is the sole emission path (it adds envelopes, computes nothing); and **every content model (FROZEN and domain) implements `to_plain_text() -> str`** — it is the required interface backing the A2A dual-part TextPart fallback (§5.1, §5.4), enforced by the base-model ABC. The bare-markdown-string shape is the AG-UI/A2A (translator) wire contract only; on the MCP surface, `MarketBriefing`'s `structuredContent`/`outputSchema` is instead a JSON object `{"markdown": <str>}`, per MCP 2025-06-18's object-only requirement for both fields (GH-105) — see §5.5.
 
 Domain cards live in the agent repo: subclass `ContentModel`, declare `data_type` (snake_case) / `component` (PascalCase wire name) / a non-Profile `catalog_id`, implement `to_plain_text()`, and register the class (import the module so registration runs at boot — no module-level global):
 
@@ -278,6 +278,8 @@ Complete A2A error code table (all seven; internal sentinel names match spec nam
 | -32006 | InvalidAgentResponse | internal translator failure |
 | -32007 | AuthenticatedExtendedCardNotConfigured | extended-card request (not configured) |
 
+An unmatched `/v1/*` route (unknown-route dispatch miss, not a task lookup) returns **HTTP 404 with the standard JSON-RPC `-32601`** (Method not found) — distinct from the `-32001 TaskNotFound` above, which known task routes emit for a missing/expired task id.
+
 Wire-shape rules baked into `models/a2a.py`:
 
 - Parts discriminate on `kind`, never `type`. `FilePart` = FileWithBytes XOR FileWithUri.
@@ -327,7 +329,7 @@ Documented consumer contract: a stream severed without a `final` frame → re-`:
 
 The card's `x-agui.customEvents` list and the console's routing table are asserted equal by a unit test; adding a name to one side without the other fails the build.
 
-**Interrupts (action_gate path):** `RUN_FINISHED` with `outcome={type:"interrupt", interrupts:[{id, reason, message, response_schema, tool_call_id}]}` — `tool_call_id` links the interrupt to the pending tool call (action_gate requires it; the spec field is optional); resume via new `RunAgentInput` with `resume=[{interrupt_id, status, payload}]`. The §5.1 identity binding applies to this path identically: an AG-UI resume must come from the identity that started the interrupted run. Custom events are not used for interrupts.
+**Interrupts (action_gate path):** `RUN_FINISHED` with `outcome={type:"interrupt", interrupts:[{id, reason, message, responseSchema, toolCallId, expiresAt}]}` (camelCase, consistent with the rest of the AG-UI wire) — `toolCallId` links the interrupt to the pending tool call (action_gate requires it; the spec field is optional); `expiresAt` is an ISO-8601 UTC string (e.g. `"2026-04-20T17:00:00Z"`), matching upstream ag-ui-protocol's `Interrupt.expires_at: Optional[str]` — never epoch-ms; resume via new `RunAgentInput` with `resume=[{interrupt_id, status, payload}]`. The §5.1 identity binding applies to this path identically: an AG-UI resume must come from the identity that started the interrupted run. Custom events are not used for interrupts.
 
 ### 5.4 A2UI v0.9.1
 
@@ -350,7 +352,7 @@ The card's `x-agui.customEvents` list and the console's routing table are assert
 
 Legacy SSE pair (`GET /mcp/sse` + `POST /mcp/messages?session_id=`) retained for older clients.
 
-**Methods:** `initialize` — echo the client's `protocolVersion` if we support it; otherwise return our highest supported version and let the client decide whether to continue. `ping`; `tools/list` — Tier 1 only, each tool with `inputSchema` **and `outputSchema`** (derived from the `emits` model — `structuredContent` is never emitted unclaimed); `tools/call` — validate → execute → result with `structuredContent` + serialized `text` block; tool failures are `isError: true` results, never JSON-RPC errors. Capabilities declare `listChanged: false` (no notifications we don't send). `notifications/*` acknowledged with 202, never answered.
+**Methods:** `initialize` — echo the client's `protocolVersion` if we support it; otherwise return our highest supported version and let the client decide whether to continue. `ping`; `tools/list` — Tier 1 only, each tool with `inputSchema` **and `outputSchema`** (derived from the `emits` model — `structuredContent` is never emitted unclaimed); `tools/call` — validate → execute → result with `structuredContent` + serialized `text` block; tool failures are `isError: true` results, never JSON-RPC errors. Capabilities declare `listChanged: false` (no notifications we don't send). `notifications/*` acknowledged with 202, never answered. Per MCP 2025-06-18, `outputSchema` and `structuredContent` are always JSON objects, never a bare string/scalar — this forces one exception to §4.3's `MarketBriefing` markdown-string contract: on the MCP surface only, its `outputSchema` is `{"type": "object", "properties": {"markdown": {"type": "string"}}, "required": ["markdown"]}` and its `structuredContent` is `{"markdown": <str>}` (GH-105); the `text` block still carries the raw markdown, and the AG-UI/A2A bare-string wire contract (§4.3, §5.4) is unaffected.
 
 **OAuth chain (Claude.ai connector compatible):**
 

@@ -26,7 +26,7 @@ the unconditional `raise ValueError`.
 grep -n "eval_str" agent_sdk/app.py
 # Confirm the except branch checks: if isinstance(ret, str): log warning and continue
 ```
-Run `pytest tests/test_mcp_conformance_w9.py::test_sc_c7_market_briefing_structured_content_is_string -x`
+Run `pytest tests/test_mcp_conformance_w9.py::test_sc_c7_market_briefing_structured_content_is_object -x`
 and confirm no `ValueError` at fixture setup.
 
 ## Prevention

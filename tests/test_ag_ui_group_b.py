@@ -9,7 +9,7 @@ import pytest
 
 from agent_sdk.agent.events import ToolResultEvent
 from agent_sdk.a2ui.translator import A2uiCapabilities
-from agent_sdk.routes.ag_ui import _RunMapper, _fold_history
+from agent_sdk.routes.ag_ui import _CONTROL_CHARS, _RunMapper, _fold_history, _validate
 
 
 # ── GH-14: synthetic TOOL_CALL_ARGS on resume path ──
@@ -143,6 +143,79 @@ def test_fold_history_no_text_list_returns_empty_string() -> None:
     # User messages with "" content still get appended.
     assert result is not None
     assert result[0]["content"][0]["text"] == ""
+
+
+# ── RT-001/RT-002: non-string `text` in a multimodal part must not raise ──
+
+
+@pytest.mark.parametrize("bad_text", [None, 5, True])
+def test_fold_history_coerces_non_string_text(bad_text: Any) -> None:
+    """A malformed part (null/int/bool `text`) must not raise TypeError from
+    the join — it must be coerced to a string, never crash the caller."""
+    messages = [{"role": "user", "content": [{"type": "text", "text": bad_text}]}]
+    result = _fold_history(messages)
+    assert result is not None
+    assert isinstance(result[0]["content"][0]["text"], str)
+
+
+@pytest.mark.parametrize("bad_text", [None, 5, True])
+def test_validate_coerces_non_string_text(bad_text: Any) -> None:
+    """_validate's own text-extraction join must be total too — a malformed
+    part must flow into the control-char check, not raise TypeError."""
+    body = {
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": bad_text}]}
+        ]
+    }
+    assert _validate(body) is None
+
+
+# ── RT-001: content is SANITIZED, never hard-rejected ──
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        [{"type": "text", "text": "bad\x07control"}],  # multimodal list part
+        {"text": "bad\x07control"},                     # dict shape → str()-coerced
+        42,
+        False,
+    ],
+)
+def test_validate_never_hard_rejects_content(content: Any) -> None:
+    """_validate rejects only the structural shape of `messages`, never
+    content. Hard-rejecting a control char (or an odd content shape) would let
+    one char anywhere in the replayed history permanently brick the AG-UI
+    session on the next turn — content is sanitized by _fold_history instead."""
+    body = {"messages": [{"role": "user", "content": content}]}
+    assert _validate(body) is None
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "bad\x07control",
+        [{"type": "text", "text": "bad\x07control"}],
+        {"text": "bad\x07control"},
+    ],
+)
+def test_fold_history_strips_control_chars(content: Any) -> None:
+    """No raw control char from any content shape may survive into the folded
+    model input (RT-001). str()-coercion of a dict/list already escapes an
+    embedded control char via repr(); a raw char in a str/list-part is stripped
+    by the _CONTROL_CHARS sub — either way nothing unsafe reaches the model."""
+    folded = _fold_history([{"role": "user", "content": content}])
+    assert folded is not None
+    text = folded[0]["content"][0]["text"]
+    assert _CONTROL_CHARS.search(text) is None
+
+
+def test_validate_still_tolerates_missing_content() -> None:
+    """A message with no `content` key at all must remain a no-op for
+    validation (mirrors _fold_history's tolerant `raw.get('content') or ''`
+    default), not get swept up by the new unsupported-shape rejection."""
+    body = {"messages": [{"role": "user"}]}
+    assert _validate(body) is None
 
 
 # ── SC-B1: SSE heartbeat ──

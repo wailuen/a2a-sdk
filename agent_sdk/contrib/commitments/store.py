@@ -45,6 +45,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from ...common.iso8601 import iso_utc
 from ...common.redact import _SECRET_KEY, redact, redact_value
 # Commitment is defined in backend.py (to avoid circular imports) and
 # re-exported here so store consumers have a single import point.
@@ -86,7 +87,7 @@ _DDL_IDX = (
 
 def _utcnow_iso() -> str:
     """Canonical fixed-width UTC instant (lexicographically comparable)."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return iso_utc(datetime.now(timezone.utc))
 
 
 def _normalize_fire_at(fire_at: str) -> str:
@@ -97,9 +98,7 @@ def _normalize_fire_at(fire_at: str) -> str:
     if not isinstance(fire_at, str):
         raise ValueError("fire_at must be an ISO 8601 string")
     parsed = datetime.fromisoformat(fire_at.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return iso_utc(parsed)
 
 
 def _has_secret_key(obj: Any, _depth: int = 0) -> bool:
@@ -292,9 +291,7 @@ class CommitmentStore(CommitmentBackend):
         NOT retried — re-running a side-effecting tool could double-act, and we
         cannot know whether the side effect already happened. Returns the count
         reaped. Call once at startup (crash recovery) and each tick."""
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=max(0, lease_seconds))
-        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cutoff = iso_utc(datetime.now(timezone.utc) - timedelta(seconds=max(0, lease_seconds)))
         self._ensure_open()
         with self._lock:
             cur = self._conn.execute(

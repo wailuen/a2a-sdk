@@ -126,6 +126,24 @@ class TaskStore(abc.ABC):
         """Hand a resume value to the paused worker. False if the task is
         not interrupted (caller maps to the spec error)."""
 
+    def interrupt_ttl_remaining(self, task_id: str) -> float | None:
+        """Seconds remaining before the pending interrupt expires, or None
+        if the task is not currently interrupted.
+
+        A relative duration, not a raw reading from ``self._clock()`` —
+        callers (route/serializer code) must stay agnostic to whichever
+        clock a concrete store uses internally (``time.monotonic`` for the
+        in-memory store; a durable cross-process store may use
+        ``time.time`` instead). Implementations compute this by subtracting
+        their own clock reading from their own stored deadline.
+
+        Default implementation returns None (unknown) so pre-existing
+        ``TaskStore`` subclasses that predate this hook keep instantiating;
+        callers already treat None as "no expiry to report" (AG-UI route
+        omits ``expiresAt`` in that case). Concrete stores should override
+        this to report a real deadline where they track one."""
+        return None
+
     @abc.abstractmethod
     def list_tasks_for_identity(
         self, identity: Identity, page_size: int = 50, page_token: str | None = None

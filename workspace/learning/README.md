@@ -107,10 +107,14 @@ Entries ordered by LRN number.
 | LRN-101 | Agent card description field must never fall back to empty string — use display_name sentinel instead | [LRN-101](LRN-101-agent-card-description-empty-string-fallback.md) |
 | LRN-102 | TOOL_PROGRESS CUSTOM event emitted in ag_ui.py but absent from CUSTOM_EVENTS tuple, card schema, DESIGN.md §5.3 table, and console router — parity guard silent because both sides missing | [LRN-102](LRN-102-tool-progress-custom-event-parity-gap.md) |
 | LRN-103 | A2A multi-turn continuation must use contextId, not taskId, for completed tasks | [LRN-103](LRN-103-a2a-multiturn-contextid-continuation.md) |
-| LRN-104 | deferred imports in model clients must not be silently caught by bare except Exception | [LRN-104](LRN-104-deferred-import-silent-wrap.md) |
-| LRN-105 | bare "except Exception" in model client invoke paths swallows distinct error categories (e.g. RateLimitError) as generic UPSTREAM | [LRN-105](LRN-105-broad-except-swallows-error-category.md) |
+| LRN-104 | Deferred imports in model clients must not be silently caught by bare except Exception | [LRN-104](LRN-104-deferred-import-silent-wrap.md) |
+| LRN-105 | Bare "except Exception" in model client invoke paths swallows distinct error categories (e.g. RateLimitError) as generic UPSTREAM | [LRN-105](LRN-105-broad-except-swallows-error-category.md) |
 | LRN-106 | caplog assertions on agent_sdk.* loggers false-green outside full-suite order | [LRN-106](LRN-106-caplog-propagate-false-order-dependent.md) |
 | LRN-107 | Fixed broken test idiom recurs uncaught in a sibling test | [LRN-107](LRN-107-duplicated-broken-test-idiom.md) |
 | LRN-108 | Unautomated documentation anchors drift silently | [LRN-108](LRN-108-unautomated-doc-anchor-drift.md) |
 | LRN-109 | Documented ledger-append fix (LRN-062) recurred unenforced in w029 | [LRN-109](LRN-109-wave-ledger-guard-not-enforced.md) |
 | LRN-110 | Required-but-nullable field silently dropped by blanket exclude_none | [LRN-110](LRN-110-required-nullable-field-dropped-by-exclude-none.md) |
+| LRN-111 | AG-UI Interrupt.expiresAt wire format — ISO-8601 citation and verification method | [LRN-111](LRN-111-agui-interrupt-expires-at-wire-format-citation.md) |
+| LRN-112 | Monotonic clock value fed to datetime.fromtimestamp() as if it were epoch time | [LRN-112](LRN-112-monotonic-clock-epoch-confusion.md) |
+| LRN-113 | New abstractmethod on public ABC breaks external subclasses | [LRN-113](LRN-113-public-abc-new-abstractmethod.md) |
+| LRN-114 | Non-total content extraction crashes AG-UI SSE stream without terminal frame | [LRN-114](LRN-114-non-total-sse-validation-crash.md) |

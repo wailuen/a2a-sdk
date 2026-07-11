@@ -398,7 +398,7 @@ async def run_task_worker(
                 # cap check + resume-channel registration; at the cap this
                 # raises and becomes a typed task failure (§5.2)
                 store.mark_interrupted(task.id, event.interrupt_id)
-                event.expires_at = record.interrupt_deadline
+                event.expires_at = store.interrupt_ttl_remaining(task.id)
                 state = (
                     TaskState.AUTH_REQUIRED
                     if "auth" in event.reason

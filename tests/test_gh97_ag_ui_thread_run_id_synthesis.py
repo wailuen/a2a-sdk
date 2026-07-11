@@ -67,11 +67,14 @@ async def test_messages_must_still_be_a_list(client):
     assert frames[-1]["message"] == "messages must be a list"
 
 
-async def test_control_characters_in_message_content_still_rejected(client):
-    r = await client.post(
-        "/ag-ui/run",
-        json={"messages": [user_message("bad\x07control")]},
-    )
-    frames = sse_frames(r.text)
-    assert frames[-1]["type"] == "RUN_ERROR"
-    assert "control" in frames[-1]["message"]
+async def test_control_characters_in_message_content_are_stripped_not_rejected(client, fake_model):
+    # RT-001: content control chars must be SANITIZED, never hard-rejected.
+    # The client re-submits the full history every turn (its own user turns +
+    # the model's folded-back assistant turns), so a single control char that
+    # rejected the run would permanently brick the session on replay. The run
+    # must succeed with the char stripped from the model input.
+    fake_model.script(reply("ok"))
+    frames = await run(client, {"messages": [user_message("bad\x07control")]})
+    types = [f["type"] for f in frames]
+    assert "RUN_ERROR" not in types
+    assert types[-1] == "RUN_FINISHED"

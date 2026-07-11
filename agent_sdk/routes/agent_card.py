@@ -23,9 +23,23 @@ from ..config import BaseAgentSettings
 from ..credentials.card import credential_forwarding_extension
 from ..credentials.fields import CredentialField
 from ..models.a2a import AgentCapabilities, AgentCard, AgentExtension, AgentSkill
+from ..models.content_types import MarketBriefing
 from ..models.errors import A2A_AUTHENTICATED_EXTENDED_CARD_NOT_CONFIGURED
 
 router = APIRouter()
+
+# RT-004 / RT-001: x-sdk.outputSchema for MarketBriefing-emitting skills mirrors
+# the MCP object schema (registry.output_schema(), GH-105), but the A2A DataPart
+# wire value stays a bare markdown string (translator.py). This sibling note is
+# a documentation-only hint so strict consumers don't schema-validate the
+# DataPart against outputSchema and get a false mismatch — it lives outside
+# outputSchema itself so it never perturbs the RT-004-pinned schema shape.
+_MARKET_BRIEFING_OUTPUT_SCHEMA_WIRE_NOTE = (
+    "outputSchema mirrors the MCP object shape ({\"markdown\": <string>}) per "
+    "GH-105, but the A2A DataPart wire value for this skill is a bare markdown "
+    "string, not that object. Do not schema-validate the A2A DataPart against "
+    "outputSchema for this skill."
+)
 
 # Frozen §5.3 CUSTOM event names — the card's x-agui.customEvents list and
 # the console's routing table are asserted equal by a unit test.
@@ -97,11 +111,19 @@ def _skill_for(entry: Any) -> AgentSkill:
         "tier": entry.tier,
         "inputSchema": entry.input_schema(),
     }
+    # RT-004: x-sdk.outputSchema deliberately mirrors the shared MCP surface
+    # (registry.output_schema(), incl. the MarketBriefing object-wrapper —
+    # GH-105), NOT the A2A DataPart wire shape, which stays a bare markdown
+    # string for MarketBriefing (translator.py). This card<->A2A-wire
+    # divergence for MarketBriefing is intentional, not a bug — RT-001 adds
+    # x-sdk.outputSchemaWireNote below so strict consumers are warned inline.
     output_schema = entry.output_schema()
     if output_schema is not None:
         x_sdk["outputSchema"] = output_schema
     if emits is not None:
         x_sdk["emits"] = getattr(emits, "data_type", emits.__name__)
+        if isinstance(emits, type) and issubclass(emits, MarketBriefing):
+            x_sdk["outputSchemaWireNote"] = _MARKET_BRIEFING_OUTPUT_SCHEMA_WIRE_NOTE
     return AgentSkill.model_validate({
         "id": entry.name,
         "name": entry.name,

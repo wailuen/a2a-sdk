@@ -247,9 +247,15 @@ class ToolEntry:
         """MCP outputSchema, derived from emits (DESIGN §5.5). None → no
         structuredContent is ever emitted for this tool (never unclaimed).
 
-        RTGA-001: MarketBriefing is the sole prose-exception type — its
-        structuredContent value is a markdown string, so its outputSchema
-        must advertise {"type": "string"}, not the Pydantic field dict schema.
+        RTGA-001: MarketBriefing is the sole prose-exception type on the
+        AG-UI/A2A wire (translator.py emits its to_markdown() as a bare
+        string) — but MCP 2025-06-18 requires Tool.outputSchema to always be
+        a JSON object (GH-105), so the markdown is wrapped in an object
+        under a "markdown" key rather than advertised as {"type": "string"}.
+        This method backs both advertisement surfaces — MCP's tools/list
+        outputSchema and the agent card's x-sdk.outputSchema (agent_card.py,
+        RT-004) — so the object-wrapper appears in both. Only the A2A
+        DataPart wire itself (translator.py) stays a bare markdown string.
         """
         from ..models.content_types import MarketBriefing
 
@@ -259,8 +265,11 @@ class ToolEntry:
         if not issubclass(emits, BaseModel):
             return None
         if issubclass(emits, MarketBriefing):
-            # Wire value is to_markdown() → a plain string.
-            return {"type": "string"}
+            return {
+                "type": "object",
+                "properties": {"markdown": {"type": "string"}},
+                "required": ["markdown"],
+            }
         return emits.model_json_schema()
 
     async def invoke(

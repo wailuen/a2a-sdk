@@ -100,6 +100,77 @@ def test_custom_events_match_actually_emitted_events():
     assert emitted == set(CUSTOM_EVENTS)
 
 
+def test_agui_assistant_turn_fold_uses_plain_string_content():
+    """Per the AG-UI spec, only UserMessage.content is Union[str, List[InputContent]];
+    AssistantMessage inherits BaseMessage.content: Optional[str] — a plain string.
+    The console's TEXT_MESSAGE_END handler folds the assistant turn back into
+    state.aguiMessages and must use a plain string, not the list-of-parts shape
+    (which is legitimate only for the user-turn fold).
+
+    RT-003: this is a source-text pin, not a behavioral test — pytest has no JS
+    runtime to execute chat.js and assert on the resulting state.aguiMessages
+    entry directly. The regex below tolerates whitespace/newline reformatting
+    and trailing comments around the `content:` expression so a cosmetic
+    reformat doesn't false-fail; it still cannot distinguish `buf.text()` from
+    a behavior-preserving wrapper (e.g. a helper that also returns a string),
+    which is an accepted gap until a JS test harness exists — at that point
+    replace this with a live TEXT_MESSAGE_END drive asserting
+    `typeof content === 'string'` on the folded message.
+    """
+    chat_js = (CONSOLE_STATIC / "chat.js").read_text()
+
+    assistant_fold = re.search(
+        r'role:\s*"assistant",\s*content:\s*([\s\S]*?)\s*\}\);',
+        chat_js,
+    )
+    assert assistant_fold, "assistant-turn fold (role: \"assistant\") not found in chat.js"
+    content_expr = assistant_fold.group(1).strip()
+    content_expr = re.sub(r"/\*.*?\*/", "", content_expr, flags=re.DOTALL)
+    content_expr = re.sub(r"//.*", "", content_expr)
+    content_expr = re.sub(r"\s+", " ", content_expr).strip()
+    assert content_expr == "buf.text()", (
+        "assistant-turn fold must use a plain string content (buf.text()), not a "
+        f"list-of-parts shape; got: {content_expr!r}"
+    )
+
+    user_fold = re.search(
+        r'role:\s*"user",\s*content:\s*(\[[^\]]+\])\s*\}\);',
+        chat_js,
+    )
+    assert user_fold, "user-turn fold (role: \"user\") must keep its list-of-parts content shape"
+
+
+def test_agui_resume_payload_matches_action_gate_contract():
+    """The AG-UI resume body's `payload` must be an object carrying `decision`,
+    not a bare string. `agent_sdk/contrib/action_gate/gate.py::parse_decision()`
+    only reads a decision out of `resume_value["payload"]["decision"]` when
+    `payload` is itself a dict (`payload = raw_payload if isinstance(raw_payload,
+    dict) else None`); a bare-string payload is silently discarded and the
+    resume falls through to Outcome.UNCLEAR regardless of the user's actual
+    intent, breaking every action_gate-gated tool confirmation driven from the
+    console's AG-UI tab.
+
+    RT-003 (source-text pin, no JS runtime available — see the assistant-turn
+    fold test above for the same caveat): tolerates whitespace/comment
+    reformatting but cannot distinguish `{ decision: text }` from a
+    behavior-preserving wrapper.
+    """
+    chat_js = (CONSOLE_STATIC / "chat.js").read_text()
+
+    resume_body = re.search(
+        r"resume:\s*\[\{([\s\S]*?)\}\]",
+        chat_js,
+    )
+    assert resume_body, "AG-UI resume body (`resume: [{...}]`) not found in chat.js"
+    body_expr = re.sub(r"//.*", "", resume_body.group(1))
+    body_expr = re.sub(r"\s+", " ", body_expr).strip()
+    assert re.search(r"payload:\s*\{\s*decision:\s*text\s*\}", body_expr), (
+        "AG-UI resume payload must be an object carrying `decision` (e.g. "
+        "`payload: { decision: text }`), not a bare string — gate.py's "
+        f"parse_decision() silently discards non-dict payloads; got: {body_expr!r}"
+    )
+
+
 async def test_console_page_and_health(client):
     r = await client.get("/health")
     assert r.status_code == 200

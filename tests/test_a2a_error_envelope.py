@@ -63,18 +63,21 @@ async def test_no_auth_401_a2a_envelope(client):
 
 async def test_unknown_v1_route_404_a2a_envelope(client):
     """GET /v1/bogus (unknown route) must return 404 with A2A envelope and
-    generic server-error code -32603, NOT -32001 (TaskNotFound).
+    JSON-RPC code -32601 (Method not found), NOT -32001 (TaskNotFound).
 
-    -32001 must only appear on known task-lookup paths (/v1/tasks/{id}) when
-    the referenced task is absent. A bare unknown-route 404 is not a task miss.
+    -32601 is the standard JSON-RPC dispatch-miss code and is already used
+    identically for MCP method-dispatch misses (the `_METHOD_NOT_FOUND`
+    fallback in routes/mcp.py `_dispatch`). -32001 must
+    only appear on known task-lookup paths (/v1/tasks/{id}) when the
+    referenced task is absent. A bare unknown-route 404 is not a task miss.
     """
     r = await client.get("/v1/bogus")
     assert r.status_code == 404
     body = r.json()
     assert "detail" not in body, f"'detail' key must not appear in A2A envelope; got {body}"
     assert "error" in body
-    assert body["error"]["code"] == -32603, (
-        f"Unknown-route 404 must emit -32603 (generic), not -32001 (TaskNotFound); "
+    assert body["error"]["code"] == -32601, (
+        f"Unknown-route 404 must emit -32601 (Method not found), not -32001 (TaskNotFound); "
         f"got {body['error']['code']}"
     )
 
@@ -105,8 +108,11 @@ async def test_task_id_with_colon_returns_unsupported_operation(client):
     not -32001 (TaskNotFound) — the colon signals a sub-resource action on
     the wrong HTTP method, not a missing task."""
     r = await client.get("/v1/tasks/abc:cancel")
-    # FastAPI may return 404 or 200 depending on route matching; what matters
-    # is that the A2A error code is -32004, not -32001 (task not found).
+    # This matches the GET /v1/tasks/{task_id} route (not a 404) and hits the
+    # colon guard at agent_sdk/routes/a2a.py:368, which returns HTTP 501 with
+    # -32004. Post-GH-104, an unmatched /v1/* path returns -32601 (Method not
+    # found) via a 404, not -32001 — so if this ever fell through to a bare
+    # 404 it would signal the colon guard was bypassed, not a benign 404/200.
     body = r.json()
     assert "error" in body, f"Expected A2A error envelope; got {body}"
     assert body["error"]["code"] == -32004, (

@@ -133,6 +133,12 @@ class InMemoryTaskStore(TaskStore):
         record.resume_future = None
         return True
 
+    def interrupt_ttl_remaining(self, task_id: str) -> float | None:
+        record = self._records.get(task_id)
+        if record is None or not record.interrupted or record.interrupt_deadline is None:
+            return None
+        return record.interrupt_deadline - self._clock()
+
     # ── context continuation ──
 
     def context_messages(

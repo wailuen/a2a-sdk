@@ -413,13 +413,19 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
     }
     # structuredContent ONLY under a declared output schema (emits), and only
     # when the artifact actually is a model we can serialize against it.
-    # RTGA-001: MarketBriefing is the sole prose-exception type — its wire value
-    # is a markdown string (to_markdown()), never the field dict (wire()).
-    # DESIGN §4.3: "MarketBriefing is the only type whose wire data is a markdown
-    # string — the translator emits model.to_markdown(), never model_dump()."
+    # RTGA-001: MarketBriefing is the sole prose-exception type. On the
+    # AG-UI/A2A wire its value is a bare markdown string (to_markdown()),
+    # never the field dict (wire()) — see DESIGN §4.3: "MarketBriefing is
+    # the only type whose wire data is a markdown string — the translator
+    # emits model.to_markdown(), never model_dump()."
+    # GH-105: on THIS (MCP) surface, MCP 2025-06-18 requires structuredContent
+    # to always be a JSON object, so the markdown is wrapped as
+    # {"markdown": to_markdown()}; content[0].text still carries the raw
+    # markdown unchanged, and the AG-UI/A2A bare-string wire contract
+    # (translator.py) is untouched.
     if entry.output_schema() is not None and isinstance(artifact, BaseModel):
         result["structuredContent"] = (
-            artifact.to_markdown()
+            {"markdown": artifact.to_markdown()}
             if isinstance(artifact, MarketBriefing)
             else artifact.wire()
             if isinstance(artifact, ContentModel)

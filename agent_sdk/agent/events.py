@@ -102,6 +102,8 @@ class InterruptEvent(LoopEvent):
     message: str
     response_schema: dict[str, Any] = field(default_factory=dict)
     tool_call_id: str | None = None
+    # Seconds remaining until the interrupt expires (relative, clock-agnostic —
+    # NOT a raw TaskStore.clock() reading; see TaskStore.interrupt_ttl_remaining).
     expires_at: float | None = None
 
 

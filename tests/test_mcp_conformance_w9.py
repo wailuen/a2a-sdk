@@ -1,10 +1,17 @@
-"""MCP protocol conformance tests — wave 9, Group C (SC-C1 through SC-C5).
+"""MCP protocol conformance tests — wave 9, Group C (SC-C1 through SC-C8 + RT-004).
 
 SC-C1  structuredContent for non-BaseModel emits (dict returned against declared emits=)
 SC-C2  tools/list cursor/nextCursor pagination (PAGE_SIZE=64)
 SC-C3  WWW-Authenticate challenge omits scope= (RFC 6750 §3 — empty scope is malformed)
 SC-C4  Example tools (echo, demo_kpis) have annotations.destructiveHint=false
 SC-C5  Tool name length > 64 raises ValueError at registration time
+SC-C6  Auto-derived title from a snake_case function name when title= is omitted
+SC-C7  MarketBriefing MCP outputSchema + structuredContent are a JSON object
+       wrapping the markdown ({"markdown": to_markdown()}), never a bare string
+       or the field dict (GH-105, MCP 2025-06-18 object-only requirement)
+SC-C8  openWorldHint=False seeded for all tier-1 / read_only tools (GH-52)
+RT-004 Agent-card x-sdk.outputSchema mirrors the MCP object schema for a
+       MarketBriefing-emitting tool
 """
 
 from __future__ import annotations
@@ -466,8 +473,10 @@ async def test_sc_c6_auto_title_appears_in_tools_list_wire(client):
 
 
 # ---------------------------------------------------------------------------
-# SC-C7: MarketBriefing tools/call structuredContent must be a markdown string
-#         (RTGA-001 / RTGA-005)
+# SC-C7: MarketBriefing tools/call structuredContent must be a JSON object
+#         wrapping the markdown string (MCP 2025-06-18 object-only requirement;
+#         GH-105). The bare-string AG-UI/A2A wire contract stays untouched on
+#         translator.py — see tests/test_a2ui_wire.py.
 # ---------------------------------------------------------------------------
 
 
@@ -475,7 +484,8 @@ async def test_sc_c6_auto_title_appears_in_tools_list_wire(client):
 def sc_c7_app(settings, fake_model):
     """App with a tool that declares emits=MarketBriefing and returns a
     MarketBriefing instance, so the MCP route must emit structuredContent as a
-    markdown string (to_markdown()), not a dict (wire())."""
+    JSON object wrapping the markdown ({"markdown": to_markdown()}), never a
+    bare string or the field dict (wire()) — GH-105, MCP 2025-06-18."""
     from pydantic import BaseModel as PM
 
     from agent_sdk.agent.registry import ToolDecl
@@ -524,13 +534,17 @@ async def sc_c7_client(sc_c7_app):
             yield c
 
 
-async def test_sc_c7_market_briefing_structured_content_is_string(sc_c7_client):
-    """RTGA-001/005: tools/call for a tool with emits=MarketBriefing must return
-    structuredContent as a markdown string (to_markdown()), not a dict (wire()).
-    The outputSchema in tools/list must also advertise {"type": "string"}."""
+async def test_sc_c7_market_briefing_structured_content_is_object(sc_c7_client):
+    """GH-105: MCP 2025-06-18 requires Tool.outputSchema and
+    CallToolResult.structuredContent to always be JSON objects. tools/call for
+    a tool with emits=MarketBriefing must return structuredContent as an
+    object wrapping the markdown string ({"markdown": ...}), not a bare
+    string. The outputSchema in tools/list must advertise an object schema
+    with a required "markdown" string property. content[0].text still
+    carries the raw markdown unchanged."""
     headers = await _mcp_init(sc_c7_client)
 
-    # 1. Verify tools/list advertises outputSchema = {"type": "string"}.
+    # 1. Verify tools/list advertises an object outputSchema.
     r_list = await sc_c7_client.post(
         "/mcp",
         json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
@@ -542,11 +556,16 @@ async def test_sc_c7_market_briefing_structured_content_is_string(sc_c7_client):
     assert briefing is not None, "briefing_tool not found in tools/list"
     output_schema = briefing.get("outputSchema")
     assert output_schema is not None, "outputSchema must be present for emits=MarketBriefing"
-    assert output_schema == {"type": "string"}, (
-        f"outputSchema for MarketBriefing must be {{\"type\": \"string\"}}, got: {output_schema!r}"
+    assert output_schema == {
+        "type": "object",
+        "properties": {"markdown": {"type": "string"}},
+        "required": ["markdown"],
+    }, (
+        f"outputSchema for MarketBriefing must be an object schema wrapping "
+        f"'markdown', got: {output_schema!r}"
     )
 
-    # 2. Verify tools/call returns structuredContent as a string (markdown), not a dict.
+    # 2. Verify tools/call returns structuredContent as an object, not a bare string.
     r_call = await sc_c7_client.post(
         "/mcp",
         json={
@@ -564,15 +583,80 @@ async def test_sc_c7_market_briefing_structured_content_is_string(sc_c7_client):
         "structuredContent MUST be present when emits=MarketBriefing is declared"
     )
     sc = result["structuredContent"]
-    assert isinstance(sc, str), (
-        f"structuredContent for MarketBriefing must be a markdown string, got {type(sc).__name__}: {sc!r}"
+    assert isinstance(sc, dict), (
+        f"structuredContent for MarketBriefing must be a JSON object, got {type(sc).__name__}: {sc!r}"
     )
-    assert "Weekly Wrap" in sc, (
-        f"Expected 'Weekly Wrap' in markdown output, got: {sc!r}"
+    assert set(sc.keys()) == {"markdown"}, f"expected only 'markdown' key, got: {sc!r}"
+    assert isinstance(sc["markdown"], str), (
+        f"structuredContent['markdown'] must be a string, got {type(sc['markdown']).__name__}"
     )
-    assert "Markets flat." in sc, (
-        f"Expected prose 'Markets flat.' in markdown output, got: {sc!r}"
+    assert "Weekly Wrap" in sc["markdown"], (
+        f"Expected 'Weekly Wrap' in markdown output, got: {sc['markdown']!r}"
     )
+    assert "Markets flat." in sc["markdown"], (
+        f"Expected prose 'Markets flat.' in markdown output, got: {sc['markdown']!r}"
+    )
+
+    # content[0].text still carries the raw markdown unchanged (unwrapped).
+    text_block = result["content"][0]["text"]
+    assert text_block == sc["markdown"], (
+        "content[0].text must carry the same raw markdown as structuredContent['markdown']"
+    )
+
+
+async def test_rt004_agent_card_output_schema_mirrors_mcp_for_market_briefing(sc_c7_client):
+    """RT-004: the A2A agent card's x-sdk.outputSchema for a MarketBriefing-
+    emitting tool must equal the same object schema advertised on the MCP
+    surface ({"markdown": ...}), not {"type": "string"} — even though the
+    actual A2A DataPart wire value for MarketBriefing stays a bare markdown
+    string (translator.py, untouched). The card deliberately mirrors the MCP
+    outputSchema (DESIGN.md, registry.output_schema()); this test pins that
+    so the divergence from the A2A wire shape isn't mistaken for a bug."""
+    card_r = await sc_c7_client.get("/.well-known/agent-card.json")
+    assert card_r.status_code == 200, card_r.text
+    card = card_r.json()
+    briefing_skill = next((s for s in card["skills"] if s["id"] == "briefing_tool"), None)
+    assert briefing_skill is not None, "briefing_tool skill not found in agent card"
+    output_schema = briefing_skill["x-sdk"].get("outputSchema")
+    assert output_schema == {
+        "type": "object",
+        "properties": {"markdown": {"type": "string"}},
+        "required": ["markdown"],
+    }, (
+        f"agent card x-sdk.outputSchema for MarketBriefing-emitting tool must mirror "
+        f"the MCP object schema wrapping 'markdown', got: {output_schema!r}"
+    )
+
+
+async def test_rt001_agent_card_flags_market_briefing_wire_divergence(sc_c7_client):
+    """RT-001 (agent_card.py): a MarketBriefing-emitting skill's x-sdk block
+    must carry an explicit sibling note (outside outputSchema itself, so
+    RT-004's exact-match pin is untouched) telling strict consumers the A2A
+    DataPart wire value is a bare markdown string, not the advertised
+    outputSchema object shape — so they don't schema-validate the DataPart
+    against outputSchema and get a false mismatch."""
+    card_r = await sc_c7_client.get("/.well-known/agent-card.json")
+    assert card_r.status_code == 200, card_r.text
+    card = card_r.json()
+    briefing_skill = next((s for s in card["skills"] if s["id"] == "briefing_tool"), None)
+    assert briefing_skill is not None, "briefing_tool skill not found in agent card"
+    x_sdk = briefing_skill["x-sdk"]
+    note = x_sdk.get("outputSchemaWireNote")
+    assert isinstance(note, str) and note, (
+        "x-sdk.outputSchemaWireNote must be a non-empty string for a "
+        f"MarketBriefing-emitting skill, got: {note!r}"
+    )
+    assert "markdown" in note.lower() and "outputschema" in note.lower(), (
+        f"outputSchemaWireNote must mention the bare-markdown DataPart wire "
+        f"value diverging from outputSchema, got: {note!r}"
+    )
+    # RT-004 pin must remain untouched: the note lives beside outputSchema,
+    # never inside it.
+    assert x_sdk["outputSchema"] == {
+        "type": "object",
+        "properties": {"markdown": {"type": "string"}},
+        "required": ["markdown"],
+    }
 
 
 # ---------------------------------------------------------------------------

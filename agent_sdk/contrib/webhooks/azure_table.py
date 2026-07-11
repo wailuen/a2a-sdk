@@ -32,6 +32,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, List
 
+from ...common.iso8601 import iso_utc
 from ...models.errors import AgentError, ErrorCategory
 from ..azure_utils import require_azure_packages
 from .backend import SubscriptionBackend
@@ -45,7 +46,7 @@ def _utcnow() -> datetime:
 
 
 def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return iso_utc(dt)
 
 
 class AzureTableSubscriptionStore(SubscriptionBackend):

@@ -42,6 +42,13 @@ Examples:
    - `ops` — deployment, rotation, credential seeding
 5. Write `workspace/learning/LRN-NNN-[slug].md` with the schema below. Keep it
    under 1 KB; if the description is long, trim to the core invariant.
+   **Refuse to write the file if it has no `## Check` section, or the section
+   is empty/non-runnable prose.** The learning-index redteam loop runs every
+   LRN's `## Check` clause against the code; an LRN without one silently
+   "passes" forever (see LRN-079, LRN-111). If the learning is genuinely
+   documentation-only with nothing to grep or test, the `## Check` section
+   must say so explicitly (e.g. "Documentation-only — no runnable check;
+   skip in the learning-index redteam loop") rather than being omitted.
 6. Append a row to `workspace/learning/README.md`.
 7. Report: LRN ID, category, and the check clause added.
 

@@ -39,6 +39,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from ...common.iso8601 import iso_utc
 from ...common.redact import redact, redact_value
 from .backend import Commitment, CommitmentBackend
 from .store import (
@@ -268,9 +269,7 @@ class AzureTableCommitmentStore(CommitmentBackend):
         from azure.core import MatchConditions
         from azure.data.tables import UpdateMode
 
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=max(0, lease_seconds))
-        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cutoff = iso_utc(datetime.now(timezone.utc) - timedelta(seconds=max(0, lease_seconds)))
 
         filter_expr = (
             "PartitionKey eq @partition_key"
