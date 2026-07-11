@@ -4,6 +4,18 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.39] — 2026-07-11
+
+### 🔧 Fixes
+- `TimeSeriesDataPoint.value` (`agent_sdk/models/content_types.py`) is required-but-nullable on the frozen `time_series` Standard Profile v1 contract — a data-gap point must still carry `"value": null`, never omit the key. `_Wire.wire()`'s blanket `model_dump(..., exclude_none=True)` was silently dropping the key whenever `value` was `None`, which (a) violated MCP's declared `outputSchema` for any tool emitting a `TimeSeriesChart` via `structuredContent`, and (b) broke the same frozen contract on A2UI's wire delivery over both A2A DataPart and AG-UI CUSTOM (`A2UI_UPDATE`). Fixed via a `model_serializer(mode="wrap")` on `TimeSeriesDataPoint` that re-inserts `value: null` when the field is `None`, without disturbing the Python-level `is None` semantics `TimeSeriesChart.to_plain_text()` relies on. Surfaced independently by both the MCP and A2UI static conformance audits (`LRN-110`). (`agent_sdk/models/content_types.py`)
+- `agent_sdk/routes/agent_card.py`: removed a dead `_is_placeholder` local left orphaned by the w024/GH-86 description-fallback refactor — `settings.is_placeholder_name` itself is unchanged and still used elsewhere.
+
+### 🧪 Test / CI
+- `tests/test_a2ui_wire.py::test_time_series_wire_data_keys_conform_to_profile` — updated to assert `value: null` survives the wire for a data-gap point (previously asserted the dropped-key bug as spec-conformant) and that a genuinely absent optional field (`label`) is still correctly excluded.
+
+### — Other
+- Static conformance audit (`/agent-stack-check . --static-only`, run as `/sdk-test` Leg 3 ahead of this release) also flagged `agent_sdk/a2ui/translator.py`'s `A2uiCapabilities.for_custom_emit()` as a possible Core/Extended tier-gating gap on the AG-UI CUSTOM path. Investigated and confirmed this is the deliberate, already-shipped behavior from `test_rt001_ag_ui_custom_extended_gate.py` (v0.5.20, `LRN-049`): AG-UI CUSTOM events are gated only on `tier=='none'`, not on Core/Extended, because AG-UI consumers silently ignore unknown CUSTOM types and stricter gating only breaks discovery. No code change; left as-is.
+
 ## [0.5.37] — 2026-07-10
 
 ### 🔧 Fixes

@@ -100,12 +100,17 @@ Entries ordered by LRN number.
 | LRN-094 | Agent card advertises tools absent from MCP tools/list | [LRN-094](LRN-094-card-mcp-surface-mismatch.md) |
 | LRN-095 | Test-first test shipped RED — wave archived without passing its own AC | [LRN-095](LRN-095-test-first-red-gate-bypass.md) |
 | LRN-096 | Workflow({name, args}) drops args — named-workflow resolver has undefined args global | [LRN-096](LRN-096-workflow-named-args-dropped.md) |
-| LRN-097 | AgentExtension URIs must use https:// scheme — URN-scheme URIs silently dropped by consumer allowlists | [LRN-097](LRN-097-agent-extension-uri-must-be-https.md) |
+| LRN-097 | AgentExtension URIs must use https:// scheme — URN-scheme URIs are silently dropped | [LRN-097](LRN-097-agent-extension-uri-must-be-https.md) |
 | LRN-098 | Scheduler-as-lifespan-extra pattern — import agent_sdk.scheduler does not exist | [LRN-098](LRN-098-scheduler-as-lifespan-extra-pattern.md) |
-| LRN-099 | A2A REST action suffix can differ from JSON-RPC method name — tasks/resubscribe maps to :subscribe path | [LRN-099](LRN-099-a2a-rest-suffix-differs-from-method-name.md) |
-| LRN-100 | Budget-exhausted deferred marker must be relocated to completed/ once all findings are resolved — leaving it in deferred/ creates a contradictory state signal | [LRN-100](LRN-100-budget-exhausted-deferred-must-be-relocated.md) |
+| LRN-099 | A2A REST action suffix can differ from the JSON-RPC method name | [LRN-099](LRN-099-a2a-rest-suffix-differs-from-method-name.md) |
+| LRN-100 | Budget-exhausted deferred marker must be relocated once findings are resolved | [LRN-100](LRN-100-budget-exhausted-deferred-must-be-relocated.md) |
 | LRN-101 | Agent card description field must never fall back to empty string — use display_name sentinel instead | [LRN-101](LRN-101-agent-card-description-empty-string-fallback.md) |
 | LRN-102 | TOOL_PROGRESS CUSTOM event emitted in ag_ui.py but absent from CUSTOM_EVENTS tuple, card schema, DESIGN.md §5.3 table, and console router — parity guard silent because both sides missing | [LRN-102](LRN-102-tool-progress-custom-event-parity-gap.md) |
 | LRN-103 | A2A multi-turn continuation must use contextId, not taskId, for completed tasks | [LRN-103](LRN-103-a2a-multiturn-contextid-continuation.md) |
 | LRN-104 | deferred imports in model clients must not be silently caught by bare except Exception | [LRN-104](LRN-104-deferred-import-silent-wrap.md) |
 | LRN-105 | bare "except Exception" in model client invoke paths swallows distinct error categories (e.g. RateLimitError) as generic UPSTREAM | [LRN-105](LRN-105-broad-except-swallows-error-category.md) |
+| LRN-106 | caplog assertions on agent_sdk.* loggers false-green outside full-suite order | [LRN-106](LRN-106-caplog-propagate-false-order-dependent.md) |
+| LRN-107 | Fixed broken test idiom recurs uncaught in a sibling test | [LRN-107](LRN-107-duplicated-broken-test-idiom.md) |
+| LRN-108 | Unautomated documentation anchors drift silently | [LRN-108](LRN-108-unautomated-doc-anchor-drift.md) |
+| LRN-109 | Documented ledger-append fix (LRN-062) recurred unenforced in w029 | [LRN-109](LRN-109-wave-ledger-guard-not-enforced.md) |
+| LRN-110 | Required-but-nullable field silently dropped by blanket exclude_none | [LRN-110](LRN-110-required-nullable-field-dropped-by-exclude-none.md) |

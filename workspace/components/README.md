@@ -8,6 +8,7 @@
 | C-004 | uv-lockfile-bootstrap convention | harness/reference/uv-lockfile-bootstrap.md (new) | planned |
 | C-005 | TaskStore | agent_sdk/tasks/store.py | present |
 | C-006 | A2uiCapabilityGate | agent_sdk/a2ui/translator.py (alongside A2uiCapabilities) | planned |
+| C-007 | safe_error_text | agent_sdk/common/redact.py | planned |
 
 ## Descriptions
 
@@ -28,3 +29,6 @@ Fail-closed per-transport A2UI capability resolver. After GH-74 lands, agent_sdk
 
 **C-004 uv-lockfile-bootstrap convention** (`harness/reference/uv-lockfile-bootstrap.md (new)`)
 GH-70b (setup), GH-70c (new-agent) and GH-70d (template/Dockerfile) all independently implement the same three-step convention: run `uv lock` to generate an initial uv.lock after template render, install with `uv sync --frozen` (no bare pip / no editable install), and `git add uv.lock` in the scaffold/upgrade commit. GH-70a (upgrade) re-locks the same way. This is one reusable harness convention being copied into four places, so the exact command sequence and rollback notes will drift between skills over time. Extract a single reference doc (or a shared command snippet) that all four todos point at, so the lock+frozen-install+commit recipe is defined once. Also: the template/ scaffold currently ships pyproject.toml with NO uv.lock (confirmed: template/uv.lock absent), so GH-70d's `COPY uv.lock ./` will fail at docker build unless GH-70b/GH-70c actually generate and commit template/uv.lock first — the four todos share an implicit ordering/artifact dependency on the committed lockfile that the group:G 'all independent' framing hides.
+
+**C-007 safe_error_text** (`agent_sdk/common/redact.py`)
+Shared truncate+control-char-strip helper for building error messages from untrusted (model-/caller-supplied) strings, guarding SI-2 log/wire injection. The pattern is currently inline at loop.py:392 (`tc.name[:64].translate(dict.fromkeys(range(0x20), " "))`); GH-99 copies it verbatim to loop.py:372 and GH-96's run_error path needs the same guarantee — a third and fourth divergent copy. The existing `agent_sdk/common/redact.py` only masks secret-named keys/bearer values, not control chars, so it does not cover this. Extract one helper next to `redact()` and have loop.py (load_skill + unknown-tool branches) and ag_ui.py route it, so the truncation/strip contract is defined once and cannot drift across transports.

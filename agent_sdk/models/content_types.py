@@ -23,7 +23,16 @@ import abc
 import math
 from typing import Annotated, Any, ClassVar, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_serializer,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 CATALOG_ID = "urn:a2ui-profile:standard:v1"
 A2UI_VERSION = "v0.9.1"
@@ -215,6 +224,18 @@ class TimeSeriesDataPoint(_Wire):
     # series is intentionally NOT on the wire: Standard Profile v1 data points
     # are {date, value, label?} only. Store it for Python-side grouping only.
     series: str | None = Field(default=None, exclude=True)
+
+    @model_serializer(mode="wrap")
+    def _wire_value(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """``value`` is required-but-nullable on the frozen time_series contract
+        (a data gap is a real point, not an absent one) — unlike ``label``, which
+        is genuinely optional. ``_Wire.wire()``'s blanket ``exclude_none=True``
+        can't distinguish the two, so re-insert ``value: null`` here when the
+        field was actually ``None`` (LRN-110)."""
+        data = handler(self)
+        if self.value is None:
+            data["value"] = None
+        return data
 
 
 class TimeSeriesSummary(_Wire):

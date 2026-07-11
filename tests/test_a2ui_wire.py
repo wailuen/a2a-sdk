@@ -144,8 +144,9 @@ def test_time_series_wire_no_series_in_data_points():
 
 
 def test_time_series_wire_data_keys_conform_to_profile():
-    """Each data point on the wire must have exactly {{date, value}} (label is
-    optional but date and value are always present for non-null values)."""
+    """Each data point on the wire must have exactly {{date, value, label?}}.
+    ``value`` is required-but-nullable on the frozen contract — a data gap is
+    a real point (``value: null``), not an absent key (LRN-110)."""
     chart = TimeSeriesChart(
         chart_type="line",
         title="T",
@@ -163,7 +164,8 @@ def test_time_series_wire_data_keys_conform_to_profile():
 
     pt1 = wire["data"][1]
     assert "date" in pt1
-    # value=None is excluded by exclude_none; that's spec-conformant
+    assert pt1["value"] is None, "value=None must survive as a literal null, not an absent key"
+    assert "label" not in pt1  # label absent is correctly excluded (genuinely optional)
     assert "series" not in pt1
 
 
