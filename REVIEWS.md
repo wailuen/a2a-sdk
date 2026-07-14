@@ -71,7 +71,7 @@ Reviewers (parallel): `a2a-advisor`, `ag-ui-advisor`, `a2ui-advisor`, `mcp-advis
 | 8 | MAJOR | Identity kind tagging; admin surfaces reject oauth kind; consent needs real API key | §5.5, §6 |
 | 9 | MINOR | GET /mcp → text/event-stream, not 405 (Claude.ai Desktop) | §5.5 |
 | 10 | MINOR | DELETE /mcp → 204 idempotent | §5.5 |
-| 11 | MINOR | MCP-Protocol-Version header validation (400 invalid; absent→2025-03-26) | §5.5 |
+| 11 | MINOR | MCP-Protocol-Version header validation (400 invalid; absent behavior transport-split — Streamable HTTP non-init→400, Legacy SSE→assume 2025-03-26; GH-77) | §5.5 |
 | 12 | MINOR | CI: curl OAuth-chain probes + live port + `claude mcp add` release gate | §12 |
 | 13 | MINOR | Omit empty scope from token response; code_challenge_methods_supported ["S256"] | §5.5 |
 
@@ -144,7 +144,7 @@ Verdicts on v2: a2a APPROVE_WITH_MINORS · ag-ui APPROVE_WITH_MINORS · a2ui APP
 |---|---|---|
 | HIGH | v2 claimed strict single-URI audience enforcement; pitchbook (and live Claude.ai, which sends bare origin) use two-value equivalence — v2 was internally inconsistent | explicit accepted set {origin, origin/mcp}, hard 401 outside it, documented RFC 8707 deviation + rationale §5.5 |
 | MED | "resource required at token" would break Claude.ai (it doesn't send it there) | resource carried from code metadata; not re-required at token; authorize defaults it §5.5 |
-| LOW | "required on all post-init requests" vs absent→default contradiction | "validated when present" §5.5 |
+| LOW | "required on all post-init requests" vs absent→default contradiction | transport-split (GH-77): Streamable HTTP non-init POST — absent→400 (effectively required); GET/DELETE — absent→allowed; Legacy SSE — absent→assume 2025-03-26 §5.5 |
 | LOW | oauth-kind route policy ambiguous (revoke? token?) | routes enumerated; revoke = self-only; token unauthenticated §5.5 |
 | LOW | CI missing unknown-session 404 probe | §12 |
 | INFO | pitchbook structuredContent-without-outputSchema not in §1 defect list | added §1 |
@@ -279,8 +279,8 @@ Four-advisor /agent-stack-check static audit. All Critical/High findings fixed a
 
 | Protocol | Sev | Finding | File:line | Rationale |
 |---|---|---|---|---|
-| MCP | CRITICAL* | `_TITLE_MIN_VERSION = "2025-11-25"` is a conservative gate — spec says title was introduced in 2025-06-18 | `routes/mcp.py:68-70`, `tests/test_mcp_initialize_version_title.py` | *Spec annotation error, not a behavioral error. Omitting an optional field is spec-valid. GH-43 observed Claude.ai rejecting handshakes with title present; we cannot safely lower the gate without a live re-test. Comment updated to document the conservative intent. Behavioral impact: title absent for 2025-06-18 clients (safe). |
-| MCP | HIGH | Tool-level `title` emitted in `tools/list` without version-gating for 2025-03-26 clients | `routes/mcp.py:301-302` | MCP `additionalProperties` is not `false` — strict clients tolerate unknown fields. Claude.ai always negotiates 2025-06-18+; no connectivity impact. Fix: remove 2025-03-26 from SUPPORTED_PROTOCOL_VERSIONS in a follow-up wave (requires test updates). |
+| MCP | CRITICAL* | `_TITLE_MIN_VERSION` (module-level constant, `routes/mcp.py`) is a conservative gate — spec says title was introduced in 2025-06-18 | `routes/mcp.py`: `_TITLE_MIN_VERSION`, `tests/test_mcp_initialize_version_title.py` | *Spec annotation error, not a behavioral error. Omitting an optional field is spec-valid. GH-43 observed Claude.ai rejecting handshakes with title present; we cannot safely lower the gate without a live re-test. Comment updated to document the conservative intent. Behavioral impact: title absent for 2025-06-18 clients (safe). |
+| MCP | HIGH | Tool-level `title` emitted in `tools/list` without version-gating for 2025-03-26 clients | `routes/mcp.py`: `_handle_tools_list()`'s `tool["title"] = entry.title` block | MCP `additionalProperties` is not `false` — strict clients tolerate unknown fields. Claude.ai always negotiates 2025-06-18+; no connectivity impact. Fix: remove 2025-03-26 from SUPPORTED_PROTOCOL_VERSIONS in a follow-up wave (requires test updates). |
 | A2A | HIGH | `ChatDriver.a2a_turn()` uses hardcoded relative URL `/v1/message:send` instead of card `url` | `testing/chat.py:266` | Testing harness only — not part of the SDK public API. The underlying httpx client is always pre-pointed at the correct base URL in test contexts. File as GH issue; fix before promoting ChatDriver to a general-purpose client guide. |
 | A2A | MED | `ChatDriver.extract_reply()` silently drops FilePart and DataPart | `testing/chat.py:370-379` | Testing harness only; SDK server never puts file content in history messages. Document text-only scope or add fallback in a follow-up. |
 | A2A | MED | `TaskState.REJECTED` and `TaskState.UNKNOWN` defined but never emitted | `agent/runner.py:226-329` | Design limitation — `FAILED` is valid for all current error paths. Add `REJECTED` path for pre-execution policy failures in a follow-up wave. |

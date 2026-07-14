@@ -24,6 +24,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_sdk.agent.events import ToolProgressEvent
+from agent_sdk.agent.registry import ToolTerminalResult
 from agent_sdk.models.errors import AgentError, ErrorCategory
 from agent_sdk.contrib.commitments import (
     Commitment,
@@ -64,16 +66,54 @@ def tmp_path_str():
         yield d
 
 
-class FakeEntry:
-    """Stands in for agent.registry.ToolEntry — records invocations."""
+_GEN_SENTINEL = object()
 
-    def __init__(self, fn):
+
+class FakeEntry:
+    """Stands in for agent.registry.ToolEntry — records invocations.
+
+    Mirrors the real ToolEntry contract (RT-002/LRN-116): ``invoke()`` raises
+    TypeError for a generator entry, and ``invoke_gen()`` drains an
+    async-generator ``fn``, wrapping the final yielded item in
+    ``ToolTerminalResult`` exactly like ``agent/registry.py``'s real
+    ``invoke_gen`` — so a test double for a Tier-1 ``long_running=True`` tool
+    behaves indistinguishably from the real registry entry.
+    """
+
+    def __init__(self, fn, *, is_generator: bool = False):
         self._fn = fn
         self.calls: list[tuple] = []
+        self.decl = SimpleNamespace(is_generator=is_generator)
 
     async def invoke(self, args, adapters):
+        if self.decl.is_generator:
+            raise TypeError(
+                "entry is an async-generator; use invoke_gen() instead"
+            )
         self.calls.append((args, adapters))
         return await self._fn(args, adapters)
+
+    async def invoke_gen(self, args, adapters):
+        if not self.decl.is_generator:
+            raise TypeError(
+                "entry is a coroutine, not an async-generator; use invoke() instead"
+            )
+        self.calls.append((args, adapters))
+        prev: object = _GEN_SENTINEL
+        async for item in self._fn(args, adapters):
+            if prev is not _GEN_SENTINEL:
+                yield prev
+            prev = item
+        yield ToolTerminalResult(value=None if prev is _GEN_SENTINEL else prev)
+
+    async def invoke_any(self, args, adapters):
+        if not self.decl.is_generator:
+            return await self.invoke(args, adapters)
+        result = None
+        async for gen_item in self.invoke_gen(args, adapters):
+            if isinstance(gen_item, ToolTerminalResult):
+                result = gen_item.value
+        return result
 
 
 class FakeRegistry:
@@ -365,6 +405,26 @@ async def test_executor_fires_due_commitment(tmp_path_str):
     ex = CommitmentExecutor(s, FakeRegistry({"send": entry}), {})
     fired = await ex.tick_once()
     assert fired == 1
+    assert entry.calls == [({"x": 1}, {})]
+    assert s.get(cid).status == STATUS_FIRED
+
+
+async def _gen_ok_tool(args, adapters):
+    yield ToolProgressEvent(message="working", tool_name="send")
+    yield {"ok": True}
+
+
+async def test_executor_fires_generator_tool(tmp_path_str):
+    # RT-002/LRN-116: a committed Tier-1 long_running=True async-generator tool
+    # must fire like any other tool — _fire() must branch on decl.is_generator
+    # (mirroring routes/mcp.py:380-390) instead of unconditionally calling
+    # entry.invoke(), which TypeErrors for a generator entry and would
+    # permanently mark the commitment failed.
+    s = _store(tmp_path_str)
+    cid = s.add(tool="send", args={"x": 1}, fire_at=_past())
+    entry = FakeEntry(_gen_ok_tool, is_generator=True)
+    ex = CommitmentExecutor(s, FakeRegistry({"send": entry}), {})
+    await ex.tick_once()
     assert entry.calls == [({"x": 1}, {})]
     assert s.get(cid).status == STATUS_FIRED
 

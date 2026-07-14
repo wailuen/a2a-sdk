@@ -43,7 +43,7 @@ from .events import (
     UsageEvent,
 )
 from .model_client import ModelClient
-from .registry import ToolRegistry, _ToolTerminalResult
+from .registry import ToolEntry, ToolRegistry, ToolTerminalResult
 from .skills import SkillsRegistry
 from ..sources import SourceAdapter
 
@@ -101,6 +101,24 @@ class LoopPolicies:
     # Populated automatically from ToolDecl.tool_timeout_override at invocation
     # time; callers may also pass explicit overrides for testing.
     per_tool_timeouts: dict[str, float] = field(default_factory=dict)
+
+
+def resolve_tool_timeout(name: str, entry: ToolEntry, policies: LoopPolicies) -> float:
+    """Effective per-call timeout (seconds) for one tool invocation.
+
+    Shared by every invocation surface (``agent/loop.py``, ``routes/mcp.py``)
+    so the resolution order can never drift between them (LRN-116 Prevention).
+    Priority order:
+      1. ``policies.per_tool_timeouts[name]`` (explicit caller override)
+      2. ``entry.decl.tool_timeout_override`` (``@tool`` decorator kwarg)
+      3. ``policies.tool_timeouts[tier]`` (tier default)
+      4. ``TIER_TIMEOUTS[2]`` (hard fallback)
+    """
+    if name in policies.per_tool_timeouts:
+        return policies.per_tool_timeouts[name]
+    if entry.decl.tool_timeout_override is not None:
+        return entry.decl.tool_timeout_override
+    return policies.tool_timeouts.get(entry.tier, TIER_TIMEOUTS[2])
 
 
 class Deadline:
@@ -259,7 +277,7 @@ def _redact_loc(loc: tuple[Any, ...], err_type: str, model: type[BaseModel] | No
     return ".".join(rendered) or "<root>"
 
 
-def _safe_validation_message(
+def safe_validation_message(
     tool_name: str,
     exc: ValidationError,
     input_model: type[BaseModel] | None = None,
@@ -421,17 +439,8 @@ async def run_loop(
 
             cache_key = (tc.name, json.dumps(tc.arguments, sort_keys=True, default=str))
             # GH-87: resolve effective timeout — per-tool override wins over
-            # per-tier default.  Sources (priority order):
-            #   1. policies.per_tool_timeouts[tc.name] (explicit caller override)
-            #   2. entry.decl.tool_timeout_override (@tool decorator kwarg)
-            #   3. policies.tool_timeouts[tier] (tier default)
-            #   4. TIER_TIMEOUTS[2] (hard fallback)
-            if tc.name in policies.per_tool_timeouts:
-                timeout = policies.per_tool_timeouts[tc.name]
-            elif entry.decl.tool_timeout_override is not None:
-                timeout = entry.decl.tool_timeout_override
-            else:
-                timeout = policies.tool_timeouts.get(entry.tier, TIER_TIMEOUTS[2])
+            # per-tier default. See resolve_tool_timeout() for priority order.
+            timeout = resolve_tool_timeout(tc.name, entry, policies)
 
             ok, result, error = True, None, None
             deferred: DeferredResult | None = None  # GH-87
@@ -444,7 +453,7 @@ async def run_loop(
                 try:
                     async with asyncio.timeout(timeout):
                         async for gen_item in entry.invoke_gen(tc.arguments, adapters):
-                            if isinstance(gen_item, _ToolTerminalResult):
+                            if isinstance(gen_item, ToolTerminalResult):
                                 result = gen_item.value
                             elif isinstance(gen_item, ToolProgressEvent):
                                 yield gen_item  # forward interim event downstream
@@ -465,11 +474,11 @@ async def run_loop(
                 except ToolInterrupt as intr:
                     interrupted = intr
                 except asyncio.TimeoutError:
-                    ok, error = False, f"tool '{tc.name}' timed out after {int(timeout)}s"
+                    ok, error = False, f"tool '{tc.name}' timed out after {timeout:g}s"
                 except AgentError as err:
                     ok, error = False, err.message
                 except ValidationError as exc:
-                    ok, error = False, _safe_validation_message(
+                    ok, error = False, safe_validation_message(
                         tc.name, exc, entry.decl.input_model
                     )
                 except Exception:
@@ -489,14 +498,14 @@ async def run_loop(
                 except ToolInterrupt as intr:
                     interrupted = intr
                 except asyncio.TimeoutError:
-                    ok, error = False, f"tool '{tc.name}' timed out after {int(timeout)}s"
+                    ok, error = False, f"tool '{tc.name}' timed out after {timeout:g}s"
                 except AgentError as err:
                     ok, error = False, err.message
                 except ValidationError as exc:
                     # loc + type only — e['msg']/e['input'] can leak input (SI-2).
                     # loc walked against input_model so user dict keys / extra
                     # field names are redacted, not echoed.
-                    ok, error = False, _safe_validation_message(
+                    ok, error = False, safe_validation_message(
                         tc.name, exc, entry.decl.input_model
                     )
                 except Exception:
@@ -544,7 +553,7 @@ async def run_loop(
                             # loc + type only — e['msg']/e['input'] leak input (SI-2).
                             # loc walked against input_model so user dict keys /
                             # extra field names are redacted, not echoed.
-                            ok, error = False, _safe_validation_message(
+                            ok, error = False, safe_validation_message(
                                 tc.name, exc, entry.decl.input_model
                             )
                         except Exception:

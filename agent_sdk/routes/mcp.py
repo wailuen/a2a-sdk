@@ -17,11 +17,18 @@ else our highest), ``ping``, ``tools/list`` (Tier 1 only — surface parity rule
 §5.6; ``outputSchema`` only when the tool declares ``emits``), ``tools/call``
 (text block always + ``structuredContent`` only under a declared output
 schema; tool failures are ``isError: true`` results, NEVER JSON-RPC errors).
-``notifications/*`` → 202 empty, never answered. ``MCP-Protocol-Version``
-header handling differs by path: Streamable HTTP (``POST /mcp``) — absent
-→ 400, present-but-unrecognized → 400 (spec §10 MUST); Legacy SSE
-(``POST /mcp/messages``) — absent → allowed, assume 2025-03-26 per §10
-SHOULD back-compat carve-out, present-but-unrecognized → 400.
+``notifications/*`` → 202 empty, never answered. Per spec §10 the client
+MUST send ``MCP-Protocol-Version`` on every non-``initialize`` request, and
+the server MUST 400 a present-but-unrecognized version — both hold on every
+path below. Only the ABSENT-header case is a spec SHOULD (assume
+2025-03-26 for pre-header clients), and handling of that case is where the
+paths diverge: Streamable HTTP (``POST /mcp``) is stricter than the SHOULD
+and 400s on absent too, present-but-unrecognized → 400 (§10 MUST);
+``GET``/``DELETE /mcp`` — absent → allowed (no negotiation context to
+validate against), present-but-unrecognized → 400 (GH-111, mirrors the POST
+check); Legacy SSE (``POST /mcp/messages``) — absent → allowed, honoring
+the §10 SHOULD-assume carve-out as 2025-03-26, present-but-unrecognized →
+400 (§10 MUST).
 
 Auth: ``Depends(require_identity)`` — api_key and oauth kinds both accepted;
 401s carry the PRM-pointing ``WWW-Authenticate`` via auth/middleware. OAuth
@@ -46,11 +53,14 @@ from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
 from ..common.sse import HEARTBEAT, SSE_HEADERS
+from ..agent.deferred import DeferredResult
+from ..agent.loop import ToolInterrupt, resolve_tool_timeout, safe_validation_message
+from ..agent.registry import ToolTerminalResult
 from ..credentials import forwarding
 from ..models.content_types import ContentModel, MarketBriefing
 from ..models.errors import AgentError
@@ -364,18 +374,74 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
         # SI-2: never reflect user-supplied tool name in error text.
         return {"__jrpc_not_found__": "tool not found"}
 
+    timeout = resolve_tool_timeout(name, entry, app.state.loop_policies)
     try:
-        artifact = await entry.invoke(arguments, app.state.adapters)
+        if entry.decl.is_generator:
+            # GH-115: mirror agent/loop.py's is_generator branch, INCLUDING its
+            # asyncio.timeout budget (agent/loop.py:445) — tools/call is a
+            # single synchronous JSON-RPC response — there is no SSE channel
+            # here to forward interim ToolProgressEvent items to (unlike the
+            # A2A/AG-UI surfaces), so only the terminal result is kept.
+            artifact = None
+            async with asyncio.timeout(timeout):
+                async for gen_item in entry.invoke_gen(arguments, app.state.adapters):
+                    if isinstance(gen_item, ToolTerminalResult):
+                        artifact = gen_item.value
+        else:
+            artifact = await asyncio.wait_for(
+                entry.invoke(arguments, app.state.adapters), timeout=timeout
+            )
+        # RT-001: a long_running=True coroutine tool may return DeferredResult
+        # instead of a terminal value (the other long_running form besides the
+        # async-generator one, agent/deferred.py). tools/call has no background
+        # task delivery channel, so resolve the handle inline under the same
+        # timeout budget agent/runner.py's background awaiter uses — never fold
+        # the DeferredResult itself (its repr — including the raw handle
+        # coroutine object — must never reach the wire, and the handle must
+        # never be silently dropped unawaited).
+        if isinstance(artifact, DeferredResult):
+            artifact = await asyncio.wait_for(artifact.handle, timeout=timeout)
+    except ToolInterrupt:
+        # RT-001: mirror agent/loop.py's dedicated ToolInterrupt branches
+        # (lines 474/498) rather than falling through to the generic
+        # Exception fallback below. MCP has no HITL/resume channel (no
+        # wait_resume equivalent) to service the interrupt, so surface a
+        # distinct, diagnosable isError instead of an opaque generic failure.
+        logger.warning("mcp tool interrupt tool=%s", name)
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": "tool requires interactive confirmation, unsupported over MCP",
+                }
+            ],
+            "isError": True,
+        }
     except AgentError as exc:
         # AgentError.public() is the consumer-safe shape (no inputs/secrets).
         public = exc.public()
         text = f"[{public['category']}] {public['message']}"
         logger.warning("mcp tool error tool=%s category=%s", name, public["category"])
         return {"content": [{"type": "text", "text": text}], "isError": True}
+    except asyncio.TimeoutError:
+        # RT-004: mirror agent/loop.py's timeout branch (lines 476-477/500-501)
+        # so a timeout is diagnosable rather than folding into the generic
+        # fallback below. `name` is a registry-resolved tool identifier, not
+        # caller-controlled free text (SI-2).
+        text = f"tool '{name}' timed out after {timeout:g}s"
+        logger.warning("mcp tool timeout tool=%s timeout=%s", name, timeout)
+        return {"content": [{"type": "text", "text": text}], "isError": True}
+    except ValidationError as exc:
+        # RT-004: mirror agent/loop.py's ValidationError branch (lines 480-483/
+        # 504-510) — safe_validation_message keeps only loc + type (schema-
+        # declared field names and Pydantic type codes), never exc's raw
+        # msg/input (SI-2), so the model gets a correctable diagnostic instead
+        # of the opaque generic fallback below.
+        text = safe_validation_message(name, exc, entry.decl.input_model)
+        logger.warning("mcp tool input validation failed tool=%s", name)
+        return {"content": [{"type": "text", "text": text}], "isError": True}
     except Exception:
-        # Includes pydantic ValidationError from the input model: a tool-call
-        # failure the model can correct and retry. Message stays generic —
-        # nothing caller-supplied is echoed.
+        # Message stays generic — nothing caller-supplied is echoed.
         logger.exception("mcp tool unexpected error tool=%s", name)
         # SI-2: never reflect user-supplied / tool-derived names in error text;
         # the tool name is already recorded in the structured log above.
@@ -384,10 +450,23 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
             "isError": True,
         }
 
+    emits_type = entry.decl.emits
+    # RT-002: a drained async-generator with no terminal yield resolves to
+    # ToolTerminalResult(value=None) (registry.py's invoke_gen), and a plain
+    # coroutine tool may simply `return None` — symmetric cases. With no
+    # emits declared, SC-C1 coercion below is skipped entirely, so without
+    # this guard the fold path would render _tool_text(None) -> the literal
+    # string "None" as a fake isError: false success.
+    if artifact is None and emits_type is None:
+        logger.warning("mcp tool produced no result tool=%s", name)
+        return {
+            "content": [{"type": "text", "text": "tool produced no result"}],
+            "isError": True,
+        }
+
     # SC-C1: if the tool declares emits but the artifact is a raw dict/scalar,
     # attempt to coerce it into the declared emits model so structuredContent
     # can be emitted (MCP §4 MUST when outputSchema is advertised).
-    emits_type = entry.decl.emits
     if emits_type is not None and not isinstance(artifact, BaseModel):
         try:
             artifact = emits_type.model_validate(artifact)
@@ -719,16 +798,16 @@ async def mcp_messages(
     is_initialize = message.get("method") == "initialize"
 
     version = _negotiated_version(request)
-    # Legacy path: _HEADER_ABSENT (header omitted) → assume oldest supported version (§10 SHOULD
-    # back-compat); None (header present but unrecognized) → 400. Streamable path rejects both.
+    # Legacy path: _HEADER_ABSENT (header omitted) → tolerate for back-compat (§10 SHOULD);
+    # None (header present but unrecognized) → 400. Streamable path rejects both.
+    # NOTE: _dispatch() below is version-agnostic — no resolved version value is threaded
+    # into it, so this branch is purely an admission check, not a version assumption.
     if version is None and not is_initialize:
         return JSONResponse(
             status_code=400,
             content={"error": "MCP-Protocol-Version header required"},
             headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
         )
-    if version is _HEADER_ABSENT:
-        version = SUPPORTED_PROTOCOL_VERSIONS[-1]
 
     token = forwarding.bind(forwarding.parse_header(request.headers.get(forwarding.HEADER_NAME)))
     try:

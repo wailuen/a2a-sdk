@@ -36,6 +36,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pydantic import BaseModel, ValidationError
 
+from ..agent.registry import ToolTerminalResult
 from ..auth.middleware import AuthRuntime, _prm_challenge, require_admin, unauth_rate_limit
 from ..credentials.fields import CredentialField, validate_credential_url
 from ..credentials.store import NS_BEDROCK, NS_MODEL, RESERVED_NAMESPACES, CredentialStore
@@ -525,9 +526,19 @@ async def try_tool(
         raise HTTPException(status_code=404, detail="unknown tool")
     timeout = _TRY_TIMEOUTS.get(entry.tier, _TRY_TIMEOUTS[2])
     try:
-        result = await asyncio.wait_for(
-            entry.invoke(arguments, _adapters(request)), timeout=timeout
-        )
+        if entry.decl.is_generator:
+            # LRN-116/GH-115: mirror routes/mcp.py:380-390 and agent/loop.py:450-457
+            # — a generator tool must be drained via invoke_gen() under the same
+            # timeout budget; entry.invoke() raises TypeError for these tools.
+            result = None
+            async with asyncio.timeout(timeout):
+                async for gen_item in entry.invoke_gen(arguments, _adapters(request)):
+                    if isinstance(gen_item, ToolTerminalResult):
+                        result = gen_item.value
+        else:
+            result = await asyncio.wait_for(
+                entry.invoke(arguments, _adapters(request)), timeout=timeout
+            )
     except AgentError as exc:
         return {"ok": False, "error": exc.public()}
     except ValidationError as exc:

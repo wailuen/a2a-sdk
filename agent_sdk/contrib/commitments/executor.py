@@ -3,9 +3,12 @@
 :class:`CommitmentExecutor` polls a :class:`CommitmentStore` every
 ``poll_interval`` seconds, atomically claims due commitments, and fires each by
 re-invoking its registered tool through the SDK's own tool registry
-(``registry.get(name).invoke(args, adapters)`` — the same path the agent loop
-uses). Each fire is independent: one tool failing never blocks the others, and a
-failure is recorded as a short non-secret reason, never a raw message.
+(``registry.get(name).invoke_any(args, adapters)`` — RT-002/LRN-116: the same
+is_generator-aware dispatch the agent loop and MCP's ``tools/call`` use, so a
+Tier-1 ``long_running=True`` async-generator tool fires here too instead of
+TypeError-ing inside a bare ``invoke()``). Each fire is independent: one tool
+failing never blocks the others, and a failure is recorded as a short
+non-secret reason, never a raw message.
 
 **Credential-agnostic by design (the integrator hook).** The executor fires
 tools with NO request context — there is no inbound assertion, no per-request
@@ -118,11 +121,15 @@ class CommitmentExecutor:
             )
             return
         try:
+            # RT-002/LRN-116: invoke_any() branches on decl.is_generator so a
+            # committed Tier-1 long_running=True async-generator tool is
+            # drained (mirroring routes/mcp.py:380-390) instead of TypeErroring
+            # inside invoke() and being permanently marked failed.
             if self._fire_auth is not None:
                 async with self._fire_auth(commitment):
-                    await entry.invoke(commitment.args, self._adapters)
+                    await entry.invoke_any(commitment.args, self._adapters)
             else:
-                await entry.invoke(commitment.args, self._adapters)
+                await entry.invoke_any(commitment.args, self._adapters)
         except asyncio.CancelledError:
             # Shutdown mid-fire: leave the row 'firing' for the reaper. Do NOT
             # mark fired/failed and do NOT re-run — at-most-once for side effects.

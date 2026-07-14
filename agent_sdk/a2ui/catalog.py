@@ -151,7 +151,7 @@ _COMPACT_SCHEMAS: dict[str, str] = {
 }
 
 
-def get_system_prompt_section() -> str:
+def get_system_prompt_section(allowed_components: list[str] | None = None) -> str:
     """Return A2UI wire-contract guidance for LLM system prompts.
 
     Returns an empty string when no A2UI content types are registered (e.g.
@@ -160,8 +160,13 @@ def get_system_prompt_section() -> str:
     When types ARE registered the returned block lists every registered
     component with its compact schema shape and a few-shot example for the
     most common types.
+
+    When *allowed_components* is set (SC-D2) only the matching component
+    types are described — schemas and few-shot examples for disallowed
+    types are omitted so the LLM is never taught output shapes it isn't
+    permitted to produce.
     """
-    types = registered_content_types()
+    types = _filtered_types(allowed_components)
     if not types:
         return ""
 

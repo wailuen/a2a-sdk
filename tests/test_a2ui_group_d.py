@@ -303,6 +303,70 @@ def test_d2_none_allowed_components_permits_all_types(tmp_path):
     gc.collect()
 
 
+def test_d2_get_system_prompt_section_filters_disallowed_types():
+    """GH-116: get_system_prompt_section(allowed_components=[...]) must omit
+    schema entries and few-shot examples for component types that are not in
+    the allowlist, matching the filtering behaviour of its 3 siblings
+    (supported_catalogs, data_types_for_catalog, a2ui_extension)."""
+    from agent_sdk.a2ui.catalog import get_system_prompt_section
+
+    section = get_system_prompt_section(allowed_components=["KpiCard"])
+    assert "KpiCard" in section
+    assert "TimeSeriesChart" not in section, (
+        f"disallowed type TimeSeriesChart must not appear in a filtered "
+        f"system prompt section; got:\n{section}"
+    )
+
+
+def test_d2_get_system_prompt_section_none_includes_all_types():
+    """GH-116: allowed_components=None (default) must retain full-catalog
+    behaviour — backward compatible with no filtering."""
+    from agent_sdk.a2ui.catalog import get_system_prompt_section
+
+    section = get_system_prompt_section()
+    assert "KpiCard" in section
+    assert "TimeSeriesChart" in section
+
+
+def test_d2_agent_build_app_system_prompt_omits_disallowed_schemas(tmp_path):
+    """GH-116 AC: app.py's build_app() must thread settings.a2ui_allowed_components
+    through to get_system_prompt_section(), so an agent restricted to KpiCard
+    does not get taught the TimeSeriesChart schema/few-shot JSON in its system
+    prompt, even though _validate_emits() only gates tool-declared emits=
+    targets, not the LLM's free-form JSON output."""
+    from agent_sdk.testing import FakeModelClient
+
+    settings = _make_settings(tmp_path, allowed_components=["KpiCard"])
+    kpi_tools = ToolSet()
+
+    @kpi_tools.tool(tier=1, emits=KpiCard, read_only=True)
+    async def good_kpi_tool(inp: KpiCard) -> KpiCard:  # type: ignore[misc]
+        """A tool that emits KpiCard — allowed."""
+        return KpiCard(metrics=[MetricItem(label="A", value=1)])
+
+    agent = Agent(
+        settings=settings,
+        persona="test agent",
+        toolsets=[kpi_tools],
+        model_client=FakeModelClient(),
+    )
+
+    app = agent.build_app()
+    try:
+        system_prompt = app.state.system_prompt
+        assert "KpiCard" in system_prompt
+        assert "TimeSeriesChart" not in system_prompt, (
+            f"restricted agent's system prompt must not teach the disallowed "
+            f"TimeSeriesChart schema; got:\n{system_prompt}"
+        )
+    finally:
+        try:
+            app.state.credential_store.close()
+        except Exception:
+            pass
+        gc.collect()
+
+
 def test_d2_agent_card_supportedcatalogids_reflects_allowlist(tmp_path):
     """SC-D2: When allowed_components is set, the agent card's A2UI extension
     supportedCatalogIds should reflect only the catalogs of allowed types.

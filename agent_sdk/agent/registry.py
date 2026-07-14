@@ -28,7 +28,7 @@ _SENTINEL = object()
 
 
 @dataclass(slots=True)
-class _ToolTerminalResult:
+class ToolTerminalResult:
     """Sentinel yielded by ``ToolEntry.invoke_gen()`` as the last item.
 
     Wraps the terminal result from an async-generator tool so the drain loop
@@ -310,9 +310,9 @@ class ToolEntry:
           model) as the LAST ``yield`` statement.
 
         This method yields each item from the generator in order; the LAST item
-        is always wrapped in a ``_ToolTerminalResult`` sentinel so the loop can
+        is always wrapped in a ``ToolTerminalResult`` sentinel so the loop can
         distinguish interim events from the terminal result without inspecting
-        every item's type. Callers check ``isinstance(item, _ToolTerminalResult)``
+        every item's type. Callers check ``isinstance(item, ToolTerminalResult)``
         to detect the terminal result.
 
         Python async generators cannot use ``return <value>`` — the terminal
@@ -339,7 +339,7 @@ class ToolEntry:
 
         # Drain the generator; buffer the last item to wrap it as the terminal
         # result.  All items EXCEPT the last are yielded as-is (interim events);
-        # the last item is wrapped in _ToolTerminalResult so the loop can detect
+        # the last item is wrapped in ToolTerminalResult so the loop can detect
         # the boundary without type-checking every event.
         prev: Any = _SENTINEL  # sentinel: "no item yet"
         async for item in agen:
@@ -349,7 +349,35 @@ class ToolEntry:
 
         # prev now holds the last (terminal) item — wrap it.
         terminal = None if prev is _SENTINEL else prev
-        yield _ToolTerminalResult(value=terminal)
+        yield ToolTerminalResult(value=terminal)
+
+    async def invoke_any(
+        self,
+        arguments: dict[str, Any],
+        adapters: dict[type[SourceAdapter], SourceAdapter],
+    ) -> Any:
+        """Invoke this tool regardless of whether it is a coroutine or an
+        async-generator (RT-002/LRN-116).
+
+        A caller with no channel to forward interim progress downstream (MCP's
+        single JSON-RPC response, the commitments executor's background fire)
+        should use this instead of reimplementing the ``decl.is_generator``
+        branch: for a generator tool it drains ``invoke_gen()``, discarding
+        interim ``LoopEvent`` items and returning the terminal value, so
+        callers never see the ``TypeError`` ``invoke()`` raises for a
+        generator entry.
+
+        A caller that DOES have a channel to forward interim events (the live
+        agent loop, ``agent/loop.py``) should keep draining ``invoke_gen()``
+        directly — this shortcut always discards them.
+        """
+        if not self.decl.is_generator:
+            return await self.invoke(arguments, adapters)
+        result: Any = None
+        async for gen_item in self.invoke_gen(arguments, adapters):
+            if isinstance(gen_item, ToolTerminalResult):
+                result = gen_item.value
+        return result
 
 
 class ToolRegistry:

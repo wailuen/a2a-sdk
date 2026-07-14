@@ -543,7 +543,7 @@ class Agent:
 
         from .a2ui.catalog import get_system_prompt_section
 
-        a2ui_section = get_system_prompt_section()
+        a2ui_section = get_system_prompt_section(allowed_components)
         if a2ui_section:
             system_prompt = system_prompt + "\n\n" + a2ui_section
 
