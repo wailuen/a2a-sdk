@@ -46,12 +46,19 @@ When planning any AG-UI CUSTOM event emit path:
 ## Check
 
 ```
-grep -n 'translate\|allows\|tier' agent_sdk/a2ui/translator.py agent_sdk/routes/ag_ui.py
+grep -n 'translate\|allows\|for_custom_emit\|tier' agent_sdk/a2ui/translator.py agent_sdk/routes/ag_ui.py
 ```
 
 Confirm that the `A2UI_UPDATE` emit in `agent_sdk/routes/ag_ui.py` is gated only
-on `tier == "none"` (via `caps.allows()` in `translator.py`) and NOT on
-`type in self.catalogs` or any catalog-membership predicate. The `allows()` method
-in `translator.py` must return `False` only when `self.tier == "none"`, and must
-emit domain types freely (consumers silently ignore unknown CUSTOM events per the
-AG-UI spec) — never suppress based on catalog membership.
+on `tier == "none"` and NOT on `type in self.catalogs` or any catalog-membership
+predicate. Since w032's C-006 extraction, `ag_ui.py` no longer calls
+`caps.allows()` directly — it calls
+`self.capabilities.for_custom_emit()` (`translator.py`) and passes the result
+into `translate()`, which applies `allows()` internally. `for_custom_emit()`
+must return `self` unchanged when `tier == "none"` (preserving the suppression)
+and otherwise force `tier="core+extended"` (catalogs preserved), so `allows()`
+downstream can only ever gate on `tier == "none"` for the AG-UI path — never on
+catalog membership. The `allows()` method in `translator.py` must return
+`False` only when `self.tier == "none"`, and must emit domain types freely
+(consumers silently ignore unknown CUSTOM events per the AG-UI spec) — never
+suppress based on catalog membership.

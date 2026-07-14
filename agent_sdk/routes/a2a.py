@@ -4,6 +4,17 @@ Success bodies are the bare result object (Task | Message); errors are the
 spec ``{"error": {code, message, data?}}`` shape with the §5.1 HTTP status
 mapping. All endpoints require an authenticated identity; task access is
 identity-bound (mismatch → 404 + -32001, existence never leaked).
+
+A disallowed ``Origin`` is rejected by the shared transport guard
+(``common/origin.py``), which raises ``HTTPException(403, "origin not
+allowed")``. On this ``/v1/*`` surface that exception does NOT reach the wire
+as FastAPI's bare ``{"detail": ...}``: the app-level ``_a2a_auth_envelope``
+handler (``app.py``) rewrites EVERY ``/v1/*`` ``HTTPException`` into the A2A
+error envelope, so the 403 body is ``{"error": {"code": -32000, "message":
+"origin not allowed"}}`` — identical in shape to the 401/403 auth failures on
+this surface. A client SHOULD therefore read ``response.json()["error"]``
+here. Only the MCP (``/mcp``) and AG-UI (``/ag-ui/run``) surfaces, which have
+no such envelope handler, return the guard's bare ``{"detail": ...}`` shape.
 """
 
 from __future__ import annotations
@@ -22,6 +33,7 @@ from ..agent.runner import StreamItem, new_task, run_task_worker
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
 from ..credentials import forwarding
+from ..common.origin import guard_origin
 from ..common.sse import SSE_HEADERS, sse_data
 from ..common.wire_errors import a2a_error, a2a_invalid_params, a2a_parse_error
 from ..models.a2a import (
@@ -81,12 +93,13 @@ def _message_text(message: Message) -> str:
 
 def _capabilities(message: Message, request: Request) -> A2uiCapabilities:
     # Gate A2UI on the opt-in header — clients that never sent X-A2A-Extensions
-    # containing A2UI_EXTENSION_URI must not receive A2UI DataParts.
+    # containing A2UI_EXTENSION_URI must not receive A2UI DataParts. The
+    # fail-closed default itself lives in A2uiCapabilities.gated (C-006) so
+    # this transport cannot drift from ag_ui.py's independently.
     extensions = request.headers.get("x-a2a-extensions", "")
-    if A2UI_EXTENSION_URI not in [u.strip() for u in extensions.split(",")]:
-        return A2uiCapabilities(tier="none", catalogs=[])
+    opted_in = A2UI_EXTENSION_URI in [u.strip() for u in extensions.split(",")]
     raw = (message.metadata or {}).get("a2uiClientCapabilities")
-    return A2uiCapabilities.from_metadata(raw)
+    return A2uiCapabilities.gated(opted_in, raw)
 
 
 def _config_error(params: MessageSendParams) -> JSONResponse | None:
@@ -220,6 +233,7 @@ def _task_wire(record: TaskRecord, history_length: int | None = None) -> dict[st
 async def message_send(
     request: Request, response: Response, identity: Identity = Depends(require_identity)
 ) -> Any:
+    guard_origin(request)
     _echo_extensions(request, response)
     params = await _parse_send(request)
     if isinstance(params, JSONResponse):
@@ -306,6 +320,7 @@ def _open_stream(
 async def message_stream(
     request: Request, response: Response, identity: Identity = Depends(require_identity)
 ) -> Any:
+    guard_origin(request)
     _echo_extensions(request, response)
     params = await _parse_send(request)
     if isinstance(params, JSONResponse):
@@ -341,6 +356,7 @@ async def tasks_list(
     pageToken: str | None = None,
     identity: Identity = Depends(require_identity),
 ) -> Any:
+    guard_origin(request)
     size = min(max(pageSize, 1), 100)
     tasks, next_token, total = request.app.state.task_store.list_tasks_for_identity(
         identity, page_size=size, page_token=pageToken
@@ -361,6 +377,7 @@ async def tasks_get(
     historyLength: int | None = None,
     identity: Identity = Depends(require_identity),
 ) -> Any:
+    guard_origin(request)
     # GH-25 AC-3 (w012, locked): a colon-bearing task_id (e.g. GET on the shape of
     # /v1/tasks/{id}:cancel) is a wrong-HTTP-verb-on-a-mutation-path miss, not a
     # genuinely unknown task — -32001 there would misleadingly imply "no such task".
@@ -376,6 +393,7 @@ async def tasks_get(
 async def tasks_cancel(
     task_id: str, request: Request, identity: Identity = Depends(require_identity)
 ) -> Any:
+    guard_origin(request)
     store = request.app.state.task_store
     record = store.get(task_id, identity)
     if record is None:
@@ -395,8 +413,10 @@ async def tasks_cancel(
         status=record.task.status,
         final=True,
     ).wire()
-    store.publish(task_id, StreamItem(frame=frame, event=None, final=True))
-    store.close_streams(task_id)
+    try:
+        store.publish(task_id, StreamItem(frame=frame, event=None, final=True))
+    finally:
+        store.close_streams(task_id)
     # spec-required: HTTP 200 with the full canceled Task (§5.1)
     return JSONResponse(_task_wire(record))
 
@@ -406,6 +426,7 @@ async def tasks_cancel(
 async def tasks_resubscribe(
     task_id: str, request: Request, response: Response, identity: Identity = Depends(require_identity)
 ) -> Any:
+    guard_origin(request)
     record = request.app.state.task_store.get(task_id, identity)
     if record is None:
         return a2a_error(A2A_TASK_NOT_FOUND, "task not found")

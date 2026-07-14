@@ -24,13 +24,9 @@ status: budget-exhausted
 ### RT-DELETE-LEN-GUARD
 - severity: low
 - file: agent_sdk/routes/mcp.py
+- status: FIXED (w032/RT-001, 2026-07-14)
 - description: DELETE /mcp does not enforce the 64-character cap on the Mcp-Session-Id header, unlike POST /mcp (lines 488-492 cap at 64 chars). An oversized session id sent to DELETE /mcp just falls through to `sessions.get(session_id)` which returns None and the handler exits with 204. The security impact is negligible (the session lookup is a pure dict.get with no side effects), but the defense-in-depth consistency is broken: POST caps it, DELETE does not.
-- fix: Add a length guard to `mcp_delete` immediately after the origin check:
-  ```python
-  if session_id and len(session_id) > 64:
-      return Response(status_code=400)
-  ```
-  This mirrors the guard already present in `mcp_post`.
+- fix: Added a length guard to `mcp_delete` immediately after the GH-111 protocol-version check (agent_sdk/routes/mcp.py:635-645), returning `JSONResponse(status_code=400, content={"error": "invalid session id"}, ...)` for a session id over 64 chars — mirrors the guard in `mcp_post`. Covered by `tests/test_http_protocol.py::test_mcp_delete_oversize_session_id_returns_400` and `::test_mcp_delete_session_id_at_cap_still_succeeds`.
 - sdkCandidate: false
 
 ### RT-NOTIFY-TEST-COV

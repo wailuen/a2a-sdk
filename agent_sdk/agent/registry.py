@@ -9,14 +9,29 @@ call time.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
+import time
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Callable, Optional, Union, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncGenerator,
+    Awaitable,
+    Callable,
+    Union,
+    cast,
+)
 
 from pydantic import BaseModel
 
+from ..models.errors import AgentError, ErrorCategory
 from ..sources import SourceAdapter
+from .deferred import DeferredResult
+
+if TYPE_CHECKING:
+    from .loop import LoopPolicies
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +40,74 @@ logger = logging.getLogger(__name__)
 
 # Unique object used as "no item buffered yet" placeholder in invoke_gen.
 _SENTINEL = object()
+
+# GH-120: total DeferredResult handles invoke_any() will await before giving
+# up — the original handle plus at most one nested resolution. A handle
+# resolving to a THIRD DeferredResult raises rather than looping forever /
+# leaking the object.
+_MAX_DEFERRED_RESOLUTIONS = 2
+
+
+async def resolve_deferred_result(
+    result: Any,
+    *,
+    tool_name: str,
+    handle_timeout: Callable[[], float],
+) -> Any:
+    """Resolve ``result`` down to a terminal value, following a chain of
+    nested ``DeferredResult`` up to ``_MAX_DEFERRED_RESOLUTIONS`` deep
+    (GH-120/GH-121, RT-001).
+
+    ``result`` need not itself be a ``DeferredResult`` — a plain value passes
+    through unchanged. ``handle_timeout`` is called fresh before each await;
+    what it RETURNS is entirely the caller's choice (RT-002). A caller
+    enforcing one overall deadline (RT-003) — ``invoke_any`` called with an
+    explicit ``timeout``, and ``runner._run_deferred_background`` — closes
+    over a single ``deadline`` computed once, so the returned budget shrinks
+    as time elapses across nested awaits. ``invoke_any`` called with
+    ``timeout=None`` (the commitments executor's call shape, which has no
+    per-call deadline of its own) instead closes over ``resolve_tool_timeout``
+    and returns a FULL fresh budget before every nested await. This function
+    does not normalize that choice — it only bounds each individual await by
+    whatever ``handle_timeout()`` returns.
+
+    Every surface that awaits a returned ``DeferredResult`` — ``invoke_any``
+    (MCP ``tools/call``, admin try-tool, commitments executor) and the A2A/
+    AG-UI background awaiter (``runner._run_deferred_background``) — routes
+    through this so a ``long_running`` tool's nested-``DeferredResult``
+    contract cannot drift by transport in the two respects this function
+    itself controls (RT-001): a nesting DEPTH that succeeds on one surface
+    must succeed identically on every other, and the same holds for the
+    point at which nesting is declared too deep and rejected. The TIMEOUT
+    BUDGET spent resolving a chain is deliberately NOT part of that parity
+    guarantee (RT-002) — see above: a slow nested chain can succeed on the
+    deadline-free commitments surface while timing out on MCP/A2A for the
+    identical tool contract, because only the timeout-bearing surfaces share
+    one shrinking deadline.
+
+    Registered as C-012 in workspace/components/README.md — imported
+    directly by both ``ToolEntry.invoke_any`` (C-010, this module) and
+    ``runner._run_deferred_background``. Any future tool-dispatch surface
+    that awaits a ``DeferredResult`` must call this rather than
+    re-deriving ``_MAX_DEFERRED_RESOLUTIONS`` (RT-001).
+    """
+    resolutions = 0
+    while isinstance(result, DeferredResult):
+        if resolutions >= _MAX_DEFERRED_RESOLUTIONS:
+            close = getattr(result.handle, "close", None)
+            if callable(close):
+                close()
+            cancel = getattr(result.handle, "cancel", None)
+            if callable(cancel):
+                cancel()
+            raise AgentError(
+                ErrorCategory.INTERNAL,
+                "tool returned a DeferredResult nested beyond the supported depth",
+                source=tool_name,
+            )
+        resolutions += 1
+        result = await asyncio.wait_for(result.handle, timeout=handle_timeout())
+    return result
 
 
 @dataclass(slots=True)
@@ -320,8 +403,6 @@ class ToolEntry:
 
         Raises TypeError when called on a non-generator tool.
         """
-        from .events import LoopEvent  # local import to avoid circulars
-
         if not self.decl.is_generator:
             raise TypeError(
                 f"tool {self.decl.name!r} is a coroutine, not an async-generator; "
@@ -355,29 +436,112 @@ class ToolEntry:
         self,
         arguments: dict[str, Any],
         adapters: dict[type[SourceAdapter], SourceAdapter],
+        *,
+        timeout: float | None = None,
+        policies: "LoopPolicies | None" = None,
     ) -> Any:
         """Invoke this tool regardless of whether it is a coroutine or an
-        async-generator (RT-002/LRN-116).
+        async-generator (RT-002/LRN-116), optionally under a caller-supplied
+        timeout budget (RT-001).
 
-        A caller with no channel to forward interim progress downstream (MCP's
-        single JSON-RPC response, the commitments executor's background fire)
-        should use this instead of reimplementing the ``decl.is_generator``
-        branch: for a generator tool it drains ``invoke_gen()``, discarding
-        interim ``LoopEvent`` items and returning the terminal value, so
-        callers never see the ``TypeError`` ``invoke()`` raises for a
-        generator entry.
+        A caller with no channel to forward interim progress downstream
+        (MCP's single JSON-RPC response, the admin console's try-tool
+        endpoint, the commitments executor's background fire) should use
+        this instead of reimplementing the ``decl.is_generator`` branch: for
+        a generator tool it drains ``invoke_gen()``, discarding interim
+        ``LoopEvent`` items and returning the terminal value, so callers
+        never see the ``TypeError`` ``invoke()`` raises for a generator
+        entry.
 
         A caller that DOES have a channel to forward interim events (the live
         agent loop, ``agent/loop.py``) should keep draining ``invoke_gen()``
         directly — this shortcut always discards them.
+
+        ``timeout`` — when given, bounds the initial invoke/drain (mirroring
+        every other invocation surface's ``asyncio.wait_for``/
+        ``asyncio.timeout``) under ONE deadline that also covers resolving a
+        returned ``DeferredResult`` (RT-003): the handle gets whatever budget
+        REMAINS after the initial call, never a fresh ``timeout`` seconds on
+        top, so a slow initial call can't double the worst-case wall-clock
+        block. When omitted (the commitments executor's call shape, which has
+        no per-call deadline of its own), the initial invoke/drain is
+        unbounded and only a returned ``DeferredResult`` is bounded, via
+        ``resolve_tool_timeout`` against ``policies`` (or a default
+        ``LoopPolicies()``). Only the executor's CALL SITE is legacy/unchanged
+        (it still calls ``invoke_any(args, adapters)``); the BEHAVIOR is NOT —
+        RT-001: before GH-120 this method returned the ``DeferredResult``
+        verbatim and the executor dropped the handle unawaited (side effect
+        never ran, yet the commitment was still marked fired). The handle is
+        now awaited here, so a committed ``long_running`` tool is marked fired
+        only after its deferred side effect completes, and marked failed if it
+        times out.
+
+        RT-002: a ``long_running=True`` tool may return ``DeferredResult``
+        instead of a terminal value (the other long_running form besides the
+        async-generator one — ``agent/deferred.py``). This caller has no
+        background delivery channel either (mirroring why ``routes/mcp.py``
+        resolves it inline), so the handle is awaited here rather than being
+        returned verbatim and silently dropped unawaited.
+
+        GH-120: the awaited handle is rechecked — a handle that resolves to
+        ANOTHER ``DeferredResult`` is itself resolved (up to
+        ``_MAX_DEFERRED_RESOLUTIONS`` handles total), rather than the nested
+        object being returned verbatim (which baked an unawaited coroutine's
+        repr into the MCP wire text under a false ``isError: false``).
+        Nesting beyond that bound raises ``AgentError`` — a clean, generic
+        internal error every caller (mcp.py, admin.py, the commitments
+        executor) already maps to its existing isError/ok:false path.
+
+        RT-001 (follow-up): the nested-resolution loop itself lives in the
+        module-level ``resolve_deferred_result`` (C-012) so ``runner.py``'s
+        background deferred-job awaiter shares the identical nesting-DEPTH
+        bound and rejection point instead of maintaining its own divergent
+        branch.
+
+        RT-002: that shared contract covers depth, not the timeout budget.
+        When this method is called with ``timeout=None`` (the commitments
+        executor's call shape — see the ``timeout`` paragraph above),
+        ``_handle_timeout`` re-derives a FULL ``resolve_tool_timeout`` budget
+        before EACH nested await, unlike the one shrinking deadline a
+        timeout-bearing ``invoke_any`` call and ``runner.
+        _run_deferred_background`` both thread through. A slow nested-
+        ``DeferredResult`` chain can therefore succeed on the commitments
+        surface while timing out identically on MCP/A2A for the same tool
+        contract — intentional, since the commitments path has no per-call
+        deadline to shrink in the first place, not a parity regression.
         """
+        deadline = time.monotonic() + timeout if timeout is not None else None
+
         if not self.decl.is_generator:
-            return await self.invoke(arguments, adapters)
-        result: Any = None
-        async for gen_item in self.invoke_gen(arguments, adapters):
-            if isinstance(gen_item, ToolTerminalResult):
-                result = gen_item.value
-        return result
+            invoke_coro = self.invoke(arguments, adapters)
+            result = (
+                await asyncio.wait_for(invoke_coro, timeout=timeout)
+                if timeout is not None
+                else await invoke_coro
+            )
+        else:
+            result = None
+            gen = self.invoke_gen(arguments, adapters)
+            if timeout is not None:
+                async with asyncio.timeout(timeout):
+                    async for gen_item in gen:
+                        if isinstance(gen_item, ToolTerminalResult):
+                            result = gen_item.value
+            else:
+                async for gen_item in gen:
+                    if isinstance(gen_item, ToolTerminalResult):
+                        result = gen_item.value
+
+        def _handle_timeout() -> float:
+            if deadline is not None:
+                return max(0.0, deadline - time.monotonic())
+            from .loop import LoopPolicies, resolve_tool_timeout  # local: avoid import cycle
+
+            return resolve_tool_timeout(self.decl.name, self, policies or LoopPolicies())
+
+        return await resolve_deferred_result(
+            result, tool_name=self.decl.name, handle_timeout=_handle_timeout
+        )
 
 
 class ToolRegistry:

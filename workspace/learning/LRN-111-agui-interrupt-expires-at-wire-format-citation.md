@@ -14,8 +14,8 @@ Optional[str]`. The AC also required "confirm ISO-8601 vs stringified
 epoch-ms convention against docs.ag-ui.com or the upstream SDK's own
 serialization before choosing the format." The landed fix chose ISO-8601 UTC
 (`%Y-%m-%dT%H:%M:%SZ`): the `InterruptEvent` branch computes
-`wall_deadline = time.time() + event.expires_at` and calls the shared helper
-`iso_utc()` (`agent_sdk/routes/ag_ui.py:352`), which owns the actual
+`wall_deadline = time.time() + event.expires_in` and calls the shared helper
+`iso_utc()` (`agent_sdk/routes/ag_ui.py:356`), which owns the actual
 `strftime("%Y-%m-%dT%H:%M:%SZ")` formatting (`agent_sdk/common/iso8601.py:25`).
 The only evidence originally recorded was an unsourced code
 comment — no citation any later reader could check. RT-002 flagged this as a
@@ -88,7 +88,7 @@ grep -n 'iso_utc(wall_deadline)' agent_sdk/routes/ag_ui.py
 ```
 The first must match `iso_utc()`'s body (`agent_sdk/common/iso8601.py:25`) —
 the ISO-8601 serialization this LRN documents. The second must match the
-`InterruptEvent` branch (currently `agent_sdk/routes/ag_ui.py:352`) — the
+`InterruptEvent` branch (currently `agent_sdk/routes/ag_ui.py:356`) — the
 call site that formats `expiresAt`. Also confirm the wire format is asserted,
 not just produced:
 ```

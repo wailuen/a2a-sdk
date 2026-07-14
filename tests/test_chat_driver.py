@@ -6,7 +6,8 @@ RUN_FINISHED branch, so interrupt outcomes were silently swallowed.
 Group E tests (SC-E1 through SC-E5) cover:
   SC-E1 Auth header injection
   SC-E2 agent.json fallback card discovery
-  SC-E3 additionalInterfaces transport fallback
+  SC-E3 non-HTTP+JSON preferredTransport rejection (ChatDriver is HTTP+JSON-only;
+        see DESIGN.md non-goals §1 — no gRPC/JSON-RPC transport selection)
   SC-E4 resume() method
   SC-E5 A2AError error code constants
 """
@@ -377,45 +378,37 @@ async def test_sc_e2_both_404_raises():
 
 
 # ---------------------------------------------------------------------------
-# SC-E3: additionalInterfaces transport fallback
+# SC-E3: ChatDriver is HTTP+JSON-only (DESIGN.md non-goals §1: no gRPC/JSON-RPC
+# transport support) — any non-"HTTP+JSON" preferredTransport must raise,
+# regardless of what additionalInterfaces lists.
 # ---------------------------------------------------------------------------
 
 
-async def test_sc_e3_additional_interfaces_fallback():
-    """When preferredTransport=GRPC (unsupported), fall back via additionalInterfaces."""
-    captured: list[str] = []
+async def test_sc_e3_additional_interfaces_do_not_rescue_non_httpjson():
+    """additionalInterfaces listing HTTP+JSON does NOT rescue a GRPC preferredTransport.
 
-    def handle_send(req):
-        captured.append(req.url.path)
-        return httpx.Response(200, json=_task_response(task_id="task-fb"))
-
-    def handle_task(req):
-        return httpx.Response(200, json=_task_response(state="completed", task_id="task-fb"))
-
+    ChatDriver never walks additionalInterfaces — it is HTTP+JSON-only.
+    """
     card = _a2a_card(
         preferred_transport="GRPC",
         additional=[{"transport": "HTTP+JSON", "url": "http://test/v1"}],
     )
-    transport = _RoutedTransport({
-        "/v1/message:send": handle_send,
-        "/v1/tasks/task-fb": handle_task,
-    })
+    transport = _RoutedTransport({})
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        driver = ChatDriver(client, poll_interval=0.01)
+        driver = ChatDriver(client)
         driver._card = card
-        await driver.a2a_turn("hello")
-
-    assert "/v1/message:send" in captured, "expected fallback to HTTP+JSON transport"
+        with pytest.raises(ValueError, match="HTTP\\+JSON"):
+            await driver.a2a_turn("hello")
 
 
 async def test_sc_e3_no_fallback_raises():
-    """When preferredTransport is unsupported and no additionalInterfaces, raises ValueError."""
+    """When preferredTransport is not HTTP+JSON and there is no additionalInterfaces, raises ValueError."""
     card = _a2a_card(preferred_transport="GRPC")
     transport = _RoutedTransport({})
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         driver = ChatDriver(client)
         driver._card = card
-        with pytest.raises(ValueError, match="unsupported A2A transport"):
+        with pytest.raises(ValueError, match="HTTP\\+JSON"):
             await driver.a2a_turn("hello")
 
 

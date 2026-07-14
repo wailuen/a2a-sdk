@@ -69,6 +69,9 @@ Fix 5 protocol conformance bugs surfaced by downstream agents after the 0.4.0 re
 | W29 [x] ✅ 2026-07-10 (GH-95–GH-101) | w029-gh-issues.md | G | 7 | — |
 | W30 [x] ✅ 2026-07-11 (GH-104, GH-105) | w030-gh-issues.md | G | 2 | — |
 | W31 [x] ✅ 2026-07-11 (AGUI-1, AGUI-2, AGUI-3) | w031-ag-ui-wire-fidelity.md | G | 2 | — |
+| W32 [x] ✅ 2026-07-14 (GH-110–GH-114) | w032-gh-issues.md | G | 5 | — |
+| W33 [x] ✅ 2026-07-14 (GH-115–GH-117) | w033-gh-issues.md | G | 3 | — |
+| W34 [x] ✅ 2026-07-14 (GH-119–GH-121; RT-001/RT-002 group-G budget-exhausted findings fixed) | w034-gh-issues.md | G | 4 | — |
 
 ## Dependency graph
 

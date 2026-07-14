@@ -14,6 +14,7 @@ import base64
 import os
 from typing import Any
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
@@ -85,7 +86,7 @@ def decrypt(aes: Any, namespace: str, field: str, blob: bytes) -> str:
         nonce, ct = raw[:12], raw[12:]
         aad = f"{namespace}/{field}".encode()
         return aes.decrypt(nonce, ct, aad).decode()
-    except Exception as exc:
+    except (InvalidTag, ValueError) as exc:
         raise AgentError(
             ErrorCategory.INTERNAL, "credential store decryption failed"
         ) from exc

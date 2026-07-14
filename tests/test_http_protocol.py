@@ -16,6 +16,8 @@ Unauthenticated requests strip the pre-set admin bearer by passing
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -237,4 +239,97 @@ async def test_prm_bare_returns_200(client):
     body = r.json()
     assert "resource" in body, (
         f"PRM response must include 'resource' key; got keys: {list(body.keys())}"
+    )
+
+
+# ===========================================================================
+# GH-111 — mcp_get / mcp_delete must reject a present-but-unrecognized
+# MCP-Protocol-Version header (400), mirroring mcp_post's validation via
+# _negotiated_version(). The absent-header case is unaffected (locked
+# GH-77/w022 ruling — do not re-litigate).
+# ===========================================================================
+
+
+async def test_mcp_get_bogus_protocol_version_returns_400(client):
+    """GET /mcp with a present-but-unrecognized MCP-Protocol-Version header
+    must return 400, not silently open the SSE stream.
+
+    The heartbeat stream never completes on its own (LRN-053 — no
+    server-initiated close), so a passing (fixed) response must arrive well
+    inside the timeout; an unfixed handler falls through into the infinite
+    generator and this call would hang past the deadline instead."""
+    r = await asyncio.wait_for(
+        client.get("/mcp", headers={"MCP-Protocol-Version": "bogus-value"}), timeout=5
+    )
+    assert r.status_code == 400, (
+        f"GET /mcp with bogus MCP-Protocol-Version → {r.status_code}, expected 400"
+    )
+
+
+async def test_mcp_delete_bogus_protocol_version_returns_400(client):
+    """DELETE /mcp with a present-but-unrecognized MCP-Protocol-Version header
+    must return 400, not silently succeed."""
+    r = await client.delete("/mcp", headers={"MCP-Protocol-Version": "bogus-value"})
+    assert r.status_code == 400, (
+        f"DELETE /mcp with bogus MCP-Protocol-Version → {r.status_code}, expected 400"
+    )
+
+
+async def test_mcp_get_bogus_protocol_version_message_names_actual_trigger(client):
+    """RT-005: on GET /mcp an absent header is allowed (GH-77/w022), so a
+    present-but-unrecognized header must NOT be reported with mcp_post's
+    "header required" wording — that would tell a client that DID send a
+    version that it omitted one. The message must name the real condition."""
+    r = await asyncio.wait_for(
+        client.get("/mcp", headers={"MCP-Protocol-Version": "bogus-value"}), timeout=5
+    )
+    assert r.json() == {"error": "unsupported MCP-Protocol-Version"}
+
+
+async def test_mcp_delete_bogus_protocol_version_message_names_actual_trigger(client):
+    """RT-005: same accurate-wording requirement as the GET case."""
+    r = await client.delete("/mcp", headers={"MCP-Protocol-Version": "bogus-value"})
+    assert r.json() == {"error": "unsupported MCP-Protocol-Version"}
+
+
+async def test_mcp_get_no_protocol_version_header_still_succeeds(client):
+    """Regression: GET /mcp with NO MCP-Protocol-Version header at all must
+    still reach the SSE heartbeat stream unchanged (absent-header case is
+    unaffected by GH-111).
+
+    The stream is intentionally infinite (LRN-053 — no server-initiated
+    close), so under the in-process ASGI test transport it can only be
+    observed as "reached and still running after the deadline" — a
+    short-circuiting 400/403 would instead return well inside the timeout."""
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(client.get("/mcp"), timeout=0.5)
+
+
+async def test_mcp_delete_no_protocol_version_header_still_succeeds(client):
+    """Regression: DELETE /mcp with NO MCP-Protocol-Version header at all
+    must still succeed (idempotent 204, absent-header case is unaffected)."""
+    r = await client.delete("/mcp")
+    assert r.status_code == 204, (
+        f"DELETE /mcp with no MCP-Protocol-Version header → {r.status_code}, expected 204"
+    )
+
+
+async def test_mcp_delete_oversize_session_id_returns_400(client):
+    """RT-001: DELETE /mcp caps the Mcp-Session-Id header at 64 chars, mirroring
+    mcp_post/mcp_messages (SI-3). An oversized value can never be a server-issued
+    uuid4().hex (32 chars), so it is rejected with 400 rather than silently
+    falling through to a 204."""
+    r = await client.delete("/mcp", headers={"Mcp-Session-Id": "x" * 65})
+    assert r.status_code == 400, (
+        f"DELETE /mcp with oversized Mcp-Session-Id → {r.status_code}, expected 400"
+    )
+    assert r.json() == {"error": "invalid session id"}
+
+
+async def test_mcp_delete_session_id_at_cap_still_succeeds(client):
+    """Boundary: a 64-char Mcp-Session-Id is within the cap; it simply matches no
+    live session, so DELETE stays idempotent (204) rather than 400."""
+    r = await client.delete("/mcp", headers={"Mcp-Session-Id": "a" * 64})
+    assert r.status_code == 204, (
+        f"DELETE /mcp with 64-char Mcp-Session-Id → {r.status_code}, expected 204"
     )

@@ -1,21 +1,46 @@
-"""RT-002: MCP ``tools/call`` must not fold a ``None`` terminal artifact into
-a fake success when the tool declares no ``emits``.
+"""RT-002/RT-001: MCP ``tools/call`` must not render the literal string
+``"None"`` for a void Tier-1 tool, but it also must NOT diverge from
+agent/loop.py's verdict for the identical result (§5.6 surface parity rule).
 
-Before the fix, an async-generator Tier-1 tool that yields nothing at all
-drains to ``ToolTerminalResult(value=None)`` (registry.py's ``invoke_gen``),
-and an ordinary coroutine tool can simply ``return None``. When the tool
-declares no ``emits``, ``_handle_tools_call``'s SC-C1 coercion is skipped
-(``emits_type is None``) and the fold path ran ``_tool_text(None)`` ->
-``str(None)`` -> the literal string ``"None"``, returned as
-``{"content": [{"type": "text", "text": "None"}], "isError": False}`` — a
-successful-looking result carrying no real content.
+Before the RT-002 fix, an async-generator Tier-1 tool that yields nothing at
+all drains to ``ToolTerminalResult(value=None)`` (registry.py's
+``invoke_gen``), and an ordinary coroutine tool can simply ``return None``.
+When the tool declares no ``emits``, ``_handle_tools_call``'s SC-C1 coercion
+is skipped (``emits_type is None``) and the fold path ran ``_tool_text(None)``
+-> ``str(None)`` -> the literal string ``"None"``, returned as
+``{"content": [{"type": "text", "text": "None"}], "isError": False}``.
+
+RT-002's own fix over-corrected: it flipped the same case to
+``isError: True`` ("tool produced no result"), but agent/loop.py's
+``run_loop`` folds this identical None result into a SUCCESS toolResult
+(``_fold_result_content(None) -> {"text": ""}``, status "success") on the
+A2A/AG-UI surfaces — so the same void Tier-1 tool call succeeded over
+A2A/AG-UI yet failed over MCP, breaking surface parity (RT-001).
+
+The corrected behaviour: fold ``None`` to ``isError: False`` with an empty
+text block, matching loop.py exactly, while still never emitting the literal
+string "None".
 
 Tests:
-1. test_mcp_tools_call_empty_generator_is_error: a long_running=True
-   async-generator tool that yields nothing must return isError: true with a
-   diagnostic, never the literal "None" text with isError: false.
-2. test_mcp_tools_call_none_coroutine_is_error: an ordinary coroutine tool
+1. test_mcp_tools_call_empty_generator_is_success: a long_running=True
+   async-generator tool that yields nothing must return isError: false with
+   empty text, never the literal "None" text.
+2. test_mcp_tools_call_none_coroutine_is_success: an ordinary coroutine tool
    that returns None must behave identically (the symmetric case).
+
+RT-002 (follow-up): the parity fix above only covered tools with NO ``emits``
+declared. A Tier-1 tool that DOES declare ``emits`` but returns/yields None
+fell through to the SC-C1 coercion block, where
+``emits_type.model_validate(None)`` raises and the call returned
+``isError: true`` ("tool output coercion failed") — diverging from the
+identical void call succeeding over A2A/AG-UI. §5.6 parity must hold
+regardless of whether the tool declares an output schema, so this must also
+fold to ``isError: false`` with empty text and no ``structuredContent``.
+
+3. test_mcp_tools_call_none_coroutine_with_emits_is_success: an ordinary
+   coroutine tool that declares ``emits`` but returns None.
+4. test_mcp_tools_call_empty_generator_with_emits_is_success: an
+   async-generator tool that declares ``emits`` but yields no terminal value.
 """
 
 from __future__ import annotations
@@ -25,6 +50,7 @@ from typing import Any, AsyncGenerator
 
 import httpx
 import pytest
+from pydantic import BaseModel
 
 from agent_sdk.agent.registry import ToolSet
 from agent_sdk.example.agent import make_agent
@@ -43,6 +69,24 @@ async def rt002_empty_gen_tool() -> AsyncGenerator[Any, None]:
 async def rt002_none_coroutine_tool() -> None:
     """Ordinary coroutine tool that returns None."""
     return None
+
+
+class _Rt002Payload(BaseModel):
+    data_type: str = "rt002_payload"
+    value: str = "unused"
+
+
+@rt002_tools.tool(tier=1, emits=_Rt002Payload)
+async def rt002_none_coroutine_with_emits_tool() -> _Rt002Payload | None:
+    """Coroutine tool that declares emits but returns None."""
+    return None
+
+
+@rt002_tools.tool(tier=1, emits=_Rt002Payload, long_running=True)
+async def rt002_empty_gen_with_emits_tool() -> AsyncGenerator[Any, None]:
+    """Async-generator tool that declares emits but yields no terminal value."""
+    return
+    yield  # pragma: no cover - makes this an async generator function
 
 
 @pytest.fixture
@@ -102,23 +146,55 @@ async def _call(client: httpx.AsyncClient, headers: dict[str, str], name: str) -
     return body["result"]
 
 
-async def test_mcp_tools_call_empty_generator_is_error(rt002_client) -> None:
+async def test_mcp_tools_call_empty_generator_is_success(rt002_client) -> None:
     headers = await _mcp_init(rt002_client)
     result = await _call(rt002_client, headers, "rt002_empty_gen_tool")
 
-    assert result.get("isError") is True, (
-        f"a generator tool with no terminal yield must not report success; got {result}"
+    assert result.get("isError") is False, (
+        "a void Tier-1 tool must report the same verdict as agent/loop.py's "
+        f"_fold_result_content(None) (SUCCESS); got {result}"
     )
     text = result["content"][0]["text"]
-    assert text != "None", f"literal 'None' text must never reach the wire; got {text!r}"
+    assert text == "", f"None must fold to empty text, not the literal 'None'; got {text!r}"
 
 
-async def test_mcp_tools_call_none_coroutine_is_error(rt002_client) -> None:
+async def test_mcp_tools_call_none_coroutine_is_success(rt002_client) -> None:
     headers = await _mcp_init(rt002_client)
     result = await _call(rt002_client, headers, "rt002_none_coroutine_tool")
 
-    assert result.get("isError") is True, (
-        f"a coroutine tool returning None must not report success; got {result}"
+    assert result.get("isError") is False, (
+        "a void Tier-1 tool must report the same verdict as agent/loop.py's "
+        f"_fold_result_content(None) (SUCCESS); got {result}"
     )
     text = result["content"][0]["text"]
-    assert text != "None", f"literal 'None' text must never reach the wire; got {text!r}"
+    assert text == "", f"None must fold to empty text, not the literal 'None'; got {text!r}"
+
+
+async def test_mcp_tools_call_none_coroutine_with_emits_is_success(rt002_client) -> None:
+    headers = await _mcp_init(rt002_client)
+    result = await _call(rt002_client, headers, "rt002_none_coroutine_with_emits_tool")
+
+    assert result.get("isError") is False, (
+        "a void Tier-1 tool must report SUCCESS regardless of whether it "
+        f"declares emits — matching A2A/AG-UI's _fold_result_content(None); got {result}"
+    )
+    text = result["content"][0]["text"]
+    assert text == "", f"None must fold to empty text, not the literal 'None'; got {text!r}"
+    assert "structuredContent" not in result, (
+        f"no structuredContent should be emitted for a None result; got {result}"
+    )
+
+
+async def test_mcp_tools_call_empty_generator_with_emits_is_success(rt002_client) -> None:
+    headers = await _mcp_init(rt002_client)
+    result = await _call(rt002_client, headers, "rt002_empty_gen_with_emits_tool")
+
+    assert result.get("isError") is False, (
+        "a void Tier-1 tool must report SUCCESS regardless of whether it "
+        f"declares emits — matching A2A/AG-UI's _fold_result_content(None); got {result}"
+    )
+    text = result["content"][0]["text"]
+    assert text == "", f"None must fold to empty text, not the literal 'None'; got {text!r}"
+    assert "structuredContent" not in result, (
+        f"no structuredContent should be emitted for a None result; got {result}"
+    )

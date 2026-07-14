@@ -246,6 +246,15 @@ def a2ui_extension(allowed_components: list[str] | None = None) -> AgentExtensio
 
     When *allowed_components* is set (SC-D2) only the matching catalog IDs
     are advertised in ``supportedCatalogIds``.
+
+    ``deleteSurfaceSemantics`` is a NON-NORMATIVE, SDK-specific hint (NOT a
+    field defined by A2UI v0.9.1 / Standard Profile v1). It carries the
+    show-then-close convention (DESIGN.md §5.4/§7.1) on the card: ``deleteSurface``
+    is applied as a post-paint step (the surface closes; the rendered output
+    persists in the transcript). A consumer must already know this SDK's
+    convention to interpret the key and its ``"post-paint"`` value — it is not
+    a spec-defined discovery mechanism, but it spares the consumer from
+    reverse-engineering the renderer source.
     """
     return AgentExtension(
         uri=A2UI_EXTENSION_URI,
@@ -254,6 +263,7 @@ def a2ui_extension(allowed_components: list[str] | None = None) -> AgentExtensio
         params={
             "supportedCatalogIds": supported_catalogs(allowed_components),
             "acceptsInlineCatalogs": False,
+            "deleteSurfaceSemantics": "post-paint",
         },
     )
 

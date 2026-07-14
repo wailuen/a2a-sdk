@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 from pydantic import BaseModel, ValidationError
 
-from ..models.errors import AgentError, ErrorCategory
+from ..models.errors import AgentError
 from .deferred import DeferredEvent, DeferredResult
 from .events import (
     ArtifactEvent,
@@ -470,7 +470,18 @@ async def run_loop(
                                     tc.name,
                                     type(gen_item).__name__,
                                 )
-                    result_cache[cache_key] = result
+                    # RT-001: detect DeferredResult on the generator's terminal
+                    # value too — hand off to runner for background awaiting;
+                    # skip cache and normal result path. Mirrors the coroutine
+                    # branch below so a deferred handoff is transport-identical
+                    # regardless of whether the tool is a coroutine or an
+                    # async-generator (the MCP surface already routes both
+                    # through resolve_deferred_result via invoke_any).
+                    if isinstance(result, DeferredResult):
+                        deferred = result
+                        result = None  # runner owns resolution
+                    else:
+                        result_cache[cache_key] = result
                 except ToolInterrupt as intr:
                     interrupted = intr
                 except asyncio.TimeoutError:

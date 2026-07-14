@@ -36,7 +36,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pydantic import BaseModel, ValidationError
 
-from ..agent.registry import ToolTerminalResult
+from ..agent.loop import safe_validation_message
 from ..auth.middleware import AuthRuntime, _prm_challenge, require_admin, unauth_rate_limit
 from ..credentials.fields import CredentialField, validate_credential_url
 from ..credentials.store import NS_BEDROCK, NS_MODEL, RESERVED_NAMESPACES, CredentialStore
@@ -367,7 +367,10 @@ async def overview(request: Request) -> dict[str, Any]:
         },
         "keys": {"count": auth.api_keys.count()},
         "bootstrap_armed": auth.bootstrap.armed,
-        "cors_origins": list(settings.cors_origins),
+        # GH-119 follow-up: reflect the resolved allow-list guard_origin()/
+        # CorsMiddleware actually enforce (includes the deployment's own
+        # resolved-base-URL origin), not just the raw configured list.
+        "cors_origins": sorted(request.app.state.cors_origins),
     }
 
 
@@ -526,31 +529,27 @@ async def try_tool(
         raise HTTPException(status_code=404, detail="unknown tool")
     timeout = _TRY_TIMEOUTS.get(entry.tier, _TRY_TIMEOUTS[2])
     try:
-        if entry.decl.is_generator:
-            # LRN-116/GH-115: mirror routes/mcp.py:380-390 and agent/loop.py:450-457
-            # — a generator tool must be drained via invoke_gen() under the same
-            # timeout budget; entry.invoke() raises TypeError for these tools.
-            result = None
-            async with asyncio.timeout(timeout):
-                async for gen_item in entry.invoke_gen(arguments, _adapters(request)):
-                    if isinstance(gen_item, ToolTerminalResult):
-                        result = gen_item.value
-        else:
-            result = await asyncio.wait_for(
-                entry.invoke(arguments, _adapters(request)), timeout=timeout
-            )
+        # RT-001/LRN-116: dispatch through the shared ToolEntry.invoke_any()
+        # helper (registry.py) rather than re-implementing the is_generator
+        # branch here — it also resolves a long_running=True coroutine
+        # tool's DeferredResult inline under the same timeout deadline,
+        # mirroring routes/mcp.py, instead of leaking the raw DeferredResult
+        # (and its unawaited handle coroutine) to _safe_result().
+        result = await entry.invoke_any(arguments, _adapters(request), timeout=timeout)
     except AgentError as exc:
         return {"ok": False, "error": exc.public()}
     except ValidationError as exc:
+        # SI-2: never build the error from raw Pydantic ``e['msg']`` —
+        # ``include_input=False`` strips only ``input``, NOT ``msg``, and a
+        # custom ``@field_validator`` that interpolates the rejected value
+        # (e.g. ``raise ValueError(f'bad token {v!r}')``) surfaces that value
+        # in ``msg``.  Route through the same SI-2-safe helper the MCP sibling
+        # surface uses (routes/mcp.py), which keeps only loc + type.
         return {
             "ok": False,
             "error": {
                 "category": "validation",
-                # never echo input values (§6 secrets hygiene)
-                "errors": [
-                    {"loc": list(e["loc"]), "msg": e["msg"], "type": e["type"]}
-                    for e in exc.errors(include_input=False, include_url=False)
-                ],
+                "message": safe_validation_message(name, exc, entry.decl.input_model),
             },
         }
     except TimeoutError:
@@ -583,7 +582,10 @@ async def selfcheck_info(request: Request) -> dict[str, Any]:
         "base_url": settings.resolved_base_url,
         "a2a_protocol_version": "0.3.0",
         "mcp_protocol_version": "2025-06-18",
-        "cors_origins": list(settings.cors_origins),
+        # GH-119 follow-up: reflect the resolved allow-list guard_origin()/
+        # CorsMiddleware actually enforce (includes the deployment's own
+        # resolved-base-URL origin), not just the raw configured list.
+        "cors_origins": sorted(request.app.state.cors_origins),
         "endpoints": {
             "agent_card": "/.well-known/agent-card.json",
             "a2a_send": "/v1/message:send",

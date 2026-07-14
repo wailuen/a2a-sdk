@@ -17,6 +17,12 @@ else our highest), ``ping``, ``tools/list`` (Tier 1 only — surface parity rule
 §5.6; ``outputSchema`` only when the tool declares ``emits``), ``tools/call``
 (text block always + ``structuredContent`` only under a declared output
 schema; tool failures are ``isError: true`` results, NEVER JSON-RPC errors).
+A Tier-1 tool that returns/yields no terminal value (``None``) is NOT a
+failure — regardless of whether it declares ``emits``, it folds to
+``isError: false`` with an empty text block and no ``structuredContent``,
+matching agent/loop.py's ``_fold_result_content(None)`` fold on the A2A/AG-UI
+surfaces exactly (§5.6 parity rule extends to result verdicts, not just tool
+visibility) (RT-001/RT-002).
 ``notifications/*`` → 202 empty, never answered. Per spec §10 the client
 MUST send ``MCP-Protocol-Version`` on every non-``initialize`` request, and
 the server MUST 400 a present-but-unrecognized version — both hold on every
@@ -26,9 +32,11 @@ paths diverge: Streamable HTTP (``POST /mcp``) is stricter than the SHOULD
 and 400s on absent too, present-but-unrecognized → 400 (§10 MUST);
 ``GET``/``DELETE /mcp`` — absent → allowed (no negotiation context to
 validate against), present-but-unrecognized → 400 (GH-111, mirrors the POST
-check); Legacy SSE (``POST /mcp/messages``) — absent → allowed, honoring
-the §10 SHOULD-assume carve-out as 2025-03-26, present-but-unrecognized →
-400 (§10 MUST).
+check); Legacy SSE (``POST /mcp/messages``) — absent → allowed, assume
+2025-03-26 per the §10 SHOULD-assume carve-out for pre-header clients — but
+that "assume" is a rationale only: ``_dispatch()`` is version-agnostic, so no
+version value is threaded or materialized (admission ≡ treat-as-pre-header),
+present-but-unrecognized → 400 (§10 MUST).
 
 Auth: ``Depends(require_identity)`` — api_key and oauth kinds both accepted;
 401s carry the PRM-pointing ``WWW-Authenticate`` via auth/middleware. OAuth
@@ -57,10 +65,9 @@ from pydantic import BaseModel, ValidationError
 
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
+from ..common.origin import guard_origin
 from ..common.sse import HEARTBEAT, SSE_HEADERS
-from ..agent.deferred import DeferredResult
 from ..agent.loop import ToolInterrupt, resolve_tool_timeout, safe_validation_message
-from ..agent.registry import ToolTerminalResult
 from ..credentials import forwarding
 from ..models.content_types import ContentModel, MarketBriefing
 from ..models.errors import AgentError
@@ -342,7 +349,15 @@ def _handle_tools_list(app: Any, params: dict[str, Any] | None = None) -> dict[s
 
 
 def _tool_text(artifact: Any) -> str:
-    """Serialized text block — ALWAYS present in a tools/call result."""
+    """Serialized text block — ALWAYS present in a tools/call result.
+
+    RT-001: ``None`` folds to the empty string, mirroring agent/loop.py's
+    ``_fold_result_content(None) -> {"text": ""}`` — a void Tier-1 tool must
+    report the same success/failure verdict on every surface (§5.6 parity
+    rule), never the literal string ``"None"``.
+    """
+    if artifact is None:
+        return ""
     if isinstance(artifact, ContentModel):
         return artifact.to_plain_text()
     if isinstance(artifact, BaseModel):
@@ -376,31 +391,17 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
 
     timeout = resolve_tool_timeout(name, entry, app.state.loop_policies)
     try:
-        if entry.decl.is_generator:
-            # GH-115: mirror agent/loop.py's is_generator branch, INCLUDING its
-            # asyncio.timeout budget (agent/loop.py:445) — tools/call is a
-            # single synchronous JSON-RPC response — there is no SSE channel
-            # here to forward interim ToolProgressEvent items to (unlike the
-            # A2A/AG-UI surfaces), so only the terminal result is kept.
-            artifact = None
-            async with asyncio.timeout(timeout):
-                async for gen_item in entry.invoke_gen(arguments, app.state.adapters):
-                    if isinstance(gen_item, ToolTerminalResult):
-                        artifact = gen_item.value
-        else:
-            artifact = await asyncio.wait_for(
-                entry.invoke(arguments, app.state.adapters), timeout=timeout
-            )
-        # RT-001: a long_running=True coroutine tool may return DeferredResult
-        # instead of a terminal value (the other long_running form besides the
-        # async-generator one, agent/deferred.py). tools/call has no background
-        # task delivery channel, so resolve the handle inline under the same
-        # timeout budget agent/runner.py's background awaiter uses — never fold
-        # the DeferredResult itself (its repr — including the raw handle
-        # coroutine object — must never reach the wire, and the handle must
-        # never be silently dropped unawaited).
-        if isinstance(artifact, DeferredResult):
-            artifact = await asyncio.wait_for(artifact.handle, timeout=timeout)
+        # RT-001: dispatch through the shared ToolEntry.invoke_any() helper
+        # (registry.py) rather than re-implementing the is_generator branch
+        # here — it also resolves a long_running=True coroutine tool's
+        # DeferredResult inline (tools/call has no background task delivery
+        # channel to hand it off to, unlike agent/runner.py), under the
+        # SAME single timeout deadline as the initial invoke/drain (RT-003:
+        # the handle gets only the REMAINING budget, never a fresh `timeout`
+        # seconds on top) — never folding the DeferredResult itself (its
+        # repr, including the raw handle coroutine object, must never reach
+        # the wire, and the handle must never be silently dropped unawaited).
+        artifact = await entry.invoke_any(arguments, app.state.adapters, timeout=timeout)
     except ToolInterrupt:
         # RT-001: mirror agent/loop.py's dedicated ToolInterrupt branches
         # (lines 474/498) rather than falling through to the generic
@@ -451,23 +452,30 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
         }
 
     emits_type = entry.decl.emits
-    # RT-002: a drained async-generator with no terminal yield resolves to
-    # ToolTerminalResult(value=None) (registry.py's invoke_gen), and a plain
-    # coroutine tool may simply `return None` — symmetric cases. With no
-    # emits declared, SC-C1 coercion below is skipped entirely, so without
-    # this guard the fold path would render _tool_text(None) -> the literal
-    # string "None" as a fake isError: false success.
-    if artifact is None and emits_type is None:
-        logger.warning("mcp tool produced no result tool=%s", name)
-        return {
-            "content": [{"type": "text", "text": "tool produced no result"}],
-            "isError": True,
-        }
-
-    # SC-C1: if the tool declares emits but the artifact is a raw dict/scalar,
-    # attempt to coerce it into the declared emits model so structuredContent
-    # can be emitted (MCP §4 MUST when outputSchema is advertised).
-    if emits_type is not None and not isinstance(artifact, BaseModel):
+    # RT-001/RT-002: a drained async-generator with no terminal yield resolves
+    # to ToolTerminalResult(value=None) (registry.py's invoke_gen), and a plain
+    # coroutine tool may simply `return None` — symmetric cases, and this holds
+    # REGARDLESS of whether the tool declares `emits`. loop.py's run_loop folds
+    # this identical None result into a SUCCESS toolResult
+    # (_fold_result_content(None) -> {"text": ""}, status "success") on the
+    # A2A/AG-UI surfaces. §5.6 requires Tier-1 tools to behave identically
+    # across surfaces, so MCP must not diverge into isError: true here — that
+    # would make the same void tool call succeed over A2A/AG-UI yet fail over
+    # MCP. _tool_text(None) below folds to "" (not the literal "None"); no
+    # structuredContent is emitted (the SC-C1 coercion attempt below is
+    # skipped for a None artifact, so `emits_type.model_validate(None)` is
+    # never reached to raise), which is spec-consistent: MCP §4 only requires
+    # structuredContent when the tool actually produces output to describe.
+    if artifact is None:
+        logger.info(
+            "mcp tool produced no result tool=%s emits_declared=%s",
+            name,
+            emits_type is not None,
+        )
+    elif emits_type is not None and not isinstance(artifact, BaseModel):
+        # SC-C1: if the tool declares emits but the artifact is a raw dict/scalar,
+        # attempt to coerce it into the declared emits model so structuredContent
+        # can be emitted (MCP §4 MUST when outputSchema is advertised).
         try:
             artifact = emits_type.model_validate(artifact)
         except Exception as exc:
@@ -522,9 +530,7 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
 async def mcp_post(
     request: Request, identity: Identity = Depends(require_identity)
 ) -> Response:
-    origin = request.headers.get("origin")
-    if origin is not None and origin not in request.app.state.cors_origins:
-        raise HTTPException(status_code=403, detail="origin not allowed")
+    guard_origin(request)
     sessions = _sessions(request.app)
     _prune_sessions(sessions)
     owner = _identity_key(identity)
@@ -652,17 +658,28 @@ async def mcp_post(
     return JSONResponse(content=response, headers=headers)
 
 
-@router.get("")
+@router.get("", response_model=None)
 async def mcp_get(
     request: Request, _identity: Identity = Depends(require_identity)
-) -> StreamingResponse:
+) -> StreamingResponse | JSONResponse:
     """Server→client SSE channel. We send no server-initiated messages
     (``listChanged: false``) so the stream is idle heartbeats — but it MUST
     exist: Claude.ai Desktop treats the connection as established only once
     this GET returns 200 text/event-stream (LRN-053; 405 breaks it)."""
-    origin = request.headers.get("origin")
-    if origin is not None and origin not in request.app.state.cors_origins:
-        raise HTTPException(status_code=403, detail="origin not allowed")
+    guard_origin(request)
+
+    # GH-111: mirror mcp_post's validation — a present-but-unrecognized
+    # MCP-Protocol-Version must 400 here too; absent is allowed (no
+    # negotiation body to validate against on this verb).  The message names
+    # the ACTUAL trigger (present-but-unrecognized): unlike mcp_post, an absent
+    # header is accepted here, so "header required" would misdirect a client
+    # that DID send a version into thinking it omitted the header (RT-005).
+    if _negotiated_version(request) is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "unsupported MCP-Protocol-Version"},
+            headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
+        )
 
     # Last-Event-ID not implemented: server emits no server-initiated messages (listChanged=False), so nothing to resume.
     async def heartbeats() -> AsyncIterator[bytes]:
@@ -687,11 +704,29 @@ async def mcp_delete(
     """Session termination — idempotent (an already-gone id is still 204).
     Only the owning caller can terminate a session; a mismatch is a silent
     no-op 204 so one caller can never delete another's session."""
-    # RT-004: defense-in-depth origin guard mirrors mcp_post / mcp_get.
-    origin = request.headers.get("origin")
-    if origin is not None and origin not in request.app.state.cors_origins:
-        raise HTTPException(status_code=403, detail="origin not allowed")
+    guard_origin(request)
+    # GH-111: mirror mcp_post / mcp_get's validation — a present-but-
+    # unrecognized MCP-Protocol-Version must 400 here too; absent is allowed.
+    # Message names the actual trigger (present-but-unrecognized), since an
+    # absent header is accepted on this verb — "header required" would mislead
+    # a client that DID send a version (RT-005).
+    if _negotiated_version(request) is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "unsupported MCP-Protocol-Version"},
+            headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
+        )
     session_id = request.headers.get(_SESSION_ID_HEADER)
+    # SI-3: cap header length before any lookup — mirrors mcp_post() (line 517)
+    # and mcp_messages() (line 700). A value over 64 chars can never be a
+    # server-issued uuid4().hex (32 chars), so reject it with 400 rather than
+    # letting an oversized id fall through to a silent idempotent 204.
+    if session_id is not None and len(session_id) > 64:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "invalid session id"},
+            headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
+        )
     if session_id:
         sessions = _sessions(request.app)
         rec = sessions.get(session_id)
@@ -711,10 +746,7 @@ async def mcp_sse(
 ) -> StreamingResponse:
     """Legacy HTTP+SSE pair: announce the session-bound messages endpoint as
     the first event; JSON-RPC responses ride this channel as message events."""
-    # RT-004: defense-in-depth origin guard mirrors mcp_post / mcp_get.
-    origin = request.headers.get("origin")
-    if origin is not None and origin not in request.app.state.cors_origins:
-        raise HTTPException(status_code=403, detail="origin not allowed")
+    guard_origin(request)
     session_id = uuid.uuid4().hex
     queues = _sse_queues(request.app)
     # RT-003: evict the oldest entry when the cap is reached so the dict stays
@@ -755,10 +787,7 @@ async def mcp_messages(
     """Same JSON-RPC dispatch as POST /mcp; the response is enqueued onto the
     session's SSE channel and the POST acks with 202. The caller must own the
     session (mismatch → 404, no existence oracle)."""
-    # RT-004: defense-in-depth origin guard mirrors mcp_post / mcp_get.
-    origin = request.headers.get("origin")
-    if origin is not None and origin not in request.app.state.cors_origins:
-        raise HTTPException(status_code=403, detail="origin not allowed")
+    guard_origin(request)
     # SI-3: cap query-param length before any lookup — mirrors the 64-char guard
     # in mcp_post() on the Mcp-Session-Id header.  Value is never logged or
     # echoed in the error response (SI-2).

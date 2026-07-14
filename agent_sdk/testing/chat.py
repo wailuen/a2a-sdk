@@ -47,6 +47,11 @@ class A2AError(Exception):
 class ChatDriver:
     """Protocol driver for live turn-by-turn chat against a booted agent.
 
+    A2A support is HTTP+JSON-only (DESIGN.md non-goals §1: "gRPC or JSON-RPC
+    transports for A2A" are explicitly out of scope for v1) — :meth:`a2a_turn`
+    raises ``ValueError`` if the discovered agent card's ``preferredTransport``
+    is anything other than ``"HTTP+JSON"``; there is no transport fallback.
+
     Both AG-UI and A2A modes are supported.  The ``emit`` dict passed to each
     turn method is a lightweight event bus — callers subscribe to any subset of
     keys and receive plain Python values; the rest are silently dropped.
@@ -224,6 +229,12 @@ class ChatDriver:
     ) -> dict[str, Any]:
         """One A2A turn: ``POST /v1/message:send`` then poll to terminal state.
 
+        HTTP+JSON-only (DESIGN.md non-goals §1): raises ``ValueError`` if the
+        agent card's ``preferredTransport`` is not ``"HTTP+JSON"``.  There is
+        no gRPC/JSON-RPC transport support and no ``additionalInterfaces``
+        fallback — the request always goes to ``/v1/message:send`` on the
+        client this driver was constructed with.
+
         Returns the completed task dict.  Use :meth:`extract_reply` and
         :meth:`extract_a2ui` to pull structured data from it.
 
@@ -231,23 +242,17 @@ class ChatDriver:
             ``tool_done()`` — fired on each poll tick (progress signal)
             ``error(message)`` — fired on timeout or non-completed terminal state
         """
-        # A2A §11.2.1 — discover card before first request; select transport
+        # A2A §11.2.1 — discover card before first request.
+        # ChatDriver is HTTP+JSON-only (DESIGN.md non-goals §1: "gRPC or JSON-RPC
+        # transports for A2A" are out of scope for v1); reject anything else
+        # rather than silently guessing at a fallback transport.
         card = await self._discover_card()
         transport = card.get("preferredTransport", "HTTP+JSON")
-        _supported = ("HTTP+JSON", "JSONRPC")
-        if transport not in _supported:
-            # SC-E3: iterate additionalInterfaces for a supported transport fallback
-            transport = None
-            for iface in card.get("additionalInterfaces", []):
-                t = iface.get("transport", "")
-                if t in _supported:
-                    transport = t
-                    break
-            if transport is None:
-                raise ValueError(
-                    f"unsupported A2A transport: {card.get('preferredTransport')!r} "
-                    "and no supported transport found in additionalInterfaces"
-                )
+        if transport != "HTTP+JSON":
+            raise ValueError(
+                f"unsupported A2A transport: {transport!r} — ChatDriver only "
+                "supports HTTP+JSON (see DESIGN.md non-goals)"
+            )
 
         body: dict[str, Any] = {
             "message": {

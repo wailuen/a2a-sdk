@@ -28,9 +28,15 @@ grep -n 'x-a2a-extensions\|A2UI_EXTENSION_URI\|a2uiClientCapabilities' agent_sdk
 # The _capabilities() function must gate A2UI on the X-A2A-Extensions opt-in
 # header. Required patterns:
 #   request.headers.get("x-a2a-extensions", ...)
-#   if A2UI_EXTENSION_URI not in [...]: return A2uiCapabilities(tier="none", ...)
+#   opted_in = A2UI_EXTENSION_URI in [...]        # computed from the header above
 #   (message.metadata or {}).get("a2uiClientCapabilities")
-# Absence of these lines means the opt-in gate has been removed — fail-open.
+#   return A2uiCapabilities.gated(opted_in, raw)  # C-006
+# Since w032's C-006 extraction, the fail-closed `tier="none"` literal no
+# longer lives inline in a2a.py — it lives in A2uiCapabilities.gated()
+# (agent_sdk/a2ui/translator.py), and _capabilities() computes `opted_in` then
+# delegates via gated(opted_in, raw). Absence of the three grep patterns above
+# means the opt-in gate has been removed — fail-open. (Confirm the fail-closed
+# default itself with: grep -n 'tier="none"' agent_sdk/a2ui/translator.py)
 ```
 
 ## Prevention

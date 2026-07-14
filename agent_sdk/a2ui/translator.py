@@ -43,7 +43,16 @@ MISSING = object()
 
 @dataclass(slots=True)
 class A2uiCapabilities:
-    """Client capability claim. Absent claim → core tier, standard catalog."""
+    """Client capability claim. Absent claim → core tier, standard catalog
+    (payload-parse default, used by the constructor and ``from_metadata()``
+    only).
+
+    Do NOT align the transport route boundary to this default. The route
+    boundary resolves an absent opt-in via ``gated()``, which fail-closes to
+    ``tier="none"`` — see LRN-046/LRN-115. These two defaults intentionally
+    diverge: this one is a fail-open convenience for already-trusted input,
+    that one is a fail-closed security gate for untrusted transport input.
+    """
 
     tier: str = "core"
     catalogs: list[str] = field(default_factory=lambda: [CATALOG_ID])
@@ -57,6 +66,21 @@ class A2uiCapabilities:
         if not isinstance(catalogs, list) or not catalogs:
             catalogs = [CATALOG_ID]
         return cls(tier=str(tier), catalogs=[str(c) for c in catalogs])
+
+    @classmethod
+    def gated(cls, opted_in: bool, raw: Any) -> "A2uiCapabilities":
+        """Fail-closed capability resolution shared across transports (C-006).
+
+        *opted_in* is the transport-specific opt-in signal — A2A: the
+        A2UI extension URI was present in ``X-A2A-Extensions``; AG-UI:
+        ``forwardedProps.a2uiClientCapabilities`` was present. A client that
+        never opts in gets ``tier="none"`` regardless of *raw* (LRN-046):
+        this is the one place that default is defined, so no transport can
+        independently drift back to fail-open.
+        """
+        if not opted_in:
+            return cls(tier="none", catalogs=[])
+        return cls.from_metadata(raw)
 
     @property
     def extended(self) -> bool:

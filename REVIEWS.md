@@ -197,8 +197,8 @@ Four-advisor /agent-stack-check static audit. All Critical/High findings fixed a
 | A2A | MED | HTTPS not enforced for public deployment | Added `_deployment_invariants()` check in `config.py`; loopback exempt |
 | AG-UI | HIGH | `parentMessageId` absent on first tool call | Always emit (as null) in `ag_ui.py` |
 | AG-UI | HIGH | Interrupt `expiresAt` not wired to wire | Three-file chain: `events.py` field → `runner.py` mutation → `ag_ui.py` wire |
-| AG-UI | MED | Assistant history `content` was plain string | Changed to `[{type:"text", text:...}]` array in `chat.js:481` |
-| AG-UI | LOW | `if event.expires_at:` truthy guard | Changed to `if event.expires_at is not None:` in `ag_ui.py:296` |
+| AG-UI | MED | Assistant history `content` was plain string | Changed to `[{type:"text", text:...}]` array in `chat.js`'s AG-UI assistant-turn fold-in (the `state.aguiMessages.push({ ... role: "assistant" ... })` block) |
+| AG-UI | LOW | `if event.expires_at:` truthy guard | Changed to `if event.expires_at is not None:` in `ag_ui.py`'s interrupt-expiry guard (the `event.expires_at is not None` block) |
 | AG-UI | LOW | Test resume entries used `status:"approved"` | Updated to `status:"resolved"` + `payload:{decision:"approved"}` in 3 test files |
 | A2UI | CRITICAL | a2ui.js validation guard `!msg.type` always true | Removed `\|\| !msg.type \|\| typeof msg.type !== "string"` — A2UI messages have no `type` field |
 | A2UI | HIGH | `updateComponents` ignored `id` — full replace instead of upsert | `_componentMap = new Map()` keyed by `component.id`; upsert semantics |
@@ -234,7 +234,7 @@ Four-advisor /agent-stack-check static audit. All Critical/High findings fixed a
 
 | Protocol | Sev | Finding | Fix |
 |---|---|---|---|
-| MCP | — | `serverInfo.title` emitted under all protocol versions | Gated behind `2025-11-25` in `mcp.py:243` |
+| MCP | — | `serverInfo.title` emitted under all protocol versions | Gated behind `2025-11-25` via the `_TITLE_MIN_VERSION` check in `mcp.py`'s `_handle_initialize()` |
 | MCP | — | Abrupt SSE session cap (500) lacked queue bound | `_MAX_SSE_SESSIONS = 500` constant in `mcp.py`; bounded LRU |
 | A2A | — | `DocumentList.to_plain_text()` ignored `type` and `last_modified` | Fixed in `content_types.py` |
 | A2A | — | `Agent.__init__` missing `lifespan_extras` docstring | Added in `app.py` |
@@ -244,16 +244,16 @@ Four-advisor /agent-stack-check static audit. All Critical/High findings fixed a
 
 | Protocol | Sev | Finding | File:line | Rationale |
 |---|---|---|---|---|
-| A2A | HIGH | `403 Forbidden` maps to `-32000` (spec has no dedicated authZ code) | `app.py:512` | Extends the existing Round 2 auth-error deferral (see above). HTTP 403 status is authoritative for authZ denial; JSON-RPC code is supplementary. The A2A v0.3.0 spec defines no named code for authZ failure — `-32000` is the only option in the implementation-defined slot. TCK does not enforce a specific code for authZ failures. A comment will be added in the follow-up hardening wave. |
-| A2A | MED | `TaskStatus.error` non-spec field on wire without `AgentExtension` URI | `models/a2a.py:113` | Field only emits when set (`exclude_none=True`); spec-compliant consumers ignore unknown fields. Registering a formal extension URI is hygiene, not interop-blocking. Track as GH issue. |
-| A2A | MED | Tasks resubscribe route path is `:subscribe`, spec says `:resubscribe` | `routes/a2a.py:389` | Low real-world impact (`capabilities.stateTransitionHistory=false` means consumers rarely call resubscribe). Path rename is safe; file as GH issue with path alias for zero-downtime migration. |
-| A2A | MED | Authenticated extended card at `/v1/card` (spec: `/v1/agent/authenticatedExtendedCard`) | `routes/agent_card.py:175` | `supportsAuthenticatedExtendedCard=false` — no spec-compliant consumer will call this path today. Path rename is safe; file as GH issue. |
-| MCP | MED | OAuth-kind token → admin route rejection not fully verifiable statically | `auth/middleware.py:120-135` | `require_api_key_identity` guard exists; enforcement is structural via FastAPI dependency injection. Gap is test coverage, not missing guard. Add integration test in follow-up. |
-| A2UI | MED | `SurfaceRegistry.open()` warns on duplicate instead of raising | `a2ui/translator.py:140-147` | Affects opt-in streaming API only; stateless `translate()` (primary path) always generates a fresh `surfaceId` — unreachable. Make it a hard error in the streaming API hardening wave. |
-| MCP | LOW | Batch request rejection uses `-32600` without an explicit `"batch not supported"` message | `routes/mcp.py:457` | Functionally correct; cosmetic only. Two-line fix; deferred to cleanup pass. |
-| A2A | LOW | `TaskStatusUpdateEvent.final` has Python default `False` (spec marks REQUIRED) | `models/a2a.py:143` | Wire always emits the field (not `None`); conformant in practice. Default matches non-terminal semantics. API-breaking change to remove default; defer. |
-| A2A | LOW | `blocking: bool \| None = None` accepts `null` (not a valid spec value) | `models/a2a.py:179` | Internal SDK; callers do not send `null`. Tighten with validator in cleanup pass. |
-| AG-UI | LOW | Dead `THINKING_*` case labels in console consumer (deprecated event types) | `console/static/chat.js:574–584` | Server never emits these types; dead code only. Remove in console cleanup wave. |
+| A2A | HIGH | `403 Forbidden` maps to `-32000` (spec has no dedicated authZ code) | `app.py`'s `_A2A_CODE` status→JSON-RPC map (the `403: -32000` entry) | Extends the existing Round 2 auth-error deferral (see above). HTTP 403 status is authoritative for authZ denial; JSON-RPC code is supplementary. The A2A v0.3.0 spec defines no named code for authZ failure — `-32000` is the only option in the implementation-defined slot. TCK does not enforce a specific code for authZ failures. A comment will be added in the follow-up hardening wave. |
+| A2A | MED | `TaskStatus.error` non-spec field on wire without `AgentExtension` URI | `models/a2a.py`'s `TaskStatus.error` field | Field only emits when set (`exclude_none=True`); spec-compliant consumers ignore unknown fields. Registering a formal extension URI is hygiene, not interop-blocking. Track as GH issue. |
+| A2A | MED | Tasks resubscribe route path is `:subscribe`, spec says `:resubscribe` | `routes/a2a.py`: the `tasks_resubscribe` route handler (`@router.post("/v1/tasks/{task_id}:subscribe")`) | Low real-world impact (`capabilities.stateTransitionHistory=false` means consumers rarely call resubscribe). Path rename is safe; file as GH issue with path alias for zero-downtime migration. |
+| A2A | MED | Authenticated extended card at `/v1/card` (spec: `/v1/agent/authenticatedExtendedCard`) | `routes/agent_card.py`'s `extended_card()` handler (`@router.get("/v1/card")`) | `supportsAuthenticatedExtendedCard=false` — no spec-compliant consumer will call this path today. Path rename is safe; file as GH issue. |
+| MCP | MED | OAuth-kind token → admin route rejection not fully verifiable statically | `auth/middleware.py`'s `require_api_key_identity()` guard | `require_api_key_identity` guard exists; enforcement is structural via FastAPI dependency injection. Gap is test coverage, not missing guard. Add integration test in follow-up. |
+| A2UI | MED | `SurfaceRegistry.open()` warns on duplicate instead of raising | `a2ui/translator.py`'s `SurfaceRegistry.open()` | Affects opt-in streaming API only; stateless `translate()` (primary path) always generates a fresh `surfaceId` — unreachable. Make it a hard error in the streaming API hardening wave. |
+| MCP | LOW | Batch request rejection uses `-32600` without an explicit `"batch not supported"` message | `routes/mcp.py`: `_INVALID_REQUEST` batch-rejection branch | Functionally correct; cosmetic only. Two-line fix; deferred to cleanup pass. |
+| A2A | LOW | `TaskStatusUpdateEvent.final` has Python default `False` (spec marks REQUIRED) | `models/a2a.py`'s `TaskStatusUpdateEvent.final` field | Wire always emits the field (not `None`); conformant in practice. Default matches non-terminal semantics. API-breaking change to remove default; defer. |
+| A2A | LOW | `blocking: bool \| None = None` accepts `null` (not a valid spec value) | `models/a2a.py`'s `MessageSendConfiguration.blocking` field | Internal SDK; callers do not send `null`. Tighten with validator in cleanup pass. |
+| AG-UI | LOW | Dead `THINKING_*` case labels in console consumer (deprecated event types) | `chat.js`'s `THINKING_*` case labels in the AG-UI event switch | Server never emits these types; dead code only. Remove in console cleanup wave. |
 
 **Round 3 sign-off: DEFERRED. No Critical/High blockers that are not acknowledged. All Medium/Low items recorded with rationale. Proceeding to tag v0.5.12.**
 
@@ -281,15 +281,35 @@ Four-advisor /agent-stack-check static audit. All Critical/High findings fixed a
 |---|---|---|---|---|
 | MCP | CRITICAL* | `_TITLE_MIN_VERSION` (module-level constant, `routes/mcp.py`) is a conservative gate — spec says title was introduced in 2025-06-18 | `routes/mcp.py`: `_TITLE_MIN_VERSION`, `tests/test_mcp_initialize_version_title.py` | *Spec annotation error, not a behavioral error. Omitting an optional field is spec-valid. GH-43 observed Claude.ai rejecting handshakes with title present; we cannot safely lower the gate without a live re-test. Comment updated to document the conservative intent. Behavioral impact: title absent for 2025-06-18 clients (safe). |
 | MCP | HIGH | Tool-level `title` emitted in `tools/list` without version-gating for 2025-03-26 clients | `routes/mcp.py`: `_handle_tools_list()`'s `tool["title"] = entry.title` block | MCP `additionalProperties` is not `false` — strict clients tolerate unknown fields. Claude.ai always negotiates 2025-06-18+; no connectivity impact. Fix: remove 2025-03-26 from SUPPORTED_PROTOCOL_VERSIONS in a follow-up wave (requires test updates). |
-| A2A | HIGH | `ChatDriver.a2a_turn()` uses hardcoded relative URL `/v1/message:send` instead of card `url` | `testing/chat.py:266` | Testing harness only — not part of the SDK public API. The underlying httpx client is always pre-pointed at the correct base URL in test contexts. File as GH issue; fix before promoting ChatDriver to a general-purpose client guide. |
-| A2A | MED | `ChatDriver.extract_reply()` silently drops FilePart and DataPart | `testing/chat.py:370-379` | Testing harness only; SDK server never puts file content in history messages. Document text-only scope or add fallback in a follow-up. |
-| A2A | MED | `TaskState.REJECTED` and `TaskState.UNKNOWN` defined but never emitted | `agent/runner.py:226-329` | Design limitation — `FAILED` is valid for all current error paths. Add `REJECTED` path for pre-execution policy failures in a follow-up wave. |
-| AG-UI | MED | SSE reconnect starts a new task rather than re-attaching to in-flight run (potential double-worker) | `console/static/chat.js:592-604` | Console UI only; production agents use A2A transport. Architectural fix requires `find_task_for_thread()` on TaskStore. Deferred to console hardening wave. |
-| AG-UI | MED | Stale `textBuffers` not reset before recursive reconnect (UI state corruption) | `console/static/chat.js:592-604` | Same reconnect path as above; same wave. |
-| A2UI | LOW | AG-UI `ArtifactEvent` path in `ag_ui.py` skips `_validate_a2ui_wire()` pre-flight | `routes/ag_ui.py:276` | Standard Profile types are Pydantic-guaranteed safe; risk is domain-card authors only. Add pre-flight call in follow-up wave. |
-| A2UI | LOW | `_validate_a2ui_wire()` does not assert `component` string type | `agent/runner.py:116` | Defense-in-depth only; Pydantic enforces `ClassVar[str]` at class-definition time for all registered types. |
-| A2A (Round 3 carry) | HIGH | `403 Forbidden` maps to `-32000` | `app.py:512` | See Round 3 rationale. |
-| A2A (Round 3 carry) | MED | `TaskStatus.error` non-spec field on wire | `models/a2a.py:113` | See Round 3 rationale. |
-| MCP (Round 3 carry) | MED | OAuth-kind token admin route rejection not fully verifiable statically | `auth/middleware.py:120-135` | See Round 3 rationale. |
+| A2A | HIGH | `ChatDriver.a2a_turn()` uses hardcoded relative URL `/v1/message:send` instead of card `url` | `testing/chat.py`'s `ChatDriver.a2a_turn()` | Testing harness only — not part of the SDK public API. The underlying httpx client is always pre-pointed at the correct base URL in test contexts. File as GH issue; fix before promoting ChatDriver to a general-purpose client guide. |
+| A2A | MED | `ChatDriver.extract_reply()` silently drops FilePart and DataPart | `testing/chat.py`'s `ChatDriver.extract_reply()` | Testing harness only; SDK server never puts file content in history messages. Document text-only scope or add fallback in a follow-up. |
+| A2A | MED | `TaskState.REJECTED` and `TaskState.UNKNOWN` defined but never emitted | `agent/runner.py`'s `run_task_worker()` terminal-state emission (the `publish(...)` helpers) | Design limitation — `FAILED` is valid for all current error paths. Add `REJECTED` path for pre-execution policy failures in a follow-up wave. |
+| AG-UI | MED | SSE reconnect starts a new task rather than re-attaching to in-flight run (potential double-worker) | `chat.js`'s SSE reconnect/backoff block | Console UI only; production agents use A2A transport. Architectural fix requires `find_task_for_thread()` on TaskStore. Deferred to console hardening wave. |
+| AG-UI | MED | Stale `textBuffers` not reset before recursive reconnect (UI state corruption) | `chat.js`'s SSE reconnect/backoff block | Same reconnect path as above; same wave. |
+| A2UI | LOW | AG-UI `ArtifactEvent` path in `ag_ui.py` skips `_validate_a2ui_wire()` pre-flight | `routes/ag_ui.py`: the `ArtifactEvent` `.wire()` emission path | Standard Profile types are Pydantic-guaranteed safe; risk is domain-card authors only. Add pre-flight call in follow-up wave. |
+| A2UI | LOW | `_validate_a2ui_wire()` does not assert `component` string type | `agent/runner.py`: `_validate_a2ui_wire()`'s component assertion | Defense-in-depth only; Pydantic enforces `ClassVar[str]` at class-definition time for all registered types. |
+| A2A (Round 3 carry) | HIGH | `403 Forbidden` maps to `-32000` | `app.py`'s `_A2A_CODE` status→JSON-RPC map (the `403: -32000` entry) | See Round 3 rationale. |
+| A2A (Round 3 carry) | MED | `TaskStatus.error` non-spec field on wire | `models/a2a.py`'s `TaskStatus.error` field | See Round 3 rationale. |
+| MCP (Round 3 carry) | MED | OAuth-kind token admin route rejection not fully verifiable statically | `auth/middleware.py`'s `require_api_key_identity()` guard | See Round 3 rationale. |
 
 **Round 4 sign-off: DEFERRED. The two MCP findings (CRITICAL/HIGH) are pre-existing: F1 is a spec annotation + conservative gate (behavior is spec-valid), F2 has no connectivity impact. Comments updated to accurately document conservative intent. All other findings are non-blocking Medium/Low. Proceeding to tag v0.5.13.**
+
+---
+
+## Round 5 — w033 (GH-115) MCP void-result parity gate
+
+`/redteam` on the async-generator dispatch fix (commit 73ab60d) surfaced the MCP void-result behaviour for explicit sign-off.
+
+### Owned decision (not deferred): MCP §4 void-result parity deviation
+
+| Protocol | Sev | Finding | File:line | Decision |
+|---|---|---|---|---|
+| MCP | MED | A Tier-1 tool that declares `emits` (so `tools/list` advertises `outputSchema`) but returns/yields `None` folds to `isError: false` with empty `text` and **no** `structuredContent` — a deviation from MCP 2025-06-18 §4's "advertised `outputSchema` MUST return conforming `structuredContent`". | `routes/mcp.py`'s `_handle_tools_call()` `if artifact is None:` branch (skips SC-C1 coercion; the `structuredContent` guard requires `isinstance(artifact, BaseModel)`); DESIGN.md §5.5 | **KEEP — signed off.** §5.6 requires a Tier-1 tool to reach the same success/failure verdict on every surface. `loop.py`'s `_fold_result_content(None)` folds the identical void result to a **success** `toolResult` on A2A/AG-UI; making MCP `isError: true` here would make the same void call succeed over A2A/AG-UI yet fail over MCP. The deviation is scoped strictly to the emits-declared void case (a no-`emits` `None` advertises no `outputSchema`, so it is not a §4 deviation at all). Tested by `tests/test_rt002_mcp_empty_result.py` (4 cases, all green). |
+
+**mcp-check impact:** none. mcp-check audits the Claude.ai-connector conformance surface — OAuth discovery chain, token flow, CORS, Streamable HTTP transport, `initialize` handshake, `tools/list` shape, and the `tools/call` result **envelope** shape. An `isError: false` result carrying a well-formed `text` content block is a valid `tools/call` result; mcp-check does not drive a live void-returning tool and assert per-tool `outputSchema`↔`structuredContent` runtime conformance, so this ruling does not fail any mcp-check probe.
+
+**Provenance-drift fix (RT-002):** DESIGN.md §5.5 previously mis-cited this ruling as `GH-113/LRN-118`. GH-113 is the `deleteSurfaceSemantics` wire-hint (adjacent paragraph copy-paste); LRN-118 is the version-header staleness rule — neither documents the void-result ruling. Citation corrected to `GH-115 / w033, RT-001/RT-002` (matching `routes/mcp.py`'s module docstring) plus this sign-off. This is exactly the canonical-doc cross-reference drift LRN-118 exists to catch, now closed.
+
+**Resolved (was RT-003):** the dead imports this note previously deferred — `AsyncIterator`/`Optional`/local `LoopEvent` in `agent/registry.py` and `ErrorCategory` in `agent/loop.py`, all present at release 5bcab2b — have since been removed from the working tree (verified: `registry.py`'s `typing` import block no longer names `AsyncIterator` or `Optional` and holds no local `LoopEvent` import; `loop.py` has zero `ErrorCategory` references). The `AsyncIterator`/`LoopEvent` symbols that remain in `loop.py` and the `LoopEvent` mentions in `registry.py` are live uses (type hints / docstrings), not dead imports. No follow-up ruff/pyflakes cleanup is outstanding for these; note closed to end the doc-vs-code drift.
+
+**Round 5 sign-off: SIGNED OFF. The void-result parity deviation is an owned, tested, §5.6-motivated decision with no mcp-check impact. Doc provenance corrected. No code change required — behaviour is correct and green.**

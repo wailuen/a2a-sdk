@@ -25,7 +25,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_sdk.agent.events import ToolProgressEvent
-from agent_sdk.agent.registry import ToolTerminalResult
+from agent_sdk.agent.registry import ToolTerminalResult, resolve_deferred_result
 from agent_sdk.models.errors import AgentError, ErrorCategory
 from agent_sdk.contrib.commitments import (
     Commitment,
@@ -108,12 +108,20 @@ class FakeEntry:
 
     async def invoke_any(self, args, adapters):
         if not self.decl.is_generator:
-            return await self.invoke(args, adapters)
-        result = None
-        async for gen_item in self.invoke_gen(args, adapters):
-            if isinstance(gen_item, ToolTerminalResult):
-                result = gen_item.value
-        return result
+            result = await self.invoke(args, adapters)
+        else:
+            result = None
+            async for gen_item in self.invoke_gen(args, adapters):
+                if isinstance(gen_item, ToolTerminalResult):
+                    result = gen_item.value
+        # RT-001: match the real ToolEntry.invoke_any contract (registry.py) —
+        # a returned DeferredResult is resolved via the SAME shared helper, not
+        # returned verbatim. A plain value passes straight through, so the
+        # existing non-deferred fake tools are unaffected; without this the
+        # double would silently mask a commitments-deferred regression.
+        return await resolve_deferred_result(
+            result, tool_name="fake", handle_timeout=lambda: 300.0
+        )
 
 
 class FakeRegistry:

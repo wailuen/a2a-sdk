@@ -12,6 +12,8 @@ protocols.
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -55,7 +57,7 @@ from .events import (
 )
 from .loop import LoopPolicies, run_loop
 from .model_client import ModelClient
-from .registry import ToolRegistry
+from .registry import ToolRegistry, resolve_deferred_result
 from .skills import SkillsRegistry
 from ..sources import SourceAdapter
 
@@ -198,12 +200,36 @@ def build_artifact(
                 metadata={"mimeType": "application/json"},
             ),
         ]
-    return Artifact(
+    artifact = Artifact(
         artifactId=uuid.uuid4().hex,
         name=event.data_type,
         parts=parts,
         metadata=metadata,
     )
+    # RT-001 (ROOT CAUSE): _Wire.wire() dumps in Python mode (model_dump WITHOUT
+    # mode="json"), so a DataPart whose `data` holds a non-JSON-serializable
+    # value survives .wire() UNCHANGED and only raises later at the UNGUARDED
+    # sse_data() json.dumps (routes/a2a.py) — killing the SSE stream AFTER the
+    # task has already transitioned to COMPLETED (false success). The plain-
+    # scalar branch above is the common offender: it embeds the raw resolved
+    # tool value directly (DataPart(data={"value": payload})) with NONE of the
+    # model_dump(mode="json") coercion the BaseModel branches apply; the A2UI /
+    # domain-card branches can leak one too. Validate serializability HERE, at
+    # the single point every branch converges, and raise ValueError so BOTH
+    # build_artifact call sites — the synchronous run_task_worker ArtifactEvent
+    # branch and the deferred background builder — fail the task
+    # deterministically with -32006 ("invalid agent response") BEFORE any false
+    # COMPLETED or dead stream. This makes the "deterministic FAILED" guarantee
+    # true for a non-serializable resolved value, not just a build_artifact
+    # raise. SI-2: this ValueError's text never reaches the wire (both call
+    # sites emit fixed strings), so no payload detail is echoed.
+    try:
+        json.dumps(artifact.wire(), ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"artifact for {event.data_type!r} is not JSON-serializable"
+        ) from exc
+    return artifact
 
 
 async def _run_deferred_background(
@@ -221,6 +247,18 @@ async def _run_deferred_background(
     ``asyncio.create_task`` immediately after receiving a ``DeferredEvent``;
     the main loop has already exited and the record is in WORKING state.
 
+    RT-001: a handle resolving to ANOTHER ``DeferredResult`` (nested
+    deferral) is resolved via the shared ``resolve_deferred_result`` —
+    the SAME helper ``ToolEntry.invoke_any`` uses for MCP ``tools/call`` and
+    the admin try-tool endpoint — under the identical
+    ``_MAX_DEFERRED_RESOLUTIONS`` bound and a single ``event.timeout_seconds``
+    deadline shared across every resolution (mirroring RT-003: a nested
+    handle never gets a fresh timeout on top). This keeps a ``long_running``
+    tool's nested-``DeferredResult`` contract identical across every
+    dispatch surface; nesting beyond the bound raises ``AgentError``, caught
+    below by the same generic ``except Exception`` branch as any other tool
+    failure.
+
     SI-2: exception text from the handle is not echoed — only a fixed
     "deferred job timed out" / "deferred job failed" string is published.
     """
@@ -228,73 +266,211 @@ async def _run_deferred_background(
     def publish(frame: dict[str, Any] | None, ev: Any, *, final: bool = False) -> None:
         store.publish(record.task.id, StreamItem(frame=frame, event=ev, final=final))
 
+    def _fail(error_msg: str, *, code: int = -32603) -> None:
+        """Single terminal FAILED exit for every PRE-TERMINAL failure branch
+        of the deferred background task — timeout, cancellation, tool
+        failure, a raise while building / serialising the terminal artifact,
+        AND a publish failure on any pre-terminal step of the success path
+        (the artifact-frame publish, the synthetic ToolResultEvent, or the
+        COMPLETED transition), all of which run before any terminal final:true
+        frame reaches the wire (RT-001).  Deliberately NOT called for a failure
+        that happens AT OR AFTER the terminal DoneEvent publish — that would
+        emit a duplicate terminal frame (see the narrowed guard around the
+        success-path terminal publish below).
+
+        Mirrors ``run_task_worker``'s terminal except-handlers: set FAILED,
+        publish the terminal ``DoneEvent(ok=False)`` + final status frame, and
+        close streams — so no SSE subscriber ever hangs and no persistent store
+        ever observes a stuck-WORKING task, regardless of *which* pre-delivery
+        step raised.
+
+        RT-002: also publishes a synthetic ``ToolResultEvent(ok=False)`` so the
+        AG-UI ``TOOL_CALL_START`` emitted before the ``DeferredEvent`` gets a
+        matching ``TOOL_CALL_RESULT`` — closing the tool-call lifecycle
+        symmetrically with the success path rather than only on the happy path
+        (frame=None → A2A SSE skips it; only the AG-UI RunMapper consumes it).
+
+        SI-2: ``error_msg`` is always a fixed, non-sensitive string (never raw
+        handle/exception text); it is echoed into both the WireError and the
+        synthetic ToolResultEvent, both of which reach the wire.
+        """
+        wire_err = WireError(code=code, message=error_msg)
+        _set_status(
+            record, TaskState.FAILED, _agent_message(record, error_msg), error=wire_err
+        )
+        # RT-002 (round 2): close_streams must run even if one of the two
+        # publish() calls below raises (e.g. a persistent TaskStore's durable
+        # write) — otherwise a *second* failure inside this already-failing
+        # path would itself skip stream teardown and strand SSE subscribers
+        # un-sentinel-closed until the TTL sweep.
+        try:
+            publish(
+                None,
+                ToolResultEvent(
+                    tool_call_id=event.tool_call_id,
+                    tool_name=event.tool_name,
+                    ok=False,
+                    error=error_msg,
+                ),
+            )
+            publish(
+                _status_frame(record, final=True),
+                DoneEvent(ok=False, error=error_msg),
+                final=True,
+            )
+        finally:
+            store.close_streams(record.task.id)
+
+    deadline = time.monotonic() + event.timeout_seconds
+
+    def _handle_timeout() -> float:
+        return max(0.0, deadline - time.monotonic())
+
     try:
-        raw_result = await asyncio.wait_for(
-            event.deferred.handle,
-            timeout=event.timeout_seconds,
+        raw_result = await resolve_deferred_result(
+            event.deferred, tool_name=event.tool_name, handle_timeout=_handle_timeout
         )
     except asyncio.TimeoutError:
-        error_msg = "deferred job timed out"
-        wire_err = WireError(code=-32603, message=error_msg)
-        _set_status(record, TaskState.FAILED, _agent_message(record, error_msg), error=wire_err)
-        done_ev = DoneEvent(ok=False, error=error_msg)
-        publish(_status_frame(record, final=True), done_ev, final=True)
-        store.close_streams(record.task.id)
+        _fail("deferred job timed out")
         return
     except asyncio.CancelledError:
         # W025-GH87-CANCEL-001: transition to FAILED and close streams so that
         # a persistent store never sees a stuck-WORKING task after cancellation,
         # and SSE subscribers are unblocked before the CancelledError propagates.
-        error_msg = "deferred job cancelled"
-        wire_err = WireError(code=-32603, message=error_msg)
-        _set_status(record, TaskState.FAILED, _agent_message(record, error_msg), error=wire_err)
-        publish(_status_frame(record, final=True), DoneEvent(ok=False, error=error_msg), final=True)
-        store.close_streams(record.task.id)
+        # RT-002: _fail() calls store.publish() / store.close_streams(); if a
+        # custom persistent TaskStore raises during that teardown (e.g. streams
+        # already closed by a concurrent close_all()), the exception must NOT
+        # replace the CancelledError — doing so would break cooperative
+        # cancellation of this fire-and-forget background task. Swallow any
+        # teardown error so the bare `raise` below always re-raises the
+        # CancelledError.
+        try:
+            _fail("deferred job cancelled")
+        except Exception:
+            pass
         raise
     except Exception:
-        error_msg = "deferred job failed"
-        wire_err = WireError(code=-32603, message=error_msg)
-        _set_status(record, TaskState.FAILED, _agent_message(record, error_msg), error=wire_err)
-        done_ev = DoneEvent(ok=False, error=error_msg)
-        publish(_status_frame(record, final=True), done_ev, final=True)
-        store.close_streams(record.task.id)
+        _fail("deferred job failed")
         return
 
-    # Build and deliver the terminal artifact, then transition to COMPLETED.
-    artifact_ev = ArtifactEvent(
-        data_type=getattr(event.emits, "data_type", event.tool_name)
-        if event.emits is not None
-        else event.tool_name,
-        tool_name=event.tool_name,
-        model=raw_result,
-    )
-    artifact = build_artifact(artifact_ev, capabilities)
-    record.task.artifacts = (record.task.artifacts or []) + [artifact]
-    artifact_frame = TaskArtifactUpdateEvent(
-        taskId=record.task.id,
-        contextId=record.task.context_id,
-        artifact=artifact,
-        lastChunk=True,
-    ).wire()
-    publish(artifact_frame, artifact_ev)
+    # RT-001: the tool has resolved successfully, but building the terminal
+    # artifact can still raise — build_artifact() runs translate() /
+    # _validate_a2ui_wire() / a domain card's wire(), and
+    # TaskArtifactUpdateEvent.wire() serialises the frame. In the SYNCHRONOUS
+    # worker the identical build_artifact call (run_task_worker, ArtifactEvent
+    # branch) is guarded by that worker's try/except, which fails the task and
+    # closes streams on any raise. This deferred path runs in a fire-and-forget
+    # background asyncio.Task that nobody awaits, so an unguarded raise here
+    # would strand the A2A task in WORKING forever and leave every SSE
+    # subscriber queue un-sentinel-closed until the TTL sweep. Guard ONLY the
+    # build/serialize/append step so a failure here — before anything has
+    # reached the wire — degrades deterministically to FAILED + closed streams,
+    # exactly like the synchronous run_task_worker ArtifactEvent branch.
+    #
+    # RT-001 (round 6): the terminal sequence splits into TWO regions,
+    # mirroring run_task_worker's `try` body vs. its `else:` terminal publish.
+    #
+    #   1. PRE-TERMINAL (guarded by _fail): the artifact-frame publish, the
+    #      artifacts append, the synthetic ToolResultEvent publish, and the
+    #      COMPLETED transition. These all run BEFORE any terminal final:true
+    #      frame reaches the wire, so a failure here (a custom/persistent
+    #      TaskStore whose publish() does a durable write that raises) must
+    #      fail the task deterministically WITH a terminal frame — _fail()
+    #      emits the FIRST terminal frame, never a duplicate — exactly like
+    #      the synchronous worker's `except Exception → _fail` ArtifactEvent
+    #      branch. Letting it escape this fire-and-forget asyncio.Task instead
+    #      (the pre-fix behaviour) stranded the A2A task in WORKING forever
+    #      with the stream sentinel-closed but no terminal frame ever
+    #      delivered — the exact WORKING-strand this fix closes.
+    #
+    #   2. TERMINAL (propagate, don't re-fail): the terminal DoneEvent publish
+    #      and close_streams. Once the ok=True terminal frame has reached
+    #      subscribers, a later failure must NOT re-enter _fail() — doing so
+    #      would emit a SECOND, ok=False terminal frame (and ToolResultEvent)
+    #      and flip an already-COMPLETED task back to FAILED while it retains
+    #      the actually-delivered artifact (RT-002b). Such a failure (e.g. a
+    #      persistent TaskStore whose terminal publish() or close_streams()
+    #      does a durable write that fails) simply propagates out of this
+    #      background task — BUT store.close_streams() still runs in the
+    #      `finally` so SSE subscribers are never left un-sentinel-closed.
+    try:
+        artifact_ev = ArtifactEvent(
+            data_type=getattr(event.emits, "data_type", event.tool_name)
+            if event.emits is not None
+            else event.tool_name,
+            tool_name=event.tool_name,
+            model=raw_result,
+        )
+        artifact = build_artifact(artifact_ev, capabilities)
+        # RT-002: serialize the wire frame HERE (inside the guarded block) but
+        # do NOT mutate task.artifacts yet — the append is deferred to AFTER
+        # publish() has actually delivered the frame (second try block below).
+        # If .wire() raises, the except branch below fails the task; if the
+        # artifact-frame publish() later raises, the append simply never runs.
+        # Either way a task that never delivered this artifact on any stream
+        # must not retain it (mirrors run_task_worker's ArtifactEvent branch).
+        artifact_frame = TaskArtifactUpdateEvent(
+            taskId=record.task.id,
+            contextId=record.task.context_id,
+            artifact=artifact,
+            lastChunk=True,
+        ).wire()
+    except Exception as exc:
+        # Mirror run_task_worker's terminal Exception handler: a ValueError
+        # (e.g. _validate_a2ui_wire rejecting a malformed domain card) maps to
+        # the A2A "invalid agent response" code (-32006); anything else is a
+        # generic internal error (-32603).  SI-2: no exception text is echoed.
+        if isinstance(exc, ValueError):
+            _fail("invalid agent response", code=-32006)
+        else:
+            _fail("internal error")
+        return
 
-    # RT-W025-003: emit a synthetic ToolResultEvent so the AG-UI RunMapper can
-    # produce a TOOL_CALL_RESULT frame to close the tool-call lifecycle that was
-    # opened by the ToolCallEvent / TOOL_CALL_START emitted before the loop
-    # yielded the DeferredEvent.  Without this, strict AG-UI clients receive a
-    # TOOL_CALL_START with no matching TOOL_CALL_RESULT, violating the protocol.
-    tool_result_ev = ToolResultEvent(
-        tool_call_id=event.tool_call_id,
-        tool_name=event.tool_name,
-        ok=True,
-        result=raw_result,
-    )
-    publish(None, tool_result_ev)
+    try:
+        publish(artifact_frame, artifact_ev)
+        # RT-002: append to task.artifacts ONLY AFTER the artifact frame has
+        # actually been delivered on the stream. If the publish() above raises
+        # (e.g. a persistent TaskStore's durable write), the artifact is never
+        # recorded on the record, so the _fail() below leaves behind no
+        # undelivered-artifact — same guarantee as run_task_worker's
+        # ArtifactEvent branch.
+        record.task.artifacts = (record.task.artifacts or []) + [artifact]
 
-    _set_status(record, TaskState.COMPLETED)
-    done_ev = DoneEvent(ok=True)
-    publish(_status_frame(record, final=True), done_ev, final=True)
-    store.close_streams(record.task.id)
+        # RT-W025-003: emit a synthetic ToolResultEvent so the AG-UI RunMapper
+        # can produce a TOOL_CALL_RESULT frame to close the tool-call
+        # lifecycle that was opened by the ToolCallEvent / TOOL_CALL_START
+        # emitted before the loop yielded the DeferredEvent.  Without this,
+        # strict AG-UI clients receive a TOOL_CALL_START with no matching
+        # TOOL_CALL_RESULT, violating the protocol.
+        tool_result_ev = ToolResultEvent(
+            tool_call_id=event.tool_call_id,
+            tool_name=event.tool_name,
+            ok=True,
+            result=raw_result,
+        )
+        publish(None, tool_result_ev)
+
+        _set_status(record, TaskState.COMPLETED)
+    except Exception:
+        # RT-001: any PRE-terminal publish failure fails the task with the
+        # FIRST terminal frame (no terminal frame has reached the wire yet, so
+        # this is never a duplicate) and closes streams — mirroring
+        # run_task_worker's `except Exception → _fail`. SI-2: fixed message
+        # only, no exception text echoed.
+        _fail("internal error")
+        return
+
+    try:
+        done_ev = DoneEvent(ok=True)
+        publish(_status_frame(record, final=True), done_ev, final=True)
+    finally:
+        # RT-002: guarantee stream closure even if the terminal publish() above
+        # raised (e.g. a persistent TaskStore's durable write) — a custom
+        # TaskStore must never strand SSE subscribers un-sentinel-closed just
+        # because the terminal frame failed. A failure here propagates without
+        # re-failing (RT-002b): the ok=True terminal frame may already have
+        # reached subscribers, so re-entering _fail() would duplicate it.
+        store.close_streams(record.task.id)
 
 
 async def run_task_worker(
@@ -317,6 +493,9 @@ async def run_task_worker(
     # `else: store.close_streams(task.id)` from closing the stream before
     # the background awaiter finishes.
     deferred_launched: bool = False
+    # Set when a DoneEvent is consumed; the terminal publish itself runs in
+    # the `else:` clause below, not here — see the DoneEvent branch.
+    done_event: DoneEvent | None = None
 
     async def wait_resume(interrupt_id: str) -> Any:
         # the InterruptEvent handler below registered the future already
@@ -386,7 +565,15 @@ async def run_task_worker(
                 break
             elif isinstance(event, ArtifactEvent):
                 artifact = build_artifact(event, capabilities)
-                task.artifacts = (task.artifacts or []) + [artifact]
+                # RT-002: serialize the wire frame BEFORE mutating
+                # task.artifacts, AND append only AFTER publish() has actually
+                # delivered the frame. This closes BOTH pre-delivery failure
+                # sub-cases: if .wire() raises OR if publish() raises, the
+                # `except` handler below flips the task to FAILED while
+                # task.artifacts still holds NO entry that never reached a
+                # stream — the exact invariant the wave's earlier reorder only
+                # half-enforced (it covered .wire() but left the append before
+                # publish). Mirrors _run_deferred_background's success path.
                 frame = TaskArtifactUpdateEvent(
                     taskId=task.id,
                     contextId=task.context_id,
@@ -394,11 +581,12 @@ async def run_task_worker(
                     lastChunk=True,
                 ).wire()
                 publish(frame, event)
+                task.artifacts = (task.artifacts or []) + [artifact]
             elif isinstance(event, InterruptEvent):
                 # cap check + resume-channel registration; at the cap this
                 # raises and becomes a typed task failure (§5.2)
                 store.mark_interrupted(task.id, event.interrupt_id)
-                event.expires_at = store.interrupt_ttl_remaining(task.id)
+                event.expires_in = store.interrupt_ttl_remaining(task.id)
                 state = (
                     TaskState.AUTH_REQUIRED
                     if "auth" in event.reason
@@ -434,7 +622,14 @@ async def run_task_worker(
                         _agent_message(record, error_msg),
                         error=WireError(code=-32603, message=error_msg),
                     )
-                publish(_status_frame(record, final=True), event, final=True)
+                # The state transition above is already committed; the
+                # terminal publish runs in the `else:` clause below, outside
+                # this try, so a publish failure there is not caught by the
+                # except handlers and cannot re-enter the FAILED path with a
+                # SECOND terminal frame on top of one that may have already
+                # reached subscribers (mirrors the narrowed guard around
+                # _run_deferred_background's success path above).
+                done_event = event
             else:
                 # TurnStarted / ToolCall / ToolResult: no A2A frame; AG-UI
                 # consumers map these to STEP_* and tool-call families
@@ -450,8 +645,13 @@ async def run_task_worker(
             message=err.message,
         )
         _set_status(record, TaskState.FAILED, _agent_message(record, err.message), error=wire_err)
-        publish(_status_frame(record, final=True), DoneEvent(ok=False, error=err.message), final=True)
-        store.close_streams(task.id)
+        # RT-002 (round 2): guard close_streams with a finally — a second
+        # publish() failure inside this except-handler must not itself skip
+        # stream teardown (mirrors _fail()'s identical guard above).
+        try:
+            publish(_status_frame(record, final=True), DoneEvent(ok=False, error=err.message), final=True)
+        finally:
+            store.close_streams(task.id)
     except Exception as exc:
         if isinstance(exc, ValueError):
             wire_err = WireError(code=-32006, message="invalid agent response")
@@ -460,14 +660,25 @@ async def run_task_worker(
             wire_err = WireError(code=-32603, message="internal error")
             msg = "internal error"
         _set_status(record, TaskState.FAILED, _agent_message(record, msg), error=wire_err)
-        publish(_status_frame(record, final=True), DoneEvent(ok=False, error=msg), final=True)
-        store.close_streams(task.id)
-    else:
-        if not deferred_launched:
-            # Normal completion: close streams now.
-            # GH-87: if deferred_launched is True, the background task owns
-            # stream closure — do NOT close here.
+        try:
+            publish(_status_frame(record, final=True), DoneEvent(ok=False, error=msg), final=True)
+        finally:
             store.close_streams(task.id)
+    else:
+        try:
+            if done_event is not None:
+                publish(_status_frame(record, final=True), done_event, final=True)
+        finally:
+            # RT-002: close_streams must run even if the terminal publish()
+            # above raises (e.g. a persistent TaskStore's durable write) —
+            # this worker is itself launched as a fire-and-forget
+            # asyncio.Task (routes/a2a.py, routes/ag_ui.py), so an unguarded
+            # raise here would strand subscribers un-sentinel-closed.
+            if not deferred_launched:
+                # Normal completion: close streams now.
+                # GH-87: if deferred_launched is True, the background task
+                # owns stream closure — do NOT close here.
+                store.close_streams(task.id)
 
 
 def new_task(context_id: str | None = None) -> Task:

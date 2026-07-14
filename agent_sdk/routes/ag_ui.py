@@ -2,13 +2,16 @@
 
 The task worker publishes ``StreamItem``s carrying raw loop events; this
 route owns a per-request state machine that maps them to AG-UI wire frames
-(camelCase JSON, ``data:`` lines only). Each request's stream is a
-self-contained run: ``RUN_STARTED`` is always the first frame (all
-validation runs inside the generator), ``STATE_SNAPSHOT`` second, exactly
-one terminal ``RUN_FINISHED`` | ``RUN_ERROR``. An interrupt ends the run
-with the interrupt outcome; resume arrives as a NEW run carrying
-``resume=[{interrupt_id, status, payload}]`` and is identity-bound exactly
-like the A2A path (§5.1).
+(camelCase JSON, ``data:`` lines only). Transport-level rejections —
+disallowed Origin (403), wrong Content-Type (415), oversized body (413) —
+are returned/raised before the stream is ever constructed. Once the stream
+begins, each request's stream is a self-contained run: ``RUN_STARTED`` is
+always the first frame, ``STATE_SNAPSHOT`` second, exactly one terminal
+``RUN_FINISHED`` | ``RUN_ERROR``; every failure after ``RUN_STARTED`` is
+reported as a ``RUN_ERROR`` frame rather than an HTTP error. An interrupt
+ends the run with the interrupt outcome; resume arrives as a NEW run
+carrying ``resume=[{interrupt_id, status, payload}]`` and is identity-bound
+exactly like the A2A path (§5.1).
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from ..agent.runner import new_task, run_task_worker
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
 from ..common.iso8601 import iso_utc
+from ..common.origin import guard_origin
 from ..common.sse import HEARTBEAT, SSE_HEADERS, sse_data
 from ..credentials import forwarding
 from ..models.content_types import ContentModel
@@ -323,7 +327,7 @@ class _RunMapper:
                 interrupt["responseSchema"] = event.response_schema
             if event.tool_call_id is not None:
                 interrupt["toolCallId"] = event.tool_call_id
-            if event.expires_at is not None:
+            if event.expires_in is not None:
                 # upstream ag-ui-protocol's Interrupt.expires_at is
                 # Optional[str] (ISO-8601, e.g. "2026-04-20T17:00:00Z") —
                 # NOT epoch-ms; a reference-SDK consumer would fail to
@@ -340,7 +344,7 @@ class _RunMapper:
                 # workspace/learning/LRN-111-agui-interrupt-expires-at-wire-format-citation.md
                 # (RT-002 citation).
                 #
-                # event.expires_at is seconds-remaining-until-expiry, a
+                # event.expires_in is seconds-remaining-until-expiry, a
                 # relative duration computed by the task store (see
                 # TaskStore.interrupt_ttl_remaining) — NOT a raw reading
                 # from whichever clock the store happens to use internally
@@ -348,7 +352,7 @@ class _RunMapper:
                 # cross-process store may use time.time instead). Adding it
                 # to wall-clock now is therefore correct regardless of the
                 # store's clock choice (RT-001).
-                wall_deadline = time.time() + event.expires_at
+                wall_deadline = time.time() + event.expires_in
                 interrupt["expiresAt"] = iso_utc(wall_deadline)
             return self.run_finished(
                 outcome={"type": "interrupt", "interrupts": [interrupt]}
@@ -368,10 +372,12 @@ class _RunMapper:
 
 
 def _capabilities(body: dict[str, Any]) -> A2uiCapabilities:
+    # The fail-closed default itself lives in A2uiCapabilities.gated (C-006)
+    # so this transport cannot drift from a2a.py's independently.
     forwarded = body.get("forwardedProps")
     if not isinstance(forwarded, dict) or "a2uiClientCapabilities" not in forwarded:
-        return A2uiCapabilities(tier="none")
-    return A2uiCapabilities.from_metadata(forwarded["a2uiClientCapabilities"])
+        return A2uiCapabilities.gated(False, None)
+    return A2uiCapabilities.gated(True, forwarded["a2uiClientCapabilities"])
 
 
 def _start_worker(request: Request, record: TaskRecord, capabilities: A2uiCapabilities) -> None:
@@ -398,6 +404,7 @@ def _start_worker(request: Request, record: TaskRecord, capabilities: A2uiCapabi
 async def ag_ui_run(
     request: Request, identity: Identity = Depends(require_identity)
 ) -> Response:
+    guard_origin(request)
     ct = request.headers.get("content-type", "")
     if ct and "application/json" not in ct:
         return Response(status_code=415)
@@ -421,8 +428,10 @@ async def ag_ui_run(
     mapper = _RunMapper(thread_id, run_id, _capabilities(body))
 
     async def stream() -> AsyncIterator[bytes]:
-        # RUN_STARTED is ALWAYS first; every failure after it is RUN_ERROR —
-        # the handler never raises before the StreamingResponse exists (§5.3)
+        # Transport-level rejections (Origin 403, Content-Type 415, body
+        # size 413) already happened above, before this generator was ever
+        # constructed. From here on, RUN_STARTED is ALWAYS first; every
+        # failure after it becomes a RUN_ERROR frame, not an HTTP error (§5.3)
         yield sse_data({"type": "RUN_STARTED", "threadId": thread_id, "runId": run_id})
         yield sse_data({"type": "STATE_SNAPSHOT", "snapshot": body.get("state") or {}})
 

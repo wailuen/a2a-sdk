@@ -227,7 +227,7 @@ async def no_interim_gen_tool() -> AsyncGenerator[Any, None]:
 
     Edge case: the drain loop in invoke_gen should handle this correctly:
     prev receives the terminal value on the very first iteration, then
-    _ToolTerminalResult(value=<FakeResult>) is yielded.
+    ToolTerminalResult(value=<FakeResult>) is yielded.
     """
     yield FakeResult(value="direct")  # terminal result only — no interim events
 
@@ -237,7 +237,7 @@ async def empty_gen_tool() -> AsyncGenerator[Any, None]:
     """Generator tool that yields nothing at all.
 
     Edge case: the drain loop in invoke_gen never enters the async-for body, so
-    prev stays as _SENTINEL → terminal=None → _ToolTerminalResult(value=None).
+    prev stays as _SENTINEL → terminal=None → ToolTerminalResult(value=None).
     The loop sets result=None; isinstance(None, FakeResult) is False so no
     ArtifactEvent is emitted. The loop must not crash.
     """

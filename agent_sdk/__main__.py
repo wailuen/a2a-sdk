@@ -12,6 +12,11 @@ test-chat:
     is given; interactive REPL when omitted.  Tool calls, A2UI surface
     sequences, and the final text reply are printed to stdout.
 
+    A2A mode (``--a2a``) is HTTP+JSON-only (DESIGN.md non-goals §1): the
+    target agent's card must advertise ``preferredTransport: "HTTP+JSON"``,
+    or the driver raises ``ValueError``.  There is no gRPC or JSON-RPC
+    transport support.
+
 bump-patch:
     Increment the patch segment of the SDK version in ``pyproject.toml``
     (e.g. 0.4.0 → 0.4.1).  Run before every push to main so the released
@@ -24,6 +29,7 @@ import argparse
 import getpass
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -90,8 +96,6 @@ def _print_a2ui(messages: list, label: str) -> None:
 
 
 async def _run_chat(args: argparse.Namespace) -> int:
-    import uuid
-
     import httpx
 
     from .testing.chat import ChatDriver
@@ -136,12 +140,10 @@ async def _chat_loop(
     catalogs: list[str],
     timeout: float,
 ) -> int:
-    import uuid
-
     driver = __import__("agent_sdk.testing.chat", fromlist=["ChatDriver"]).ChatDriver(
         client, extra_catalogs=catalogs, timeout=timeout
     )
-    thread_id = str(__import__("uuid").uuid4().hex)
+    thread_id = uuid.uuid4().hex
     agui_messages: list = []
     a2a_context_id: str | None = None
 
@@ -510,7 +512,11 @@ def main(argv: list[str] | None = None) -> int:
     src.add_argument(
         "--url",
         metavar="URL",
-        help="base URL of a running agent (e.g. http://localhost:8045)",
+        help=(
+            "base URL of a running agent (e.g. http://localhost:8045); "
+            "with --a2a, only agents advertising preferredTransport=HTTP+JSON "
+            "are supported (no gRPC/JSON-RPC — see DESIGN.md non-goals)"
+        ),
     )
     chat.add_argument(
         "--token",

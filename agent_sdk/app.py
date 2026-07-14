@@ -19,6 +19,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -609,7 +610,24 @@ class Agent:
         # in MCP routes match the same normalized form that CorsMiddleware stores
         # internally.  Without this, CORS_ORIGINS=['https://app.example.com/']
         # would pass the middleware check but 403 the MCP route guards.
+        # GH-119: also union in the deployment's own resolved_base_url so the
+        # bundled console's same-origin requests aren't blocked by guard_origin()
+        # on a non-claude.ai deployment that never explicitly listed itself in
+        # CORS_ORIGINS. RT-001: browser Origin headers are always path-less
+        # (scheme://host[:port], RFC 6454) — a path-prefixed PUBLIC_URL (e.g. a
+        # reverse-proxy deployment at https://gw.example.com/agents/x) must
+        # therefore union only its origin component, never the full URL with
+        # its path, or the allow-list entry can never equal the real Origin.
+        _own_url = urlsplit(settings.resolved_base_url)
         _cors_origins = {o.rstrip("/") for o in settings.cors_origins} | {"https://claude.ai"}
+        # RT-003: only union the deployment's own origin when BOTH components are
+        # present. A scheme-less DEV_MODE PUBLIC_URL (e.g. 'localhost:8080') makes
+        # urlsplit yield scheme='localhost', netloc='' — f"{scheme}://{netloc}"
+        # would then pollute the allow-list with a nonsense 'localhost://' entry
+        # (empty PUBLIC_URL similarly yields '://'). A malformed base URL should
+        # contribute nothing rather than a garbage origin.
+        if _own_url.scheme and _own_url.netloc:
+            _cors_origins = _cors_origins | {f"{_own_url.scheme}://{_own_url.netloc}"}
         app.add_middleware(CorsMiddleware, origins=_cors_origins)
         app.state.cors_origins = _cors_origins
 
