@@ -1,9 +1,23 @@
-# SDK issue candidates — w034 (2026-07-15)
+# SDK issue candidates — w035 (2026-07-20)
 
 Run `/sdk-issue-scan` to review and file as GitHub issues on `wailuen/a2a-sdk`.
 
-## Candidate 1: The RT-001 guard in _run_deferred_background (agent_sdk/agent/runner.py:354-385) only catches EXCEPTIONS raised by build_artifact()/translate()/domain-card wire()/TaskArtifactUpdateEvent.wire(). None of those perform JSON-serializability validation of DataPart payloads, so a long_running deferred tool resolving to a non-BaseModel, non-JSON-serializable value (datetime.date, a set, a custom class) takes the scalar DataPart branch, sails through the guard unflagged, and the task transitions to COMPLETED. The crash is deferred to the unguarded json.dumps inside sse_data() (agent_sdk/common/sse.py:25), reached via the A2A SSE consumer at agent_sdk/routes/a2a.py:307 with no surrounding try/except emitting a terminal frame — killing the stream before final:true is delivered and leaving an un-retrievable poisoned task in the store (tasks/get re-serializes it). This is the same WORKING/COMPLETED-then-SSE-crash class GH-121 addressed, but only for the DeferredResult-specific instance — the general non-serializable-value case on the same success path remains open.
+Note: this file originally listed 7 candidates surfaced across w035's redteam
+rounds. Candidates 1–6 (all in `agent_sdk/routes/oauth.py`'s CSP handling and
+`.claude/workflows/sdk-wave.js`'s import-resolution ladder) described
+intermediate states from early-round findings that were fixed later in the
+*same* wave by RT-001 through RT-004 — verified directly against current code
+(`_redirect_security_headers`/`_validated_origin` in oauth.py, the four-way
+resolver ladder in sdk-wave.js) and the passing regression tests
+(`tests/test_oauth_flow.py::test_valid_redirect_uri_rejects_csp_significant_netloc`,
+`test_dcr_rejects_csp_injection_redirect_uri`, `test_valid_redirect_uri_rejects_ipv6_literal`,
+etc.). They were pruned here so `/sdk-issue-scan` doesn't file already-fixed
+findings as new issues. Only the genuinely open finding remains below.
+
+## Candidate 1: `sdk-wave.js` classifies `agent_sdk/routes/oauth.py` as `MCP_SURFACE`-only, so a wave touching oauth.py only dispatches the mcp-advisor and never the a2a-advisor or ag-ui-advisor — but oauth.py's `OAuthTokenStore.verify` is the shared auth backend consumed via `require_identity` by every protected A2A and AG-UI endpoint (its own docstring documents PRM payloads for `/v1/` and `/ag-ui/` surfaces). A wave editing oauth.py's audience validation, PRM payloads, or token minting can silently break A2A or AG-UI auth while the protocol-audit gate reports only an MCP finding set, and no test in tests/ asserts surface-array membership to catch a regression.
 - Severity: high
-- Component: sdk/loop
-- File: n/a
-- Rationale: Root cause and fix both sit in agent_sdk/agent/runner.py's shared, transport-agnostic deferred-task/artifact-build guard (mirrored in run_task_worker's ArtifactEvent branch) — core SDK execution-loop internals, not agent-specific tool code. The secondary factor (sse_data()'s unguarded json.dumps in agent_sdk/common/sse.py) is shared infra used identically by both routes/a2a.py and routes/ag_ui.py, confirmed by grep, so the defect is a transport-agnostic gap in the SDK's task-completion loop rather than an A2A-protocol-shape violation; the A2A route reference is the reproduction surface (and matches GH-121's prior fix locus), not the defect's true home.
+- Component: harness/workflow
+- File: `.claude/workflows/sdk-wave.js` (lines 23-25: `A2A_SURFACE`, `MCP_SURFACE`, `AGUI_SURFACE`)
+- Rationale: The misclassification lives in the MCP_SURFACE/A2A_SURFACE/AGUI_SURFACE arrays inside `.claude/workflows/sdk-wave.js`, which govern which protocol advisors a wave dispatches — an SDK harness workflow defect with real cross-protocol (protocol/oauth, protocol/a2a, protocol/ag-ui) blast radius, but the fix and the bug both sit in the harness workflow file.
+- Codified: `workspace/learning/LRN-132-protocol-surface-classification-by-blast-radius.md`
+- Confirmed still open as of 2026-07-20 (not fixed in w035): `agent_sdk/routes/oauth.py` is present only in `MCP_SURFACE`, absent from `A2A_SURFACE` and `AGUI_SURFACE`.

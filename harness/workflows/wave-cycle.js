@@ -236,16 +236,33 @@ const PLAN_ROW_SCHEMA = {
 // The agent runs `git status --short`, parses the output into dirty paths,
 // cross-references against wave.allScope (Creates: ∪ Modifies:), and returns any offending paths.
 // GH-84 adds offendingHarnessPaths for dirty/untracked files under harness deliverable directories
-// (tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/).
+// (tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/, .claude/workflows/,
+// harness/workflows/, template/.claude/workflows/). Post-archive w035 follow-up: the workflow-file
+// dirs were added after a GH-118 fix (RT-003, below) landed in wave-cycle.js without either
+// wave.allScope or this dir list watching wave-cycle.js/sdk-wave.js's own directories — an
+// undeclared workflow-file edit could evade offendingPaths (undeclared) AND offendingHarnessPaths
+// (dir unwatched) at once. RT-002 (round-7): template/.claude/workflows/ is the third
+// byte-identical mirror (synced via test_workflow_sync.py) and is watched here for the same reason.
+// GH-118 (LRN-119): the checks above only catch paths git already sees as dirty/untracked
+// AND either in wave.allScope or under a harness dir — they never inspect import statements.
+// A module extracted mid-wave (e.g. agent_sdk/common/origin.py in GH-110) that sits
+// untracked, is imported by a declared file, but is itself outside both allScope and the
+// harness dirs produces no offending entry and silently passes the gate — risking an
+// ImportError at boot on every importing surface if archive stages only declared paths.
+// offendingUndeclaredImports closes that gap: it holds resolved agent_sdk.* import targets
+// of dirty/scope .py files that are themselves untracked and undeclared.
+// RT-003: ported from sdk-wave.js — wave-cycle.js is the more widely-used wave runner and
+// was left exposed to the LRN-119 failure class while sdk-wave.js alone carried the fix.
 const ARCHIVE_INTENT_SCHEMA = {
   type: 'object',
-  required: ['gitStatusOutput', 'dirtyPaths', 'offendingPaths', 'offendingHarnessPaths'],
+  required: ['gitStatusOutput', 'dirtyPaths', 'offendingPaths', 'offendingHarnessPaths', 'offendingUndeclaredImports'],
   additionalProperties: false,
   properties: {
     gitStatusOutput:      { type: 'string', description: 'Raw stdout of git status --short' },
     dirtyPaths:           { type: 'array', items: { type: 'string' }, description: 'All paths reported dirty or untracked by git' },
     offendingPaths:       { type: 'array', items: { type: 'string' }, description: 'Dirty paths that overlap with wave.allScope (Creates: ∪ Modifies:)' },
-    offendingHarnessPaths: { type: 'array', items: { type: 'string' }, description: 'Dirty/untracked paths under tests/, workspace/learning/, workspace/scenarios/results/, or workspace/prd/ even if not in allScope' },
+    offendingHarnessPaths: { type: 'array', items: { type: 'string' }, description: 'Dirty/untracked paths under tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/, .claude/workflows/, harness/workflows/, or template/.claude/workflows/ even if not in allScope' },
+    offendingUndeclaredImports: { type: 'array', items: { type: 'string' }, description: 'GH-118/LRN-119/RT-001: resolved import targets (absolute agent_sdk.* OR relative from ./from ..) of dirty/scope .py files that are untracked (git ls-files empty) AND absent from wave.allScope' },
   },
 }
 
@@ -1297,6 +1314,16 @@ if (!preArchiveGate) {
 // GH-40 / GH-84: pre-archive commit check — all scope files (Creates: ∪ Modifies:) plus any
 // harness deliverable directories must be committed before archive. A wave that archives
 // with deliverables only in the working tree will silently lose them on `git checkout`.
+// GH-118 (LRN-119): step 5 below adds an import cross-check — a module extracted mid-wave
+// that is untracked, imported by a declared file, but absent from wave.allScope AND outside
+// the harness dirs produced no offending entry under the checks above and silently passed
+// this gate, risking an ImportError at boot on every importing surface. See
+// offendingUndeclaredImports on ARCHIVE_INTENT_SCHEMA above.
+// RT-001: step 5 also resolves RELATIVE intra-package imports (`from ..pkg.mod import X`),
+// not only absolute `agent_sdk.*` imports. Relative imports are the dominant style inside
+// agent_sdk/routes/ — the canonical LRN-119 module (agent_sdk/common/origin.py) is imported
+// there as `from ..common.origin import guard_origin`, which an absolute-only scan misses
+// entirely, defeating the gate on its own motivating scenario.
 if (!protocolBlocked) {
   const archiveIntent = await agent(
     'Run `git status --short` and parse the output.\n\n' +
@@ -1310,11 +1337,129 @@ if (!protocolBlocked) {
     '   b. It starts with a scope entry (the scope entry is a directory prefix), OR\n' +
     '   c. A scope entry starts with the dirty path (dirty parent directory).\n' +
     '4. Separately, collect any dirty/untracked paths whose relative path starts with\n' +
-    '   tests/, workspace/learning/, workspace/scenarios/results/, or workspace/prd/\n' +
+    '   tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/,\n' +
+    '   .claude/workflows/, harness/workflows/, or template/.claude/workflows/\n' +
     '   — put these in offendingHarnessPaths even if they do not appear in the scope list.\n' +
-    '5. Return all four fields.\n\n' +
+    '5. GH-118 import cross-check (LRN-119 — mid-wave module extraction). RT-001: this step\n' +
+    '   MUST resolve RELATIVE intra-package imports (`from . import X`, `from .mod import Y`,\n' +
+    '   `from ..pkg.mod import Z`) in addition to ABSOLUTE `agent_sdk.*` imports. Relative\n' +
+    '   imports are the dominant style inside agent_sdk/routes/ (e.g.\n' +
+    '   `from ..common.origin import guard_origin`) — a scan that resolves only absolute\n' +
+    '   imports misses the canonical case this gate exists to catch, and quietly passes:\n' +
+    '   a. Identify every dirty or untracked .py file from the git status output.\n' +
+    '   b. For each .py file that is dirty/untracked OR listed in the scope above, read every\n' +
+    '      import statement in it — both ABSOLUTE (`import agent_sdk...`,\n' +
+    '      `from agent_sdk... import ...`) and RELATIVE (`from . import ...`,\n' +
+    '      `from .mod import ...`, `from ..pkg.mod import ...`) — and resolve any intra-\n' +
+    '      package target, whether spelled absolutely OR relatively, to the local .py file it\n' +
+    '      names. Four forms, resolved differently:\n' +
+    '        - ABSOLUTE, direct module: `import agent_sdk.<dotted-path>` (one or more dotted\n' +
+    '          segments — a SINGLE segment counts too, e.g. `import agent_sdk.foo`) → resolve\n' +
+    '          directly to `agent_sdk/<dotted-path-with-/-for-.>.py` (e.g.\n' +
+    '          `agent_sdk.common.origin` → `agent_sdk/common/origin.py`; `agent_sdk.foo` →\n' +
+    '          `agent_sdk/foo.py`).\n' +
+    '        - ABSOLUTE, from-import: `from agent_sdk[.<pkg-path>] import <name>` where\n' +
+    '          <pkg-path> is ZERO or more dotted segments at ANY depth — zero segments covers\n' +
+    '          the bare top-level form `from agent_sdk import <name>` → do NOT assume this\n' +
+    '          resolves to `agent_sdk/<pkg-path>/__init__.py`. First check whether\n' +
+    '          `agent_sdk/<pkg-path>/<name>.py` exists on disk (`<name>` is itself a submodule\n' +
+    '          file at that depth; when <pkg-path> is empty, check `agent_sdk/<name>.py`\n' +
+    '          directly), e.g. `from agent_sdk.common import origin` → check for\n' +
+    '          `agent_sdk/common/origin.py`. If the submodule file exists, resolve to it — this\n' +
+    '          is the case a mid-wave extraction produces, and the one this gate exists to\n' +
+    '          catch, no matter how many package levels deep the extraction landed. RT-001\n' +
+    '          (round-5): otherwise <name> may be a SUB-PACKAGE (a directory with its own\n' +
+    '          `__init__.py`) rather than a submodule file — check whether\n' +
+    '          `agent_sdk/<pkg-path>/<name>/__init__.py` exists on disk (when <pkg-path> is\n' +
+    '          empty, check `agent_sdk/<name>/__init__.py` directly); if it exists, <name> is\n' +
+    '          a sub-package and resolves to THAT file, e.g. `from agent_sdk import routes` →\n' +
+    '          `agent_sdk/routes.py` does NOT exist, but `agent_sdk/routes/__init__.py` DOES\n' +
+    '          (agent_sdk/routes/ is a package) → resolves to `agent_sdk/routes/__init__.py`.\n' +
+    '          RT-004: otherwise, when <pkg-path> is NON-EMPTY, check whether\n' +
+    '          `agent_sdk/<pkg-path>.py` exists on disk — <pkg-path> itself names a MODULE and\n' +
+    '          <name> is a symbol inside it (the from-clause names the module fully), e.g.\n' +
+    '          `from agent_sdk.common.origin import guard_origin` → <pkg-path> is\n' +
+    '          `common.origin`; neither `agent_sdk/common/origin/guard_origin.py` nor\n' +
+    '          `agent_sdk/common/origin/guard_origin/__init__.py` exists, but\n' +
+    '          `agent_sdk/common/origin.py` DOES → resolves to `agent_sdk/common/origin.py`,\n' +
+    '          NEVER to the nonexistent `agent_sdk/common/origin/__init__.py`. Only resolve to\n' +
+    '          `agent_sdk/<pkg-path>/__init__.py` as the ENCLOSING package (i.e. `<name>` is a\n' +
+    '          symbol re-exported from it, not a submodule, sub-package, or module) when NONE\n' +
+    '          of `agent_sdk/<pkg-path>/<name>.py`, `agent_sdk/<pkg-path>/<name>/__init__.py`,\n' +
+    '          nor (when <pkg-path> is non-empty) `agent_sdk/<pkg-path>.py` exists.\n' +
+    '        - RELATIVE, from-import with a module path: `from <dots><module-path> import\n' +
+    '          <name>` where <dots> is one or more leading dots and <module-path> is a\n' +
+    '          NON-EMPTY dotted path immediately following the dots (e.g.\n' +
+    '          `from ..common.origin import guard_origin`, `from ..credentials import forwarding`,\n' +
+    '          or `from .mod import Y`) → resolve the dots against the\n' +
+    '          directory that CONTAINS the importing file: one dot means that directory\n' +
+    '          itself; each additional dot walks up one more parent directory from there.\n' +
+    '          Append <module-path> (with `.` replaced by `/`) to that directory to get\n' +
+    '          <pkg-path>. Then disambiguate <name> using the SAME four-way on-disk order as\n' +
+    '          the ABSOLUTE from-import form above — never resolve straight to `<pkg-path>.py`\n' +
+    '          or straight to `<pkg-path>/__init__.py`: FIRST check whether\n' +
+    '          `<pkg-path>/<name>.py` exists on disk (<name> is itself a submodule file under\n' +
+    '          the <module-path> package) and resolve to THAT if it exists. RT-004: otherwise\n' +
+    '          check whether `<pkg-path>/<name>/__init__.py` exists on disk (<name> is a\n' +
+    '          SUB-PACKAGE — e.g. a freshly-extracted, still-untracked sub-package) and resolve\n' +
+    '          to THAT if it exists. Otherwise check whether `<pkg-path>.py` exists on disk\n' +
+    '          (<pkg-path> itself names a MODULE and <name> is a symbol inside it) and resolve\n' +
+    '          to THAT if it exists. Only when NONE of those three exist does `<name>` resolve\n' +
+    '          as a symbol re-exported from a package, in which case resolve to\n' +
+    '          `<pkg-path>/__init__.py`. Worked example (symbol-from-module):\n' +
+    '          `from ..common.origin import guard_origin` inside `agent_sdk/routes/a2a.py` —\n' +
+    '          that file lives in `agent_sdk/routes`, one dot keeps that directory, the second\n' +
+    '          dot walks up to `agent_sdk`; appending `common/origin` gives <pkg-path>\n' +
+    '          `agent_sdk/common/origin`; neither `agent_sdk/common/origin/guard_origin.py`\n' +
+    '          nor `agent_sdk/common/origin/guard_origin/__init__.py` exists, but\n' +
+    '          `agent_sdk/common/origin.py` DOES → resolves to `agent_sdk/common/origin.py`.\n' +
+    '          Worked example (submodule, RT-001):\n' +
+    '          `from ..credentials import forwarding` inside `agent_sdk/routes/a2a.py` —\n' +
+    '          <pkg-path> is `agent_sdk/credentials`; `agent_sdk/credentials/forwarding.py`\n' +
+    '          DOES exist, so `forwarding` is a submodule and this resolves to that tracked\n' +
+    '          file — NEVER to the nonexistent `agent_sdk/credentials.py`, which would be a\n' +
+    '          false-positive undeclared-import block on every wave that scopes a route file.\n' +
+    '          Worked example (sub-package, RT-004): `from ..common import newsubpkg` inside\n' +
+    '          `agent_sdk/routes/a2a.py` — <pkg-path> is `agent_sdk/common`;\n' +
+    '          `agent_sdk/common/newsubpkg.py` does NOT exist, but\n' +
+    '          `agent_sdk/common/newsubpkg/__init__.py` DOES → resolves to that file, not to\n' +
+    '          the nonexistent `agent_sdk/common.py` a two-step ladder would have stopped at.\n' +
+    '        - RELATIVE, bare: `from <dots> import <name>` where <dots> is one or more\n' +
+    '          leading dots with NO module path after them (e.g. `from . import origin`\n' +
+    '          inside `agent_sdk/common/foo.py`) → resolve the dots to a base directory\n' +
+    '          exactly as in the relative from-import form above, then check whether\n' +
+    '          `<base-dir>/<name>.py` exists on disk. If it exists, resolve to that file —\n' +
+    '          <name> is itself a submodule directly under that directory. RT-001 (round-5):\n' +
+    '          otherwise <name> may be a SUB-PACKAGE (a directory with its own `__init__.py`)\n' +
+    '          rather than a submodule file — check whether `<base-dir>/<name>/__init__.py`\n' +
+    '          exists on disk; if it exists, resolve to THAT file, e.g. `from . import routes`\n' +
+    '          inside `agent_sdk/__init__.py` → `<base-dir>/routes.py` does NOT exist, but\n' +
+    '          `<base-dir>/routes/__init__.py` DOES → resolves to it. Only resolve to\n' +
+    '          `<base-dir>/__init__.py` as the ENCLOSING package (i.e. `<name>` is a symbol\n' +
+    '          re-exported from it) when NEITHER `<base-dir>/<name>.py` NOR\n' +
+    '          `<base-dir>/<name>/__init__.py` exists.\n' +
+    '      Ignore stdlib and third-party imports. Resolve any intra-package target — whether\n' +
+    '      spelled ABSOLUTELY (rooted at `agent_sdk`) OR RELATIVELY (`from .`, `from ..`,\n' +
+    '      etc.) — do not skip relative forms just because they do not start with\n' +
+    '      `agent_sdk`.\n' +
+    '   c. For each resolved path, decide offender status. A resolved path is an offender\n' +
+    '      ONLY when ALL THREE hold: (i) it actually EXISTS on disk — the LRN-119 mid-wave-\n' +
+    '      extraction failure mode is a module that is PRESENT locally (so the import works\n' +
+    '      now) but untracked (so it vanishes on `git checkout`); (ii) `git ls-files <path>`\n' +
+    '      produces NO output (the file is untracked); and (iii) the path does not appear in\n' +
+    '      the scope list above. Add offenders to offendingUndeclaredImports. A resolved path\n' +
+    '      that does NOT exist on disk is a mis-resolution (or a genuine broken import the\n' +
+    '      RED-suite pre-archive gate already blocks on), never a mid-wave-extracted module —\n' +
+    '      NEVER flag it (RT-001: guards against a from-import whose <name> submodule is\n' +
+    '      mis-resolved to a nonexistent `<pkg>.py`). A resolved path that IS tracked\n' +
+    '      (git ls-files returns it) is never an offender either, even if it was also\n' +
+    '      modified — only newly-untracked local modules internal to this package that are\n' +
+    '      present on disk qualify, regardless of whether they were imported absolutely or\n' +
+    '      relatively.\n' +
+    '6. Return all five fields.\n\n' +
     'If the working tree is completely clean, gitStatusOutput is empty string,\n' +
-    'dirtyPaths is [], offendingPaths is [], offendingHarnessPaths is [].',
+    'dirtyPaths is [], offendingPaths is [], offendingHarnessPaths is [],\n' +
+    'offendingUndeclaredImports is [].',
     { schema: ARCHIVE_INTENT_SCHEMA, label: 'gate:archive-commit', phase: 'Archive' }
   )
 
@@ -1324,7 +1469,8 @@ if (!protocolBlocked) {
     protocolBlocked = true
     log('WARNING: archive-commit gate agent returned null — archive BLOCKED (unknown commit state). Re-run /wave ' + wave.waveId)
   } else if ((archiveIntent.offendingPaths && archiveIntent.offendingPaths.length > 0) ||
-             (archiveIntent.offendingHarnessPaths && archiveIntent.offendingHarnessPaths.length > 0)) {
+             (archiveIntent.offendingHarnessPaths && archiveIntent.offendingHarnessPaths.length > 0) ||
+             (archiveIntent.offendingUndeclaredImports && archiveIntent.offendingUndeclaredImports.length > 0)) {
     protocolBlocked = true
     if (archiveIntent.offendingPaths && archiveIntent.offendingPaths.length > 0) {
       log('Archive BLOCKED — ' + archiveIntent.offendingPaths.length + ' scope file(s) are uncommitted:')
@@ -1333,6 +1479,14 @@ if (!protocolBlocked) {
     if (archiveIntent.offendingHarnessPaths && archiveIntent.offendingHarnessPaths.length > 0) {
       log('Archive BLOCKED — ' + archiveIntent.offendingHarnessPaths.length + ' harness deliverable(s) are uncommitted:')
       archiveIntent.offendingHarnessPaths.forEach(function(p) { log('  [uncommitted] ' + p) })
+    }
+    if (archiveIntent.offendingUndeclaredImports && archiveIntent.offendingUndeclaredImports.length > 0) {
+      // GH-118 / LRN-119: a module extracted mid-wave that a declared file imports, but
+      // which is itself untracked and outside wave.allScope — staging only declared paths
+      // would ship an ImportError at boot on every importing surface.
+      log('Archive BLOCKED — ' + archiveIntent.offendingUndeclaredImports.length + ' undeclared module(s) are imported by scope files:')
+      archiveIntent.offendingUndeclaredImports.forEach(function(p) { log('  [undeclared import] ' + p) })
+      log('Add the module(s) above to Creates: in the wave/todo and stage them explicitly, then re-run /wave ' + wave.waveId)
     }
     log('Commit or stage the files above, then re-run /wave ' + wave.waveId)
   } else {

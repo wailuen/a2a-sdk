@@ -72,6 +72,7 @@ Fix 5 protocol conformance bugs surfaced by downstream agents after the 0.4.0 re
 | W32 [x] ✅ 2026-07-14 (GH-110–GH-114) | w032-gh-issues.md | G | 5 | — |
 | W33 [x] ✅ 2026-07-14 (GH-115–GH-117) | w033-gh-issues.md | G | 3 | — |
 | W34 [x] ✅ 2026-07-14 (GH-119–GH-121; RT-001/RT-002 group-G budget-exhausted findings fixed) | w034-gh-issues.md | G | 4 | — |
+| W35 [x] ✅ 2026-07-19 (GH-118, GH-122; target 0.5.42) | w035-gh-issues.md | G | 2 | — |
 
 ## Dependency graph
 

@@ -12,8 +12,17 @@ The Claude.ai-connector-compatible chain, mounted at the app root:
   rate-limited. The security gate is the admin-gated /authorize, not DCR.
 - ``GET/POST /oauth/authorize`` — minimal inline consent page (no template
   dependency; ``frame-ancestors 'none'`` + ``X-Frame-Options: DENY``).
-  Approval requires a REAL admin API key (header- or form-borne); oauth-kind
-  tokens never verify on this path (§5.5 surface assertion).
+  ``form-action`` is dynamically widened from a bare ``'self'`` to include
+  the validated ``redirect_uri``'s origin (``_redirect_security_headers``,
+  GH-122/RT-001) — required because Chromium/Electron enforces
+  ``form-action`` from the CSP of the form-owning document, not a later 30x
+  hop's headers (crbug.com/932518), so the consent-page render and both
+  redirects (error + success) all need the widened policy for the Approve
+  button to actually reach the OAuth client. Only the unknown-client /
+  unregistered-redirect_uri error page keeps the bare ``form-action 'self'``
+  — it has no trusted destination to widen to. Approval requires a REAL
+  admin API key (header- or form-borne); oauth-kind tokens never verify on
+  this path (§5.5 surface assertion).
 - ``POST /oauth/token`` — PKCE S256 exchange + single-use refresh rotation.
   RFC 8707 ``resource`` is NOT re-required here (Claude.ai omits it); the
   audience bound at authorize travels via the code/refresh metadata.
@@ -32,13 +41,14 @@ from __future__ import annotations
 import html
 import json
 import logging
+import re
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlparse
+from urllib.parse import ParseResult, parse_qsl, urlencode, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from ..auth.middleware import AuthRuntime, _prm_challenge, require_identity, unauth_rate_limit
+from ..auth.middleware import AuthRuntime, _prm_challenge, unauth_rate_limit
 from ..auth.oauth_tokens import OAuthTokenStore
 from ..common.etag import etag_for, matches
 from ..models.errors import AgentError
@@ -147,6 +157,82 @@ def _has_control_char(value: str) -> bool:
     return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
 
 
+# Hostname/IPv4 charset — deliberately excludes ``;`` ``'`` ``"`` space and
+# everything else CSP-significant. ``urlparse().hostname`` does NOT validate
+# against the URI authority grammar (RFC 3986 reg-name permits sub-delims
+# like ``;``), so a control-char-free redirect_uri such as
+# ``https://evil.com;frame-ancestors *;/cb`` parses with that whole string
+# as ``hostname`` — this is the enforcement point that rejects it.
+#
+# Deliberately wider than strict RFC 1123: each label also permits ``_``
+# (common in internal/dev hostnames — e.g. ``my_host.example.com``) and the
+# whole host permits one trailing ``.`` (absolute FQDN — e.g.
+# ``client.example.com.``). Neither character is CSP-significant, so
+# admitting them does not reopen the injection this regex exists to close
+# (RT-002); it only widens accepted charset back toward pre-RT-002 client
+# compatibility (RT-002 follow-up).
+#
+# IPv6-literal hosts (e.g. the ``2001:db8::1`` that ``urlparse().hostname``
+# returns, bracket-stripped, for ``https://[2001:db8::1]/cb``) are
+# INTENTIONALLY rejected here: ``:`` is outside this charset, and
+# _validated_origin has no bracket-aware reconstruction to re-emit a valid
+# ``https://[2001:db8::1]`` origin, so a widened charset alone would let a
+# validated IPv6 redirect_uri fall through to an unbracketed, malformed CSP
+# origin. Fail-closed (reject the whole redirect_uri) is preferred over
+# emitting a broken origin (RT-003). OAuth clients targeting this endpoint
+# use hostnames or loopback (127.0.0.1/localhost), so this is not expected
+# to affect real registrations; do not "fix" by loosening the charset
+# without also adding bracket-aware IPv6 origin reconstruction.
+_HOSTNAME_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)*\.?$"
+)
+
+
+def _validated_origin(parsed: ParseResult) -> str | None:
+    """Rebuild ``scheme://host[:port]`` from sanitized components only.
+
+    Never interpolate ``parsed.netloc`` (or ``parsed.hostname``
+    unvalidated) into a header or CSP — RFC 3986 reg-name permits
+    characters (``;`` among them) that are significant to CSP, and a
+    malformed port substring can smuggle the same characters through
+    while ``hostname`` itself stays clean (RT-002). Returns ``None`` when
+    the origin cannot be safely reconstructed — including for IPv6-literal
+    hosts, which ``_HOSTNAME_RE`` rejects intentionally (RT-003: this
+    function has no bracket-aware reconstruction, so it fails closed
+    rather than risk emitting an unbracketed, malformed origin).
+
+    The https-or-loopback-http scheme contract is enforced HERE, at the
+    reconstruction boundary, not left to callers (RT-002 follow-up). This
+    origin is emitted verbatim into a ``form-action`` CSP security header,
+    so the function must never hand back a scheme it would not itself vouch
+    for — a scheme-downgraded plain-http non-loopback origin (which would
+    weaken the CSP to permit form submission over cleartext) or a non-http(s)
+    scheme (``ftp://``, ``javascript://``, …). A caller that forgets to
+    pre-run ``_valid_redirect_uri`` therefore still cannot widen the CSP to
+    an unsafe origin; reconstruction fails closed to ``None`` and the header
+    builder falls back to the bare ``form-action 'self'``.
+    """
+    hostname = parsed.hostname
+    if not hostname or not _HOSTNAME_RE.fullmatch(hostname):
+        return None
+    # Scheme contract: https anywhere, or http only on the loopback hosts
+    # (RFC 8252 §7.3 native-app callbacks). Everything else fails closed.
+    if parsed.scheme == "http":
+        if hostname not in ("localhost", "127.0.0.1"):
+            return None
+    elif parsed.scheme != "https":
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    origin = f"{parsed.scheme}://{hostname}"
+    if port is not None:
+        origin += f":{port}"
+    return origin
+
+
 def _valid_redirect_uri(uri: str) -> bool:
     """https required, except http for localhost/127.0.0.1 loopback callbacks.
     Fragments are forbidden on a redirect endpoint (RFC 6749 §3.1.2)."""
@@ -158,9 +244,13 @@ def _valid_redirect_uri(uri: str) -> bool:
         return False
     if parsed.fragment or not parsed.hostname:
         return False
-    if parsed.scheme == "https":
-        return True
-    return parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1")
+    # _validated_origin is the single source of truth for the https-or-loopback-http
+    # scheme/host contract (RT-001): a non-None return already guarantees scheme is
+    # https (any valid host) or http on the localhost/127.0.0.1 loopback, with a
+    # HOSTNAME_RE-clean host and a parseable port. The former trailing scheme+host
+    # re-check here was provably always-True once this passed; collapsed to one return
+    # so the loopback set cannot silently drift between two copies of the invariant.
+    return _validated_origin(parsed) is not None
 
 
 def _too_large() -> HTTPException:
@@ -263,6 +353,52 @@ def _clean_params(source: Any) -> dict[str, str]:
     return cleaned
 
 
+def _redirect_security_headers(redirect_uri: str) -> dict[str, str]:
+    """Consent-page CSP, but with ``form-action`` widened to include the
+    validated ``redirect_uri``'s origin.
+
+    Chromium/Electron enforces ``form-action`` across a form-submission
+    redirect chain using the CSP of the form-owning *document*, not the CSP
+    delivered on a later 30x hop — a 30x response never commits as a
+    rendered document, so its CSP header is inert there (crbug.com/932518).
+    That means this must be applied both to the redirect responses AND to
+    the consent-page render itself (``_consent_page``, which hosts the
+    ``<form>`` the user submits) — a bare ``form-action 'self'`` on either
+    silently blocks the redirect to the OAuth client and the Approve button
+    appears to do nothing. Only call this with a ``redirect_uri`` that has
+    already passed ``_valid_redirect_uri`` (https, or http on the
+    localhost/127.0.0.1 loopback) — never for the unknown-client /
+    unregistered-redirect_uri error page, which has no trusted destination
+    to widen to. Non-http(s) custom schemes (e.g. ``claude://``) are
+    rejected by ``_valid_redirect_uri`` at registration and re-validation
+    time, so this never sees one.
+
+    The origin is rebuilt from sanitized host+port via
+    ``_validated_origin`` — never spliced from ``parsed.netloc`` directly
+    (RT-002) — and ``_validated_origin`` self-enforces the
+    https-or-loopback-http scheme contract, so even a value that reaches
+    this function without having passed ``_valid_redirect_uri`` can neither
+    inject an extra CSP directive nor downgrade the origin to an insecure
+    (plain-http non-loopback) or non-http(s) scheme; it just falls back to
+    the bare ``form-action 'self'``.
+
+    Widened by substituting the ``form-action 'self'`` token inside the
+    shared ``_CONSENT_SECURITY_HEADERS`` policy string, never by
+    re-spelling a second copy of the full policy (RT-001) — a hand-
+    maintained duplicate can silently drift from the base (e.g. a future
+    edit to ``default-src``/``frame-ancestors``/``base-uri`` on the base
+    constant that forgets the copy here) with nothing to catch it.
+    """
+    parsed = urlparse(redirect_uri)
+    origin = _validated_origin(parsed)
+    headers = dict(_CONSENT_SECURITY_HEADERS)
+    if origin is not None:
+        headers["Content-Security-Policy"] = _CONSENT_SECURITY_HEADERS[
+            "Content-Security-Policy"
+        ].replace("form-action 'self'", f"form-action 'self' {origin}")
+    return headers
+
+
 def _error_page(message: str, status: int = 400) -> HTMLResponse:
     body = (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
@@ -283,7 +419,7 @@ def _error_redirect(redirect_uri: str, error: str, state: str) -> RedirectRespon
     return RedirectResponse(
         url=f"{redirect_uri}{sep}{urlencode(query)}",
         status_code=302,
-        headers=_CONSENT_SECURITY_HEADERS,
+        headers=_redirect_security_headers(redirect_uri),
     )
 
 
@@ -396,7 +532,8 @@ button {{ width: 100%; padding: 10px; border: none; border-radius: 4px;
 </body>
 </html>
 """
-    return HTMLResponse(content=body, status_code=status, headers=_CONSENT_SECURITY_HEADERS)
+    headers = _redirect_security_headers(str(cleaned["redirect_uri"]))
+    return HTMLResponse(content=body, status_code=status, headers=headers)
 
 
 @router.get("/oauth/authorize", dependencies=[Depends(unauth_rate_limit)])
@@ -480,7 +617,7 @@ async def oauth_authorize_approve(request: Request) -> Response:
     return RedirectResponse(
         url=f"{cleaned['redirect_uri']}{sep}{urlencode(query)}",
         status_code=303,
-        headers=_CONSENT_SECURITY_HEADERS,
+        headers=_redirect_security_headers(cleaned["redirect_uri"]),
     )
 
 

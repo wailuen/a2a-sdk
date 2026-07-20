@@ -129,3 +129,10 @@ Entries ordered by LRN number.
 | LRN-123 | task.artifacts must be appended AFTER the wire frame serializes, not before | [LRN-123](LRN-123-artifact-append-must-follow-serialize.md) |
 | LRN-124 | Archive note describing a redteam fix must cover the full landed diff, not just its headline AC | [LRN-124](LRN-124-archive-note-must-cover-full-redteam-diff.md) |
 | LRN-125 | Terminal-artifact guard caught build/wire exceptions but not non-serializable payloads | [LRN-125](LRN-125-artifact-guard-serializability-gap.md) |
+| LRN-126 | CSP form-action must be widened on the form-owning document, not the redirect | [LRN-126](LRN-126-csp-form-action-wrong-response.md) |
+| LRN-127 | CSP directive injection via raw redirect_uri netloc interpolation | [LRN-127](LRN-127-header-injection-via-raw-netloc.md) |
+| LRN-128 | SI-tagged AC landed without its mandated regression test | [LRN-128](LRN-128-si-ac-missing-named-test.md) |
+| LRN-129 | Import gate only resolves absolute imports, misses relative | [LRN-129](LRN-129-import-gate-relative-import-blind-spot.md) |
+| LRN-130 | Relative direct-module import form skipped submodule check, false-positive-blocked archive | [LRN-130](LRN-130-import-resolution-form-parity.md) |
+| LRN-131 | Cross-runner gate logic diverges when a fix lands in only one runner | [LRN-131](LRN-131-cross-runner-gate-logic-divergence.md) |
+| LRN-132 | Protocol surface classification must follow code sharing, not directory naming | [LRN-132](LRN-132-protocol-surface-classification-by-blast-radius.md) |
