@@ -84,10 +84,21 @@ release blocker. MEDIUM/LOW findings must be acknowledged before tagging
    If it points elsewhere, the example is not testing the current SDK — emit a
    warning and offer to reinstall with `--no-cache-dir`.
 
-6. Boot the alphageo example in DEV_MODE from the SDK root (path matters):
+6. Boot the alphageo example in DEV_MODE from the SDK root (path matters).
+   **Set `PORT=9001` in addition to uvicorn's `--port 9001`** — `agent_sdk/config.py`'s
+   `resolved_base_url` derives the app's self-advertised OAuth/card URLs from the
+   `PORT` env var (via `.env` or the process env), which is entirely independent of
+   uvicorn's bind port. If `examples/alphageo/.env` sets its own `PORT` (e.g. `8045`)
+   and you pass only `--port 9001` to uvicorn, the server binds to 9001 but advertises
+   URLs pointing at the `.env` port — every OAuth discovery probe in `/agent-verify`
+   Phase 3 will then reference the wrong port. Also **do not `source` `.env` with bash**
+   before booting — bash quote-stripping corrupts JSON-array values like
+   `CORS_ORIGINS=["https://claude.ai"]` into invalid JSON; let pydantic-settings' own
+   `env_file` loader parse it by running uvicorn with CWD inside `examples/alphageo/`
+   instead:
    ```bash
-   DEV_MODE=true examples/alphageo/.venv/bin/uvicorn src.main:app \
-     --app-dir examples/alphageo --port 9001 --workers 1
+   cd examples/alphageo && DEV_MODE=true PORT=9001 .venv/bin/uvicorn src.main:app \
+     --port 9001 --workers 1
    ```
    Run in background (stdout/stderr to a temp file). Poll
    `GET http://localhost:9001/health` for 200 (30 s timeout). On failure, cat the
