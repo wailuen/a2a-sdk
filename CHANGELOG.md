@@ -4,6 +4,17 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.42] — 2026-07-20
+
+### 🟠 Security
+- GH-122: consent-page `Content-Security-Policy: form-action` now covers the **entire** redirect chain (consent-page GET, 401 re-render, error redirect, success redirect) via a shared `_redirect_security_headers()` helper, closing a gap where Chromium/Electron enforce `form-action` against the form-owning document's CSP across the whole chain (crbug.com/932518) rather than a later 30x hop's CSP alone. The advertised origin is now rebuilt from sanitized components (`_validated_origin()`) instead of interpolating the raw `netloc`/`.hostname`, closing a CSP-header-injection vector (RFC 3986 `reg-name` permits `;`/space characters that `urlparse().hostname` doesn't reject). IPv6-literal `redirect_uri`s are now rejected outright (fail-closed) rather than best-effort sanitized. (`agent_sdk/routes/oauth.py`)
+
+### 🔧 Fixes
+- GH-118: `sdk-wave.js`/`wave-cycle.js` (and harness/template mirrors)'s `archiveIntent` import-resolution gate now handles sub-package imports and both absolute/relative import forms via a four-way disambiguation ladder, kept in sync across runner copies by `test_workflow_sync.py`. (`.claude/workflows/sdk-wave.js`, `.claude/workflows/wave-cycle.js`)
+
+### 🧪 Test / CI
+- Codifies LRN-126 through LRN-132 from wave w035's redteam rounds (`workspace/learning/`).
+
 ## [0.5.41] — 2026-07-15
 
 ### ✅ Features
