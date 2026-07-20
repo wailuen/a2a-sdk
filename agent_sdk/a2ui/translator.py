@@ -106,6 +106,20 @@ class A2uiCapabilities:
         Extended/catalog membership is irrelevant on the AG-UI path because
         consumers silently ignore unknown CUSTOM types — suppressing them
         breaks discovery without any security benefit.
+
+        DELIBERATE, NOT A GAP: this also means a client that declares
+        ``tier="core"`` (no Extended) still receives in-catalog Extended
+        Standard-Profile types (e.g. WaterfallChart) over AG-UI — the caller's
+        real tier is intentionally discarded here, unlike ``allows()`` used
+        directly on the A2A DataPart path, which DOES enforce Extended-tier
+        gating for in-catalog types. This asymmetry is correct: AG-UI's
+        silent-ignore-unknown-CUSTOM-event convention is the safety net that
+        A2A DataPart lacks, so withholding data here has no protective value
+        and only breaks graceful degradation. Reviewed 2026-07-20 (GH-124,
+        closed as not-a-bug) after a fresh conformance audit re-raised it —
+        see the pinning test
+        tests/test_rt001_ag_ui_custom_extended_gate.py::test_extended_type_emits_a2ui_update_under_tier_core
+        before "fixing" this.
         """
         if self.tier == "none":
             return self
