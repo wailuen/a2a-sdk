@@ -30,7 +30,7 @@ internals, `contrib/`) may change in minors with notice here.
   `test_split_a2ui_delivery_empty_input`) plus updated assertions in
   `tests/test_gh113_delete_surface_semantics.py`, `tests/test_a2ui_group_d.py`,
   `tests/test_protocol_fixes_w6.py`, `tests/test_protocol_wire.py`. See DESIGN.md §5.4/§7.1 for
-  the full wire contract. **Not yet filed as its own GH issue — pending confirmation.**
+  the full wire contract. Filed and closed as fixed: GH-127.
   (`agent_sdk/a2ui/translator.py`, `agent_sdk/agent/runner.py`, `agent_sdk/routes/ag_ui.py`,
   `agent_sdk/a2ui/catalog.py`, `agent_sdk/console/static/a2ui.js`, `DESIGN.md`)
 
