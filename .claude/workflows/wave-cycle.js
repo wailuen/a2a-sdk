@@ -20,9 +20,56 @@ const WAVE_FILE = args.waveFile
 const TODAY     = args.today || new Date().toISOString().slice(0, 10)
 
 // ─── protocol surface paths (trigger the Protocol Audit phase) ─────────────────
-const A2A_SURFACE  = ['src/routes/a2a', 'src/routes/agent_card', 'src/models/a2a']
-const MCP_SURFACE  = ['src/routes/mcp', 'src/routes/oauth']
-const AGUI_SURFACE = ['src/routes/ag_ui']
+// LRN-132/GH-123: src/routes/oauth is the OAuth discovery/token endpoints
+// surface (PRM/authorize/token/register/revoke), not the store that backs
+// require_identity. require_identity (defined in src/auth/middleware.py)
+// delegates credential verification to OAuthTokenStore in
+// src/auth/oauth_tokens.py via runtime.oauth.verify(). Both routes/oauth and
+// middleware are shared surfaces every protected A2A, AG-UI, and MCP route
+// depends on — not MCP-only. RT-001: middleware.py itself must also be a
+// shared surface member — it is the file that actually DEFINES
+// require_identity and is consumed directly via Depends() by all four route
+// files. AUTH_SURFACE holds both paths and is folded into all three protocol
+// arrays so a wave touching only oauth.py OR only middleware.py still
+// dispatches a2a-advisor and ag-ui-advisor, not mcp-advisor alone.
+// RT-001 (round-4 fresh-lens): AUTH_SURFACE now mirrors ALL FOUR members of
+// sdk-wave.js's auth surface — routes/oauth, auth/middleware, and the two
+// credential-verification backends auth/oauth_tokens (OAuthTokenStore.verify) and
+// auth/api_keys (ApiKeyStore.verify) that require_identity delegates to. The prior
+// 2-member list dropped oauth_tokens/api_keys on the rationale that they were "SDK
+// internals with no equivalent file in a downstream agent's src/ tree", but that
+// criterion never distinguished the KEPT members from the DROPPED ones: the standard
+// agent src/ tree ships NEITHER src/auth/ NOR src/routes/ (only src/tools, src/sources,
+// src/artifacts, src/skills), so src/routes/oauth and src/auth/middleware are exactly
+// as absent downstream as oauth_tokens/api_keys. These path fragments are defensive —
+// a custom agent that overrides ANY auth file (e.g. its credential store at
+// src/auth/oauth_tokens.py) should dispatch the protocol advisors. Over-triggering the
+// audit is fail-safe; under-triggering ships a security-relevant auth change unaudited,
+// the exact GH-123/LRN-132 blind spot. Full parity with sdk-wave.js removes the
+// asymmetry rather than defending it with a criterion that does not hold. (Each runner
+// keeps its own path dialect: sdk-wave.js addresses agent_sdk/auth/*, wave-cycle.js
+// src/auth/*.)
+// RT-003 (round 5): both verify() backends (oauth_tokens.py, api_keys.py) `from .identity
+// import Identity` and return an Identity — the object require_identity yields to every
+// protected route's Depends(). By the same "trace transitive require_identity consumers"
+// rule that added oauth_tokens/api_keys, src/auth/identity belongs in AUTH_SURFACE too — a
+// wave touching only identity.py (e.g. a binding-key or kind-tag regression on the
+// dataclass every audience check relies on) previously dispatched no protocol advisor at
+// all. Mirrors sdk-wave.js's agent_sdk/auth/identity member.
+const AUTH_SURFACE = ['src/routes/oauth', 'src/auth/middleware', 'src/auth/oauth_tokens', 'src/auth/api_keys', 'src/auth/identity']
+const A2A_SURFACE  = ['src/routes/a2a', 'src/routes/agent_card', 'src/models/a2a'].concat(AUTH_SURFACE)
+const MCP_SURFACE  = ['src/routes/mcp'].concat(AUTH_SURFACE)
+const AGUI_SURFACE = ['src/routes/ag_ui'].concat(AUTH_SURFACE)
+// RT-003 (low, this wave): A2UI_SURFACE deliberately does NOT fold in AUTH_SURFACE, unlike
+// A2A_SURFACE/MCP_SURFACE/AGUI_SURFACE above. A2UI has no transport of its own — it is
+// delivered exclusively as an A2A DataPart or an AG-UI CUSTOM event, so a wave touching only
+// an AUTH_SURFACE file already sets runA2A/runAGUI (both fold in AUTH_SURFACE), dispatching
+// a2a-advisor/ag-ui-advisor plus the unconditional seam leg below — the layer where A2UI's
+// transport-level auth is actually enforced and audited. Folding AUTH_SURFACE in here too
+// would dispatch a2ui-advisor on every auth-only wave for no added coverage: a2ui-advisor
+// audits component/message-shape conformance, not authentication. Unlike AUTH_SURFACE's fold
+// into the three transport arrays (a genuine under-triggering risk closed by GH-123/LRN-132),
+// omitting it here is not an under-trigger — it is a documented exception, not a silent gap.
 const A2UI_SURFACE = ['src/a2ui/', 'src/models/content_types']
 
 // ─── schemas ──────────────────────────────────────────────────────────────────
@@ -237,12 +284,17 @@ const PLAN_ROW_SCHEMA = {
 // cross-references against wave.allScope (Creates: ∪ Modifies:), and returns any offending paths.
 // GH-84 adds offendingHarnessPaths for dirty/untracked files under harness deliverable directories
 // (tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/, .claude/workflows/,
-// harness/workflows/, template/.claude/workflows/). Post-archive w035 follow-up: the workflow-file
-// dirs were added after a GH-118 fix (RT-003, below) landed in wave-cycle.js without either
-// wave.allScope or this dir list watching wave-cycle.js/sdk-wave.js's own directories — an
-// undeclared workflow-file edit could evade offendingPaths (undeclared) AND offendingHarnessPaths
-// (dir unwatched) at once. RT-002 (round-7): template/.claude/workflows/ is the third
-// byte-identical mirror (synced via test_workflow_sync.py) and is watched here for the same reason.
+// harness/workflows/). Post-archive w035 follow-up: the workflow-file dirs were added after a
+// GH-118 fix (RT-003, below) landed in wave-cycle.js without either wave.allScope or this dir
+// list watching wave-cycle.js/sdk-wave.js's own directories — an undeclared workflow-file edit
+// could evade offendingPaths (undeclared) AND offendingHarnessPaths (dir unwatched) at once.
+// RT-002 (round-7): template/.claude/workflows/ is the third byte-identical mirror (synced via
+// test_workflow_sync.py). RT-001 (w036): that mirror lives inside a gitignored nested peer repo
+// (template/), so it can NEVER show up in the top-level `git status --short` this gate runs in
+// step 1 — watching it via the main-repo dirty-path list (step 4) was a dead guard. Step 4b
+// separately runs `git -C template status --short` and folds any dirty .claude/workflows/ path
+// from THAT output into offendingHarnessPaths (prefixed `template/`) — the only way this gate
+// can see an uncommitted template mirror.
 // GH-118 (LRN-119): the checks above only catch paths git already sees as dirty/untracked
 // AND either in wave.allScope or under a harness dir — they never inspect import statements.
 // A module extracted mid-wave (e.g. agent_sdk/common/origin.py in GH-110) that sits
@@ -261,7 +313,7 @@ const ARCHIVE_INTENT_SCHEMA = {
     gitStatusOutput:      { type: 'string', description: 'Raw stdout of git status --short' },
     dirtyPaths:           { type: 'array', items: { type: 'string' }, description: 'All paths reported dirty or untracked by git' },
     offendingPaths:       { type: 'array', items: { type: 'string' }, description: 'Dirty paths that overlap with wave.allScope (Creates: ∪ Modifies:)' },
-    offendingHarnessPaths: { type: 'array', items: { type: 'string' }, description: 'Dirty/untracked paths under tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/, .claude/workflows/, harness/workflows/, or template/.claude/workflows/ even if not in allScope' },
+    offendingHarnessPaths: { type: 'array', items: { type: 'string' }, description: 'Dirty/untracked paths under tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/, .claude/workflows/, or harness/workflows/ (step 4) — plus, per step 4b, any dirty .claude/workflows/ path from `git -C template status --short` (the nested template repo), resolved to template/.claude/workflows/<file> — even if not in allScope' },
     offendingUndeclaredImports: { type: 'array', items: { type: 'string' }, description: 'GH-118/LRN-119/RT-001: resolved import targets (absolute agent_sdk.* OR relative from ./from ..) of dirty/scope .py files that are untracked (git ls-files empty) AND absent from wave.allScope' },
   },
 }
@@ -963,33 +1015,48 @@ if (!runProtocol) {
   // so no single advisor owns it. Uses the default agent with full cross-surface context.
   // RT-005: derive seam paths from allScope (Creates: ∪ Modifies:) rather than hardcoding —
   // hardcoded paths silently produce empty results when routes live at different paths or are not yet created.
-  // WC-007: leading-slash anchors each marker to a path-segment boundary, preventing
-  // false positives from names like 'mcptools.py' or 'pseudoa2a.py' matching 'mcp'/'a2a'.
-  // 'routes/' is kept as-is — the trailing slash already anchors it to a directory name.
-  const SEAM_ROUTE_MARKERS = ['routes/', '/a2a', '/mcp', '/oauth', '/agent_card', '/ag_ui', '/a2ui']
+  // RT-001: dispatched unconditionally whenever this block runs at all — it only runs
+  // inside the `if (runProtocol)` branch above — matching sdk-wave.js, which never gates
+  // its seam task on a marker list. Previously this leg was ALSO gated on
+  // seamPaths.length > 0, so a wave touching only a file promoted into a protocol-surface
+  // array but not matched by SEAM_ROUTE_MARKERS (e.g. AUTH_SURFACE's src/auth/middleware)
+  // skipped the seam audit — the one leg that checks "Auth mode enforced uniformly: no
+  // surface accepts a token type another rejects", the check most relevant to that class
+  // of change. seamPaths is still only a HINT that narrows the "files to audit" line in the
+  // prompt; it no longer gates whether the task runs — wave.allScope is always given in full.
+  // RT-001 (round-7 fresh-lens): markers are matched as WHOLE path segments — a file
+  // basename minus its extension, or a directory name — NOT as substrings. This delivers
+  // the segment-boundary match the earlier leading-slash markers ('/mcp', '/a2a', …) only
+  // half-provided: a leading slash anchors a segment's START but not its END, so '/mcp'
+  // still prefix-matched '/mcptools' and '/a2a' matched 'pseudoa2a'. Whole-segment matching
+  // makes both non-matches — 'mcptools'/'pseudoa2a' are not the segments 'mcp'/'a2a' — and
+  // needs no 'auth'-fragment marker: the OAuth route routes/oauth is caught by the 'routes'
+  // segment, while the credential store auth/oauth_tokens (a non-route AUTH_SURFACE member)
+  // is correctly excluded, ending the round-4 asymmetric mislabel at its source. The heading
+  // below stays "Candidate route/shared surfaces" so a matched non-HTTP shared surface
+  // (e.g. src/a2ui/… via the 'a2ui' segment) is not described as a route file.
+  const SEAM_ROUTE_MARKERS = ['routes', 'a2a', 'mcp', 'agent_card', 'ag_ui', 'a2ui']
   const seamPaths = wave.allScope.filter(function(p) {
-    return SEAM_ROUTE_MARKERS.some(function(m) { return p.indexOf(m) !== -1 })
-  })
-  if (seamPaths.length === 0) {
-    log('Seam audit skipped — no route files in scope (Creates: ∪ Modifies:)')
-  } else {
-    advisorTasks.push(function() {
-      return agent(
-        'Cross-protocol seam audit — consistency ACROSS A2A, MCP, AG-UI, A2UI surfaces.\n\n' +
-        'Route files to audit (derived from wave scope):\n' +
-        seamPaths.join('\n') + '\n\n' +
-        'Wave scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n\n' +
-        'Check:\n' +
-        '- Agent card skills array contains one entry per @tool in the ToolRegistry (no tool advertised in the card is absent from the registry).\n' +
-        '- src/skills/*.md files are reachable via the load_skill tool (skills_dir is wired in the Agent constructor); these are separate from the card\'s skills[] and no 1:1 count match is required.\n' +
-        '- Agent card streaming flag matches actual SSE implementation.\n' +
-        '- Auth mode enforced uniformly: no surface accepts a token type another rejects.\n' +
-        '- Version strings identical across agent card, MCP server info, health endpoint.\n\n' +
-        'Return structured findings. Set protocol="SEAM" per finding.',
-        { schema: PROTO_SCHEMA, label: 'proto:seam', phase: 'Protocol Audit' }
-      )
+    return p.split('/').some(function(seg) {
+      return SEAM_ROUTE_MARKERS.indexOf(seg.replace(/\.[^./]+$/, '')) !== -1
     })
-  }
+  })
+  advisorTasks.push(function() {
+    return agent(
+      'Cross-protocol seam audit — consistency ACROSS A2A, MCP, AG-UI, A2UI surfaces.\n\n' +
+      'Candidate route/shared surfaces in scope (derived from wave scope):\n' +
+      (seamPaths.length > 0 ? seamPaths.join('\n') : '(none matched by name — shared/auth surface change; see full scope below)') + '\n\n' +
+      'Wave scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n\n' +
+      'Check:\n' +
+      '- Agent card skills array contains one entry per @tool in the ToolRegistry (no tool advertised in the card is absent from the registry).\n' +
+      '- src/skills/*.md files are reachable via the load_skill tool (skills_dir is wired in the Agent constructor); these are separate from the card\'s skills[] and no 1:1 count match is required.\n' +
+      '- Agent card streaming flag matches actual SSE implementation.\n' +
+      '- Auth mode enforced uniformly: no surface accepts a token type another rejects.\n' +
+      '- Version strings identical across agent card, MCP server info, health endpoint.\n\n' +
+      'Return structured findings. Set protocol="SEAM" per finding.',
+      { schema: PROTO_SCHEMA, label: 'proto:seam', phase: 'Protocol Audit' }
+    )
+  })
 
   const protoResults = (await parallel(advisorTasks)).filter(Boolean)
   let protoCritical = protoResults.reduce(function(n, r) { return n + (r.criticalCount || 0) }, 0)
@@ -1127,18 +1194,18 @@ if (!runProtocol) {
       })
     }
     // Seam recheck: no specialist agentType for the same reason as the initial seam check.
-    // RT-005: only push seam recheck if there were seam paths to audit (mirrors initial logic).
-    if (seamPaths.length > 0) {
-      recheckTasks.push(function() {
-        return agent(
-          'Cross-protocol seam re-audit after preceding fix.\n' +
-          'Route files to audit:\n' + seamPaths.join('\n') + '\n' +
-          'Scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n' +
-          'Focus on previously-critical SEAM findings. Return structured findings.',
-          { schema: PROTO_SCHEMA, label: 'proto:recheck:seam', phase: 'Protocol Audit' }
-        )
-      })
-    }
+    // RT-001: pushed unconditionally, mirroring the initial seam task above — previously
+    // gated on seamPaths.length > 0, the same gap the initial-dispatch fix removes there.
+    recheckTasks.push(function() {
+      return agent(
+        'Cross-protocol seam re-audit after preceding fix.\n' +
+        'Candidate route/shared surfaces in scope:\n' +
+        (seamPaths.length > 0 ? seamPaths.join('\n') : '(none matched by name — shared/auth surface change; see full scope below)') + '\n' +
+        'Scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n' +
+        'Focus on previously-critical SEAM findings. Return structured findings.',
+        { schema: PROTO_SCHEMA, label: 'proto:recheck:seam', phase: 'Protocol Audit' }
+      )
+    })
     const recheckResults = (await parallel(recheckTasks)).filter(Boolean)
     protoCritical = recheckResults.reduce(function(n, r) { return n + (r.criticalCount || 0) }, 0)
 
@@ -1338,8 +1405,18 @@ if (!protocolBlocked) {
     '   c. A scope entry starts with the dirty path (dirty parent directory).\n' +
     '4. Separately, collect any dirty/untracked paths whose relative path starts with\n' +
     '   tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/,\n' +
-    '   .claude/workflows/, harness/workflows/, or template/.claude/workflows/\n' +
+    '   .claude/workflows/, or harness/workflows/\n' +
     '   — put these in offendingHarnessPaths even if they do not appear in the scope list.\n' +
+    '4b. RT-001 (w036): template/.claude/workflows/ is a THIRD byte-identical mirror\n' +
+    '   (synced via test_workflow_sync.py) but lives inside template/, a nested peer git\n' +
+    '   repo that is gitignored in THIS repo — step 1\'s `git status --short` can NEVER\n' +
+    '   show a path under template/, no matter how dirty that nested repo\'s working tree\n' +
+    '   is, so it cannot be folded in via step 4 above. If a `template/` directory exists\n' +
+    '   at the repo root, separately run: git -C template status --short\n' +
+    '   For each line in THAT output whose path starts with .claude/workflows/, add\n' +
+    '   `template/` + that path (e.g. template/.claude/workflows/wave-cycle.js) to\n' +
+    '   offendingHarnessPaths. This is the only way this gate can see an uncommitted\n' +
+    '   template mirror — the mirror lives in a repo the top-level git status cannot see.\n' +
     '5. GH-118 import cross-check (LRN-119 — mid-wave module extraction). RT-001: this step\n' +
     '   MUST resolve RELATIVE intra-package imports (`from . import X`, `from .mod import Y`,\n' +
     '   `from ..pkg.mod import Z`) in addition to ABSOLUTE `agent_sdk.*` imports. Relative\n' +

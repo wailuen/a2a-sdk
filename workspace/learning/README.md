@@ -41,7 +41,7 @@ Entries ordered by LRN number.
 | LRN-035 | Test-fix agent result must be verified with a re-gate pytest pass | [LRN-035](LRN-035-test-fix-agent-missing-regate-verify.md) |
 | LRN-036 | Phase redteam null-response must not reset prevSigs | [LRN-036](LRN-036-phase-redteam-null-must-not-reset-prevsigs.md) |
 | LRN-037 | Protocol test-fix path missing re-gate before recheck | [LRN-037](LRN-037-proto-testfix-missing-regate.md) |
-| LRN-038 | Unconditional seam audit dispatch on empty seam paths | [LRN-038](LRN-038-unconditional-seam-audit-dispatch.md) |
+| LRN-038 | → Consolidated into LRN-034 (unconditional seam audit dispatch) | [LRN-038](LRN-038-unconditional-seam-audit-dispatch.md) |
 | LRN-039 | SC-F1 emits annotation validator must skip — not raise — when eval_str resolution fails | [LRN-039](LRN-039-sc-f1-emits-annotation-unresolvable-string-skip.md) |
 | LRN-040 | Deterministic THREAD_ID in acceptance-api.js causes concurrent-run contamination | [LRN-040](LRN-040-thread-id-acceptance-api-contamination-risk.md) |
 | LRN-041 | Protocol-fix loop missing re-gate before recheck | [LRN-041](LRN-041-proto-fix-loop-missing-regate-before-recheck.md) |
@@ -136,3 +136,4 @@ Entries ordered by LRN number.
 | LRN-130 | Relative direct-module import form skipped submodule check, false-positive-blocked archive | [LRN-130](LRN-130-import-resolution-form-parity.md) |
 | LRN-131 | Cross-runner gate logic diverges when a fix lands in only one runner | [LRN-131](LRN-131-cross-runner-gate-logic-divergence.md) |
 | LRN-132 | Protocol surface classification must follow code sharing, not directory naming | [LRN-132](LRN-132-protocol-surface-classification-by-blast-radius.md) |
+| LRN-133 | Reversing a decision must supersede its learning's Check in the same wave | [LRN-133](LRN-133-learning-check-reversal-reconciliation.md) |

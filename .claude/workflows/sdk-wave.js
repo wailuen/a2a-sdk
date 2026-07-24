@@ -20,9 +20,57 @@ const WAVE_FILE = args.waveFile
 const TODAY     = args.today || '(see context date)'
 
 // ─── protocol surface paths — SDK repo layout ─────────────────────────────────
-const A2A_SURFACE  = ['agent_sdk/routes/a2a', 'agent_sdk/routes/agent_card', 'agent_sdk/models/a2a']
-const MCP_SURFACE  = ['agent_sdk/routes/mcp', 'agent_sdk/routes/oauth']
-const AGUI_SURFACE = ['agent_sdk/routes/ag_ui']
+// LRN-132/GH-123: agent_sdk/routes/oauth is the OAuth discovery/token
+// endpoints surface (PRM/authorize/token/register/revoke), not the store
+// that backs require_identity. require_identity (defined in
+// agent_sdk/auth/middleware.py) delegates credential verification to
+// OAuthTokenStore in agent_sdk/auth/oauth_tokens.py via
+// runtime.oauth.verify(). Both routes/oauth and middleware are shared
+// surfaces every protected A2A, AG-UI, and MCP route depends on — not
+// MCP-only. RT-001: middleware.py itself must also be a shared surface
+// member — it is the file that actually DEFINES require_identity and is
+// consumed directly via Depends() by all four route files. AUTH_SURFACE
+// holds both paths and is folded into all three protocol arrays so a wave
+// touching only oauth.py OR only middleware.py still dispatches
+// a2a-advisor and ag-ui-advisor, not mcp-advisor alone.
+// RT-001 (round 2): middleware.py only calls into the credential-verification
+// implementations — agent_sdk/auth/oauth_tokens.py (OAuthTokenStore.verify)
+// and agent_sdk/auth/api_keys.py (ApiKeyStore.verify) are what actually gate
+// every protected route. Neither was a surface member, so a wave touching
+// only oauth_tokens.py (e.g. an audience-binding regression) dispatched no
+// protocol advisor at all. Both are added to AUTH_SURFACE for the same
+// reason middleware.py was: trace the transitive runtime consumers of
+// require_identity, not just its direct Depends() target.
+// RT-003 (round 5): both verify() backends (oauth_tokens.py:377, api_keys.py:94)
+// `from .identity import Identity` and return an Identity — the object
+// require_identity yields to every protected route's Depends(). By the same
+// "trace transitive require_identity consumers" rule that added oauth_tokens
+// and api_keys, agent_sdk/auth/identity.py belongs in AUTH_SURFACE too — a wave
+// touching only identity.py (e.g. a binding-key or kind-tag regression on the
+// dataclass every audience check relies on) previously dispatched no protocol
+// advisor at all.
+const AUTH_SURFACE = [
+  'agent_sdk/routes/oauth',
+  'agent_sdk/auth/middleware',
+  'agent_sdk/auth/oauth_tokens',
+  'agent_sdk/auth/api_keys',
+  'agent_sdk/auth/identity',
+]
+const A2A_SURFACE  = ['agent_sdk/routes/a2a', 'agent_sdk/routes/agent_card', 'agent_sdk/models/a2a'].concat(AUTH_SURFACE)
+const MCP_SURFACE  = ['agent_sdk/routes/mcp'].concat(AUTH_SURFACE)
+const AGUI_SURFACE = ['agent_sdk/routes/ag_ui'].concat(AUTH_SURFACE)
+// RT-003 (fix wave): A2UI_SURFACE deliberately does NOT fold in AUTH_SURFACE, unlike
+// A2A_SURFACE/MCP_SURFACE/AGUI_SURFACE above. A2UI has no transport of its own — it is
+// delivered exclusively as an A2A DataPart or an AG-UI CUSTOM event, so a wave touching
+// only an AUTH_SURFACE file already sets runA2A/runAGUI (both fold in AUTH_SURFACE),
+// dispatching a2a-advisor/ag-ui-advisor plus the unconditional seam leg below — the
+// layer where A2UI's transport-level auth is actually enforced and audited. Folding
+// AUTH_SURFACE in here too would dispatch a2ui-advisor on every auth-only wave for no
+// added coverage: a2ui-advisor audits component/message-shape conformance, not
+// authentication. Unlike AUTH_SURFACE's fold into the three transport arrays (a genuine
+// under-triggering risk closed by GH-123/LRN-132), omitting it here is not an
+// under-trigger — it is a documented exception, not a silent gap. Mirrors
+// wave-cycle.js's identical rationale above its own A2UI_SURFACE.
 const A2UI_SURFACE = ['agent_sdk/a2ui/', 'agent_sdk/models/content_types']
 
 // ─── schemas ──────────────────────────────────────────────────────────────────
@@ -222,12 +270,17 @@ const GATE_SCHEMA = {
 // cross-references against wave.allScope (Creates: ∪ Modifies:) for offendingPaths, and
 // separately flags any dirty/untracked paths under harness deliverable directories
 // (tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/, .claude/workflows/,
-// harness/workflows/, template/.claude/workflows/) as offendingHarnessPaths. Post-archive w035
-// follow-up: the workflow-file dirs were added after a GH-118 fix (RT-003) landed in wave-cycle.js
-// without either wave.allScope or this dir list watching wave-cycle.js/sdk-wave.js's own
-// directories — an undeclared workflow-file edit could evade offendingPaths AND
-// offendingHarnessPaths at once. RT-002 (round-7): template/.claude/workflows/ is the third
-// byte-identical mirror (synced via test_workflow_sync.py) and is watched here for the same reason.
+// harness/workflows/) as offendingHarnessPaths. Post-archive w035 follow-up: the workflow-file
+// dirs were added after a GH-118 fix (RT-003) landed in wave-cycle.js without either
+// wave.allScope or this dir list watching wave-cycle.js/sdk-wave.js's own directories — an
+// undeclared workflow-file edit could evade offendingPaths AND offendingHarnessPaths at once.
+// RT-002 (round-7): template/.claude/workflows/ is the third byte-identical mirror (synced via
+// test_workflow_sync.py). RT-001 (w036): that mirror lives inside a gitignored nested peer repo
+// (template/), so it can NEVER show up in the top-level `git status --short` this gate runs in
+// step 1 — watching it via the main-repo dirty-path list (step 4) was a dead guard. Step 4b
+// separately runs `git -C template status --short` and folds any dirty .claude/workflows/ path
+// from THAT output into offendingHarnessPaths (prefixed `template/`) — the only way this gate
+// can see an uncommitted template mirror.
 // GH-118 (LRN-119): the checks above only catch paths git already sees as dirty/untracked
 // AND either in wave.allScope or under a harness dir — they never inspect import statements.
 // A module extracted mid-wave (e.g. agent_sdk/common/origin.py in GH-110) that sits
@@ -244,7 +297,7 @@ const ARCHIVE_INTENT_SCHEMA = {
     gitStatusOutput:      { type: 'string', description: 'Raw stdout of git status --short' },
     dirtyPaths:           { type: 'array', items: { type: 'string' }, description: 'All paths reported dirty or untracked by git' },
     offendingPaths:       { type: 'array', items: { type: 'string' }, description: 'Dirty paths that overlap with wave.allScope (Creates: ∪ Modifies:)' },
-    offendingHarnessPaths: { type: 'array', items: { type: 'string' }, description: 'Dirty/untracked paths under tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/, .claude/workflows/, harness/workflows/, or template/.claude/workflows/ even if not in allScope' },
+    offendingHarnessPaths: { type: 'array', items: { type: 'string' }, description: 'Dirty/untracked paths under tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/, .claude/workflows/, or harness/workflows/ (step 4) — plus, per step 4b, any dirty .claude/workflows/ path from `git -C template status --short` (the nested template repo), resolved to template/.claude/workflows/<file> — even if not in allScope' },
     offendingUndeclaredImports: { type: 'array', items: { type: 'string' }, description: 'GH-118/LRN-119/RT-001: resolved import targets (absolute agent_sdk.* OR relative from ./from ..) of dirty/scope .py files that are untracked (git ls-files empty) AND absent from wave.allScope' },
   },
 }
@@ -1061,8 +1114,18 @@ if (!protocolBlocked) {
     '   c. A scope entry starts with the dirty path (dirty parent directory).\n' +
     '4. Separately, collect any dirty/untracked paths whose relative path starts with\n' +
     '   tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/,\n' +
-    '   .claude/workflows/, harness/workflows/, or template/.claude/workflows/\n' +
+    '   .claude/workflows/, or harness/workflows/\n' +
     '   — put these in offendingHarnessPaths even if they do not appear in the scope list.\n' +
+    '4b. RT-001 (w036): template/.claude/workflows/ is a THIRD byte-identical mirror\n' +
+    '   (synced via test_workflow_sync.py) but lives inside template/, a nested peer git\n' +
+    '   repo that is gitignored in THIS repo — step 1\'s `git status --short` can NEVER\n' +
+    '   show a path under template/, no matter how dirty that nested repo\'s working tree\n' +
+    '   is, so it cannot be folded in via step 4 above. If a `template/` directory exists\n' +
+    '   at the repo root, separately run: git -C template status --short\n' +
+    '   For each line in THAT output whose path starts with .claude/workflows/, add\n' +
+    '   `template/` + that path (e.g. template/.claude/workflows/wave-cycle.js) to\n' +
+    '   offendingHarnessPaths. This is the only way this gate can see an uncommitted\n' +
+    '   template mirror — the mirror lives in a repo the top-level git status cannot see.\n' +
     '5. GH-118 import cross-check (LRN-119 — mid-wave module extraction). RT-001: this step\n' +
     '   MUST resolve RELATIVE intra-package imports (`from . import X`, `from .mod import Y`,\n' +
     '   `from ..pkg.mod import Z`) in addition to ABSOLUTE `agent_sdk.*` imports. Relative\n' +
