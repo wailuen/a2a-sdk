@@ -28,7 +28,7 @@ _background_tasks: set[asyncio.Task[Any]] = set()
 
 from pydantic import BaseModel
 
-from ..a2ui.translator import A2uiCapabilities, translate
+from ..a2ui.translator import A2uiCapabilities, split_a2ui_delivery, translate
 from ..models.a2a import (
     Artifact,
     DataPart,
@@ -167,11 +167,23 @@ def build_artifact(
             # SC-D1: validate structure before delivery
             _validate_a2ui_wire(payload, a2ui_messages)
             metadata["mimeType"] = A2UI_MIME_TYPE
-            # A2UI delivery: DataPart.data is the bare message array (trap #11),
-            # and the part is self-describing via its mimeType.
+            # Critical protocol-conformance fix: deleteSurface must never
+            # share a delivered array with its own surface's create/populate
+            # messages — a spec-conformant Path-A renderer folds one
+            # delivered array atomically and paints once after the fold, so
+            # a bundled deleteSurface would unmount the surface before it
+            # ever painted (see split_a2ui_delivery() docstring). Deliver the
+            # open and close arrays as two DataParts, open first, each
+            # self-describing via its own mimeType (trap #11: DataPart.data
+            # is always a bare message array, never wrapped).
+            open_messages, close_messages = split_a2ui_delivery(a2ui_messages)
             parts.append(
-                DataPart(data=a2ui_messages, metadata={"mimeType": A2UI_MIME_TYPE})
+                DataPart(data=open_messages, metadata={"mimeType": A2UI_MIME_TYPE})
             )
+            if close_messages:
+                parts.append(
+                    DataPart(data=close_messages, metadata={"mimeType": A2UI_MIME_TYPE})
+                )
         else:
             # P6-02 / A2A §D3: always emit a DataPart for structured payloads,
             # even when A2UI is not active, so plain A2A clients can consume

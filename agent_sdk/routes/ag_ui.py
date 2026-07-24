@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
-from ..a2ui.translator import A2uiCapabilities, translate
+from ..a2ui.translator import A2uiCapabilities, split_a2ui_delivery, translate
 from ..agent.runner import new_task, run_task_worker
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
@@ -309,9 +309,22 @@ class _RunMapper:
             if isinstance(payload, ContentModel):
                 a2ui_messages = translate(payload, capabilities=self.capabilities.for_custom_emit())
                 if a2ui_messages is not None:
-                    # Named envelope so consumers can key on value.messages
-                    # (spec: CUSTOM.value carries the A2UI message array).
-                    frames.append(self._custom("A2UI_UPDATE", {"messages": a2ui_messages}))
+                    # Critical protocol-conformance fix: deleteSurface must
+                    # never share a delivered array with its own surface's
+                    # create/populate messages — a spec-conformant Path-A
+                    # renderer folds one delivered array atomically and
+                    # paints once after the fold, so a bundled deleteSurface
+                    # would unmount the surface before it ever painted (see
+                    # split_a2ui_delivery() docstring). Deliver the open and
+                    # close arrays as two separate A2UI_UPDATE CUSTOM events,
+                    # open first — each event a self-contained fold+paint
+                    # unit. Named envelope so consumers can key on
+                    # value.messages (spec: CUSTOM.value carries the A2UI
+                    # message array).
+                    open_messages, close_messages = split_a2ui_delivery(a2ui_messages)
+                    frames.append(self._custom("A2UI_UPDATE", {"messages": open_messages}))
+                    if close_messages:
+                        frames.append(self._custom("A2UI_UPDATE", {"messages": close_messages}))
             return frames
 
         if isinstance(event, InterruptEvent):

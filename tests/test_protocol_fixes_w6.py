@@ -177,24 +177,31 @@ def test_build_artifact_content_model_no_a2ui_emits_two_parts():
 
 
 def test_build_artifact_content_model_with_a2ui_emits_a2ui_data_part():
-    """When A2UI is active, build_artifact emits TextPart + A2UI DataPart."""
+    """When A2UI is active, build_artifact emits TextPart + two A2UI DataParts
+    (open + close — deleteSurface is delivered as its own array, never
+    bundled with create/populate; see split_a2ui_delivery())."""
     card = _SimpleCard(value="world")
     assert _CAPS_A2UI_ON.allows(_SimpleCard), "precondition: A2UI must be active"
 
     artifact = build_artifact(_make_event(card), _CAPS_A2UI_ON)
     parts = artifact.parts
-    assert len(parts) == 2, f"expected 2 parts, got {len(parts)}: {parts}"
+    assert len(parts) == 3, f"expected 3 parts, got {len(parts)}: {parts}"
 
-    text_part, data_part = parts
+    text_part, open_part, close_part = parts
     assert isinstance(text_part, TextPart)
-    assert isinstance(data_part, DataPart)
+    assert isinstance(open_part, DataPart)
+    assert isinstance(close_part, DataPart)
 
-    # A2UI DataPart carries the message array and the A2UI mime type.
-    assert isinstance(data_part.data, list), (
-        f"A2UI DataPart.data must be a list, got {type(data_part.data)}"
-    )
-    meta = data_part.metadata or {}
-    assert meta.get("mimeType") == "application/a2ui+json"
+    # A2UI DataParts carry the message array and the A2UI mime type.
+    for data_part in (open_part, close_part):
+        assert isinstance(data_part.data, list), (
+            f"A2UI DataPart.data must be a list, got {type(data_part.data)}"
+        )
+        meta = data_part.metadata or {}
+        assert meta.get("mimeType") == "application/a2ui+json"
+
+    assert all("deleteSurface" not in m for m in open_part.data)
+    assert len(close_part.data) == 1 and "deleteSurface" in close_part.data[0]
 
 
 # ---------------------------------------------------------------------------

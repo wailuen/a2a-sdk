@@ -249,12 +249,21 @@ def a2ui_extension(allowed_components: list[str] | None = None) -> AgentExtensio
 
     ``deleteSurfaceSemantics`` is a NON-NORMATIVE, SDK-specific hint (NOT a
     field defined by A2UI v0.9.1 / Standard Profile v1). It carries the
-    show-then-close convention (DESIGN.md §5.4/§7.1) on the card: ``deleteSurface``
-    is applied as a post-paint step (the surface closes; the rendered output
-    persists in the transcript). A consumer must already know this SDK's
-    convention to interpret the key and its ``"post-paint"`` value — it is not
-    a spec-defined discovery mechanism, but it spares the consumer from
-    reverse-engineering the renderer source.
+    show-then-close convention (DESIGN.md §5.4/§7.1) on the card:
+    ``deleteSurface`` for a surface is always delivered as its own,
+    independently-folded message array — a separate A2A DataPart (or a
+    separate AG-UI ``A2UI_UPDATE`` CUSTOM event) from that surface's
+    create/populate messages, never bundled into the same array (critical
+    fix: a strictly spec-conformant Path-A renderer folds ONE delivered
+    array atomically and paints once after the fold, so a bundled
+    ``deleteSurface`` would unmount the surface before it ever painted). This
+    means NO special-casing is required to render this SDK's A2UI output
+    correctly — ordinary per-array fold-then-paint handling, exactly what
+    A2UI v0.9.1 already specifies, is sufficient. The hint value
+    ``"split-delivery"`` documents this on the card as a courtesy so a
+    consumer need not reverse-engineer the delivery shape, but it is not a
+    spec-defined discovery mechanism and correct rendering never depends on
+    reading it.
     """
     return AgentExtension(
         uri=A2UI_EXTENSION_URI,
@@ -263,7 +272,7 @@ def a2ui_extension(allowed_components: list[str] | None = None) -> AgentExtensio
         params={
             "supportedCatalogIds": supported_catalogs(allowed_components),
             "acceptsInlineCatalogs": False,
-            "deleteSurfaceSemantics": "post-paint",
+            "deleteSurfaceSemantics": "split-delivery",
         },
     )
 

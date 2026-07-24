@@ -3,13 +3,20 @@
 B1: KpiTrend collapses to direction string on the wire (MetricItem.trend).
 B2: TimeSeriesChart emits no top-level `series` and no per-point `series`.
 C1: translate() produces the canonical four-message sequence.
+D1: split_a2ui_delivery() isolates deleteSurface into its own delivered array.
 """
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
 import pytest
 
-from agent_sdk.a2ui.translator import A2uiCapabilities, translate
+from agent_sdk.a2ui.translator import A2uiCapabilities, split_a2ui_delivery, translate
 from agent_sdk.models.content_types import (
     KpiCard,
     KpiTrend,
@@ -234,6 +241,43 @@ def test_translate_returns_four_messages():
     assert "deleteSurface" in result[3]
 
 
+# ── D1: split_a2ui_delivery() ────────────────────────────────────────────────
+
+def test_split_a2ui_delivery_isolates_delete_surface():
+    """deleteSurface must never share a delivered array with its own
+    surface's create/populate messages (critical finding: a spec-conformant
+    Path-A renderer folds one array atomically and paints once after the
+    fold, so a bundled deleteSurface unmounts the surface before it ever
+    paints)."""
+    payload = KpiCard(
+        title="Test",
+        metrics=[MetricItem(label="Revenue", value=1_000_000, unit="USD")],
+    )
+    result = translate(payload)
+    assert result is not None
+
+    open_msgs, close_msgs = split_a2ui_delivery(result)
+
+    assert all("deleteSurface" not in m for m in open_msgs), (
+        "open array must not contain deleteSurface"
+    )
+    assert all("deleteSurface" in m for m in close_msgs), (
+        "close array must contain only deleteSurface message(s)"
+    )
+    assert len(close_msgs) == 1
+    assert [next(k for k in m if k != "version") for m in open_msgs] == [
+        "createSurface",
+        "updateComponents",
+        "updateDataModel",
+    ]
+    # every original message is accounted for exactly once, order preserved
+    assert open_msgs + close_msgs == result
+
+
+def test_split_a2ui_delivery_empty_input():
+    assert split_a2ui_delivery([]) == ([], [])
+
+
 def test_translate_update_data_model_carries_wire_value():
     """The updateDataModel message value must be the wire() output of the payload."""
     payload = KpiCard(
@@ -376,24 +420,119 @@ def test_apply_data_model_update_explicit_none_sets_null():
     assert model["title"] is None
 
 
-def test_apply_data_model_update_missing_is_noop():
-    """M3: Passing MISSING leaves the field unchanged."""
+def test_apply_data_model_update_missing_deletes_key():
+    """M3 (A2UI v0.9.1): Passing MISSING deletes the key at *pointer*."""
     from agent_sdk.a2ui.translator import MISSING, apply_data_model_update
 
     model: dict = {"title": "keep"}
     apply_data_model_update(model, "/title", MISSING)
-    assert model["title"] == "keep"
+    assert "title" not in model
 
 
-def test_apply_data_model_update_rejects_escape_pointer():
-    """M2: Pointer starting with // or containing /.. must raise ValueError."""
+def test_apply_data_model_update_missing_deletes_nonexistent_leaf_is_noop():
+    """M3: Deleting an absent leaf key must not raise."""
+    from agent_sdk.a2ui.translator import MISSING, apply_data_model_update
+
+    model: dict = {"other": "value"}
+    apply_data_model_update(model, "/title", MISSING)
+    assert model == {"other": "value"}
+
+
+def test_apply_data_model_update_missing_deletes_nested_path():
+    """M3: Deleting a nested pointer removes only the leaf key, leaving
+    intermediate containers and sibling keys intact."""
+    from agent_sdk.a2ui.translator import MISSING, apply_data_model_update
+
+    model: dict = {"metrics": {"label": "IRR", "value": 0.18}}
+    apply_data_model_update(model, "/metrics/value", MISSING)
+    assert model["metrics"] == {"label": "IRR"}
+
+
+def test_apply_data_model_update_missing_scaffolds_absent_intermediate_path():
+    """RT-001: Deleting a nested pointer whose parent segments are absent
+    scaffolds those intermediate dicts, mirroring the console renderer's
+    pointerSet unconditional-traverse-then-branch shape (a2ui.js) — server
+    and renderer now converge on identical wire input. The leaf itself is
+    still never created (pop on an absent key is a no-op)."""
+    from agent_sdk.a2ui.translator import MISSING, apply_data_model_update
+
+    model: dict = {}
+    apply_data_model_update(model, "/a/b/c", MISSING)
+    assert model == {"a": {"b": {}}}
+
+
+def test_apply_data_model_update_empty_first_segment_writes_empty_string_key():
+    """RT-EMPTY-SEGMENT-001 (round 5, corrects the over-broad "//" guard): a
+    "//" prefix (empty FIRST segment) is NOT a component-root escape. Per RFC
+    6901 it addresses the empty-string key — an ordinary key WITHIN the
+    component-root model (model[""]), never the envelope or a parent. A prior
+    revision rejected ONLY this one spelling while the helper accepted every
+    equivalent spelling that reaches the same empty-string key ("/a//b",
+    "/a/"), so the guard provided no boundary. "//"-prefixed pointers now
+    converge with the renderer's pointerSet (which writes {"": {"bar": "X"}} —
+    see the empty-segment convergence-table rows for the live cross-check).
+    Genuine ".." parent-escape tokens remain rejected — see
+    test_apply_data_model_update_still_rejects_genuine_dotdot_segment."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    model: dict = {}
+    apply_data_model_update(model, "//bar", "X")
+    assert model == {"": {"bar": "X"}}, (
+        f"'//bar' must write the empty-string key, matching the renderer; got {model!r}"
+    )
+
+
+def test_apply_data_model_update_accepts_tilde_escaped_slash_as_literal_key():
+    """RT-JSON-POINTER-001 (corrected): a ~1-encoded "/" is a literal key
+    CHARACTER, never a path separator, so "/foo~1../bar" decodes to the two
+    tokens ["foo/..", "bar"] — a legitimate RFC 6901 nested write to the
+    literal key "foo/..", NOT a parent-escape. The prior revision rejected it
+    via an over-broad `"/.." in t` / `t.startswith("../")` substring check
+    that could only ever fire on such ~1-formed literal keys (a decoded "/"
+    comes only from ~1); the check now rejects ONLY a decoded token EQUAL to
+    "..". This helper must ACCEPT the pointer and set the literal key, matching
+    the console renderer's pointerSet (which writes {"foo/..": {"bar": ...}} —
+    see the live cross-check test below)."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    model: dict = {}
+    apply_data_model_update(model, "/foo~1../bar", "X")
+    assert model == {"foo/..": {"bar": "X"}}, (
+        f"'/foo~1../bar' must set literal key 'foo/..', matching the renderer; got {model!r}"
+    )
+
+
+def test_apply_data_model_update_allows_keys_that_merely_contain_dotdot():
+    """RT-002: the raw pre-decode check used a naive '/..' substring match
+    that over-rejected legitimate RFC 6901 keys which merely CONTAIN '..'
+    textually (e.g. '..foo', '..bar') as if they were a parent-escape
+    segment. Only a genuine '..' PATH SEGMENT (a decoded token equal to
+    '..') is a parent-escape attempt — the per-token check below the raw
+    check already enforces that correctly. '..foo' and '..bar' must be
+    settable, ordinary object keys."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    model: dict = {}
+    apply_data_model_update(model, "/..foo", 1)
+    assert model == {"..foo": 1}
+
+    model2: dict = {}
+    apply_data_model_update(model2, "/a/..bar", 1)
+    assert model2 == {"a": {"..bar": 1}}
+
+
+def test_apply_data_model_update_still_rejects_genuine_dotdot_segment():
+    """RT-002: dropping the over-broad raw '/..' substring check must not
+    reopen the real parent-escape hole — a genuine '..' path segment
+    (/foo/../bar decodes to the token '..') is still rejected by the
+    post-decode per-token check."""
     from agent_sdk.a2ui.translator import apply_data_model_update
 
     with pytest.raises(ValueError, match="escapes"):
-        apply_data_model_update({}, "//escape", "bad")
+        apply_data_model_update({}, "/foo/../bar", "bad")
 
     with pytest.raises(ValueError, match="escapes"):
-        apply_data_model_update({}, "/foo/../bar", "bad")
+        apply_data_model_update({}, "/..", "bad")
 
 
 def test_apply_data_model_update_rejects_non_root_pointer():
@@ -404,6 +543,87 @@ def test_apply_data_model_update_rejects_non_root_pointer():
         apply_data_model_update({}, "title", "bad")
 
 
+def test_apply_data_model_update_empty_pointer_replaces_whole_model():
+    """RT-001 (corrects RT-003): A2UI v0.9.1 explicitly overrides RFC 6901 —
+    "omit path or use / to replace the whole data model" — for BOTH the
+    omitted/empty-string path and "/". A dict value replaces every existing
+    key; nothing from the stale model survives."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    model: dict = {"stale": "keep-me-out"}
+    apply_data_model_update(model, "", {"fresh": "value"})
+    assert model == {"fresh": "value"}
+
+
+def test_apply_data_model_update_slash_pointer_replaces_whole_model():
+    """RT-001: "/" must behave IDENTICALLY to the omitted/empty-string form
+    per the A2UI spec's explicit override of RFC 6901 — NOT as an ordinary
+    one-segment pointer addressing model[""]. A prior revision matched the
+    console renderer's pointerSet output for "/" (model[""]) instead of the
+    spec; pointerSet itself is non-conformant here, so mirroring it just
+    relocated the bug from the renderer to the server. See the pinned
+    divergence tests below for the (intentional) pointerSet mismatch."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    model: dict = {"stale": "keep-me-out"}
+    apply_data_model_update(model, "/", {"fresh": "value"})
+    assert model == {"fresh": "value"}
+
+
+def test_apply_data_model_update_empty_and_slash_pointer_are_symmetric():
+    """RT-001: the two spec-named whole-model-replace spellings must produce
+    byte-for-byte identical results from identical inputs."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    m_empty: dict = {"a": 1}
+    m_slash: dict = {"a": 1}
+    apply_data_model_update(m_empty, "", {"b": 2})
+    apply_data_model_update(m_slash, "/", {"b": 2})
+    assert m_empty == m_slash == {"b": 2}
+
+
+def test_apply_data_model_update_empty_pointer_missing_value_is_noop():
+    """RT-001: MISSING (omitted value) on a whole-model-replace pointer is a
+    no-op, matching the console renderer's real pointerSet output —
+    pointerSet(doc, "", undefined) returns doc unchanged (verified: the
+    empty-tokens branch is `value === undefined ? doc : value`)."""
+    from agent_sdk.a2ui.translator import MISSING, apply_data_model_update
+
+    model: dict = {"a": 1}
+    apply_data_model_update(model, "", MISSING)
+    assert model == {"a": 1}
+
+
+def test_apply_data_model_update_slash_pointer_missing_value_is_noop():
+    """RT-001: "/" must match the "" MISSING no-op, by the same symmetry
+    the spec requires for the set case."""
+    from agent_sdk.a2ui.translator import MISSING, apply_data_model_update
+
+    model: dict = {"a": 1}
+    apply_data_model_update(model, "/", MISSING)
+    assert model == {"a": 1}
+
+
+def test_apply_data_model_update_empty_pointer_rejects_non_dict_value():
+    """RT-001: this helper mutates *model* in place and cannot reassign the
+    caller's reference, so a non-dict whole-model value (which pointerSet
+    would happily return verbatim, replacing the reference wholesale) cannot
+    be honored — raise a clear error instead of silently doing nothing or
+    writing a nonsensical shape."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    with pytest.raises(ValueError, match="object"):
+        apply_data_model_update({}, "", "not-a-dict")
+
+
+def test_apply_data_model_update_slash_pointer_rejects_non_dict_value():
+    """RT-001: "/" must reject non-dict whole-model values exactly like ""."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    with pytest.raises(ValueError, match="object"):
+        apply_data_model_update({}, "/", ["not", "a", "dict"])
+
+
 def test_apply_data_model_update_nested_path():
     """M2+M3: Nested pointer /a/b creates intermediate dicts and sets leaf."""
     from agent_sdk.a2ui.translator import apply_data_model_update
@@ -411,6 +631,535 @@ def test_apply_data_model_update_nested_path():
     model: dict = {}
     apply_data_model_update(model, "/metrics/0", {"label": "IRR", "value": 0.18})
     assert model["metrics"]["0"] == {"label": "IRR", "value": 0.18}
+
+
+def test_apply_data_model_update_numeric_token_is_dict_key_not_list_index():
+    """RT-002: A numeric token is a literal string dict key, never a list
+    index — this diverges from a2ui.js's pointerSet, which builds a JS array
+    for a numeric segment. Documented, latent (translate() only ever emits
+    the flat /root pointer), not a live bug."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    model: dict = {}
+    apply_data_model_update(model, "/metrics/0/value", 0.18)
+    assert model == {"metrics": {"0": {"value": 0.18}}}
+    assert not isinstance(model["metrics"], list)
+
+
+def test_apply_data_model_update_set_through_existing_list_node_raises():
+    """RT-002: setting a value through a pre-existing list-valued node
+    raises rather than splicing/indexing into it, unlike pointerSet."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    model: dict = {"metrics": [{"label": "IRR"}]}
+    with pytest.raises(ValueError, match="dict"):
+        apply_data_model_update(model, "/metrics/0/value", 0.18)
+
+
+def test_apply_data_model_update_missing_through_existing_list_node_is_noop():
+    """RT-002a: deleting through a pre-existing list-valued node is a silent
+    no-op (same no-scaffolding-for-existing-non-dict-nodes rule), not a
+    splice."""
+    from agent_sdk.a2ui.translator import MISSING, apply_data_model_update
+
+    model: dict = {"metrics": [{"label": "IRR"}]}
+    apply_data_model_update(model, "/metrics/0/value", MISSING)
+    assert model == {"metrics": [{"label": "IRR"}]}
+
+
+def test_apply_data_model_update_set_through_scalar_intermediate_raises():
+    """RT-002b: setting a value through a pre-existing SCALAR (non-dict,
+    non-list) intermediate node raises here — unlike pointerSet, which
+    overwrites the scalar with {} and continues (verified:
+    pointerSet({"a": 5}, "/a/b/c", "X") -> {"a": {"b": {"c": "X"}}},
+    discarding the 5)."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    model: dict = {"a": 5}
+    with pytest.raises(ValueError, match="dict"):
+        apply_data_model_update(model, "/a/b/c", "X")
+    assert model == {"a": 5}, "a rejected set must not mutate the model"
+
+
+def test_apply_data_model_update_missing_through_scalar_intermediate_preserves_value():
+    """RT-002b: deleting through a pre-existing SCALAR intermediate node is a
+    silent no-op here, preserving the scalar — unlike pointerSet, which is
+    destructive even on delete: pointerSet({"a": 5}, "/a/b/c", undefined)
+    overwrites the 5 with {} while walking, then no-ops the (now-absent)
+    leaf, yielding {"a": {"b": {}}}. This is the scalar-node counterpart to
+    test_apply_data_model_update_missing_scaffolds_absent_intermediate_path
+    (which scaffolds only because the intermediate keys are ABSENT, not
+    because a pre-existing value is overwritten)."""
+    from agent_sdk.a2ui.translator import MISSING, apply_data_model_update
+
+    model: dict = {"a": 5}
+    apply_data_model_update(model, "/a/b/c", MISSING)
+    assert model == {"a": 5}, "a no-op delete must not overwrite the pre-existing scalar"
+
+
+# ── RT-001: A2UI spec whole-model-replace oracle (independent of pointerSet) ─
+#
+# Every test in the sections above and below checks apply_data_model_update
+# for agreement with a SECOND implementation — the console renderer's
+# pointerSet (a2ui.js). RT-002 fixed pointerSet's own non-conformance for
+# "/" at the root (pointerTokens("/") now folds to the empty token list,
+# same as pointerTokens("")), so the two implementations no longer merely
+# happen to agree — they are both independently conformant to the spec
+# (see harness a2ui-advisor.md's authoritative A2UI reference,
+# `updateDataModel` section): "Omit `path` or use `"/"` to replace the whole
+# data model." A suite that only checks renderer-convergence could stay
+# fully green while both implementations violate the spec's literal words,
+# with nothing ever asserting what the spec itself requires — exactly what
+# let "/" handling churn through two reverted, pointerSet-anchored revisions
+# (see translator.py's apply_data_model_update docstring, RT-002) with no
+# spec anchor to settle the argument either way.
+#
+# The tests below assert the spec's literal semantics directly, as their own
+# oracle, independent of pointerSet — and pin CONFORMANCE: both the
+# omitted/empty-string path and "/" perform a genuine whole-model replace.
+
+
+def test_apply_data_model_update_conforms_to_a2ui_spec_on_slash_whole_model_replace():
+    """RT-001/RT-002: per the A2UI spec, path "/" must replace the whole data
+    model. apply_data_model_update does this directly, as its own oracle
+    independent of pointerSet — and, since RT-002 fixed pointerSet's own
+    "/" handling too, this now also converges with the renderer (see the
+    convergence-table section below). Supersedes the old
+    "diverges_from_a2ui_spec" pin: the docstring on that test explicitly
+    called for flipping it, not deleting it, once '/' becomes conformant."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    model: dict = {"a": 1, "b": 2}
+    apply_data_model_update(model, "/", {"replaced": True})
+
+    spec_conformant_whole_model_replace = {"replaced": True}
+    assert model == spec_conformant_whole_model_replace, (
+        f"'/' must replace the ENTIRE model, not address a child key; got {model!r}"
+    )
+
+
+def test_apply_data_model_update_conforms_to_a2ui_spec_on_omitted_path_whole_model_replace():
+    """RT-001: per the A2UI spec, an omitted path must also replace the whole
+    data model, identically to "/". apply_data_model_update no longer
+    rejects it. Supersedes the old "diverges_from_a2ui_spec" pin for the
+    same reason as the "/" counterpart above."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    model: dict = {"a": 1, "b": 2}
+    apply_data_model_update(model, "", {"replaced": True})
+    assert model == {"replaced": True}, (
+        f"omitted path must replace the ENTIRE model; got {model!r}"
+    )
+
+
+def test_apply_data_model_update_whole_model_missing_is_noop_per_spec_no_key_at_path():
+    """RT-002: the whole-model + omitted-value intersection is a no-op. The
+    spec composes two independent rules — "omit path or use / to replace the
+    whole data model" AND "omit value to delete the key AT PATH" — and that
+    composition is genuinely ambiguous, not spec-decided: this SDK reads an
+    updateDataModel with BOTH omitted as addressing the whole model, where
+    there is no single key at path for the delete rule to target, so the
+    delete has no referent and the operation no-ops. A spec-literal
+    third-party peer could equally read the same composition as
+    clear-the-whole-model, so this pin documents the SDK's CHOSEN reading of
+    an ambiguous rule, not a spec oracle — it is NOT justified by pointerSet
+    convergence (the way the _missing_value_is_noop tests above are); that
+    convergence is a consequence of picking the same reading consistently
+    across the SDK, not proof the spec mandates it. The SET whole-model case
+    already had test_..._conforms_to_a2ui_spec_on_slash_whole_model_replace,
+    but the MISSING case was previously pinned only against pointerSet's
+    empty-tokens branch — the renderer-over-spec reasoning RT-001 set out to
+    eliminate.
+
+    Crucially, no-op here does NOT strand a caller who wants to CLEAR the model:
+    the spec-supported clear is an explicit whole-model replace with an empty
+    object (value={}), which is honored below. 'Omit value' means delete-a-key,
+    not clear-the-model; the two are distinct operations on the wire."""
+    from agent_sdk.a2ui.translator import MISSING, apply_data_model_update
+
+    for pointer in ("", "/"):
+        # Omit value on the whole-model path: no single key at path to delete → no-op.
+        model: dict = {"kept": 1, "also": 2}
+        apply_data_model_update(model, pointer, MISSING)
+        assert model == {"kept": 1, "also": 2}, (
+            f"whole-model MISSING ({pointer!r}) must no-op: the 'delete key at path' "
+            f"rule has no single key when the path is the whole model; got {model!r}"
+        )
+
+        # The spec-supported way to CLEAR the model is an explicit empty-object
+        # whole-model replace — honored, not silently dropped, so the no-op
+        # above does not leave a would-be clear with no path.
+        clearable: dict = {"kept": 1, "also": 2}
+        apply_data_model_update(clearable, pointer, {})
+        assert clearable == {}, (
+            f"whole-model replace with an empty object ({pointer!r}) must clear "
+            f"the model; got {clearable!r}"
+        )
+
+
+# ── RT-003: apply_data_model_update <-> pointerSet convergence table ─────────
+#
+# The tests above (and apply_data_model_update()'s docstring) repeatedly claim
+# specific points of agreement/divergence with the console renderer's
+# pointerSet (agent_sdk/console/static/a2ui.js). Nothing previously
+# cross-checked those claims against the real renderer output, so a false
+# convergence claim could ship with every test green (w037 RT-001 was exactly
+# this: a "converges with the renderer" docstring/CHANGELOG claim for the "/"
+# pointer that was, empirically, backwards).
+#
+# The expected values below are real pointerSet(...) outputs, not a
+# hand-derived approximation — each was captured by extracting pointerTokens
+# + pointerSet verbatim from a2ui.js and running it under node:
+#
+#   node -e '
+#     const fs = require("fs");
+#     const src = fs.readFileSync("agent_sdk/console/static/a2ui.js", "utf8");
+#     const tokStart = src.indexOf("function pointerTokens");
+#     const tokEnd = src.indexOf("export function pointerGet");
+#     const setStart = src.indexOf("function pointerSet");
+#     const setEnd = src.indexOf("/* ── fold + paint ── */");
+#     eval(src.slice(tokStart, tokEnd) + src.slice(setStart, setEnd));
+#     console.log(JSON.stringify(pointerSet(<doc>, "<pointer>", <value>)));
+#   '
+#
+# Re-run that (swap in each row's doc/pointer/value) whenever a2ui.js's
+# pointerSet changes, and update this table — that is the "keep the two
+# implementations from silently drifting apart" contract this section pins.
+# Single-sourced convergence rows (RT-001): the static reference table below
+# and the live-node cross-check table further down BOTH parametrize over this
+# one constant, so a row can only be added or edited once. Duplicating it would
+# reintroduce exactly the static/live drift this whole section exists to guard
+# against — add a row to one copy only and the other silently stops verifying
+# it. Each `expected` is a real pointerSet(...) output (see the node snippet in
+# the header comment). Callers copy `model` before mutating, so the shared
+# dicts here are never mutated in place.
+_POINTER_SET_CONVERGENCE_ROWS = [
+    # /root set on {} — the one shape translate() actually emits.
+    ("root-set", {}, "/root", "X", {"root": "X"}),
+    # /a/b/c delete-scaffold on {} — absent intermediates are scaffolded
+    # as empty dicts by both sides.
+    ("delete-scaffold-absent", {}, "/a/b/c", "MISSING", {"a": {"b": {}}}),
+    # "" set — pointerSet's empty-tokens branch returns *value* verbatim
+    # (a real whole-model overwrite); model.clear()+update() converges.
+    ("empty-set-dict", {"stale": 1}, "", {"fresh": True}, {"fresh": True}),
+    # "" delete (MISSING) — pointerSet's empty-tokens branch is
+    # `value === undefined ? doc : value`, i.e. a no-op; converges.
+    ("empty-missing-noop", {"a": 1}, "", "MISSING", {"a": 1}),
+    # "/" set — pointerTokens("/") now folds to the empty list too
+    # (a2ui.js fix), so "/" converges with "" here exactly as the spec
+    # requires: a genuine whole-model overwrite, not a write to model[""].
+    ("slash-set-dict", {"stale": 1}, "/", {"fresh": True}, {"fresh": True}),
+    # "/" delete (MISSING) — same empty-tokens no-op branch as "".
+    ("slash-missing-noop", {"a": 1}, "/", "MISSING", {"a": 1}),
+    # RT-JSON-POINTER-001: a ~1-encoded "/" is a literal key CHARACTER, so
+    # "/foo~1../bar" is a nested write to the literal key "foo/.." — both
+    # sides accept it (the earlier over-broad substring guard wrongly
+    # rejected it server-side). pointerSet writes {"foo/..": {"bar": "X"}}.
+    ("tilde-slash-literal-key", {}, "/foo~1../bar", "X", {"foo/..": {"bar": "X"}}),
+    # RT-EMPTY-SEGMENT-001: an empty path segment addresses the RFC 6901
+    # empty-string key (model[""]), NOT a component-root escape. All three
+    # spellings converge with pointerSet — the earlier "//" prefix guard
+    # rejected only the first while accepting the equivalent middle/trailing
+    # forms, so it was no boundary at all.
+    ("empty-first-segment", {}, "//bar", "X", {"": {"bar": "X"}}),
+    ("empty-middle-segment", {}, "/a//b", "X", {"a": {"": {"b": "X"}}}),
+    ("empty-trailing-segment", {}, "/a/", "X", {"a": {"": "X"}}),
+]
+
+
+@pytest.mark.parametrize(
+    "label,model,pointer,value,expected", _POINTER_SET_CONVERGENCE_ROWS
+)
+def test_apply_data_model_update_converges_with_pointer_set_reference(
+    label, model, pointer, value, expected
+):
+    from agent_sdk.a2ui.translator import MISSING, apply_data_model_update
+
+    actual_value = MISSING if value == "MISSING" else value
+    m = dict(model)
+    apply_data_model_update(m, pointer, actual_value)
+    assert m == expected, f"{label}: diverged from the verified pointerSet reference value"
+
+
+def test_apply_data_model_update_diverges_from_pointer_set_reference_on_scalar_intermediate_delete():
+    """RT-002b, pinned as a divergence row (not folded into the convergence
+    table above): pointerSet({"a": 5}, "/a/b/c", undefined) really does
+    return {"a": {"b": {}}} (verified via the node snippet in this section's
+    header comment) — destroying the 5 — while apply_data_model_update()
+    no-ops and preserves {"a": 5}. Documented, deliberate (see docstring
+    RT-002b), not a bug: kept as its own pinned test so this specific
+    divergence cannot silently re-converge (or silently widen) unnoticed."""
+    from agent_sdk.a2ui.translator import MISSING, apply_data_model_update
+
+    pointer_set_reference_result = {"a": {"b": {}}}  # verified via node, see header comment
+    model: dict = {"a": 5}
+    apply_data_model_update(model, "/a/b/c", MISSING)
+    assert model == {"a": 5}
+    assert model != pointer_set_reference_result
+
+
+def test_apply_data_model_update_diverges_from_pointer_set_reference_on_whole_model_replace_non_dict():
+    """RT-003 (redteam finding): a THIRD divergence, not previously enumerated
+    or pinned — whole-model-replace with a non-dict value. pointerSet's
+    empty-tokens branch (`value === undefined ? doc : value`) returns *value*
+    verbatim: pointerSet({}, "/", "scalar") really does return "scalar"
+    (verified via the node snippet in this section's header comment), so a
+    caller assigning `entry.dataModel = pointerSet(...)` ends up with a
+    non-object dataModel. apply_data_model_update() is stricter here and
+    raises ValueError instead (see docstring RT-002c). Documented, deliberate
+    (the server is safer, not just constrained by its in-place-mutator
+    shape): kept as its own pinned test so this specific divergence cannot
+    silently re-converge (or silently widen) unnoticed."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    pointer_set_reference_result = "scalar"  # verified via node, see header comment
+    model: dict = {}
+    with pytest.raises(ValueError, match="object"):
+        apply_data_model_update(model, "/", pointer_set_reference_result)
+    assert model == {}
+
+
+# ── RT-002: live node cross-check of the pointerSet reference ────────────────
+#
+# The table and divergence test above assert hand-copied pointerSet(...)
+# outputs, captured once by running the node snippet in the header comment
+# and pasting the result in. Nothing executes against the live renderer at
+# test time, so an edit to a2ui.js's pointerSet would not fail either test
+# until a developer manually re-ran the snippet and updated the literals —
+# both suites stay green while the two implementations silently diverge.
+#
+# The tests below close that gap: they extract pointerTokens + pointerSet
+# from the real agent_sdk/console/static/a2ui.js source (the same slice the
+# header comment documents) and run it under node AT TEST TIME, so a future
+# pointerSet edit that changes behavior fails this suite automatically
+# instead of drifting away from a stale snapshot.
+
+_NODE_BIN = shutil.which("node")
+_A2UI_JS_PATH = Path(__file__).resolve().parent.parent / "agent_sdk" / "console" / "static" / "a2ui.js"
+_UNDEFINED_MARKER = "__a2ui_undefined__"
+
+# RT-003: every live cross-check test below is skipif(_NODE_BIN is None), so a
+# CI runner without node on PATH leaves all of them silently skipped — a green
+# build with the convergence guarantee only conditionally closed, and only the
+# hand-copied static reference table (test_apply_data_model_update_converges_
+# with_pointer_set_reference, above) actually running. CI is the environment
+# this matters for: it is expected to always provide node, so the skip there
+# must be a loud failure, not a quiet pass. `CI` is the de facto standard env
+# var set by GitHub Actions, GitLab CI, CircleCI, Travis, etc.
+_IN_CI = os.environ.get("CI", "").strip().lower() in {"1", "true", "yes"}
+
+
+def test_live_pointer_set_cross_check_available_in_ci():
+    """RT-003: the live a2ui.js pointerSet cross-check tests must not be able
+    to silently skip in CI. Locally (not CI), skip when node is absent —
+    that's a legitimate dev-machine gap, closed by the hand-copied static
+    reference table. In CI, node missing must fail loudly here instead of
+    letting every skipif(_NODE_BIN is None) test below quietly disappear."""
+    if not _IN_CI:
+        pytest.skip("not running in CI; local runs may lack node")
+    assert _NODE_BIN is not None, (
+        "node is required in CI to run the live a2ui.js pointerSet "
+        "cross-check (RT-003) — install node in the CI image; do not let "
+        "the convergence guarantee silently skip"
+    )
+
+_POINTER_SET_NODE_HARNESS = """
+const fs = require("fs");
+const src = fs.readFileSync(process.argv[1], "utf8");
+const tokStart = src.indexOf("function pointerTokens");
+const tokEnd = src.indexOf("export function pointerGet");
+const setStart = src.indexOf("function pointerSet");
+const setEnd = src.indexOf("/* \\u2500\\u2500 fold + paint \\u2500\\u2500 */");
+eval(src.slice(tokStart, tokEnd) + src.slice(setStart, setEnd));
+const doc = JSON.parse(process.argv[2]);
+const pointer = process.argv[3];
+const rawValue = process.argv[4];
+const value = rawValue === "__a2ui_undefined__" ? undefined : JSON.parse(rawValue);
+process.stdout.write(JSON.stringify(pointerSet(doc, pointer, value)));
+"""
+
+
+def _live_pointer_set(model: dict, pointer: str, value):
+    """Run the real a2ui.js pointerSet under node and return its output,
+    computed fresh — not a hand-copied literal."""
+    assert _NODE_BIN is not None, "caller must skip when node is unavailable"
+    value_arg = _UNDEFINED_MARKER if value == "MISSING" else json.dumps(value)
+    result = subprocess.run(
+        [
+            _NODE_BIN, "-e", _POINTER_SET_NODE_HARNESS, "--",
+            str(_A2UI_JS_PATH), json.dumps(model), pointer, value_arg,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.mark.skipif(_NODE_BIN is None, reason="node is not installed; cannot cross-check against a2ui.js")
+@pytest.mark.parametrize(
+    "label,model,pointer,value,expected", _POINTER_SET_CONVERGENCE_ROWS
+)
+def test_apply_data_model_update_converges_with_live_pointer_set_reference(
+    label, model, pointer, value, expected
+):
+    """RT-002: recompute the pointerSet reference at test time and check it
+    still matches both the hand-copied table above and this helper's output
+    — so a pointerSet edit fails here rather than only going stale silently."""
+    from agent_sdk.a2ui.translator import MISSING, apply_data_model_update
+
+    live_reference = _live_pointer_set(dict(model), pointer, value)
+    assert live_reference == expected, (
+        f"{label}: the hand-copied convergence table has drifted from the "
+        f"live a2ui.js pointerSet output ({live_reference!r}); update the table"
+    )
+
+    actual_value = MISSING if value == "MISSING" else value
+    m = dict(model)
+    apply_data_model_update(m, pointer, actual_value)
+    assert m == live_reference, f"{label}: diverged from the live pointerSet reference"
+
+
+@pytest.mark.skipif(_NODE_BIN is None, reason="node is not installed; cannot cross-check against a2ui.js")
+def test_apply_data_model_update_diverges_from_live_pointer_set_reference_on_scalar_intermediate_delete():
+    """RT-002: live counterpart of the pinned-divergence test above — recomputes
+    the pointerSet reference at test time instead of trusting the hand-copied
+    literal, then re-asserts the documented divergence against it."""
+    from agent_sdk.a2ui.translator import MISSING, apply_data_model_update
+
+    live_reference = _live_pointer_set({"a": 5}, "/a/b/c", "MISSING")
+    assert live_reference == {"a": {"b": {}}}, (
+        f"live a2ui.js pointerSet output has changed; got {live_reference!r}"
+    )
+
+    model: dict = {"a": 5}
+    apply_data_model_update(model, "/a/b/c", MISSING)
+    assert model == {"a": 5}
+    assert model != live_reference
+
+
+@pytest.mark.skipif(_NODE_BIN is None, reason="node is not installed; cannot cross-check against a2ui.js")
+def test_apply_data_model_update_diverges_from_live_pointer_set_reference_on_whole_model_replace_non_dict():
+    """RT-003: live counterpart of the RT-002c pinned-divergence test above —
+    recomputes the pointerSet reference at test time instead of trusting the
+    hand-copied literal, then re-asserts the documented divergence against
+    it. This is the exact gap RT-003 flagged: a server/renderer divergence on
+    identical wire input (whole-model-replace with a non-dict value) that was
+    only described in prose, never cross-checked against the live renderer."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    live_reference = _live_pointer_set({}, "/", "scalar")
+    assert live_reference == "scalar", (
+        f"live a2ui.js pointerSet output has changed; got {live_reference!r}"
+    )
+
+    model: dict = {}
+    with pytest.raises(ValueError, match="object"):
+        apply_data_model_update(model, "/", "scalar")
+    assert model == {}
+    assert model != live_reference
+
+
+@pytest.mark.skipif(_NODE_BIN is None, reason="node is not installed; cannot cross-check against a2ui.js")
+def test_apply_data_model_update_diverges_from_live_pointer_set_reference_on_numeric_token():
+    """RT-001/RT-002a: live counterpart of the numeric-token divergence pin.
+
+    Before this test, RT-002a was the ONE enumerated divergence
+    (RT-002a/RT-002b/RT-002c) with no live node cross-check — it was asserted
+    only against a Python-side literal
+    (test_apply_data_model_update_numeric_token_is_dict_key_not_list_index),
+    while RT-002b and RT-002c each recompute the pointerSet reference at test
+    time. The CHANGELOG's 'Each is pinned by a live node cross-check' claim was
+    therefore false for RT-002a, and the numeric-token divergence could drift
+    silently if a2ui.js's pointerSet numeric handling changed. This closes that
+    gap: recompute the renderer reference live and re-assert the divergence.
+
+    The renderer treats a numeric token as a LIST INDEX and builds a JS array
+    for that segment; apply_data_model_update treats it as a literal string
+    dict key. Documented, latent (translate() only ever emits the flat /root
+    pointer), not a live bug."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    live_reference = _live_pointer_set({}, "/metrics/0/value", 0.18)
+    assert live_reference == {"metrics": [{"value": 0.18}]}, (
+        f"live a2ui.js pointerSet must build a JS array for a numeric token; "
+        f"got {live_reference!r}"
+    )
+    assert isinstance(live_reference["metrics"], list), (
+        "the renderer's numeric-token segment must be a JS array"
+    )
+
+    model: dict = {}
+    apply_data_model_update(model, "/metrics/0/value", 0.18)
+    assert model == {"metrics": {"0": {"value": 0.18}}}
+    assert isinstance(model["metrics"], dict), (
+        "this helper must treat the numeric token as a literal dict key"
+    )
+    assert model != live_reference
+
+
+@pytest.mark.skipif(_NODE_BIN is None, reason="node is not installed; cannot cross-check against a2ui.js")
+@pytest.mark.parametrize(
+    "pointer,renderer_literal_key_result",
+    [
+        # A genuine ".." token: RFC 6901 has no parent semantics, so the
+        # renderer treats ".." as an ordinary literal key and writes it —
+        # pointerSet({}, "/foo/../bar", "X") -> {"foo": {"..": {"bar": "X"}}},
+        # pointerSet({}, "/..", "bad") -> {"..": "bad"}. apply_data_model_update
+        # DIVERGES here: it conservatively rejects any decoded ".." token as a
+        # parent-escape (a deliberate, security-motivated stricter-than-renderer
+        # guard — see the docstring's RT-JSON-POINTER-001 note). This pins the
+        # divergence RT-JSON-POINTER-001 flagged as previously undocumented, and
+        # cross-checks it against the LIVE renderer so it cannot silently drift.
+        ("/foo/../bar", {"foo": {"..": {"bar": "X"}}}),
+        ("/..", {"..": "X"}),
+    ],
+)
+def test_apply_data_model_update_diverges_from_live_pointer_set_reference_on_genuine_dotdot_token(
+    pointer, renderer_literal_key_result
+):
+    """RT-JSON-POINTER-001: the renderer accepts a ".." token as a literal key;
+    this helper rejects it. Deliberate divergence, cross-checked live."""
+    from agent_sdk.a2ui.translator import apply_data_model_update
+
+    live_reference = _live_pointer_set({}, pointer, "X")
+    assert live_reference == renderer_literal_key_result, (
+        f"live a2ui.js pointerSet treats '..' as a literal key; got {live_reference!r}"
+    )
+
+    with pytest.raises(ValueError, match="escapes"):
+        apply_data_model_update({}, pointer, "X")
+
+
+@pytest.mark.skipif(_NODE_BIN is None, reason="node is not installed; cannot cross-check against a2ui.js")
+@pytest.mark.parametrize(
+    "label,model,pointer,value,expected",
+    [
+        # RT-002: A2UI v0.9.1's updateDataModel section reads "Omit `path`
+        # or use `/` to replace the whole data model" — "/" must behave
+        # IDENTICALLY to the omitted "" path: a genuine whole-model replace,
+        # not the RFC-6901-literal child key model[""].
+        ("slash-whole-model-set", {"a": 1, "b": 2}, "/", {"replaced": True}, {"replaced": True}),
+        ("empty-whole-model-set", {"a": 1, "b": 2}, "", {"replaced": True}, {"replaced": True}),
+        ("slash-whole-model-delete-noop", {"a": 1}, "/", "MISSING", {"a": 1}),
+        ("empty-whole-model-delete-noop", {"a": 1}, "", "MISSING", {"a": 1}),
+    ],
+)
+def test_pointer_set_slash_is_whole_model_replace_matching_omitted_path(
+    label, model, pointer, value, expected
+):
+    """RT-002 (redteam finding, root non-conformance): prior to this fix,
+    pointerSet("/", ...) addressed model[""] like any other one-segment
+    pointer, diverging from pointerSet("", ...) — which already correctly
+    whole-model-replaces — even though the spec names them as the SAME
+    operation. pointerTokens("/") must now fold to the empty token list,
+    exactly like pointerTokens("")."""
+    live_reference = _live_pointer_set(dict(model), pointer, value)
+    assert live_reference == expected, (
+        f"{label}: pointerSet({pointer!r}, ...) must whole-model-replace "
+        f"like the omitted path does, got {live_reference!r}"
+    )
 
 
 # ── SC-C7 (A2UI path): MarketBriefing prose-exception on the A2UI translator ──

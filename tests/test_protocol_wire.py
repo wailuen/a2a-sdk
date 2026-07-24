@@ -261,8 +261,10 @@ def test_build_artifact_a2ui_disabled_yields_text_and_data_part():
 
 def test_build_artifact_a2ui_enabled_yields_datapart_with_a2ui_mime():
     """When the client capability allows the ContentModel type, build_artifact
-    must return [TextPart, DataPart] where the DataPart carries the A2UI MIME
-    type (GH #6)."""
+    must return [TextPart, DataPart(open), DataPart(close)] — deleteSurface is
+    delivered as its own array, never bundled with create/populate (critical
+    protocol-conformance fix; see split_a2ui_delivery()) — where each DataPart
+    carries the A2UI MIME type (GH #6)."""
     from agent_sdk.a2ui.translator import A2uiCapabilities
     from agent_sdk.agent.events import ArtifactEvent
     from agent_sdk.agent.runner import build_artifact
@@ -282,27 +284,33 @@ def test_build_artifact_a2ui_enabled_yields_datapart_with_a2ui_mime():
     caps_on = A2uiCapabilities(tier="core")
 
     artifact = build_artifact(event, caps_on)
-    assert len(artifact.parts) == 2, (
-        f"Expected 2 parts [TextPart, DataPart] when A2UI enabled; got {len(artifact.parts)}"
+    assert len(artifact.parts) == 3, (
+        f"Expected 3 parts [TextPart, DataPart, DataPart] when A2UI enabled; "
+        f"got {len(artifact.parts)}"
     )
     assert isinstance(artifact.parts[0], TextPart), (
         f"First part must be TextPart; got {type(artifact.parts[0]).__name__}"
     )
-    data_part = artifact.parts[1]
-    assert isinstance(data_part, DataPart), (
-        f"Second part must be DataPart; got {type(data_part).__name__}"
+    open_part, close_part = artifact.parts[1], artifact.parts[2]
+    for data_part in (open_part, close_part):
+        assert isinstance(data_part, DataPart), (
+            f"Part must be DataPart; got {type(data_part).__name__}"
+        )
+        part_mime = (data_part.metadata or {}).get("mimeType")
+        assert part_mime == A2UI_MIME_TYPE, (
+            f"DataPart metadata.mimeType must be {A2UI_MIME_TYPE!r}; got {part_mime!r}"
+        )
+        # DataPart.data must be the bare A2UI message array (list, not dict)
+        assert isinstance(data_part.data, list), (
+            f"DataPart.data must be a list (A2UI message array); got {type(data_part.data).__name__}"
+        )
+    assert len(open_part.data) == 3, (
+        f"open DataPart must carry createSurface/updateComponents/updateDataModel; "
+        f"got {len(open_part.data)}"
     )
-    part_mime = (data_part.metadata or {}).get("mimeType")
-    assert part_mime == A2UI_MIME_TYPE, (
-        f"DataPart metadata.mimeType must be {A2UI_MIME_TYPE!r}; got {part_mime!r}"
-    )
-    # DataPart.data must be the bare A2UI message array (list, not dict)
-    assert isinstance(data_part.data, list), (
-        f"DataPart.data must be a list (A2UI message array); got {type(data_part.data).__name__}"
-    )
-    assert len(data_part.data) == 4, (
-        f"A2UI message array must have 4 messages (create/update/updateData/delete); "
-        f"got {len(data_part.data)}"
+    assert all("deleteSurface" not in m for m in open_part.data)
+    assert len(close_part.data) == 1 and "deleteSurface" in close_part.data[0], (
+        "close DataPart must carry exactly the deleteSurface message"
     )
 
 

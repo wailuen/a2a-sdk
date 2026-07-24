@@ -8,7 +8,7 @@ resolution-markers = [
 
 [[package]]
 name = "agent-sdk"
-version = "0.5.41"
+version = "0.5.44"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },

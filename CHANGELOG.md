@@ -4,6 +4,191 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.5.44] — 2026-07-24
+
+### 🟡 Protocol surface changes
+- `split_a2ui_delivery()` (new, `agent_sdk/a2ui/translator.py`): discovered during the GH-126
+  redteam pass, tracked separately as it is unrelated to GH-126's scope. `translate()` computes
+  a per-artifact A2UI sequence — `createSurface` → `updateComponents` → `updateDataModel` →
+  `deleteSurface` — as one logical `list[dict]`, but A2UI v0.9.1's client contract folds ONE
+  delivered array atomically and paints once after the fold. Delivering all four messages in a
+  single array (the prior behavior) meant a strictly spec-conformant Path-A renderer — built from
+  the public spec alone, with no knowledge of this SDK's internals — would unmount the surface via
+  `deleteSurface` during the fold, before it was ever painted: **nothing would render, for every
+  A2UI artifact this SDK emits**, on any consumer that didn't happen to special-case this SDK's
+  bundling. `split_a2ui_delivery()` splits that sequence into an `open` array
+  (createSurface/updateComponents/updateDataModel) and a `close` array (deleteSurface), and both
+  delivery callers now send them as two independently-folded wire units, open before close:
+  `agent/runner.py::build_artifact` emits two A2A DataParts on the artifact instead of one;
+  `routes/ag_ui.py`'s `ArtifactEvent` branch emits two `A2UI_UPDATE` CUSTOM events instead of one.
+  This is a wire-shape change for every A2UI emission (previously one DataPart/event per artifact,
+  now up to two) — flagged here as a protocol surface change, not a plain fix, since any consumer
+  that assumed exactly one DataPart/event per A2UI artifact must now expect two. The agent card's
+  A2UI extension hint (`deleteSurfaceSemantics`, GH-113) is updated from `"post-paint"` to
+  `"split-delivery"` to match — non-normative in both cases, but the value itself changed.
+  Covered by `tests/test_a2ui_wire.py` (`test_split_a2ui_delivery_isolates_delete_surface`,
+  `test_split_a2ui_delivery_empty_input`) plus updated assertions in
+  `tests/test_gh113_delete_surface_semantics.py`, `tests/test_a2ui_group_d.py`,
+  `tests/test_protocol_fixes_w6.py`, `tests/test_protocol_wire.py`. See DESIGN.md §5.4/§7.1 for
+  the full wire contract. **Not yet filed as its own GH issue — pending confirmation.**
+  (`agent_sdk/a2ui/translator.py`, `agent_sdk/agent/runner.py`, `agent_sdk/routes/ag_ui.py`,
+  `agent_sdk/a2ui/catalog.py`, `agent_sdk/console/static/a2ui.js`, `DESIGN.md`)
+
+### 🔧 Fixes
+- GH-126 / RT-001: `apply_data_model_update()` (`agent_sdk/a2ui/translator.py`)
+  now matches A2UI v0.9.1's `updateDataModel` semantics on both value- and
+  path-handling.
+  - Omitting `value` (the `MISSING` sentinel) deletes the key at `pointer`
+    (`target.pop(leaf, None)`, a no-op if already absent) instead of leaving
+    the target unchanged. `apply_data_model_update()` has no production
+    callers today — `translate()`, the SDK's only emit path, always sets an
+    explicit `value` — so this closes a latent server/renderer divergence.
+  - A2UI v0.9.1 overrides RFC 6901 for `updateDataModel.path`: "omit `path`
+    or use `/` to replace the whole data model." `""` and `"/"` are now both
+    handled, identically, as a genuine whole-model replace —
+    `model.clear(); model.update(value)` — evaluated before the
+    root-relative check, so neither spelling falls through to ordinary
+    pointer traversal. Because this is an in-place mutator (it cannot
+    reassign the caller's `model` reference), *value* must be a `dict` for
+    a whole-model replace; any other type raises `ValueError`. `MISSING` is
+    a no-op on both spellings. An earlier revision of this fix reasoned from
+    the console renderer's `pointerSet` (`agent_sdk/console/static/a2ui.js`)
+    alone, whose `pointerTokens("/")` returned a literal one-segment token
+    list (addressing the ordinary child key `model[""]`) rather than folding
+    to the whole-model-replace empty-token-list case — that premise was
+    itself non-conformant to the spec, not a valid reference. Both
+    `pointerTokens` and this helper now implement the spec's `"/"` override
+    directly against the A2UI spec text, and agree with each other as a
+    consequence of that, not as the justification for it.
+  - Parent-key navigation for ordinary (non-whole-model) pointers is a
+    single traversal shared by set and delete, scaffolding missing
+    intermediate dicts unconditionally and then branching on `MISSING`
+    (pop) vs. set — mirroring `pointerSet`'s shape, so e.g. deleting
+    `/a/b/c` on `{}` converges with the renderer's `{a: {b: {}}}` on both
+    sides. Three documented, latent VALUE/TRAVERSAL divergences remain (not
+    live bugs — `translate()` never emits a numeric-token, array-shaped,
+    scalar-shadowed, or whole-model-replace pointer): RT-002a — a numeric path
+    token (e.g. the `0` in `/metrics/0`) is treated as a literal string dict key
+    here, not a list index; RT-002b — a pre-existing scalar (non-dict, non-list)
+    intermediate node is preserved by this helper (set raises, delete
+    no-ops) where `pointerSet` destructively overwrites it with `{}`/`[]`;
+    RT-002c — a whole-model replace (`""`/`"/"`) with a non-`dict` value
+    raises `ValueError` here (the helper is an in-place mutator and cannot
+    write a non-object `dataModel`) where `pointerSet`'s empty-tokens branch
+    (`value === undefined ? doc : value`) returns the scalar verbatim
+    (`pointerSet({}, "/", "scalar")` → `"scalar"`). Each of the three — RT-002a
+    (`..._on_numeric_token`), RT-002b (`..._on_scalar_intermediate_delete`), and
+    RT-002c (`..._on_whole_model_replace_non_dict`) — is pinned by its own live
+    node cross-check that recomputes the `pointerSet` reference at test time, so
+    none can drift silently against a hand-copied literal. A FOURTH divergence —
+    the deliberate `..`-token parent-escape guard (RT-JSON-POINTER-001, next
+    bullet) — is a security divergence rather than a value/traversal one; the
+    `apply_data_model_update()` docstring enumerates all four together so the
+    tally cannot drift.
+  - RT-JSON-POINTER-001: the parent-escape guard rejects ONLY a decoded
+    token EQUAL to `..` (e.g. `/foo/../bar`, `/..`). This check is complete:
+    it runs after `~1`/`~0` decoding and `..` has no tilde form, so nothing
+    can hide a parent-escape segment from it. A prior revision additionally
+    tested each decoded token for the `/..` / `../` SUBSTRINGS; those clauses
+    were false-positives only — a `/` inside a decoded token can arise solely
+    from `~1` (a literal key character, the split on `/` having already
+    happened), so they fired exclusively on legitimate `~1`-formed literal
+    keys and never on a genuine escape. Concretely `/foo~1../bar` decodes to
+    the literal key `foo/..` then `bar`; the renderer's `pointerSet` accepts
+    it and writes `{"foo/..": {"bar": ...}}`, and this helper now converges
+    (sets the same literal key) instead of wrongly rejecting it. Rejecting a
+    genuine `..` token remains a deliberate stricter-than-renderer guard (the
+    renderer treats `..` as a literal key), pinned as a live-cross-checked
+    divergence.
+  - RT-EMPTY-SEGMENT-001: removed the over-broad `//`-prefix guard. An empty
+    path segment is not a component-root escape — per RFC 6901 it addresses
+    the empty-string key `model[""]`, an ordinary key within the component
+    root, never the envelope or a parent. The old guard rejected only a `//`
+    PREFIX while the helper already accepted every equivalent spelling that
+    reaches the same empty-string key (`/a//b` → `model["a"][""]["b"]`, `/a/`
+    → `model["a"][""]`), so it blocked one spelling of a legitimate operation
+    and was no boundary. `//`-prefixed pointers now converge with the
+    renderer's `pointerSet` (`pointerSet({}, "//bar", "X")` →
+    `{"": {"bar": "X"}}`), cross-checked live. The genuine parent-escape guard
+    (a decoded `..` token) is unaffected.
+  - RT-002 (a later, separate redteam finding on the fix above — distinct
+    from the RT-002a/RT-002b/RT-002c divergence labels earlier in this
+    entry): the intersection of BOTH spec rules — path omitted/`"/"` (whole
+    data model) AND `value` omitted (`MISSING`, delete-at-path) — is
+    deliberately defined as a no-op. The spec states two independent rules:
+    "omit `path` or use `/` to replace the whole data model" and "omit
+    `value` to delete the key at path." Composed, those two rules are
+    genuinely ambiguous, not spec-decided: read one way, an
+    `updateDataModel` with both omitted addresses the whole model, where
+    there is no single key at path for the delete rule to target — the
+    delete has no referent, so the operation no-ops (this SDK's reading);
+    read the other way, a spec-literal peer could treat omit-path +
+    omit-value as "clear the whole model." The no-op is therefore an
+    SDK-defined resolution of that ambiguity, not a spec certainty — both
+    this helper and the console renderer's `pointerSet` empty-tokens branch
+    (`value === undefined ? doc : value`) agree on the no-op reading, which
+    is a consequence of choosing it consistently across the SDK, not proof
+    the spec mandates it. This is NOT "clear the model" under the SDK's
+    reading: the spec-supported way to unambiguously clear the model
+    remains an explicit whole-model replace with an empty object
+    (`value={}`), honored as `model.clear(); model.update({})`, so a
+    caller who wants a clear is never stranded by the no-op reading. Pinned
+    by
+    `test_apply_data_model_update_whole_model_missing_is_noop_per_spec_no_key_at_path`,
+    which documents the SDK's chosen reading of the ambiguous composition
+    (not a spec oracle), alongside the existing `..._missing_value_is_noop`
+    renderer-convergence tests. Cross-implementation interop risk only: a
+    spec-clarification request for this composition is worth filing
+    upstream with the A2UI spec maintainers so a genuinely conformant
+    third-party peer has an authoritative answer rather than two SDK
+    surfaces agreeing by internal convention.
+
+  Covered by `test_apply_data_model_update_empty_pointer_replaces_whole_model`,
+  `test_apply_data_model_update_slash_pointer_replaces_whole_model`,
+  `test_apply_data_model_update_empty_and_slash_pointer_are_symmetric`, their
+  `_missing_value_is_noop`/`_rejects_non_dict_value` counterparts, the
+  convergence-table tests
+  (`test_apply_data_model_update_converges_with_pointer_set_reference` and its
+  live-node counterpart,
+  `test_apply_data_model_update_converges_with_live_pointer_set_reference`),
+  and the RT-002a/RT-002b/RT-002c divergence pins. See the docstring of
+  `apply_data_model_update()` for the full contract.
+  (`agent_sdk/a2ui/translator.py`, `agent_sdk/console/static/a2ui.js`)
+
+### ⚠️ Behavior changes
+- RT-004: the `MISSING` sentinel's effect on `apply_data_model_update()`
+  changed from a documented no-op to delete-at-path (`target.pop(leaf, None)`).
+  Both `apply_data_model_update` and `MISSING` are importable submodule
+  utilities on `agent_sdk.a2ui.translator` — NOT part of the package public
+  API: neither is in any `__all__`, and `agent_sdk.a2ui.__init__` re-exports
+  only `A2uiCapabilities`, `get_system_prompt_section`, and `translate`. They
+  are therefore provisional per the SemVer note at the top of this file, so a
+  behavior change ships in a patch. Still flagged explicitly because the
+  symbols ARE importable: any external code that reached into the submodule and
+  imported `MISSING` relying on the previously-documented no-op now silently
+  deletes the key at `pointer` instead (the old behavior was a latent bug, and
+  there are no in-repo callers). The whole-model-replace forms (`""`/`"/"`)
+  with `MISSING` remain a no-op (see the value-semantics contract in the
+  `apply_data_model_update` docstring).
+
+## [0.5.43] — 2026-07-20
+
+### 📖 Docs
+- GH-124: `for_custom_emit()`'s (`agent_sdk/a2ui/translator.py`) deliberate
+  Extended-tier bypass on the AG-UI CUSTOM-event path — a client that
+  declares `tier="core"` still receives in-catalog Extended Standard-Profile
+  types (e.g. `WaterfallChart`), unlike `allows()` on the A2A DataPart path,
+  which does enforce Extended-tier gating — was re-flagged as a HIGH
+  conformance bug by a fresh `/agent-stack-check` run. On review this is the
+  intentional, already-tested LRN-049 decision, not a defect:
+  `tests/test_rt001_ag_ui_custom_extended_gate.py` already pins
+  `WaterfallChart` emitting under `tier="core"`, and AG-UI's silent-ignore of
+  unknown CUSTOM events is the safety net A2A DataPart lacks, so withholding
+  data here has no protective value and only breaks graceful degradation.
+  GH-124 closed as not-a-bug. Strengthened the `for_custom_emit()` docstring
+  with this rationale so it isn't re-flagged. No behavior change.
+  (`agent_sdk/a2ui/translator.py`)
+
 ## [0.5.42] — 2026-07-20
 
 ### 🟠 Security

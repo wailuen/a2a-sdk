@@ -29,9 +29,10 @@ async def test_card_shape(client):
     params = a2ui_ext["params"]
     assert "urn:a2ui-profile:standard:v1" in params["supportedCatalogIds"]
     assert params["acceptsInlineCatalogs"] is False
-    # GH-113: show-then-close deleteSurface convention (§5.4/§7.1) is now
-    # wire-discoverable rather than only a console-source-code convention.
-    assert params["deleteSurfaceSemantics"] == "post-paint"
+    # GH-113 (superseded by the critical split-delivery fix, DESIGN.md
+    # §5.4/§7.1): deleteSurface is always delivered as its own,
+    # independently-folded message array — wire-discoverable via this hint.
+    assert params["deleteSurfaceSemantics"] == "split-delivery"
     # skills carry only spec fields + x-sdk
     for skill in card["skills"]:
         bare = set(skill) - {

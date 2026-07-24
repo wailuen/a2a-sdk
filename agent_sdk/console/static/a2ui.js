@@ -8,7 +8,10 @@
  *   updates for that surfaceId are rejected) while the painted DOM persists
  *   as a transcript snapshot (show-then-close, the SDK-wide rule).
  * - Data bindings are JSON Pointer (RFC 6901) {"path": ...} references into
- *   the surface data model.
+ *   the surface data model. RT-002: per spec, an omitted path AND the
+ *   literal path "/" both mean "the whole data model" — "/" is NOT the
+ *   RFC-6901-literal one-segment pointer to the child key "" here.
+ *   pointerTokens() folds both to the empty token list.
  * - Renders the 14 FROZEN Standard Profile types; MarketBriefing is prose
  *   (no card chrome); unknown components render the artifact's text
  *   fallback. Display-only: no input binding, no action dispatch.
@@ -26,8 +29,12 @@ const surfaces = new Map();
 /* ── JSON Pointer (RFC 6901) ── */
 
 function pointerTokens(pointer) {
-  if (pointer === "" || pointer === null || pointer === undefined) return [];
-  if (pointer === "/") return [""];
+  // A2UI v0.9.1: "Omit path or use '/' to replace the whole data model" —
+  // "/" is a SPEC ALIAS for the omitted path, not the RFC-6901-literal
+  // single empty-string token (which would address the child key ""). Both
+  // fold to the empty token list so pointerSet/pointerGet treat them
+  // identically (whole-document replace / whole-document read).
+  if (pointer === "" || pointer === "/" || pointer === null || pointer === undefined) return [];
   return String(pointer)
     .split("/")
     .slice(1)

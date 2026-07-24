@@ -142,7 +142,10 @@ def test_d1_good_domain_card_wire_nonempty_does_not_raise(_register_d1_cards):
     # Should succeed without raising
     artifact = build_artifact(event, _CAPS_DOMAIN_ON)
     assert artifact is not None
-    assert len(artifact.parts) == 2  # TextPart + A2UI DataPart
+    # TextPart + A2UI DataPart(open) + A2UI DataPart(close) — deleteSurface is
+    # delivered as its own array, never bundled with create/populate (critical
+    # protocol-conformance fix; see split_a2ui_delivery()).
+    assert len(artifact.parts) == 3
 
 
 def test_d1_bad_domain_card_gated_off_does_not_raise(_register_d1_cards):
@@ -182,7 +185,8 @@ def test_d1_standard_profile_type_wire_not_double_validated():
     caps = A2uiCapabilities(tier="core", catalogs=["urn:a2ui-profile:standard:v1"])
     artifact = build_artifact(event, caps)
     assert artifact is not None
-    assert len(artifact.parts) == 2
+    # TextPart + A2UI DataPart(open) + A2UI DataPart(close)
+    assert len(artifact.parts) == 3
 
 
 # ---------------------------------------------------------------------------

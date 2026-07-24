@@ -42,13 +42,27 @@ async def test_send_completes_with_artifact(client, fake_model):
     assert done["status"]["state"] == "completed"
     art = done["artifacts"][0]
     kinds = [p["kind"] for p in art["parts"]]
-    assert kinds == ["text", "data"]
+    # Critical protocol-conformance fix: deleteSurface must never share a
+    # delivered array with its own surface's create/populate messages (a
+    # spec-conformant Path-A renderer folds one array atomically and paints
+    # once after the fold — a bundled deleteSurface would unmount the
+    # surface before it ever painted). The A2UI payload is therefore split
+    # across TWO DataParts: text, data(open), data(close).
+    assert kinds == ["text", "data", "data"]
     assert art["metadata"]["data_type"] == "kpi_card"
+    for part in art["parts"][1:]:
+        assert part["metadata"]["mimeType"] == "application/a2ui+json"
     # A2UI DataPart.data is a bare message array (conformance: not wrapped)
-    msgs = art["parts"][1]["data"]
-    assert art["parts"][1]["metadata"]["mimeType"] == "application/a2ui+json"
-    verbs = [next(k for k in m if k != "version") for m in msgs]
+    open_msgs = art["parts"][1]["data"]
+    close_msgs = art["parts"][2]["data"]
+    verbs = [next(k for k in m if k != "version") for m in open_msgs + close_msgs]
     assert verbs == ["createSurface", "updateComponents", "updateDataModel", "deleteSurface"]
+    assert all("deleteSurface" not in m for m in open_msgs), (
+        "open DataPart must not contain deleteSurface"
+    )
+    assert len(close_msgs) == 1 and "deleteSurface" in close_msgs[0], (
+        "close DataPart must contain exactly the deleteSurface message"
+    )
 
 
 async def test_missing_message_id_is_invalid_params(client):

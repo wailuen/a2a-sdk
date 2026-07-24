@@ -67,12 +67,30 @@ async def test_tool_and_custom_events(client, fake_model):
     assert result["toolCallId"] == start["toolCallId"]
     assert result["messageId"] != result["toolCallId"]  # fresh UUID rule
 
-    customs = {f["name"]: f["value"] for f in frames if f["type"] == "CUSTOM"}
-    assert set(customs) == {"AGENT_ARTIFACT", "A2UI_UPDATE"}
-    assert customs["AGENT_ARTIFACT"]["dataType"] == "kpi_card"
-    assert customs["AGENT_ARTIFACT"]["toolName"] == "demo_kpis"
-    verbs = [next(k for k in m if k != "version") for m in customs["A2UI_UPDATE"]["messages"]]
+    custom_frames = [f for f in frames if f["type"] == "CUSTOM"]
+    names = [f["name"] for f in custom_frames]
+    assert set(names) == {"AGENT_ARTIFACT", "A2UI_UPDATE"}
+    agent_artifact = next(f["value"] for f in custom_frames if f["name"] == "AGENT_ARTIFACT")
+    assert agent_artifact["dataType"] == "kpi_card"
+    assert agent_artifact["toolName"] == "demo_kpis"
+
+    # Critical protocol-conformance fix: deleteSurface must never share a
+    # delivered array with its own surface's create/populate messages (a
+    # spec-conformant Path-A renderer folds one array atomically and paints
+    # once after the fold — a bundled deleteSurface would unmount the
+    # surface before it ever painted). The A2UI payload is therefore split
+    # across TWO A2UI_UPDATE CUSTOM events, open before close.
+    a2ui_updates = [f["value"]["messages"] for f in custom_frames if f["name"] == "A2UI_UPDATE"]
+    assert len(a2ui_updates) == 2, "deleteSurface must be its own A2UI_UPDATE event"
+    open_msgs, close_msgs = a2ui_updates
+    verbs = [next(k for k in m if k != "version") for m in open_msgs + close_msgs]
     assert verbs == ["createSurface", "updateComponents", "updateDataModel", "deleteSurface"]
+    assert all("deleteSurface" not in m for m in open_msgs), (
+        "first A2UI_UPDATE event must not contain deleteSurface"
+    )
+    assert len(close_msgs) == 1 and "deleteSurface" in close_msgs[0], (
+        "second A2UI_UPDATE event must contain exactly the deleteSurface message"
+    )
 
 
 async def test_interrupt_outcome_and_resume(client, fake_model):
