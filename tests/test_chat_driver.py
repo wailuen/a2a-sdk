@@ -553,3 +553,167 @@ async def test_l9_agui_turn_body_includes_tools_and_context():
     assert "context" in body, f"'context' key missing from agui_turn() POST body: {list(body.keys())}"
     assert body["tools"] == [], f"expected tools=[], got {body['tools']!r}"
     assert body["context"] == [], f"expected context=[], got {body['context']!r}"
+
+
+# ---------------------------------------------------------------------------
+# RT-001 (w038 group G, budget-exhausted): extract_a2ui() unwrap coverage.
+#
+# GH-128 changed extract_a2ui()'s A2A DataPart handling from
+# `isinstance(data, list)` / `result.append(p["data"])` to
+# `isinstance(data, dict)` / `result.append(data.get("messages", []))`, to
+# match the object-wrapped `{"messages": [...]}` wire shape runner.py now
+# emits (was a bare array). The console consumer (chat.js handleA2aArtifact)
+# got a dedicated regression pin (test_card_console.py::
+# test_handle_a2a_artifact_guards_malformed_a2ui_datapart) but this scripted
+# client had none — a revert of the `data.get("messages", ...)` unwrap would
+# pass the rest of the suite silently. These two tests pin both the
+# well-formed and malformed shapes.
+# ---------------------------------------------------------------------------
+
+
+def _a2ui_task(data: dict) -> dict:
+    """Minimal task dict with a single artifact carrying one A2UI DataPart."""
+    return {
+        "artifacts": [
+            {
+                "parts": [
+                    {
+                        "kind": "data",
+                        "metadata": {"mimeType": "application/a2ui+json"},
+                        "data": data,
+                    }
+                ]
+            }
+        ]
+    }
+
+
+def test_rt001_extract_a2ui_unwraps_messages_object():
+    """Well-formed post-GH-128 shape: data={"messages": [...]} unwraps to the array."""
+    messages = [{"createSurface": {"surfaceId": "s1"}}, {"updateComponents": {}}]
+    task = _a2ui_task({"messages": messages})
+
+    result = ChatDriver.extract_a2ui(task)
+
+    assert result == [messages], (
+        "extract_a2ui() must unwrap DataPart.data.messages, not the raw "
+        f"data dict — got {result!r}"
+    )
+
+
+def test_rt001_extract_a2ui_guards_malformed_data_dict():
+    """A data dict missing the 'messages' key must not raise — falls back to []."""
+    task = _a2ui_task({})
+
+    result = ChatDriver.extract_a2ui(task)
+
+    assert result == [[]], (
+        f"extract_a2ui() must default a missing 'messages' key to [], got {result!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# RT-002 (residual robustness gap surfaced alongside RT-001): a `messages`
+# value present but not a list must not be treated as a message array —
+# mirrors the `Array.isArray(part.data.messages)` guard in the console
+# consumer (chat.js handleA2aArtifact).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_messages", ["x", {"nope": True}, 42, None, True])
+def test_rt002_extract_a2ui_guards_non_list_messages_value(bad_messages):
+    """A non-list 'messages' value must not raise or leak through — falls back to []."""
+    task = _a2ui_task({"messages": bad_messages})
+
+    result = ChatDriver.extract_a2ui(task)
+
+    assert result == [[]], (
+        f"extract_a2ui() must default a non-list 'messages' value to [], got {result!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# RT-002 (w038 group G): a strictly spec-conformant A2UI v0.9.1 producer's own A2A
+# binding requires DataPart.data to be a BARE array — this SDK's own producer
+# emits the object-wrapped {"messages": [...]} shape instead (GH-128, locked,
+# REVIEWS.md Round 6), but extract_a2ui() is a general-purpose scripted-client
+# helper that must also be able to read a conformant third-party producer's
+# bare-array DataPart, not just this SDK's own wrapped shape (mirrors the
+# console consumer, chat.js handleA2aArtifact).
+# ---------------------------------------------------------------------------
+
+
+def test_rt002_extract_a2ui_accepts_bare_array():
+    """A bare-array data= is the A2UI v0.9.1 spec's own literal A2A binding
+    shape (see LRN-134); extract_a2ui() must unwrap it directly, not silently
+    drop it because it isn't a dict."""
+    messages = [{"createSurface": {"surfaceId": "s1"}}, {"updateComponents": {}}]
+    task = _a2ui_task(messages)
+
+    result = ChatDriver.extract_a2ui(task)
+
+    assert result == [messages], (
+        f"extract_a2ui() must unwrap a bare-array DataPart.data directly, got {result!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# RT-001 (w038 group G, fresh-lens): agui_turn()'s AG-UI A2UI_UPDATE handler
+# was the lone first-party A2UI consumer NOT widened for the tolerant read that
+# extract_a2ui() and both chat.js paths already do. Its `(value or {}).get(
+# "messages")` read did not silently drop a bare-array value — a non-empty list
+# is truthy, so `.get("messages")` raised AttributeError and broke the entire
+# turn on the exact bare-array shape the sibling consumers were widened to
+# accept. These tests pin the wrapped-object shape, the bare-array shape, and
+# malformed values through the emit bus.
+# ---------------------------------------------------------------------------
+
+
+def _a2ui_update_frames(value) -> list[dict]:
+    """AG-UI SSE frames carrying one A2UI_UPDATE CUSTOM event with *value*."""
+    return [
+        {"type": "RUN_STARTED", "runId": "r1", "threadId": "t1"},
+        {"type": "CUSTOM", "name": "A2UI_UPDATE", "value": value},
+        {"type": "RUN_FINISHED", "outcome": {"type": "success"}},
+    ]
+
+
+async def test_agui_turn_a2ui_update_unwraps_messages_object():
+    """This SDK's own wrapped shape value={"messages": [...]} unwraps to the array."""
+    messages = [{"createSurface": {"surfaceId": "s1"}}, {"updateComponents": {}}]
+    async with _make_client(_a2ui_update_frames({"messages": messages})) as client:
+        driver = ChatDriver(client)
+        fired: list = []
+        await driver.agui_turn("x", "t1", [], emit={"a2ui": fired.append})
+
+    assert fired == [messages], (
+        f"agui_turn() must unwrap A2UI_UPDATE value.messages, got {fired!r}"
+    )
+
+
+async def test_agui_turn_a2ui_update_accepts_bare_array():
+    """A bare-array value (the A2UI v0.9.1 spec's own binding shape) must be
+    unwrapped directly — and must NOT raise AttributeError (the pre-fix bug)."""
+    messages = [{"createSurface": {"surfaceId": "s1"}}, {"updateComponents": {}}]
+    async with _make_client(_a2ui_update_frames(messages)) as client:
+        driver = ChatDriver(client)
+        fired: list = []
+        await driver.agui_turn("x", "t1", [], emit={"a2ui": fired.append})
+
+    assert fired == [messages], (
+        f"agui_turn() must unwrap a bare-array A2UI_UPDATE value directly, got {fired!r}"
+    )
+
+
+@pytest.mark.parametrize("bad_value", [{"messages": "x"}, {"messages": 42}, {}, "str", 7])
+async def test_agui_turn_a2ui_update_guards_malformed_value(bad_value):
+    """A malformed value (non-list messages, missing key, or non-dict/list
+    value) must fire an empty list — never raise or leak a non-list."""
+    async with _make_client(_a2ui_update_frames(bad_value)) as client:
+        driver = ChatDriver(client)
+        fired: list = []
+        await driver.agui_turn("x", "t1", [], emit={"a2ui": fired.append})
+
+    assert fired == [[]], (
+        f"agui_turn() must default a malformed A2UI_UPDATE value to [], got {fired!r}"
+    )

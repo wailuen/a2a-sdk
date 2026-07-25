@@ -28,8 +28,8 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
-from ..a2ui.translator import A2uiCapabilities, split_a2ui_delivery, translate
-from ..agent.runner import new_task, run_task_worker
+from ..a2ui.translator import A2uiCapabilities, translate
+from ..agent.runner import new_task, run_task_worker, split_a2ui_delivery_validated
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
 from ..common.iso8601 import iso_utc
@@ -309,6 +309,19 @@ class _RunMapper:
             if isinstance(payload, ContentModel):
                 a2ui_messages = translate(payload, capabilities=self.capabilities.for_custom_emit())
                 if a2ui_messages is not None:
+                    # RT-001: SC-D1 + RT-004 validation, mirroring
+                    # runner.py::build_artifact's A2A path exactly via the
+                    # shared split_a2ui_delivery_validated() boundary, so a
+                    # malformed translate() output (e.g. a custom domain-card
+                    # translate() that is entirely deleteSurface) fails this
+                    # transport too instead of silently emitting an empty
+                    # A2UI_UPDATE {"messages": []} and letting the run
+                    # succeed. Raises ValueError, caught by the enclosing
+                    # stream() try/except and reported as RUN_ERROR (§5.3) —
+                    # the same "every failure after RUN_STARTED becomes a
+                    # RUN_ERROR frame" contract every other exception here
+                    # already follows.
+                    #
                     # Critical protocol-conformance fix: deleteSurface must
                     # never share a delivered array with its own surface's
                     # create/populate messages — a spec-conformant Path-A
@@ -321,7 +334,9 @@ class _RunMapper:
                     # unit. Named envelope so consumers can key on
                     # value.messages (spec: CUSTOM.value carries the A2UI
                     # message array).
-                    open_messages, close_messages = split_a2ui_delivery(a2ui_messages)
+                    open_messages, close_messages = split_a2ui_delivery_validated(
+                        payload, a2ui_messages
+                    )
                     frames.append(self._custom("A2UI_UPDATE", {"messages": open_messages}))
                     if close_messages:
                         frames.append(self._custom("A2UI_UPDATE", {"messages": close_messages}))

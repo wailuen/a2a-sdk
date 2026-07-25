@@ -58,7 +58,7 @@ blocks). Note whether `generate_system_prompt()` is called and with what params.
 | `surfaceId` in all post-create messages | Required |
 | `catalogId` in `createSurface` | Required (LLMs drop it); Profile id is `urn:a2ui-profile:standard:v1` |
 | `deleteSurface` before re-creating the same `surfaceId` | Duplicate `createSurface` is a protocol error |
-| `data` field in a DataPart is an array | Even for one message |
+| `DataPart.data` shape is internally consistent with a documented convention | A2UI's own binding requires a bare array; A2A v0.3.0's `DataPart.data` typing requires an object — a genuine, unresolved spec conflict (see A5); an object-wrapped choice MUST be advertised via a `dataEncoding` agent-card hint |
 | Sequential processing on failure | Continue the array on a per-message error; no bail-early |
 
 ### A3 — Component model
@@ -90,7 +90,7 @@ blocks). Note whether `generate_system_prompt()` is called and with what params.
 | MIME type `application/a2ui+json` (canonical v0.9.1) | Not `application/json+a2ui` (legacy/deprecated) |
 | Extension URI in agent card `capabilities.extensions[]` | `https://a2ui.org/a2a-extension/a2ui/v0.9.1` |
 | `X-A2A-Extensions` header on agent-to-agent requests | Required to activate the extension |
-| `DataPart.data` is a JSON array | Not a bare object |
+| `DataPart.data` shape matches a documented convention | A2UI v0.9.1's own binding requires a bare array; A2A v0.3.0's `DataPart.data` typing requires an object — no spec resolves this conflict. Flag only an inconsistent shape across emissions, or an object-wrapped choice missing its `dataEncoding` agent-card hint |
 | `DataPart.metadata.mimeType` set | Required for consumer dispatch |
 
 ### A6 — AG-UI CUSTOM delivery (if applicable)
@@ -108,7 +108,7 @@ blocks). Note whether `generate_system_prompt()` is called and with what params.
 - **v0.8 key-discriminator in v0.9 code** — `{"component":{"Text":{...}}}` vs `{"component":"Text",...}`. Silent failure.
 - **Missing `root`** — client buffers indefinitely; nothing renders.
 - **Unvalidated LLM output** — validate every emission; `"text"` vs `"Text"` is the most common error.
-- **`data` not an array** — protocol error.
+- **`DataPart.data` shape mismatch with the server's own documented convention** — A2UI v0.9.1's own binding requires a bare array; A2A v0.3.0's `DataPart.data` typing requires an object. Neither spec resolves the conflict; flag inconsistency or an undocumented (missing `dataEncoding` hint) object-wrapped choice, not the shape itself.
 - **`catalogId` omitted** from `createSurface` — required; validate before sending.
 - **Wrong MIME type** — `application/json+a2ui` for v0.9.1 is deprecated; flag medium.
 - **Missing `version`** — fails schema validation.
@@ -197,7 +197,7 @@ curl -X POST "$BASE/v1/message:send" \
   -H "Content-Type: application/json" -H "$AUTH" \
   -d '{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"kind":"message","role":"user","parts":[{"kind":"text","text":"<a query that should yield a chart/table>"}],"messageId":"<uuid>"}}}'
 # Assert: a part with kind=="data" AND metadata.mimeType=="application/a2ui+json"
-# Assert: data[] is an array; first message is createSurface with version, surfaceId, catalogId
+# Assert: data is either a bare array or an object with the array under a wrapper key (check the agent card's dataEncoding hint); first message is createSurface with version, surfaceId, catalogId
 # Assert: an updateComponents has a component id=="root"; component names are PascalCase
 # Assert: any FROZEN Profile payload satisfies its A9 structural contract
 

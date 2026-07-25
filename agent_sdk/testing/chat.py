@@ -198,7 +198,25 @@ class ChatDriver:
                     v = frame.get("value") or {}
                     self._fire(emit, "artifact", v.get("dataType", ""), v.get("toolName", ""))
                 elif custom_name == "A2UI_UPDATE":
-                    msgs = (frame.get("value") or {}).get("messages") or []
+                    # RT-001 (w038 group G): mirror the tolerant read used by
+                    # extract_a2ui() and the console's handleCustom() — accept
+                    # BOTH this SDK's own object-wrapped {"messages": [...]}
+                    # value AND the bare-array value a strictly spec-conformant
+                    # third-party A2UI v0.9.1 producer emits over AG-UI CUSTOM.
+                    # The prior `(value or {}).get("messages")` read did NOT
+                    # merely drop a bare array — a non-empty list is truthy, so
+                    # `.get("messages")` raised AttributeError and killed the
+                    # whole turn. This is the last first-party A2UI consumer to
+                    # be widened; the other three (extract_a2ui, and chat.js's
+                    # two paths) already tolerate both shapes.
+                    value = frame.get("value")
+                    if isinstance(value, list):
+                        msgs = value
+                    elif isinstance(value, dict):
+                        m = value.get("messages")
+                        msgs = m if isinstance(m, list) else []
+                    else:
+                        msgs = []
                     self._fire(emit, "a2ui", msgs)
                 elif t == "TEXT_MESSAGE_CONTENT":
                     delta = frame.get("delta") or ""
@@ -389,12 +407,23 @@ class ChatDriver:
 
         Dispatches on DataPart.metadata.mimeType per A2UI §A5 (the canonical
         render-hint location); not on the artifact-level mimeType shortcut.
+
+        This SDK's own producer wraps the message array as an OBJECT under
+        "messages" (GH-128, §5.4, LRN-134 — locked, REVIEWS.md Round 6); a
+        strictly spec-conformant third-party A2UI v0.9.1 producer's own A2A
+        binding instead requires a BARE array. Both shapes are accepted on
+        read (RT-002, w038 group G) — mirrors the console consumer's
+        handleA2aArtifact() in chat.js.
         """
         result = []
         for art in task.get("artifacts") or []:
             for p in art.get("parts") or []:
                 part_mime = (p.get("metadata") or {}).get("mimeType")
                 if p.get("kind") == "data" and part_mime == A2UI_MIME:
-                    if isinstance(p.get("data"), list):
-                        result.append(p["data"])
+                    data = p.get("data")
+                    if isinstance(data, list):
+                        result.append(data)
+                    elif isinstance(data, dict):
+                        msgs = data.get("messages")
+                        result.append(msgs if isinstance(msgs, list) else [])
         return result

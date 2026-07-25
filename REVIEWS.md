@@ -313,3 +313,64 @@ Four-advisor /agent-stack-check static audit. All Critical/High findings fixed a
 **Resolved (was RT-003):** the dead imports this note previously deferred — `AsyncIterator`/`Optional`/local `LoopEvent` in `agent/registry.py` and `ErrorCategory` in `agent/loop.py`, all present at release 5bcab2b — have since been removed from the working tree (verified: `registry.py`'s `typing` import block no longer names `AsyncIterator` or `Optional` and holds no local `LoopEvent` import; `loop.py` has zero `ErrorCategory` references). The `AsyncIterator`/`LoopEvent` symbols that remain in `loop.py` and the `LoopEvent` mentions in `registry.py` are live uses (type hints / docstrings), not dead imports. No follow-up ruff/pyflakes cleanup is outstanding for these; note closed to end the doc-vs-code drift.
 
 **Round 5 sign-off: SIGNED OFF. The void-result parity deviation is an owned, tested, §5.6-motivated decision with no mcp-check impact. Doc provenance corrected. No code change required — behaviour is correct and green.**
+
+## Round 6 — w038 group G (GH-128) A2UI-over-A2A DataPart wrapper key decision (2026-07-25)
+
+`/wave w038` group G's unit redteam (RT-002, round 5, budget-exhausted) flagged that the
+GH-128 base-vs-extension conflict resolution — recorded only as a low-severity LRN
+(LRN-134) plus inline comments — is a permanent, contested protocol deviation with a
+real third-party-interop cost, and argued the decision belongs at ADR/sign-off level,
+not buried in a low LRN. This SDK's own workspace does not keep a per-repo `workspace/adr/`
+(that convention is for agent repos generated *from* the SDK, via `template/CLAUDE.md`'s
+"Credential ADR discipline" — see `template/workspace/adr/a001-credential-model.md`); the
+SDK's own equivalent for a protocol-level, permanently-owned decision is an explicit
+sign-off round in this log, as Round 5 above already established. This round promotes the
+GH-128 wrapper-key decision to that same level.
+
+### Owned decision (not deferred): A2UI-over-A2A `DataPart.data` wrapper key (`"messages"`)
+
+| Protocol | Sev | Finding | File:line | Decision |
+|---|---|---|---|---|
+| A2A / A2UI | LOW (interop cost), decision itself is protocol-binding | A2A v0.3.0's `DataPart.data` typing (`{[key: string]: any}`, `types.ts`, pinned tag) requires a JSON object; A2UI v0.9.1's own A2A binding (`a2ui_extension_specification.md`, "Data encoding", pinned `v0_9_1`) independently requires `data` to be a bare array and shows no `messages` wrapper in its own example. The two pinned specs directly conflict for this exact field. This SDK resolves the conflict by wrapping the array as `data: {"messages": [...]}}`, matching its own AG-UI `CUSTOM` `value.messages` convention — a shape neither spec defines as normative. | `agent_sdk/agent/runner.py::build_artifact()` (open/close A2UI `DataPart` construction); `agent_sdk/models/a2a.py` (`DataPart.data: dict[str, Any]`, object-only); `agent_sdk/a2ui/catalog.py::a2ui_extension()` (`dataEncoding` hint); DESIGN.md §5.4 | **KEEP the object wrapper — signed off.** Rejected alternative: revert to a bare array under the reading that A2UI, as an *activated extension*, may refine the base `DataPart.data` shape for its own mimeType — this was considered and rejected because it reintroduces the GH-128 Critical finding (a schema-validating A2A client — TCK, A2A Inspector, any typed SDK generated from the real v0.3.0 spec — rejects a bare-array `DataPart.data` outright, independent of any A2UI-specific reading); the object-typed base contract is treated as unconditionally binding. **Accepted residual cost:** a strictly spec-conformant, non-SDK-aware A2UI v0.9.1 Path-A renderer looks for the message array at `data` and will not find it at `data.messages` — it renders nothing for every A2UI artifact this SDK emits over A2A. Mitigated, not eliminated, by a non-normative `params.dataEncoding: "data.messages"` agent-card hint (mirrors `deleteSurfaceSemantics`/GH-113): a third-party renderer that reads and interprets SDK-specific card params can recover the shape; the spec does not require it to. This SDK's own first-party consumers (`agent_sdk/console/static/chat.js`, `agent_sdk/testing/chat.py`) unwrap `data.messages` correctly and are unaffected. |
+
+**Upstream spec clarification (considered, not filed):** the cleanest long-term resolution
+is an A2UI spec clarification (google/A2UI) stating whether an activated A2A extension may
+refine `DataPart.data`'s shape for its own declared mimeType, which would let this SDK
+either keep the bare array under a documented extension-refinement rule or have the wrapper
+become citably canonical rather than SDK-private. Filing that issue was intentionally not
+done as part of this round — it is an external, third-party repo this SDK does not own, and
+per this project's own filing discipline (confirm before filing even for its own tracker —
+see `sdk-issue`/`sdk-issue-scan`), opening a public issue on an unrelated upstream project
+warrants an explicit decision by the SDK maintainer, not an automated one. Left as a follow-up
+for the maintainer to file (or decline) at their discretion; this sign-off does not depend on it.
+
+**Round 6 sign-off: SIGNED OFF. The `data.messages` wrapper is an owned, tested,
+GH-128-motivated decision with a documented rejected alternative and an explicitly accepted
+(not silently absorbed) third-party-interop cost. LRN-134 and DESIGN.md §5.4 carry the full
+citation trail; this entry is the durable, ADR-equivalent record RT-002 asked for. No code
+change required — behaviour is correct and already covered by
+`tests/test_rt001_a2ui_data_encoding_hint.py` and the GH-128 wire-shape test updates.**
+
+## Round 7 — w038 group G (GH-128) DESIGN §4.0 wire-shape conformance exemption (2026-07-25)
+
+A later redteam round of the same w038 group-G loop (RT-005, versioning discipline) flagged
+that the GH-128 fix ships a breaking `DataPart.data` narrowing under a same-minor patch bump
+(0.5.43 → 0.5.44, not 0.6.0). The first resolution cited 0.5.40's `interrupt_ttl_remaining`
+as *precedent*; a second pass noted that precedent alone leaves the top-of-file SemVer promise
+("SemVer applies to the stable core (DESIGN.md §4.0)") in tension with practice, so it added a
+standing **wire-shape conformance exemption** to DESIGN §4.0. That is a change to the SemVer
+contract itself — strictly larger in blast radius than the Round-6 wrapper-key decision it sat
+beside, yet it landed on CHANGELOG prose from a redteam finding (RT-005) with no owned-decision
+record. This round gives it the same ADR-equivalent sign-off Round 6 gave the wrapper key.
+
+### Owned decision (not deferred): DESIGN §4.0 wire-shape conformance exemption
+
+| Scope | Sev | Finding | File:line | Decision |
+|---|---|---|---|---|
+| SemVer policy (stable core) | LOW (versioning discipline), decision is contract-level | DESIGN §4.0's stable core is under strict SemVer, yet 0.5.44 narrows a stable-core wire type (`DataPart.data`) under a patch bump. Without a stated rule, a consumer pinning `~=0.5.x` has no reason to expect a stable-core wire type to change without a major bump. | DESIGN.md §4.0 ("Wire-shape conformance exemption"); CHANGELOG.md `## [0.5.44]` `🔴 Breaking changes` | **KEEP the exemption — signed off.** A stable-core wire-shape break whose *sole* purpose is conformance to an external protocol spec (A2A/AG-UI/A2UI/MCP), not a voluntary redesign, may ship under a patch/minor bump, **conditional** on a dedicated `🔴 Breaking changes` CHANGELOG heading naming the exact type/field, both directions of impact (emit + parse), and a Migration callout. Rejected alternative: require a **major bump for every stable-core wire break** — rejected because a spec-conformance fix (the pre-fix shape was *already* non-conformant and unusable by schema-validating clients) is a bug fix that restores the documented contract, not a new contract; forcing 0.6.0 for it would both over-signal (implying voluntary API churn) and delay shipping a correctness fix. A **voluntary** stable-core break still requires a major bump and cannot cite this exemption. **Accepted risk:** a consumer pinning `~=0.5.x` who does not read the `🔴 Breaking changes` section may be surprised by a wire-shape change within a minor series; the conditional CHANGELOG discipline (dedicated heading + both-directions + Migration) is the mitigation, not elimination. |
+
+**Round 7 sign-off: SIGNED OFF. The §4.0 wire-shape conformance exemption is an owned,
+contract-level decision with a documented rejected alternative (major bump for all stable-core
+wire breaks) and an explicitly accepted risk to `~=0.5.x` pinners. DESIGN §4.0 is now the
+standing rule; CHANGELOG breaking-change entries cite it directly rather than re-arguing from
+0.5.40 precedent release-by-release. No code change required.**

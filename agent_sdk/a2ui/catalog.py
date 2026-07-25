@@ -264,6 +264,20 @@ def a2ui_extension(allowed_components: list[str] | None = None) -> AgentExtensio
     consumer need not reverse-engineer the delivery shape, but it is not a
     spec-defined discovery mechanism and correct rendering never depends on
     reading it.
+
+    ``dataEncoding`` is also a NON-NORMATIVE, SDK-specific hint (LRN-134
+    follow-up to GH-128/GH-113). A2UI v0.9.1's own A2A binding mandates a
+    bare array at the DataPart's ``data`` field; this SDK instead wraps the
+    array as ``{"messages": [...]}`` (``agent_sdk/agent/runner.py::
+    build_artifact()``) because A2A v0.3.0's ``DataPart.data`` typing
+    requires an object, not an array — a genuine conflict between the base
+    protocol and the extension's own literal binding, resolved in favor of
+    A2A-base conformance. The hint value ``"data.messages"`` documents where
+    the message array actually lives so a strictly spec-conformant
+    third-party A2UI Path-A renderer, which would otherwise look for the
+    array directly at ``data`` and render nothing, has a wire-discoverable
+    way to find it. This SDK's own first-party consumers already unwrap
+    ``data.messages`` unconditionally and do not read this hint.
     """
     return AgentExtension(
         uri=A2UI_EXTENSION_URI,
@@ -273,6 +287,7 @@ def a2ui_extension(allowed_components: list[str] | None = None) -> AgentExtensio
             "supportedCatalogIds": supported_catalogs(allowed_components),
             "acceptsInlineCatalogs": False,
             "deleteSurfaceSemantics": "split-delivery",
+            "dataEncoding": "data.messages",
         },
     )
 

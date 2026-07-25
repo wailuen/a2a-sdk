@@ -52,9 +52,10 @@ async def test_send_completes_with_artifact(client, fake_model):
     assert art["metadata"]["data_type"] == "kpi_card"
     for part in art["parts"][1:]:
         assert part["metadata"]["mimeType"] == "application/a2ui+json"
-    # A2UI DataPart.data is a bare message array (conformance: not wrapped)
-    open_msgs = art["parts"][1]["data"]
-    close_msgs = art["parts"][2]["data"]
+    # A2UI DataPart.data is an object wrapping the message array under
+    # "messages" — matching the AG-UI CUSTOM value convention (GH-128).
+    open_msgs = art["parts"][1]["data"]["messages"]
+    close_msgs = art["parts"][2]["data"]["messages"]
     verbs = [next(k for k in m if k != "version") for m in open_msgs + close_msgs]
     assert verbs == ["createSurface", "updateComponents", "updateDataModel", "deleteSurface"]
     assert all("deleteSurface" not in m for m in open_msgs), (

@@ -16,9 +16,13 @@ holding the full self-cleaning sequence::
 ``translate()``'s return value is a computed sequence, not a wire delivery
 unit. Delivery callers (``agent/runner.py::build_artifact``,
 ``routes/ag_ui.py``'s ``ArtifactEvent`` branch) MUST pass it through
-``split_a2ui_delivery()`` and deliver the two halves as two independently
-folded arrays — see that function's docstring for why: a spec-conformant
-A2UI v0.9.1 Path-A renderer folds one delivered message array atomically and
+``agent/runner.py::split_a2ui_delivery_validated()`` — never call this
+module's own ``split_a2ui_delivery()`` directly from a delivery caller
+(RT-001: a transport that split without validating first shipped malformed
+A2UI silently instead of failing the run) — and deliver the two returned
+halves as two independently folded arrays. See ``split_a2ui_delivery()``'s
+own docstring for why the split exists at all: a spec-conformant A2UI
+v0.9.1 Path-A renderer folds one delivered message array atomically and
 paints once after the fold, so ``deleteSurface`` can never share a delivered
 array with its own surface's create/populate messages.
 

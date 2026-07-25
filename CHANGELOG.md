@@ -6,6 +6,39 @@ internals, `contrib/`) may change in minors with notice here.
 
 ## [0.5.44] — 2026-07-24
 
+### 🔴 Breaking changes
+- **`DataPart.data` narrows from `dict[str, Any] | list[Any]` to `dict[str, Any]`**
+  (`agent_sdk/models/a2a.py`) — part of the GH-128 fix for the non-conformant bare-array A2UI
+  wire shape, detailed in full under "Protocol surface changes" below. Both directions change:
+  outbound, every A2A `DataPart` this SDK emits for A2UI now wraps the message array as
+  `{"messages": [...]}` instead of delivering it bare; inbound, a `DataPart` whose `data` is a
+  bare array now fails Pydantic validation (`-32602`, Invalid Params) instead of being accepted.
+  **Migration:** any A2A client reading A2UI delivery must change from `part.data` to
+  `part.data.messages`. RT-005 (redteam, low, versioning discipline): flagged that shipping a
+  breaking wire-shape change under a same-minor patch bump (0.5.43 → 0.5.44, not 0.6.0) could
+  surprise a consumer pinning `~=0.5.43`. Resolved by keeping the version at 0.5.44 rather
+  than bumping to 0.6.0 — consistent with this project's established convention of surfacing
+  breaking changes via an explicit `🔴 Breaking changes` section with a Migration callout rather
+  than reserving them for a minor/major bump (precedent: 0.5.40's `TaskStore.interrupt_ttl_remaining`
+  breaking change, also shipped under a same-minor patch bump, see below). This section is that
+  callout, given its own top-level heading — matching 0.5.40's placement, and promoted out from
+  inside "Protocol surface changes" where the fuller writeup still lives — precisely so a reader
+  scanning only `Breaking changes` headers across releases does not miss it. Redteam follow-up
+  (low, versioning discipline — a second pass on RT-005): citing 0.5.40 as *precedent* still left
+  the top-of-file SemVer promise ("SemVer applies to the stable core (DESIGN.md §4.0)") and this
+  entry's own practice in tension for any reader who checks §4.0 without reading changelog
+  precedent — a consumer pinning `~=0.5.43` has no reason to expect a stable-core wire type to
+  narrow without a major bump just because a *different* prior release also did it. Resolved for
+  good, not just for this release: DESIGN.md §4.0 now states a standing, explicit **wire-shape
+  conformance exemption** — a stable-core wire-shape break driven by external protocol conformance
+  (not a voluntary redesign) may ship under a patch/minor bump provided it carries a dedicated
+  `🔴 Breaking changes` heading + Migration callout, exactly as this entry does. §4.0 is the rule
+  now; this entry and 0.5.40's are its precedent, not its justification — future breaking wire-shape
+  conformance fixes cite §4.0 directly instead of re-litigating this argument per release. The §4.0
+  exemption is a signed-off, owned decision (not merely this CHANGELOG note): **REVIEWS.md Round 7**
+  records the rejected alternative (a major bump for every stable-core wire break) and the accepted
+  risk to consumers pinning `~=0.5.x`.
+
 ### 🟡 Protocol surface changes
 - `split_a2ui_delivery()` (new, `agent_sdk/a2ui/translator.py`): discovered during the GH-126
   redteam pass, tracked separately as it is unrelated to GH-126's scope. `translate()` computes
@@ -21,18 +54,48 @@ internals, `contrib/`) may change in minors with notice here.
   delivery callers now send them as two independently-folded wire units, open before close:
   `agent/runner.py::build_artifact` emits two A2A DataParts on the artifact instead of one;
   `routes/ag_ui.py`'s `ArtifactEvent` branch emits two `A2UI_UPDATE` CUSTOM events instead of one.
-  This is a wire-shape change for every A2UI emission (previously one DataPart/event per artifact,
-  now up to two) — flagged here as a protocol surface change, not a plain fix, since any consumer
-  that assumed exactly one DataPart/event per A2UI artifact must now expect two. The agent card's
-  A2UI extension hint (`deleteSurfaceSemantics`, GH-113) is updated from `"post-paint"` to
-  `"split-delivery"` to match — non-normative in both cases, but the value itself changed.
+  On the A2A side each array is now delivered as `DataPart(data={"messages": [...]})`. **This is
+  a breaking wire-shape change, not just a count change** (see the dedicated `🔴 Breaking changes`
+  section above): every released version through v0.5.42
+  (back to the initial commit — verified via `git show v0.5.42:agent_sdk/agent/runner.py`) emitted
+  `DataPart(data=a2ui_messages, ...)` with `data` as a bare `list`, which was already non-conformant
+  — the A2A base spec requires `DataPart.data` to be a JSON object (`a2a.json`/`types.ts`, pinned
+  v0.3.0 tag) — but shipped that way across every tagged release to date. 0.5.44 fixes the shape by
+  wrapping the message array under a `"messages"` key, matching the AG-UI CUSTOM event's
+  `value.messages` convention exactly (same key, same shape). **Migration for A2A consumers:** any
+  client parsing `DataPart.data` as an array for A2UI must change to reading `part.data.messages`
+  (was `part.data`) — this will silently break on upgrade otherwise. `agent_sdk/models/a2a.py`'s
+  `DataPart.data` is now typed `dict[str, Any]` (was `dict[str, Any] | list[Any]`) so the old
+  bare-array shape fails at construction time, closing GH-128. The bare-array shape was caught by
+  `/sdk-test` Leg 3's static conformance gate (a2a-advisor) before the v0.5.44 tag and fixed under
+  GH-128. This is also a wire-*count* change
+  for every A2UI emission (previously one DataPart/event per artifact, now up to two) — flagged
+  here as a protocol surface change, not a plain fix, since any consumer that assumed exactly one
+  DataPart/event per A2UI artifact must now expect two. The agent card's A2UI extension hint
+  (`deleteSurfaceSemantics`, GH-113) is updated from `"post-paint"` to `"split-delivery"` to match
+  — non-normative in both cases, but the value itself changed.
   Covered by `tests/test_a2ui_wire.py` (`test_split_a2ui_delivery_isolates_delete_surface`,
   `test_split_a2ui_delivery_empty_input`) plus updated assertions in
   `tests/test_gh113_delete_surface_semantics.py`, `tests/test_a2ui_group_d.py`,
-  `tests/test_protocol_fixes_w6.py`, `tests/test_protocol_wire.py`. See DESIGN.md §5.4/§7.1 for
-  the full wire contract. Filed and closed as fixed: GH-127.
+  `tests/test_protocol_fixes_w6.py`, `tests/test_protocol_wire.py`, `tests/test_a2a.py`. See
+  DESIGN.md §5.4/§7.1 for the full wire contract. Filed and closed as fixed: GH-127, GH-128.
   (`agent_sdk/a2ui/translator.py`, `agent_sdk/agent/runner.py`, `agent_sdk/routes/ag_ui.py`,
-  `agent_sdk/a2ui/catalog.py`, `agent_sdk/console/static/a2ui.js`, `DESIGN.md`)
+  `agent_sdk/a2ui/catalog.py`, `agent_sdk/console/static/a2ui.js`, `agent_sdk/console/static/chat.js`,
+  `agent_sdk/models/a2a.py`, `agent_sdk/testing/chat.py`, `DESIGN.md`)
+- RT-003 (redteam, low, `agent_sdk/models/a2a.py`): the `DataPart.data` narrowing above
+  (`dict[str, Any]`, was `dict[str, Any] | list[Any]`) is symmetric — it also tightens INBOUND
+  parsing, not just the outbound A2UI wire shape migration documented above. A `Message.parts`
+  `DataPart` whose `data` is a bare array — the exact shape A2UI v0.9.1's own A2A binding mandates
+  for an inbound `action` DataPart (see LRN-134) — now fails Pydantic validation at parse time and
+  is rejected as `-32602` (Invalid Params) instead of being accepted. No functional regression
+  today: the SDK has no inbound A2UI-action `DataPart` consumer (`Message.parts` `DataPart.data` is
+  never read anywhere in `agent_sdk`), so nothing that previously worked stopped working. Recorded
+  because it forecloses a future spec-conformant inbound A2UI action `DataPart` without first
+  adding a bare-array-tolerant parse — if inbound A2UI actions are ever supported, they must be
+  parsed through such a path (e.g. a dedicated inbound type/validator that accepts a bare array
+  before Pydantic sees it), not through this tightened `DataPart` model. Pinned by
+  `test_inbound_data_part_bare_array_rejected_as_invalid_params` (`tests/test_protocol_wire.py`),
+  which documents the current end-to-end rejection via `POST /v1/message:send`.
 
 ### 🔧 Fixes
 - GH-126 / RT-001: `apply_data_model_update()` (`agent_sdk/a2ui/translator.py`)

@@ -113,6 +113,11 @@ def _validate_a2ui_wire(payload: "ContentModel", a2ui_messages: list[Any]) -> No
     Standard Profile types use _Wire.wire() (Pydantic-validated), so this
     primarily catches domain cards whose wire() returns a non-conformant value.
     Raises ValueError before delivery rather than silently sending malformed data.
+
+    RT-004's open/close-split emptiness guard lives in ``build_artifact``
+    (right after its own single ``split_a2ui_delivery`` call) rather than
+    here, so the split is computed exactly once per artifact instead of
+    once here and again in ``build_artifact`` (RT-002).
     """
     from ..models.content_types import CATALOG_ID as _CATALOG_ID  # local to avoid circulars
 
@@ -149,6 +154,32 @@ def _validate_a2ui_wire(payload: "ContentModel", a2ui_messages: list[Any]) -> No
             )
 
 
+def split_a2ui_delivery_validated(
+    payload: "ContentModel", a2ui_messages: list[Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """SC-D1 + RT-004, as one call: validate structure, split into (open,
+    close), and raise if the open half is empty.
+
+    The single boundary both delivery transports (A2A ``build_artifact``,
+    AG-UI's ``ArtifactEvent`` branch in ``routes/ag_ui.py``) MUST call
+    between ``translate()`` and delivering the split arrays, so a malformed
+    ``translate()`` output — e.g. a custom domain-card ``translate()`` that
+    is entirely ``deleteSurface`` — is rejected identically on every
+    transport instead of only on whichever one remembers to check (RT-001).
+    """
+    _validate_a2ui_wire(payload, a2ui_messages)
+    open_messages, close_messages = split_a2ui_delivery(a2ui_messages)
+    if not open_messages:
+        raise ValueError(
+            f"Content type {type(payload).__name__!r} "
+            f"({payload.data_type!r}): translate() output split into "
+            "an empty open sequence (deleteSurface with no "
+            "accompanying create/populate messages); malformed "
+            "translate() output"
+        )
+    return open_messages, close_messages
+
+
 def build_artifact(
     event: ArtifactEvent, capabilities: A2uiCapabilities
 ) -> Artifact:
@@ -164,8 +195,12 @@ def build_artifact(
         parts: list[Any] = [TextPart(text=payload.to_plain_text())]
         a2ui_messages = translate(payload, capabilities=capabilities)
         if a2ui_messages is not None:
-            # SC-D1: validate structure before delivery
-            _validate_a2ui_wire(payload, a2ui_messages)
+            # SC-D1 + RT-004: validate structure, split into open/close, and
+            # reject an empty open sequence — the one shared boundary both
+            # transports call (RT-001; see split_a2ui_delivery_validated).
+            # Computed exactly ONCE and reused for both the emptiness guard
+            # and the DataPart split itself (RT-002).
+            open_messages, close_messages = split_a2ui_delivery_validated(payload, a2ui_messages)
             metadata["mimeType"] = A2UI_MIME_TYPE
             # Critical protocol-conformance fix: deleteSurface must never
             # share a delivered array with its own surface's create/populate
@@ -174,15 +209,36 @@ def build_artifact(
             # a bundled deleteSurface would unmount the surface before it
             # ever painted (see split_a2ui_delivery() docstring). Deliver the
             # open and close arrays as two DataParts, open first, each
-            # self-describing via its own mimeType (trap #11: DataPart.data
-            # is always a bare message array, never wrapped).
-            open_messages, close_messages = split_a2ui_delivery(a2ui_messages)
+            # self-describing via its own mimeType. DataPart.data is wrapped
+            # as {"messages": [...]} rather than a bare array to satisfy A2A
+            # v0.3.0's DataPart.data typing (types.ts DataPart.data:
+            # {[key: string]: any}, required — an object, confirmed against
+            # the pinned tag, not just this SDK's own prior claim; GH-128).
+            # This is an SDK-specific tradeoff, NOT a canonical A2UI
+            # convention: A2UI v0.9.1's own A2A binding (google/A2UI
+            # specification/v0_9_1/docs/a2ui_extension_specification.md,
+            # "Data encoding") says data "MUST be an array of messages" — a
+            # bare array — and defines no data.messages wrapper. A strictly
+            # spec-conformant third-party A2UI Path-A renderer with no
+            # knowledge of this SDK will not find messages at `data` and
+            # will render nothing; this SDK's own console/testing clients
+            # unwrap data.messages and are unaffected. The deviation is
+            # wire-discoverable via the agent card's `dataEncoding` A2UI
+            # extension param (agent_sdk/a2ui/catalog.py::a2ui_extension(),
+            # mirroring deleteSurfaceSemantics/GH-113). See LRN-134 for the
+            # full citation trail.
             parts.append(
-                DataPart(data=open_messages, metadata={"mimeType": A2UI_MIME_TYPE})
+                DataPart(
+                    data={"messages": open_messages},
+                    metadata={"mimeType": A2UI_MIME_TYPE},
+                )
             )
             if close_messages:
                 parts.append(
-                    DataPart(data=close_messages, metadata={"mimeType": A2UI_MIME_TYPE})
+                    DataPart(
+                        data={"messages": close_messages},
+                        metadata={"mimeType": A2UI_MIME_TYPE},
+                    )
                 )
         else:
             # P6-02 / A2A §D3: always emit a DataPart for structured payloads,

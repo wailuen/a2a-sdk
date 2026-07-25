@@ -625,8 +625,16 @@ Agent-card advertisement — the extension object lives under **`capabilities.ex
   extension `params` (vs only by `catalogId` reference). If `false`/absent, only `supportedCatalogIds`
   are honored and an inline catalog MUST be rejected.
 
-DataPart wire format:
+DataPart wire format — genuine, unresolved spec conflict; read before implementing:
+A2UI v0.9.1's own A2A binding (`a2ui_extension_specification.md`, "Data encoding") says the `data`
+field of the `DataPart` MUST be a bare array of A2UI messages, no wrapper key. A2A v0.3.0's own
+`DataPart.data` typing (`types.ts`) is `{[key: string]: any}` — a required JSON **object**, with no
+array member — so a bare-array `data` fails schema validation against a strict, spec-generated A2A
+client (A2A TCK, A2A Inspector, a typed client generated from the real spec). No published spec on
+either side resolves this; pick one and document the choice.
+
 ```json
+// (a) Spec-literal — matches A2UI's own binding; may fail strict A2A DataPart.data schema validation
 {
   "kind": "data",
   "data": [
@@ -635,9 +643,26 @@ DataPart wire format:
   ],
   "metadata": {"mimeType": "application/a2ui+json"}
 }
+
+// (b) Object-wrapped — matches A2A's DataPart.data typing; deviates from A2UI's own binding
+// (an SDK-specific resolution, not a citable canonical shape on either side)
+{
+  "kind": "data",
+  "data": {
+    "messages": [
+      {"version": "v0.9.1", "createSurface": {"surfaceId": "s1", "catalogId": "urn:a2ui-profile:standard:v1"}},
+      {"version": "v0.9.1", "updateComponents": {"surfaceId": "s1", "components": [{"id": "root", "component": "KpiCard", "data": {"path": "/kpi"}}]}}
+    ]
+  },
+  "metadata": {"mimeType": "application/a2ui+json"}
+}
 ```
-`data` MUST be a JSON array (even for one message). On per-message validation failure: log and
-continue the rest of the array; do not abort the batch.
+If you choose (b), advertise it via a non-normative agent-card extension param — e.g.
+`params.dataEncoding: "data.messages"` alongside `supportedCatalogIds` — so a strictly
+spec-conformant third-party A2UI Path-A renderer, built from the A2UI spec alone with no knowledge
+of your implementation, has a wire-discoverable way to find the message array instead of silently
+rendering nothing. Either way, on per-message validation failure inside the array: log and continue
+the rest of the array; do not abort the batch.
 
 ## AG-UI CUSTOM delivery
 
@@ -689,9 +714,13 @@ A2UI always arrives as an **array of messages**. One entry point folds them all,
 ```ts
 // AG-UI
 if (event.type === "CUSTOM" && event.name === "A2UI_UPDATE") processA2UiMessages(event.value.messages);
-// A2A DataPart
-if (part.kind === "data" && part.metadata?.mimeType === "application/a2ui+json")
-  processA2UiMessages(Array.isArray(part.data) ? part.data : []);
+// A2A DataPart — shape depends on which side of the conflict the server chose (see above);
+// check the agent card's `dataEncoding` hint if present, but fold gracefully either way
+if (part.kind === "data" && part.metadata?.mimeType === "application/a2ui+json") {
+  const raw = part.data;
+  const messages = Array.isArray(raw) ? raw : Array.isArray(raw?.messages) ? raw.messages : [];
+  processA2UiMessages(messages);
+}
 ```
 Accept the legacy MIME type `application/json+a2ui` (v0.8/v0.9) for interop, but treat
 `application/a2ui+json` (v0.9.1) as canonical.
@@ -768,7 +797,11 @@ full Path-A renderer when you only need data (use Path B).
 8. **Unvalidated LLM output** — validate every emission; lowercase `"text"` vs `"Text"` is the most common LLM error.
 9. **Missing `version`** on a message — fails schema validation.
 10. **Missing `catalogId`** in `createSurface` — required; LLMs drop it.
-11. **`data` not an array** in a DataPart — must be a JSON array even for one message.
+11. **`DataPart.data` shape mismatch with the server's chosen convention** — A2UI v0.9.1's own A2A
+    binding requires a bare array; A2A v0.3.0's own `DataPart.data` typing requires an object. No
+    spec resolves the conflict (see "DataPart wire format" above). A server choosing the
+    object-wrapped form (e.g. `{"messages": [...]}`) MUST advertise it via an agent-card
+    `dataEncoding` hint; a client MUST check for that hint rather than assuming either shape.
 12. **`action` without extension activation** — the agent never parses it.
 13. **Blocking the repaint on one bad message** — keep processing the array.
 14. **Emitting an Extended type to a Core-only client** — check `a2uiClientCapabilities` and degrade.
@@ -818,7 +851,9 @@ and a Path-B extractor should run before sending, and is exactly what the `/a2ui
 
 **Server (emit):** SDK initialized with `VERSION_0_9_1`; `generate_system_prompt(include_schema=True,
 include_examples=True)`; LLM output validated before `create_a2ui_part()`; `create_a2ui_part()` used
-(not manual dicts); `data` always an array; agent card advertises the A2UI extension; emitted Profile
+(not manual dicts); `DataPart.data` shape internally consistent with a documented convention (bare
+array or object-wrapped — see "DataPart wire format" above; advertise `dataEncoding` if
+object-wrapped); agent card advertises the A2UI extension; emitted Profile
 payloads match the frozen field contracts; Extended types gated on client capability.
 
 **Client (render):** all 4 message types handled; surface updated atomically before one repaint;

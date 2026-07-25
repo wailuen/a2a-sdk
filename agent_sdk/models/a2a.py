@@ -67,7 +67,10 @@ class FilePart(_Wire):
 
 class DataPart(_Wire):
     kind: Literal["data"] = "data"
-    data: dict[str, Any] | list[Any]
+    # dict-only both ways (A2A base spec, CHANGELOG RT-003). A future inbound
+    # A2UI action DataPart needs a bare array — parse that through a separate
+    # bare-array-tolerant validator ahead of Pydantic; do not widen this field.
+    data: dict[str, Any]
     metadata: dict[str, Any] | None = None
 
 

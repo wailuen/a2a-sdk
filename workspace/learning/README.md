@@ -137,3 +137,5 @@ Entries ordered by LRN number.
 | LRN-131 | Cross-runner gate logic diverges when a fix lands in only one runner | [LRN-131](LRN-131-cross-runner-gate-logic-divergence.md) |
 | LRN-132 | Protocol surface classification must follow code sharing, not directory naming | [LRN-132](LRN-132-protocol-surface-classification-by-blast-radius.md) |
 | LRN-133 | Reversing a decision must supersede its learning's Check in the same wave | [LRN-133](LRN-133-learning-check-reversal-reconciliation.md) |
+| LRN-134 | A2UI-over-A2A DataPart "messages" wrapper key satisfies A2A v0.3.0 but contradicts A2UI v0.9.1's own literal binding | [LRN-134](LRN-134-a2ui-a2a-datapart-messages-key-not-spec-mandated.md) |
+| LRN-135 | Portable a2ui-advisor oracle rewritten to teach this SDK's private `data.messages` deviation as the canonical A2UI-over-A2A rule, burying the spec's bare-array binding | [LRN-135](LRN-135-portable-oracle-encodes-deviation.md) |

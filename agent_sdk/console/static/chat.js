@@ -388,8 +388,33 @@ export function render(pane, ctx) {
       const mime = part.metadata ? part.metadata.mimeType : "";
       // canonical mime + accepted legacy form (§5.4)
       if (mime === "application/a2ui+json" || mime === "application/json+a2ui") {
-        renderA2uiMessages(part.data, fallbackText);
-        renderedA2ui = true;
+        // This SDK's own producer wraps the A2UI message array as an OBJECT
+        // under "messages" (GH-128, §5.4, LRN-134 — a deliberate, locked
+        // resolution of a genuine A2A-vs-A2UI spec conflict, REVIEWS.md
+        // Round 6). A2UI v0.9.1's own A2A binding independently requires a
+        // BARE array instead — a strictly spec-conformant third-party
+        // producer emits that shape — so the consumer tolerates BOTH on
+        // read (RT-002, w038 group G; mirrors harness/agents/a2ui-advisor.md's own
+        // prescribed tolerant-consumer pattern). Only treat the part as
+        // rendered A2UI when the resulting array is actually present AND
+        // non-empty — renderA2ui([]) paints nothing, so setting
+        // renderedA2ui on either a bad-shape (non-conformant) part or a
+        // well-formed-but-empty messages array would swallow the TextPart
+        // fallback the outer `if (!renderedA2ui && fallbackText)` bubble is
+        // meant to deliver (RT-003, w038 group G).
+        const msgs = Array.isArray(part.data)
+          ? part.data
+          : part.data && Array.isArray(part.data.messages)
+          ? part.data.messages
+          : null;
+        if (msgs && msgs.length) {
+          renderA2uiMessages(msgs, fallbackText);
+          renderedA2ui = true;
+        } else if (msgs) {
+          systemLine("a2ui: DataPart messages array is empty — nothing to render");
+        } else {
+          systemLine("a2ui: DataPart.data missing messages array (unexpected shape)");
+        }
       } else {
         attach(el("pre", { class: "code-output mono" }, fmtJson(part.data)));
       }
@@ -630,8 +655,27 @@ export function render(pane, ctx) {
         )
       );
     } else if (name === "A2UI_UPDATE") {
-      // {messages: [...]}
-      renderA2uiMessages(value.messages || [], "");
+      // Canonical value shape is {messages:[...]} — this SDK's own frozen
+      // A2UI_UPDATE valueSchema (routes/agent_card.py). Mirror
+      // handleA2aArtifact's tolerant guard + diagnostic (RT-001): tolerate the
+      // bare-array shape a spec-conformant third-party producer may emit, but
+      // surface a systemLine when the value carries no renderable messages
+      // array or an empty one — closing the silent-failure twin. This branch
+      // was the last A2UI delivery path in this consumer that rendered
+      // `value.messages || []` with no empty/unexpected-shape diagnostic, so a
+      // malformed or empty value painted nothing with no trace.
+      const msgs = Array.isArray(value)
+        ? value
+        : Array.isArray(value.messages)
+        ? value.messages
+        : null;
+      if (msgs && msgs.length) {
+        renderA2uiMessages(msgs, "");
+      } else if (msgs) {
+        systemLine("a2ui: A2UI_UPDATE messages array is empty — nothing to render");
+      } else {
+        systemLine("a2ui: A2UI_UPDATE value missing messages array (unexpected shape)");
+      }
     } else if (name === "AGENT_PROGRESS") {
       // {message}
       systemLine(`progress: ${value.message || ""}`);

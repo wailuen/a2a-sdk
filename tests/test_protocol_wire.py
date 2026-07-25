@@ -9,9 +9,16 @@ Groups:
   3. MCP-Protocol-Version header / body agreement on initialize (GH #4)
   4. Agent card customEvents shape (GH #5)
   5. build_artifact DataPart / A2UI gating (GH #6)
+  6. DataPart.data inbound/construction narrowing (GH-128): model-level
+     rejection of a bare-array data field plus the end-to-end -32602
+     rejection via POST /v1/message:send.
+  7. FilePart.file bytes-XOR-uri validation (L-5)
+  8. Bedrock admin-credential HTTP seam (RT-001 / GH-72)
 
-All HTTP tests use the shared async httpx client from conftest (asyncio_mode=auto).
-Group 5 is a pure unit test of build_artifact().
+Most groups' HTTP tests use the shared async httpx client from conftest
+(asyncio_mode=auto). Group 5 is a pure unit test of build_artifact(); Group 6
+mixes a pure DataPart unit test with one end-to-end -32602 HTTP integration
+test; Group 7 is pure unit tests.
 """
 
 from __future__ import annotations
@@ -300,22 +307,70 @@ def test_build_artifact_a2ui_enabled_yields_datapart_with_a2ui_mime():
         assert part_mime == A2UI_MIME_TYPE, (
             f"DataPart metadata.mimeType must be {A2UI_MIME_TYPE!r}; got {part_mime!r}"
         )
-        # DataPart.data must be the bare A2UI message array (list, not dict)
-        assert isinstance(data_part.data, list), (
-            f"DataPart.data must be a list (A2UI message array); got {type(data_part.data).__name__}"
+        # DataPart.data must be an object wrapping the A2UI message array
+        # under "messages" — matching the AG-UI CUSTOM value convention (GH-128).
+        assert isinstance(data_part.data, dict), (
+            f"DataPart.data must be a dict wrapping 'messages'; got {type(data_part.data).__name__}"
         )
-    assert len(open_part.data) == 3, (
+        assert isinstance(data_part.data["messages"], list), (
+            f"DataPart.data['messages'] must be a list (A2UI message array); "
+            f"got {type(data_part.data['messages']).__name__}"
+        )
+    assert len(open_part.data["messages"]) == 3, (
         f"open DataPart must carry createSurface/updateComponents/updateDataModel; "
-        f"got {len(open_part.data)}"
+        f"got {len(open_part.data['messages'])}"
     )
-    assert all("deleteSurface" not in m for m in open_part.data)
-    assert len(close_part.data) == 1 and "deleteSurface" in close_part.data[0], (
-        "close DataPart must carry exactly the deleteSurface message"
+    assert all("deleteSurface" not in m for m in open_part.data["messages"])
+    assert (
+        len(close_part.data["messages"]) == 1
+        and "deleteSurface" in close_part.data["messages"][0]
+    ), "close DataPart must carry exactly the deleteSurface message"
+
+
+# ===========================================================================
+# Group 6 — DataPart.data inbound/construction narrowing (GH-128)
+# ===========================================================================
+
+
+def test_data_part_rejects_bare_array_at_construction():
+    """DataPart.data is dict[str, Any] — a bare array (the pre-fix wire shape
+    this module used to emit) must fail Pydantic validation at construction
+    time, not merely be absent from the wire (RT-002 regression guard)."""
+    from agent_sdk.models.a2a import DataPart
+
+    with pytest.raises(ValidationError):
+        DataPart(kind="data", data=[{"version": "v0.9.1"}])
+
+
+async def test_inbound_data_part_bare_array_rejected_as_invalid_params(client):
+    """RT-003: the DataPart.data narrowing (dict[str, Any], was
+    dict[str, Any] | list[Any]) is symmetric — it also tightens INBOUND
+    parsing, not just the outbound A2UI wire shape. A Message.parts DataPart
+    whose data is a bare array (the exact shape A2UI v0.9.1's own A2A
+    binding mandates for an inbound action DataPart) now fails Pydantic
+    validation and is rejected as -32602 (Invalid Params) rather than
+    silently coerced. Pins the CURRENT behavior; if inbound A2UI actions
+    are ever supported, they must be parsed through a bare-array-tolerant
+    path, not this tightened DataPart model (see CHANGELOG 0.5.44)."""
+    r = await client.post(
+        "/v1/message:send",
+        json={
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "data", "data": [{"version": "v0.9.1"}]}],
+                "messageId": uuid.uuid4().hex,
+            }
+        },
+    )
+    assert r.status_code == 400
+    body = r.json()
+    assert body["error"]["code"] == -32602, (
+        f"expected -32602 Invalid Params, got {body['error']['code']}"
     )
 
 
 # ===========================================================================
-# Group 6 — FilePart.file XOR validation (L-5)
+# Group 7 — FilePart.file XOR validation (L-5)
 # ===========================================================================
 
 
@@ -354,7 +409,7 @@ def test_file_part_both_bytes_and_uri_raises():
 
 
 # ===========================================================================
-# Group 7 — Bedrock admin-credential HTTP seam (RT-001 / GH-72)
+# Group 8 — Bedrock admin-credential HTTP seam (RT-001 / GH-72)
 # ===========================================================================
 #
 # GH-72 added the aws_session_token Bedrock CredentialField, but the only
