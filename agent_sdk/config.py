@@ -96,6 +96,19 @@ class BaseAgentSettings(BaseSettings):
     unauth_rate_limit_per_minute: int = Field(
         default=30, alias="AGENT_SDK_UNAUTH_RATE_LIMIT"
     )
+    # One-time org consent (GH-136). OFF by default: every authorization is
+    # gated on an admin API key. When ON, a client that an admin has ALREADY
+    # approved re-authorizes silently — the operator consents once at setup
+    # and the org's users connect without an admin key.
+    #
+    # Enable only when the agent's URL is not publicly discoverable: consent
+    # is bound to the DCR *registration*, not to a person, so everyone who
+    # reaches the server through that registration inherits the approval.
+    # A never-approved client still hits the admin gate, and codes are still
+    # only ever delivered to the client's registered redirect_uri.
+    oauth_one_time_consent: bool = Field(
+        default=False, alias="AGENT_SDK_OAUTH_ONE_TIME_CONSENT"
+    )
     max_turns: int = Field(default=20, alias="AGENT_SDK_MAX_TURNS")
     max_output_tokens: int = Field(default=8192, alias="AGENT_SDK_MAX_OUTPUT_TOKENS")
 

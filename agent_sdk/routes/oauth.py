@@ -539,12 +539,57 @@ button {{ width: 100%; padding: 10px; border: none; border-radius: 4px;
 @router.get("/oauth/authorize", dependencies=[Depends(unauth_rate_limit)])
 async def oauth_authorize_page(request: Request) -> Response:
     """Render the consent page. The page itself is unauthenticated (it only
-    reflects validated registration data); approval (the POST) is the gate."""
+    reflects validated registration data); approval (the POST) is the gate.
+
+    One-time org consent (GH-136): when ``oauth_one_time_consent`` is enabled
+    AND this client has already been approved by an admin (``consented``, set
+    by the POST path), skip the page and issue the code directly — the
+    operator consents once at setup and the org's users connect silently.
+
+    This is a SHORT-CIRCUIT, never a bypass of validation: ``_validate_authorize``
+    has already run, so an unknown client, an unregistered ``redirect_uri``, a
+    malformed PKCE challenge or a bad audience is refused exactly as before,
+    and the code can only ever be delivered to a URI this client registered.
+    A never-approved client still gets the admin gate — DCR mints a fresh
+    ``client_id`` with ``consented: False`` on every registration, so a
+    self-registered client can never authorize itself.
+
+    Trust is bound to the *registration*, not to a person: everyone who
+    reaches the server through an approved client_id inherits that approval.
+    That is the point (org-wide access) and the risk (see the settings docs);
+    the auto-approval is logged at INFO for audit.
+    """
     params = _clean_params(request.query_params)
-    cleaned, error = _validate_authorize(_oauth(request), params)
+    store = _oauth(request)
+    cleaned, error = _validate_authorize(store, params)
     if error is not None:
         return error
     assert cleaned is not None
+
+    runtime = _runtime(request)
+    client = store.get_client(cleaned["client_id"])
+    if runtime.oauth_one_time_consent and (client or {}).get("consented"):
+        code = store.mint_code(
+            client_id=cleaned["client_id"],
+            redirect_uri=cleaned["redirect_uri"],
+            code_challenge=cleaned["code_challenge"],
+            scope=cleaned["scope"],
+            audience=cleaned["audience"],
+        )
+        query: dict[str, str] = {"code": code}
+        if cleaned["state"]:
+            query["state"] = cleaned["state"]
+        sep = "&" if urlparse(cleaned["redirect_uri"]).query else "?"
+        logger.info(
+            "oauth authorize auto-approved (one-time consent) client_id=%s...",
+            cleaned["client_id"][:8],
+        )
+        return RedirectResponse(
+            url=f"{cleaned['redirect_uri']}{sep}{urlencode(query)}",
+            status_code=303,
+            headers=_redirect_security_headers(cleaned["redirect_uri"]),
+        )
+
     return _consent_page(cleaned, params)
 
 
