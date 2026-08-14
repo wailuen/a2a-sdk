@@ -96,14 +96,26 @@ class BaseAgentSettings(BaseSettings):
     unauth_rate_limit_per_minute: int = Field(
         default=30, alias="AGENT_SDK_UNAUTH_RATE_LIMIT"
     )
-    # One-time org consent (GH-136). OFF by default: every authorization is
+    # One-time consent (GH-136). OFF by default: every authorization is
     # gated on an admin API key. When ON, a client that an admin has ALREADY
-    # approved re-authorizes silently — the operator consents once at setup
-    # and the org's users connect without an admin key.
+    # approved re-authorizes silently.
+    #
+    # This is per-registration, not automatically per-org (GH-138): DCR
+    # (``POST /oauth/register``) mints a fresh, unconsented ``client_id`` on
+    # every registration call, so by default this only saves a RETURNING
+    # client from re-hitting the gate — a brand-new user whose connector
+    # performs its own DCR call still hits the admin gate the first time.
+    # For genuine org-wide sharing (one pre-approved connection every org
+    # member uses), run
+    # ``python -m agent_sdk provision-org-oauth-client`` to mint one
+    # ``client_id``, pre-approve it offline, and pin it into the connector
+    # platform's static/pre-registered OAuth Client ID field — every user
+    # who connects through that pinned registration then inherits the same
+    # approval.
     #
     # Enable only when the agent's URL is not publicly discoverable: consent
     # is bound to the DCR *registration*, not to a person, so everyone who
-    # reaches the server through that registration inherits the approval.
+    # reaches the server through an approved registration inherits it.
     # A never-approved client still hits the admin gate, and codes are still
     # only ever delivered to the client's registered redirect_uri.
     oauth_one_time_consent: bool = Field(
