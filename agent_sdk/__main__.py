@@ -51,7 +51,10 @@ import os
 import sys
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .credentials.store import CredentialStore
 
 
 # ── rotate-master-key ─────────────────────────────────────────────────────────
@@ -530,6 +533,7 @@ def _cmd_provision_org_oauth_client(args: argparse.Namespace) -> int:
     conn_str_raw = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
     account_name = os.environ.get("AZURE_STORAGE_ACCOUNT_NAME")
     table_prefix = os.environ.get("AZURE_STORAGE_TABLE_PREFIX", "agent")
+    credential_store: CredentialStore
     if conn_str_raw:
         from .credentials.azure_table import AzureTableCredentialStore
 

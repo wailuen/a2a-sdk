@@ -335,3 +335,66 @@ def test_wave_skill_loop_control_invariants_present_in_both_copies(invariant: st
             f"invariant {invariant!r}. The two copies are deliberately divergent on "
             "scriptPath only — the loop contract must stay in lockstep."
         )
+
+
+# ---------------------------------------------------------------------------
+# Axis 5: harness/skills/setup/SKILL.md ↔ template/.claude/skills/setup/SKILL.md
+#
+# Same drift class as axis 2 (harness/workflows/ ↔ template/.claude/workflows/),
+# one directory over: /setup only exists in the harness→template direction (there
+# is no .claude/skills/setup/ in this repo — /setup only makes sense inside a
+# freshly-cloned template checkout, so axis 4 above cannot cover it — its SHARED
+# set requires presence in BOTH .claude/skills/ and harness/skills/). Found
+# unguarded when the AGENT_SDK_OAUTH_ONE_TIME_CONSENT per-user/per-org interview
+# question was added to harness/skills/setup/SKILL.md — the harness and template
+# copies had already independently drifted (uv vs pip install instructions,
+# a missing retry-config interview step) with nothing to catch it.
+# ---------------------------------------------------------------------------
+
+SETUP_SKILL_HARNESS_PATH = REPO_ROOT / "harness" / "skills" / "setup" / "SKILL.md"
+SETUP_SKILL_TEMPLATE_PATH = TEMPLATE_DIR.parent / "skills" / "setup" / "SKILL.md"
+
+
+def test_setup_skill_exists_in_harness() -> None:
+    """Guard: harness/skills/setup/SKILL.md must exist — it is the source of truth
+    the template copy is propagated from. If this fails, the identity test below
+    would otherwise silently skip the file entirely."""
+    assert SETUP_SKILL_HARNESS_PATH.is_file(), (
+        f"{SETUP_SKILL_HARNESS_PATH} is missing — /setup's harness source was "
+        "deleted or moved."
+    )
+
+
+@pytest.mark.xfail(
+    not TEMPLATE_DIR.exists(),
+    reason=(
+        "peer repo not checked out — propagation unverified: template/ "
+        "(wailuen/a2a-agent-template, LRN-071) is absent from this working tree, "
+        "so the harness↔template propagation axis cannot be evaluated locally. "
+        "This must pass wherever template/ is present (e.g. CI with the peer repo "
+        "cloned) — an XPASS there means the axis is verified; leaving this on "
+        "xfail keeps the unverifiable state visible in the run summary instead of "
+        "silently skipping it."
+    ),
+    strict=True,
+)
+def test_setup_skill_is_harness_template_identical() -> None:
+    """harness/skills/setup/SKILL.md and template/.claude/skills/setup/SKILL.md must
+    stay byte-identical — a fix (e.g. a new /setup interview question) landing in
+    only one copy is silently un-applied for whoever actually runs /setup: the
+    template copy, never the harness one.
+
+    This assertion always runs (never skipped): when template/ is absent it is
+    expected to fail (xfail, above) as the loud, still-visible signal that the
+    propagation axis is unverifiable in this checkout; when template/ is present
+    it must pass as a hard assertion.
+    """
+    harness_text = SETUP_SKILL_HARNESS_PATH.read_text()
+    template_text = SETUP_SKILL_TEMPLATE_PATH.read_text()
+    assert harness_text == template_text, (
+        "harness/skills/setup/SKILL.md and template/.claude/skills/setup/SKILL.md "
+        "have diverged. These two copies must be byte-identical — a fix landing in "
+        "only one copy is silently un-applied in the peer repo. Reconcile into a "
+        "single superset (diff the files to find the drift), then copy the result "
+        "to both locations."
+    )
