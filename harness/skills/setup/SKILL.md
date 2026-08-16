@@ -61,6 +61,20 @@ Collect, then echo back a summary for confirmation before touching any file:
    console) and/or the built-in OAuth 2.1 chain for MCP. Note: a Claude.ai MCP
    connector uses DCR-based OAuth automatically — static bearer tokens are not
    supported on that surface.
+   - **If OAuth is selected**, also ask: "One-time consent scope — per-user or
+     per-org?"
+     - **per-user** (default, no extra step): a RETURNING client's own
+       registration skips repeat admin approval, but each new user's own
+       registration still hits the gate once, the first time.
+     - **per-org**: every org member shares ONE pre-approved registration
+       instead of each hitting the gate individually. This needs a SEPARATE
+       Day-2 step against the real deployed `PUBLIC_URL` (not local dev) —
+       flag it now so it isn't forgotten: `python -m agent_sdk
+       provision-org-oauth-client` (see Handoff → Day-2 operations).
+     Either scope sets `AGENT_SDK_OAUTH_ONE_TIME_CONSENT=true` in `.env`
+     (Phase 3); leave OAuth's one-time consent unset (`false`) only if the
+     operator wants every authorization, including repeat ones, to hit the
+     admin gate.
 5. **Model backend** — Bedrock (default) or another `ModelClient`. Collect the
    routing env vars for the chosen backend (these go in `.env`; API keys never go
    in `.env` — they are seeded via the credential store after bootstrapping):
@@ -256,6 +270,10 @@ will never fail with "no lockfile found". Stage it with the initial commit:
    - Bedrock: `BEDROCK_REGION=`, `BEDROCK_MODEL_ARN=`
    - OpenAI: `OPENAI_MODEL=`
    - Azure OpenAI: `AZURE_OPENAI_ENDPOINT=`, `AZURE_OPENAI_DEPLOYMENT=`, `AZURE_API_VERSION=`
+   - OAuth one-time consent, if either scope was chosen in Phase 0:
+     `AGENT_SDK_OAUTH_ONE_TIME_CONSENT=true`. Per-org additionally needs the
+     Day-2 `provision-org-oauth-client` step (see Handoff) once a real
+     `PUBLIC_URL` exists — do not run it now, against localhost.
    **Never write any API key or secret into `.env`** — LLM API keys go into the
    `__model__` namespace via the credential store (see step 5 below).
    **If `.env` already exists (re-run):** the script updates only the `MASTER_KEY=`
@@ -397,6 +415,12 @@ Manifest:    .claude/.harness-manifest.json ✓
      /provision    — re-seed credentials or walk a new environment
      /upgrade      — bump the SDK pin + sync harness files
      /sdk-issue    — report a bug in the SDK itself (not agent code)
+     python -m agent_sdk provision-org-oauth-client
+                   — per-org OAuth scope only (Phase 0): mint + pre-approve
+                     ONE shared client for org-wide MCP connector access.
+                     Run against the real PUBLIC_URL after deploying, not
+                     local dev — then pin the printed client_id into the
+                     connector platform's static OAuth Client ID field.
 ```
 
 ## Rules
