@@ -21,6 +21,26 @@ bump-patch:
     Increment the patch segment of the SDK version in ``pyproject.toml``
     (e.g. 0.4.0 → 0.4.1).  Run before every push to main so the released
     version is always monotonically increasing.
+
+provision-org-oauth-client:
+    Guided setup for ``AGENT_SDK_OAUTH_ONE_TIME_CONSENT`` (GH-136/GH-138).
+    The setting has exactly two usable scopes, and this command exists
+    because they are easy to conflate:
+
+    * per-user (default — no setup needed): each connecting client's OWN
+      DCR registration is remembered after an admin approves it once.
+      A brand-new user still hits the admin gate the first time, because
+      DCR mints a fresh, unconsented ``client_id`` per registration.
+    * per-org (this command): registers and pre-approves ONE ``client_id``
+      that every org member shares, by pinning it into the connector
+      platform's static/pre-registered OAuth Client ID field instead of
+      letting each user's client perform its own DCR call.
+
+    Requires the exact ``redirect_uri`` the connector platform will use
+    (get this from the platform's own connector setup screen BEFORE
+    running this command — e.g. Claude.ai: Organization settings →
+    Connectors → *connector* → Advanced settings) and prompts for explicit
+    confirmation before minting a client every org member will share.
 """
 
 from __future__ import annotations
@@ -448,6 +468,109 @@ def _cmd_migrate_store(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── provision-org-oauth-client ──────────────────────────────────────────────
+
+def _cmd_provision_org_oauth_client(args: argparse.Namespace) -> int:
+    """Register + pre-approve ONE OAuth client for org-wide sharing.
+
+    Runs the identical DCR registration (``OAuthTokenStore.register_client``)
+    and admin-approval (``mark_consented``) steps the live ``/oauth/register``
+    + ``/oauth/authorize`` routes perform over HTTP, but offline: this CLI's
+    access to MASTER_KEY / the credential-store backend IS the admin trust
+    boundary here, matching ``rotate-master-key``'s offline-operator model —
+    there is no separate admin-API-key prompt.
+
+    The minted ``client_id`` is not a secret (it identifies a registration,
+    it does not authenticate one — PKCE does that), so it is printed in full
+    for the operator to paste into the connector platform's static/
+    pre-registered OAuth Client ID field.
+    """
+    from .auth.oauth_tokens import OAuthTokenStore
+    from .routes.oauth import _valid_redirect_uri
+
+    public_url = args.public_url or os.environ.get("PUBLIC_URL")
+    if not public_url:
+        print(
+            "error: --public-url is required (or set $PUBLIC_URL) — org-wide "
+            "provisioning needs the agent's real, reachable base URL",
+            file=sys.stderr,
+        )
+        return 1
+    base_url = public_url.rstrip("/")
+
+    redirect_uri = args.redirect_uri
+    if not redirect_uri:
+        redirect_uri = input(
+            "Redirect URI the connector platform will use "
+            "(from its own connector setup screen): "
+        ).strip()
+    if not _valid_redirect_uri(redirect_uri):
+        print(
+            "error: redirect_uri must be https (or http://localhost / "
+            "http://127.0.0.1) without a fragment",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not args.yes:
+        print(
+            "\nThis mints ONE OAuth client that every user in your "
+            "organization will share once pinned into the connector "
+            "platform's static/pre-registered OAuth Client ID field.\n"
+            "If you instead want each user's own connection to be "
+            "remembered after an admin approves it once (per-user, the "
+            "default), stop here — no setup is needed for that.\n"
+        )
+        confirmed = input("Type 'org' to confirm org-wide provisioning: ").strip()
+        if confirmed != "org":
+            print("Aborted — no client was registered.")
+            return 1
+
+    master_key = _key("MASTER_KEY", "MASTER_KEY: ")
+    conn_str_raw = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+    account_name = os.environ.get("AZURE_STORAGE_ACCOUNT_NAME")
+    table_prefix = os.environ.get("AZURE_STORAGE_TABLE_PREFIX", "agent")
+    if conn_str_raw:
+        from .credentials.azure_table import AzureTableCredentialStore
+
+        credential_store = AzureTableCredentialStore(
+            master_key, connection_string=conn_str_raw, prefix=table_prefix
+        )
+    elif account_name:
+        from .credentials.azure_table import AzureTableCredentialStore
+
+        credential_store = AzureTableCredentialStore(
+            master_key, account_name=account_name, prefix=table_prefix
+        )
+    else:
+        from .credentials.encrypted_sqlite import EncryptedSqliteStore
+
+        data_dir = Path(args.data_dir)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        credential_store = EncryptedSqliteStore(data_dir / "credentials.db", master_key)
+
+    oauth_store = OAuthTokenStore(
+        credential_store, issuer=base_url, canonical_resource=f"{base_url}/mcp"
+    )
+    record = oauth_store.register_client([redirect_uri], client_name=args.client_name)
+    oauth_store.mark_consented(record["client_id"])
+
+    print(f"\nRegistered + pre-approved client_id: {record['client_id']}")
+    print(
+        "\nPaste this Client ID into the connector platform's static/"
+        "pre-registered OAuth Client ID field (Claude.ai: Organization "
+        "settings → Connectors → <connector> → Advanced settings). Every "
+        "org member who connects through that connector shares this ONE "
+        "pre-approved registration."
+    )
+    print(
+        "Ensure AGENT_SDK_OAUTH_ONE_TIME_CONSENT=true is set in this "
+        "deployment's environment — without it, this registration still "
+        "hits the admin gate on every authorize call."
+    )
+    return 0
+
+
 # ── bump-patch ────────────────────────────────────────────────────────────────
 
 def _cmd_bump_patch(args: argparse.Namespace) -> int:
@@ -574,6 +697,43 @@ def main(argv: list[str] | None = None) -> int:
         help="overwrite existing Azure entities (default: skip collisions)",
     )
     migrate.set_defaults(fn=_cmd_migrate_store)
+
+    # provision-org-oauth-client
+    provision = sub.add_parser(
+        "provision-org-oauth-client",
+        help=(
+            "register + pre-approve ONE OAuth client for org-wide sharing "
+            "(guided setup for AGENT_SDK_OAUTH_ONE_TIME_CONSENT's per-org scope)"
+        ),
+    )
+    provision.add_argument(
+        "--redirect-uri",
+        metavar="URI",
+        help="the exact redirect_uri the connector platform will use (prompted if omitted)",
+    )
+    provision.add_argument(
+        "--client-name",
+        metavar="NAME",
+        help="human-readable label for this registration (optional)",
+    )
+    provision.add_argument(
+        "--public-url",
+        metavar="URL",
+        help="agent's public base URL (default: $PUBLIC_URL)",
+    )
+    provision.add_argument(
+        "--data-dir",
+        default="./data",
+        metavar="DIR",
+        help="directory for the SQLite credential store when Azure env vars are unset (default: ./data)",
+    )
+    provision.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="skip the interactive org-wide confirmation prompt",
+    )
+    provision.set_defaults(fn=_cmd_provision_org_oauth_client)
 
     # bump-patch
     bump = sub.add_parser(
