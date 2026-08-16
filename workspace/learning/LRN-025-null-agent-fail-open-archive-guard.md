@@ -15,9 +15,15 @@ The null guard was omitted for this specific gate. Every other null-agent respon
 
 ## Check
 ```
-grep -n "archiveIntent" harness/workflows/wave-cycle.js template/.claude/workflows/wave-cycle.js
+grep -n "archiveIntent" harness/workflows/wave-cycle.js
 ```
 Expected: a leading `if (!archiveIntent)` block that sets `protocolBlocked = true` before the `offendingPaths` check. Absence means the null guard is missing.
+
+RT-014: checks the in-repo propagation source (`harness/workflows/wave-cycle.js`)
+only — the peer repo copy `template/.claude/workflows/wave-cycle.js` (LRN-071) is
+not always checked out locally, and `test_workflow_sync.py`'s harness↔template
+axis already keeps the two byte-identical whenever it is, so this grep covers
+both copies without a dead path in a checkout without `template/`.
 
 ## Prevention
 For every gate agent result in wave-cycle (and any future workflow), add a null guard as the first branch: set `protocolBlocked = true` and log a blocking warning before testing inner fields. Never rely on a falsy compound condition to catch a missing agent response — it silently takes the else/pass branch.

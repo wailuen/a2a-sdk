@@ -14,7 +14,17 @@ GH-75 corrected the live A2A resubscribe route from `POST /v1/tasks/{id}:resubsc
 The route correction wave updated the implementation file but did not include the companion reference binding table or its template peer copy as required modifies, leaving the advisor's source-of-truth out of sync with the live wire path.
 
 ## Check
-`grep -n "subscribe" harness/reference/a2a-protocol-0_3_0.md template/.claude/reference/a2a-protocol-0_3_0.md` — confirm both show `POST /v1/tasks/{id}:subscribe` (not `:resubscribe`) in the `tasks/resubscribe` row. The JSON-RPC method name `tasks/resubscribe` is correct and unchanged; only the REST path suffix must be `:subscribe`.
+`grep -n "subscribe" harness/reference/a2a-protocol-0_3_0.md` — confirm this shows
+`POST /v1/tasks/{id}:subscribe` (not `:resubscribe`) in the `tasks/resubscribe` row.
+`template/` is a peer-repo checkout (wailuen/a2a-agent-template, LRN-071) not always
+present locally, so guard its copy on the same line as the grep (see LRN-054):
+
+```bash
+test -d template/ && grep -n "subscribe" template/.claude/reference/a2a-protocol-0_3_0.md
+```
+
+The JSON-RPC method name `tasks/resubscribe` is correct and unchanged; only the REST
+path suffix must be `:subscribe`.
 
 ## Prevention
 When planning any protocol route change, ensure the wave's modifies list explicitly includes the companion reference binding table (`harness/reference/<protocol>.md`) and its template peer copy (`template/.claude/reference/<protocol>.md`); the advisor agent and check skills cite these files as ground truth, so a route correction that omits them makes the auditor regress against the old path.

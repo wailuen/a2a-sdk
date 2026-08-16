@@ -9,7 +9,8 @@ description: "Primary development entry point after /analyze. Without a wave ID:
 The primary development command after `/analyze`. Without a wave ID it reads
 the PRD, plans all waves, redteams the plan, and executes each wave in sequence.
 Each wave runs a full 8-phase cycle — including a Todos Redteam pass before
-any implementation, zero-tolerance fix loops, and auto-codify at the end.
+any implementation, fix loops gated on a critical/high severity floor
+(medium/low are recorded, not blocking), and auto-codify at the end.
 
 ## Usage
 
@@ -61,15 +62,31 @@ For each wave whose `Depends:` items are all in `completed/`:
      args: { waveFile: "<absolute path to active wave file>", today: "<YYYY-MM-DD>" }
    })
    ```
+   `args.agentBudget` (optional, default `150`) overrides the hard agent-call
+   ceiling described in the Phase Redteam bullet below — e.g.
+   `args: { waveFile, today, agentBudget: 300 }`.
+
    The workflow runs 8 phases for this wave:
    - **Parse** — reads wave file; extracts groups, creates paths, `groupDeps` map, and LRN baseline.
    - **Todos Redteam** — `redteam` agent annotates todos with `SI:` fields and `Reuses: C-NNN`
      before implementation; flags new component candidates for registration.
    - **Implement** — tier-based parallel execution via `groupDeps`; `python-implementer` agent
      per todo; test-first (RED→GREEN→refactor).
-   - **Unit Redteam** — `redteam` zero-tolerance per group; `debug` fires after >3 failed rounds
-     (r4+) and on stall; `python-implementer` for fixes.
-   - **Phase Redteam** — `redteam` zero-tolerance full wave; `debug` on stall/r4+.
+   - **Unit Redteam** — `redteam` per group; loop exits when zero critical/high findings
+     remain (severity floor, GH-132) — medium/low are recorded once to
+     `workspace/todos/deferred/<wave>-group-<label>-medium-low.md` and do not block.
+     `python-implementer` fixes rounds 1–3; at round 4 (the only round above the
+     fix-fan-out threshold before the round-5 deferred exit) or on stall, `debug`
+     REPLACES the fix fan-out (not alongside it) for that round. Max 5 rounds, then
+     the group is deferred.
+   - **Phase Redteam** — same severity-floor/debug-replaces-fix-fan-out contract at
+     full-wave scope (medium/low → `workspace/todos/deferred/<wave>-phase-medium-low.md`);
+     max 8 rounds, then deferred. A hard agent-call ceiling backstops the whole wave
+     against runaway loops: `150` for the handful of Parse-phase calls, then recomputed
+     once the group count is known to `max(150, 45 × groups + 80)` (e.g. 260 for a
+     4-group wave) so the ceiling scales with the wave's own shape. `args.agentBudget`
+     in the `Workflow(...)` args (see step 2 above) is an explicit override that always
+     wins over both.
    - **Protocol Audit** — `a2a-advisor`, `mcp-advisor`, `ag-ui-advisor`, `a2ui-advisor` + seam
      check (triggered only for touched protocol surfaces in `agent_sdk/routes/`).
    - **Codify** — `codify` agent captures LRNs for critical/high findings; SDK issue scan writes
@@ -97,7 +114,14 @@ Execute one specific wave. Used for:
 Steps:
 1. Resolve `workspace/todos/active/w<NNN>-*.md`.
 2. **Hard stop** if any `Depends:` item is not in `completed/` — report which dep is missing.
-3. Launch `wave-cycle.js` as in Mode A step 2.
+3. **Launch `sdk-wave.js`** (the SDK-context executor) — same invocation shape as Mode A
+   step 2:
+   ```js
+   Workflow({
+     scriptPath: ".claude/workflows/sdk-wave.js",
+     args: { waveFile: "<absolute path to the resolved wave file>", today: "<YYYY-MM-DD>" }
+   })
+   ```
 4. Display the wave summary and suggest next step: `/wave` (continue next wave) or `/wave status`.
 
 ---

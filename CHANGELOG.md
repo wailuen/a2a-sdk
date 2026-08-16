@@ -4,6 +4,401 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [Unreleased]
+
+### 🔴 Breaking changes
+- GH-134 (corrects GH-52): `ToolSet.tool()`'s `openWorldHint` MCP annotation
+  seeding (`agent_sdk/agent/registry.py`) moved from the outer `tool()`
+  scope — where it was force-set `False` for `tier == 1 or read_only`,
+  before `adapter_params` was known — into `decorator()`, evaluated after
+  the function signature is scanned. GH-52 (w016) correctly seeded
+  `openWorldHint=False` for `read_only=True` tools but overgeneralized by
+  also tying it to `tier == 1`, misclassifying every tier-1
+  `SourceAdapter`-backed tool (a tool that DOES talk to an external system)
+  as closed-world by default. `openWorldHint` is now `True` iff the tool
+  has at least one `SourceAdapter`-backed keyword-only parameter, `False`
+  otherwise — independent of tier — while `read_only`'s
+  `readOnlyHint`/`destructiveHint` seeding and an explicit `annotations=`
+  override are unchanged. Filed under `🔴 Breaking changes`, not
+  `⚠️ Behavior changes` (RT-007) — this is a stable-core MCP wire-shape
+  break (`ToolDecl.annotations`, defined in `agent_sdk/agent/registry.py`
+  and serialized ad hoc into the `tools/list` response in
+  `agent_sdk/routes/mcp.py`; there is no `models/` type for MCP tool
+  declarations at all). DESIGN.md §4.0's wire-shape conformance exemption
+  requires **both** that the changed shape live in `models/` **and** that
+  the change be spec-conformance-driven (RT-004; the same two-condition
+  test REVIEWS.md Round 8 applied to GH-135). This change satisfies only
+  the second condition — its sole purpose is correcting this SDK's
+  `tools/list` output to conform to MCP's `openWorldHint` semantics (a
+  tier-1 SourceAdapter-backed tool talks to an external system and must
+  not report closed-world) rather than a voluntary redesign — but fails
+  the first, since neither `ToolDecl` nor the wire dict it feeds lives in
+  `models/`. Per REVIEWS.md Round 9, the exemption **does not apply and
+  cannot be cited** for it, for the same reason (failing one of the two
+  required conditions) that Round 8 already disqualified GH-135. **This
+  heading, the emit/parse split and the Migration callout below are still
+  required regardless** — they document the wire break itself, not an
+  exemption claim. **Version:** per REVIEWS.md Round 9, this entry
+  requires this batch to ship as `0.6.0`, not the next `0.5.x` patch, when
+  cut — same as GH-135 below.
+  - **Emit:** every tier-1 SourceAdapter-backed tool's MCP `tools/list`
+    `annotations.openWorldHint` flips `False`→`True` on upgrade, changing
+    how MCP consent UIs classify/badge these tools (open- vs. closed-world).
+    Separately (RT-015), because `openWorldHint` is now seeded
+    unconditionally, `ToolDecl.annotations` (and the wire `tools/list`
+    `annotations` field) is never `None` again — including for a tier-2,
+    non-`read_only` tool with no `SourceAdapter`-backed parameter, which
+    previously fell through to `None` (the old seeding only ran for
+    `tier == 1 or read_only`) and now gets `{"openWorldHint": False}`.
+  - **Parse:** this SDK is an MCP *server* only and never parses
+    `annotations`/`openWorldHint` on any inbound tool declaration, so there
+    is no in-repo parse path affected by this change. The parse-side impact
+    lands entirely on external MCP clients reading this agent's `tools/list`
+    response — see Migration.
+  - **Migration:** any MCP client or consent UI that (a) branches on
+    `annotations is None` vs. a populated dict, or (b) classifies/badges a
+    tool open- vs. closed-world from `openWorldHint`, must re-check that
+    logic against both changes above before upgrading. No code change is
+    required in this SDK itself — this is a receiver-side migration only.
+  (`agent_sdk/agent/registry.py`, `tests/test_mcp_conformance_w9.py`)
+- GH-135: `ToolEntry.invoke()`/`invoke_gen()` (`agent_sdk/agent/registry.py`)
+  now raise a new `ToolInputValidationError` — wrapping the original
+  `pydantic.ValidationError` as `.validation_error` — when
+  `input_model.model_validate(arguments)` rejects the caller-supplied
+  tool_call arguments, instead of letting the raw `pydantic.ValidationError`
+  propagate. `ToolInputValidationError` does **not** subclass
+  `pydantic.ValidationError` (it is a plain `Exception`), so this is a
+  genuine breaking change to `ToolSet`/`@tool` dispatch, stable core per
+  DESIGN.md §4.0, that is neither a `models/` wire shape nor required by
+  any external protocol spec: it fails **both** conditions of the §4.0
+  exemption, so the exemption **does not apply and cannot be cited** for
+  it (RT-007) — unlike GH-134 above, which is spec-conformance-driven but
+  (per RT-004 / REVIEWS.md Round 9) still fails the `models/` condition,
+  landing in the same not-exemption-eligible outcome by a different route.
+  **Version:** per the explicit sign-off recorded in REVIEWS.md Round 8,
+  this entry requires this batch to ship as `0.6.0`, not the next `0.5.x`
+  patch, when cut.
+  - **Migration:** any dispatch surface — inside or outside this SDK — that
+    wraps a call to `ToolEntry.invoke()` / `invoke_gen()` / `invoke_any()`
+    in `except pydantic.ValidationError` must change that clause to
+    `except ToolInputValidationError` (`from agent_sdk import
+    ToolInputValidationError` — exported from the stable core surface per
+    RT-013; do not reach into `agent_sdk.agent.registry`), or the exception
+    now falls through uncaught. This SDK's own **four** dispatch sites
+    (`agent/loop.py`'s sync/streaming/resume tool-call branches,
+    `routes/mcp.py::_handle_tools_call`, `routes/admin.py::try_tool`, and
+    `contrib/commitments/executor.py::_fire`) are all updated.
+  - **Migration (RT-006, persisted data):** the commitments executor records a
+    failure reason in the commitments DB. Its generic `except Exception`
+    branch persists `type(exc).__name__`, so introducing
+    `ToolInputValidationError` between the raise site and that catch-all would
+    have silently changed the stored string from `"ValidationError"` to
+    `"ToolInputValidationError"` for every existing deployment. `_fire()` now
+    catches `ToolInputValidationError` explicitly and persists the stable,
+    explicit reason `"invalid_tool_input"` (exported as
+    `INVALID_TOOL_INPUT_REASON`). **Any query, dashboard or alert matching
+    `last_error == "ValidationError"` on the commitments table must be updated
+    to `"invalid_tool_input"`** for the caller-input case; a ValidationError
+    raised by the tool BODY still records `"ValidationError"`, and the two are
+    now distinguishable — which they were not before.
+    (`agent_sdk/contrib/commitments/executor.py`,
+    `tests/test_contrib_commitments.py`)
+  - The discriminator exists so a `ValidationError` raised by the tool BODY
+    (e.g. constructing a `ContentModel` with bad data downstream) is no
+    longer misreported to the model as bad input-argument coercion — which
+    previously drove an unresolvable retry loop, since the model has no way
+    to fix arguments that were never the problem.
+  (`agent_sdk/agent/registry.py`,
+  `agent_sdk/agent/loop.py`, `agent_sdk/routes/mcp.py`,
+  `agent_sdk/routes/admin.py`, `agent_sdk/__init__.py`,
+  `tests/test_gh135_tool_body_validation_error.py`,
+  `tests/test_rt013_tool_input_validation_error_export.py`)
+
+### 🟠 Security
+- RT-003 (SI-2, redteam on GH-135): `ToolInputValidationError.__init__`
+  (`agent_sdk/agent/registry.py`) no longer sets its own exception message to
+  `str(validation_error)`. Pydantic renders a `ValidationError` with each
+  error's `msg`/`input` baked in — e.g. a custom `@field_validator` that
+  raises `ValueError(f"bad token {v!r}")` puts the raw rejected value
+  straight into that rendering — so wrapping it verbatim armed a leak for
+  any downstream `except Exception as e: str(e)` handler, exactly what
+  GH-135's SI-2 acceptance criteria required stay unreachable via a bare
+  `str(exc)`. The message is now a fixed, non-interpolating
+  `"tool {tool_name!r} input validation failed"`; the raw
+  `pydantic.ValidationError` remains reachable only via `.validation_error`,
+  which `safe_validation_message()` (`agent_sdk/agent/loop.py`) already
+  consumes to build the loc+type-only, redacted diagnostic actually surfaced
+  to callers. (`agent_sdk/agent/registry.py`,
+  `tests/test_rt003_tool_input_validation_error_message.py`)
+- GH-129: boot now emits a `WARNING` when `DEV_MODE=True` and
+  `AZURE_STORAGE_CONNECTION_STRING` is set (`agent_sdk/app.py`), mirroring
+  the existing dev-mode-mismatch warning that previously covered only the
+  sibling `azure_storage_account_name` path. Root cause confirmed against a
+  real production incident: roughly 30 days of local/test runs with
+  `DEV_MODE=True` pointed at a live connection string minted 18,969 admin
+  API keys into the production credential store, silently, with no
+  boot-time signal. SI-2: the warning names the setting only — the
+  connection string value itself never appears in the emitted log record.
+  RT-008: the SI-2 regression test asserting that absence lives in a
+  guard-free module so it runs in the default `pytest -q` suite — its
+  original home, `tests/test_app_azure_wire.py`, is skipped wholesale when
+  `npx` is missing, which silently disabled the SI-2 gate on any runner
+  without Node. (`agent_sdk/app.py`,
+  `tests/test_gh129_dev_mode_connection_string_warning.py`,
+  `tests/test_app_azure_wire.py`)
+- GH-130: `ContentModel.to_plain_text()` implementations that join untrusted
+  field values into a delimited text render now pass each value through a new
+  `_sanitize_cell()` helper (`agent_sdk/models/content_types.py`) before
+  joining. An untrusted `|` — or its visual confusables U+2502 (`│`) / U+FF5C
+  (`｜`) — previously fabricated an extra column in a `" | ".join(...)`
+  render, and an embedded line break previously fabricated an extra
+  row/entry in a `"\n".join(...)` render, silently misrepresenting structured
+  data to any reader of the plain-text fallback (including tool-result
+  folding). Documented as a standing delimiter-safety contract on
+  `ContentModel.to_plain_text`, binding for future `ContentModel` subclasses.
+  - **Scope (RT-007 correction):** the sanitiser is applied across **all 14
+    Standard Profile renderers**, not only `ComparisonTable`/`EntityList` as
+    an earlier revision of this entry stated — `KpiCard`, `TimeSeriesChart`,
+    `ComparisonTable`, `BarChart`, `EntityList`, `MarketBriefing`,
+    `WaterfallChart`, `MultiCategoryChart`, `FundPerformance`, `EmailList`,
+    `CalendarEvents`, `UserProfile`, `UserList`, `DocumentList` — and covers
+    each type's own `title`/`entity_type`/`as_of` fields (RT-006), which are
+    plain `str` and carry the same risk as any other cell.
+  - **Neutralised set (RT-007 correction):** not just CR/LF but the full
+    `str.splitlines()` break set — CR, LF, VT, FF, FS/GS/RS, NEL,
+    U+2028/U+2029 — plus all remaining C0, DEL and C1 controls, each mapped
+    to a space. C1 is not optional: NEL (`\x85`) is treated as a line break
+    by many log/terminal consumers and CSI (`\x9b`) is a single-byte ANSI
+    escape introducer.
+- RT-001 (redteam on GH-130): `MarketBriefing.prose` and
+  `TextSection.content` are **excluded** from `_sanitize_cell` and routed
+  through a new `safe_block_text()` / `_sanitize_block()` pair
+  (`agent_sdk/common/redact.py`, `agent_sdk/models/content_types.py`) that
+  preserves `\n`, `\t` and `|` while still neutralising ANSI/terminal escape
+  introducers, NEL, U+2028/U+2029 and the rest of C0/DEL/C1. `MarketBriefing`
+  is the SDK's sole prose-exception type (DESIGN §4.3): its `to_markdown()`
+  output **is** the A2A/AG-UI DataPart value (`a2ui/translator.py`) and the
+  MCP `structuredContent {"markdown": ...}` payload (`routes/mcp.py`), so
+  running those two fields through a single-line cell sanitiser collapsed
+  every newline to a space and rewrote `|` to `/` — destroying headings,
+  lists, paragraphs and markdown tables in the one payload designed to carry
+  them. No delimiter is fabricated for these fields: `to_markdown()` joins
+  *sections*, and nothing downstream re-parses the rendered text
+  positionally. Choose the helper by the **field's** contract, not by the
+  enclosing method's name. **Behavior-visible:** the residual wire-payload
+  impact of this correction — every field `to_markdown()` interpolates is now
+  sanitised where none was before — is recorded under `⚠️ Behavior changes`
+  below, not here, matching the GH-134/GH-135 heading discipline (RT-007).
+  (`agent_sdk/common/redact.py`,
+  `agent_sdk/models/content_types.py`, `tests/test_content_types.py`)
+
+### ⚠️ Behavior changes
+- GH-130 / RT-001: `MarketBriefing.to_markdown()`'s output — the A2A/AG-UI
+  DataPart value (`agent_sdk/a2ui/translator.py`) and the MCP
+  `structuredContent {"markdown": ...}` payload (`agent_sdk/routes/mcp.py`) —
+  is no longer a byte-for-byte passthrough of the model's field values.
+  Before this batch, `to_markdown()` interpolated `title`, `as_of`, every KPI
+  `title`/`value`/`unit`, chart/table section titles, `prose`, and
+  `TextSection.content` with **zero** sanitisation. Now:
+  - `title`, `as_of`, KPI fields, and chart/table titles route through
+    `_sanitize_cell()`: any `str.splitlines()` break char (CR, LF, VT, FF,
+    FS/GS/RS, NEL, U+2028/U+2029) plus the remaining C0/DEL/C1 controls
+    collapse to a space, and `|` plus its confusables (U+2502, U+FF5C)
+    rewrite to `/`.
+  - `prose` and `TextSection.content` route through `_sanitize_block()`
+    (`safe_block_text()`) instead: `\n`, `\t` and `|` are preserved as
+    markdown structure and CR/CRLF normalise to `\n`, but ANSI/terminal
+    escape introducers (ESC, CSI), NEL, U+2028/U+2029 and the rest of
+    C0/DEL/C1 still collapse to a space.
+  - **Migration:** any consumer of this wire payload that depended on
+    receiving `MarketBriefing`/section field values byte-for-byte — e.g. a
+    round-trip checksum, or a downstream renderer that itself relied on raw
+    control/escape bytes surviving inside `prose`/`TextSection.content`/
+    titles — will now observe those bytes replaced. No action is needed for
+    the ordinary markdown-rendering path: headings, lists, paragraphs and
+    tables inside `prose`/`TextSection.content` are unaffected, since `\n`,
+    `\t` and `|` are preserved exactly (see the multiline-prose regression
+    tests below).
+  (`agent_sdk/models/content_types.py`, `agent_sdk/common/redact.py`,
+  `tests/test_content_types.py`)
+- RT-010/RT-011 (redteam on GH-139): `BedrockModelClient.converse()`
+  (`agent_sdk/agent/bedrock.py`) now classifies three
+  `botocore.exceptions.ClientError` codes — `ThrottlingException`,
+  `TooManyRequestsException`, `ServiceQuotaExceededException` — as
+  `ErrorCategory.RATE_LIMITED` instead of falling through to the generic
+  `ErrorCategory.UPSTREAM` catch-all, mirroring `OpenAIModelClient`'s
+  existing `RateLimitError` clause (GH-94). This is wire-visible for every
+  A2A/AG-UI/MCP consumer of a Bedrock-backed agent:
+  `agent_sdk/common/wire_errors.py` maps `RATE_LIMITED` → HTTP `429` and
+  `UPSTREAM` → HTTP `502`, so both the HTTP status and
+  `AgentError.public()["category"]` (`"upstream"` → `"rate_limited"`) change
+  for these three codes on upgrade. No other `ClientError` code is affected
+  — every other code still maps to `UPSTREAM`/`502` exactly as before (see
+  `test_client_error_non_rate_limit_code_stays_upstream`).
+  - **Migration:** any caller that branched on Bedrock's `502`/`upstream`
+    response to detect throttling (e.g. a custom retry loop reading the wire
+    error `category`) must also handle `429`/`rate_limited` for these three
+    codes after upgrading.
+  - Separately, `_boto_client()`'s bearer-auth path (RT-011) now pre-seeds
+    dummy static credentials directly on the botocore session
+    (`bcore_session.set_credentials(...)`) before client construction,
+    purely to short-circuit `Session.create_client()`'s unconditional
+    `get_credentials()` call — bearer auth signs exclusively through the
+    registered `token_provider` and never reads these dummy values. The
+    practical effect is also behavior-visible: the bearer-token path no
+    longer consults the host's ambient AWS profile chain at all
+    (`~/.aws/config`, `AWS_PROFILE`, SSO/login sessions,
+    `credential_process`) during client construction — previously an
+    interfering ambient profile (e.g. one requiring `botocore[crt]`) could
+    raise an unrelated vendor exception before the bearer signer was ever
+    consulted. A deployment that relied on ambient-profile side effects
+    running during bearer-token client construction will no longer see
+    them.
+  (`agent_sdk/agent/bedrock.py`, `tests/test_bedrock_error_boundary.py`,
+  `tests/test_bedrock_credential_store.py`)
+
+### 🔧 Fixes
+- RT-008 (redteam on GH-134): `ToolSet.tool()` now logs a `WARNING` at
+  registration time for a tier-2 tool with no `SourceAdapter`-backed
+  parameter and no explicit `annotations={"openWorldHint": ...}` override
+  (`agent_sdk/agent/registry.py`). The `bool(adapter_params)` derivation
+  itself is unchanged and correct — see the docstring at its call site and
+  `workspace/learning/LRN-043-mcp-tier1-tools-openworldhint-missing.md` for
+  why it is a complete claim, not a heuristic, under the SDK's
+  dependency-injection contract — but a tier-2 *composite* tool is the
+  shape most likely to reach an external system by a route other than a
+  declared adapter parameter (a nested call into another tool's function, a
+  contrib source that doesn't itself follow the `SourceAdapter` contract),
+  so an author relying on that route now gets a boot-time nudge toward the
+  explicit override instead of a silently closed-world annotation.
+  `docs/tools.md` gained a short "MCP annotations" section documenting the
+  same contract. (`agent_sdk/agent/registry.py`, `docs/tools.md`,
+  `tests/test_mcp_conformance_w9.py`)
+- GH-139: `BedrockModelClient._boto_client()`'s bearer-auth path now sets
+  `signature_version="bearer"` explicitly via `botocore.client.Config`
+  (`agent_sdk/agent/bedrock.py`). botocore's own gate for preferring bearer
+  auth (`_should_prefer_bearer_auth`) reads the real process `os.environ`,
+  not this client's isolated per-instance credential dict, so it never
+  fired here — resolution silently fell through to SigV4 with no IAM
+  credentials configured, failing at signing time with
+  `NoCredentialsError` even though `bearer_token`/`token_provider` were
+  correctly wired. Setting `signature_version` explicitly resolves to
+  `'bearer'` directly, independent of that environment-based gate.
+  - RT-005 (redteam on RT-013): the accompanying "did it really resolve to
+    bearer?" guard now probes `botocore.auth.AUTH_TYPE_MAPS` — the registry
+    `RequestSigner.get_auth_instance()` itself consults, raising
+    `UnknownSignatureVersionError` on a miss — instead of reading back
+    `built_client.meta.config.signature_version`. That read-back returned the
+    exact value set two lines earlier: verified against botocore 1.43.32,
+    `Config(signature_version='totally-bogus-scheme')` is echoed back verbatim
+    and no signer resolution happens at construction time, so the guard could
+    never fire in production while its test — which fabricated the impossible
+    state on a `MagicMock` — stayed green. The probe now runs at the same
+    point as the botocore>=1.39 floor check and is exercised against the real
+    module.
+  - RT-010/RT-011's wire-visible consequences of this same batch — the
+    `ClientError` throttling-code → `RATE_LIMITED`/`429` reclassification and
+    the bearer path's ambient-AWS-profile decoupling — are recorded under
+    `⚠️ Behavior changes` above, not here, matching the GH-134/GH-135 heading
+    discipline (RT-007).
+  (`agent_sdk/agent/bedrock.py`, `tests/test_bedrock_credential_store.py`)
+- GH-131: `wave-cycle.js`'s fallback for a missing `args.today` called
+  `new Date()`, but the workflow sandbox bans the `Date` global outright —
+  and the fallback fired whenever `args` arrived JSON-encoded as a string
+  (reading `.today` off a string is always `undefined`), producing a
+  `Date`-related crash with zero agents spawned instead of an error naming
+  the actual missing argument. Args are now normalized first (JSON-parsed
+  if string-encoded; a missing/falsy `args` becomes `{}`), then the
+  workflow fails fast naming whichever of `waveFile`/`today` is absent —
+  never falling back to `Date`. (`.claude/workflows/wave-cycle.js`,
+  `harness/workflows/wave-cycle.js`, `tests/test_workflows.py`,
+  `tests/test_gh131_wave_cycle_args_normalization.py`)
+- GH-132: `wave-cycle.js`'s unit/phase redteam loops now gate exit only on
+  `critical`/`high` findings (`blockingFindings()`) — previously any
+  finding, including routine `low`-severity nits, counted toward the
+  loop's exit condition, so an adversarial reviewer's low-severity nit
+  alone was enough to force the round cap (5 unit / 8 phase) on
+  effectively every run. `medium`/`low` findings are still surfaced
+  (recorded once to a deferred note when the loop exits clean on blocking
+  severity) but no longer keep the loop spinning. Also adds: batching the
+  fix fan-out into one agent per round covering every file, unless
+  blocking findings span more than `FIX_BATCH_FILE_THRESHOLD` (6) files;
+  a `MAX_LRN_PER_WAVE` (20) cap on codified LRN files per wave; and a hard
+  `AGENT_CALL_BUDGET` backstop — a flat 150-call floor for the handful of
+  calls before the wave file is parsed, recomputed once `wave.groups.length`
+  is known as `Math.max(150, 45 * wave.groups.length + 80)` so the ceiling
+  scales with the wave's own shape, overridable via `args.agentBudget` for a
+  wave whose honest cost exceeds even that — every dispatched agent call is
+  now counted, and exceeding the budget stops the wave loudly (throws)
+  instead of continuing to spend agent calls silently.
+  - RT-009: the `medium`/`low` deferred note is no longer written only on the
+    clean loop-exit branch. Every round accumulates its non-blocking findings
+    into a loop-scoped store via a new `accumulateNonBlocking()` helper
+    (deduped by the same `file + description` key `sigs()` uses), and the note
+    is written **once, after the loop, from one place** — so the null-gate,
+    findings-mismatch, round-budget-exhausted and tests-red exits all record
+    their findings too, and a finding that resurfaces across rounds appears
+    once rather than once per round.
+  - RT-002: that RT-009 fix originally landed in the `wave-cycle.js` mirrors
+    only. `sdk-wave.js` — the runner `.claude/skills/wave/SKILL.md` launches
+    for SDK waves — kept the clean-exit-only write and had no accumulator at
+    all, silently discarding every medium/low finding on all other exit paths.
+    It is now ported there, and the RT-009 gates in `tests/test_workflows.py`
+    are parametrized over **every** runner instead of the `wave-cycle.js`
+    runtime copy alone. The one gate that did span `sdk-wave.js` asserted only
+    that the literal `-medium-low.md` appeared somewhere in the loop section —
+    true even when the write sits inside the clean-exit branch — so it passed
+    vacuously; it is replaced with a structural (brace-depth) check that the
+    write is *not* nested inside `if (blocking.length === 0)`.
+  (`.claude/workflows/wave-cycle.js`, `harness/workflows/wave-cycle.js`,
+  `.claude/workflows/sdk-wave.js`, `tests/test_workflows.py`)
+
+### ✅ Features
+- RT-002 (GH-130 follow-up): new public **`safe_cell_text`** in the C-007
+  redaction family (`agent_sdk/common/redact.py`), re-exported from the
+  package root (`agent_sdk.safe_cell_text`, `__all__`) and therefore stable
+  core under strict SemVer (DESIGN.md §4.0). It is the helper that actually
+  discharges the GH-130 delimiter-safety contract for a **delimited
+  single-line render**: `safe_error_text(value, max_len=None)` composed with
+  the full separator alphabet (`|`/`│`/`｜`, `<`, `>`, `(`, `)`, `[`, `]`,
+  `=` neutralised everywhere; `:`, `,`, `@`, en/em dash and `→` neutralised
+  only where they could form the template's spaced joiner, so emails and ISO
+  timestamps survive intact).
+  Previously this logic existed only as the module-private
+  `agent_sdk/models/content_types.py::_sanitize_cell`, while the contract it
+  implements was declared mandatory for third-party domain cards in three
+  places — so downstream code could comply only by hand-rebuilding the
+  alphabet per card module, which `docs/content-types.md` explicitly
+  instructed. `_sanitize_cell` is now a thin alias for the public helper; no
+  render output changes. **`safe_error_text` is not a substitute** — it
+  performs no separator neutralisation at all, so any domain card following
+  the old §4.0 wording literally was still exposed to the identity-fabrication
+  attacks GH-130 closed. `ContentModel`'s contract docstring, DESIGN.md §4.0
+  and `docs/content-types.md` (including its canonical `ClimateRiskReport`
+  example, which previously demonstrated the per-renderer opt-in the same
+  document forbids 70 lines later) all now name `safe_cell_text`. Registered
+  as C-018 in `workspace/components/README.md`.
+- GH-133: `OpenAIModelClient.__init__` (`agent_sdk/agent/openai_client.py`)
+  accepts new optional `max_retries: int | None` and `timeout: float | None`
+  parameters, forwarded verbatim to the underlying
+  `AsyncOpenAI`/`AsyncAzureOpenAI` constructor when set. Left unset (the
+  default), the openai SDK's own defaults apply and behavior is unchanged.
+  Documents a retry asymmetry: `SourceAdapter._request()` retries once on a
+  429/503 response, but `OpenAIModelClient` has no retry-once policy of its
+  own — `max_retries`/`timeout` are its only retry/timeout control surface,
+  delegated entirely to the openai SDK's own retry/backoff. Reachable via two
+  new `BaseAgentSettings` fields (`agent_sdk/config.py`):
+  `openai_max_retries` (env `AGENT_SDK_OPENAI_MAX_RETRIES`, int) and
+  `openai_timeout` (env `AGENT_SDK_OPENAI_TIMEOUT`, float) — both
+  `AGENT_SDK_`-prefixed per DESIGN.md §4.0 (RT-005: an earlier bare-name
+  draft, `OPENAI_MAX_RETRIES`/`OPENAI_TIMEOUT`, was caught before release and
+  renamed). `Agent._build_model_client` (`agent_sdk/app.py`) forwards both
+  through to `OpenAIModelClient`; unset (the default) omits the kwargs
+  entirely rather than passing explicit `None`.
+  (`agent_sdk/agent/openai_client.py`, `agent_sdk/config.py`, `agent_sdk/app.py`,
+  `tests/test_gh133_openai_retry_timeout.py`,
+  `tests/test_rt009_openai_max_retries_timeout_seam.py`)
+
 ## [0.5.44] — 2026-07-24
 
 ### 🔴 Breaking changes

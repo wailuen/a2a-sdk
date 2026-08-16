@@ -61,13 +61,15 @@ from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
 from ..common.origin import guard_origin
+from ..common.redact import frame_locations
 from ..common.sse import HEARTBEAT, SSE_HEADERS
 from ..agent.loop import ToolInterrupt, resolve_tool_timeout, safe_validation_message
+from ..agent.registry import ToolInputValidationError
 from ..credentials import forwarding
 from ..models.content_types import ContentModel, MarketBriefing
 from ..models.errors import AgentError
@@ -432,18 +434,43 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
         text = f"tool '{name}' timed out after {timeout:g}s"
         logger.warning("mcp tool timeout tool=%s timeout=%s", name, timeout)
         return {"content": [{"type": "text", "text": text}], "isError": True}
-    except ValidationError as exc:
-        # RT-004: mirror agent/loop.py's ValidationError branch (lines 480-483/
-        # 504-510) — safe_validation_message keeps only loc + type (schema-
-        # declared field names and Pydantic type codes), never exc's raw
-        # msg/input (SI-2), so the model gets a correctable diagnostic instead
-        # of the opaque generic fallback below.
-        text = safe_validation_message(name, exc, entry.decl.input_model)
+    except ToolInputValidationError as exc:
+        # RT-004/GH-135: mirror agent/loop.py's ToolInputValidationError branch
+        # — safe_validation_message keeps only loc + type (schema-declared
+        # field names and Pydantic type codes), never exc's raw msg/input
+        # (SI-2), so the model gets a correctable diagnostic instead of the
+        # opaque generic fallback below. GH-135: this discriminator is raised
+        # ONLY by the input-model coercion step, never by the tool body, so a
+        # body-raised ValidationError falls through to that generic fallback
+        # instead of being misreported as caller input here.
+        text = safe_validation_message(name, exc.validation_error, entry.decl.input_model)
         logger.warning("mcp tool input validation failed tool=%s", name)
         return {"content": [{"type": "text", "text": text}], "isError": True}
-    except Exception:
+    except Exception as exc:
         # Message stays generic — nothing caller-supplied is echoed.
-        logger.exception("mcp tool unexpected error tool=%s", name)
+        # SI-2/RT-001: a body-raised ValidationError (GH-135's discriminator
+        # only catches the input-model coercion step above) has a __str__
+        # that embeds the raw rejected value (`input_value=...`) — same for
+        # any other exception whose message interpolates caller/tool-derived
+        # data. `logger.exception`/`exc_info=True` would format that message
+        # straight into the log, so we never log exc's message or its
+        # formatted traceback text. RT-010: dropping the traceback ENTIRELY
+        # over-corrected — a genuine bug (AttributeError, KeyError, TypeError)
+        # in a tool body became undiagnosable (bare class name, no file/line).
+        # frame_locations() (common/redact.py) carries no interpolated values
+        # (FrameSummary.filename/lineno only — never `.line`, which echoes
+        # source text that could itself contain a caller-derived literal), so
+        # logging it satisfies SI-2 (suppresses the message) without
+        # sacrificing diagnosability. RT-004: the same helper backs
+        # routes/admin.py's try-tool and every agent/loop.py dispatch site so
+        # the cross-surface parity this comment claims is actually true.
+        frames = frame_locations(exc)
+        logger.error(
+            "mcp tool unexpected error tool=%s error_type=%s frames=%s",
+            name,
+            type(exc).__name__,
+            frames,
+        )
         # SI-2: never reflect user-supplied / tool-derived names in error text;
         # the tool name is already recorded in the structured log above.
         return {

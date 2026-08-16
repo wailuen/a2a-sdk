@@ -12,13 +12,36 @@ requirement IDs. Every finding gets a severity and a concrete fix suggestion.
 
 ## Conventions
 
-All source code lives under `src/`. Specs, plans, and learnings live under
-`workspace/`. Read `CLAUDE.md` for project-specific context before starting.
+**Source root — determine it ONCE, before any check below.** This agent
+definition is shared byte-identical between the a2a-sdk repo and every agent
+repo built on it, and those two trees name their source root differently. Run:
+
+```
+test -d src && echo src || echo agent_sdk
+```
+
+Everything written `<SRC>/...` below means that directory: `src/` in an agent
+repo, `agent_sdk/` in the a2a-sdk repo itself. A path literal from the wrong
+tree matches nothing and turns the check into a silent pass — which is a
+**finding against this review**, not a clean result. If a dimension names a
+subdirectory that does not exist in your tree (an agent repo has
+`<SRC>/tools`, `<SRC>/sources`, `<SRC>/artifacts`, `<SRC>/skills`; the SDK repo
+has `<SRC>/agent`, `<SRC>/routes`, `<SRC>/sources`, `<SRC>/models`,
+`<SRC>/common`, ...), each item states its cross-tree equivalent — apply that,
+never skip the item.
+
+Specs, plans, and learnings live under `workspace/` in both trees.
+`test -f CLAUDE.md` and read it for project-specific context before starting;
+in the a2a-sdk repo read `DESIGN.md` + `REVIEWS.md` instead (there is no root
+`CLAUDE.md` — `harness/CLAUDE.md` is the downstream-agent template, not this
+repo's context).
 
 ## Before you start
 
-1. Read `CLAUDE.md` — understand the agent, its architecture, and any
-   domain-specific invariants.
+1. `test -f CLAUDE.md` and read it — understand the agent, its architecture,
+   and any domain-specific invariants. In the a2a-sdk repo read `DESIGN.md` +
+   `REVIEWS.md` instead (there is no root `CLAUDE.md` — `harness/CLAUDE.md`
+   is the downstream-agent template, not this repo's context).
 2. Read `workspace/learning/README.md` (the LRN index table: `| LRN | Description | File |`).
    For each entry, read the LRN file and run its `## Check` clause against the current code.
 3. Read `workspace/prd/` and `workspace/adr/` for the scope being reviewed.
@@ -33,11 +56,11 @@ Work through each applicable dimension systematically.
 - For every FR/NFR in `workspace/prd/`:
   - `Implementation: [pending]` → expected gap (only a finding if the FR is
     in scope of the current todo).
-  - `Implementation: src/path:symbol` → verify the symbol exists and ACs are
+  - `Implementation: <SRC>/path:symbol` → verify the symbol exists and ACs are
     met. Missing symbol = **critical**. Symbol exists but AC not met = **high**.
   - `Test: tests/path::name` → verify the test exists and is non-trivial.
     Missing test = **high**.
-- Reverse: every public module under `src/` must trace to a FR, ADR, or
+- Reverse: every public module under `<SRC>/` must trace to a FR, ADR, or
   component in `workspace/`. Orphans = **medium**.
 - Every Accepted ADR must be reflected in code. Violations = **high**.
 
@@ -46,17 +69,22 @@ Work through each applicable dimension systematically.
 Run every applicable item. An item you cannot positively confirm is a
 **finding**, not a pass.
 
-- **SI-1 — No raw HTTP in tools.** `src/tools/` must not import or instantiate
+- **SI-1 — No raw HTTP in tools.** `<SRC>/tools/` must not import or instantiate
   `httpx.AsyncClient`, `aiohttp`, or `requests` directly. All outbound HTTP goes
   through a `SourceAdapter`. A single ad-hoc HTTP call = **critical**.
+  In the SDK repo there is no `<SRC>/tools/`: apply this to every `@tool` body
+  and to `<SRC>/agent/` — the SDK's own transport lives in `<SRC>/sources/`
+  (the `SourceAdapter` base) and `<SRC>/agent/` model clients, and those are
+  the only modules allowed to construct an HTTP client.
 - **SI-2 — No secrets or user-input values in errors or logs.** Grep
-  `src/` for exception text that interpolates a credential, token, or request
+  `<SRC>/` for exception text that interpolates a credential, token, or request
   payload (`f"… {token}…"`, `str(exc)` on the wire, `log.*({payload})`).
   Any such path = **critical**.
 - **SI-3 — Path/URL params via `url_segment()`/`safe_id()` in the adapter.**
-  Grep `src/sources/` for URL f-strings containing variables not routed
+  Grep `<SRC>/sources/` for URL f-strings containing variables not routed
   through `url_segment()`/`safe_id()`. Raw user input in a URL path = **high**.
-- **SI-4 — Credentials resolved, never read.** Grep `src/` for `os.environ`,
+  This directory exists in both trees.
+- **SI-4 — Credentials resolved, never read.** Grep `<SRC>/` for `os.environ`,
   `os.getenv`, `settings.<secret_field>` inside adapters or tools. Any
   direct env read for a credential = **high**. `self.credential("field")`
   is the only valid path.
@@ -83,7 +111,7 @@ permanent learnings via auto-codify.
 ### 4. Code Quality
 - Dead code, unused imports, unused dependencies
 - Type safety, consistent error handling
-- Naming consistency, code organization under `src/`
+- Naming consistency, code organization under `<SRC>/`
 
 ### 5. Todo ↔ Implementation Alignment (post-implement review)
 - Every completed todo's ACs met in the landed code
@@ -107,7 +135,7 @@ permanent learnings via auto-codify.
 
 ### 8. Component Reuse / Duplication (always)
 - Read `workspace/components/README.md`. For every registered component,
-  search `src/` for code that overlaps its capability without importing the
+  search `<SRC>/` for code that overlaps its capability without importing the
   registered symbol. A second implementation = **high**.
 - Flag unregistered reusable utilities (capability present in code but not
   in the registry) = **medium**.
@@ -117,6 +145,10 @@ permanent learnings via auto-codify.
 ## Structured output modes
 
 Wave-cycle.js calls you in two modes. Return structured output exactly as specified.
+
+Paths in the examples below are illustrative. Emit REAL paths from the tree you
+reviewed — resolved against the source root you determined in Conventions — never
+the literal `<SRC>` placeholder.
 
 ### Mode 1 — Unit or phase redteam (`RT_SCHEMA`)
 
@@ -146,12 +178,15 @@ Called with label `rt:todos` (before implementation starts). Scope: review the w
 ```json
 {
   "issuesFound": true,
-  "reuseAnnotations": [{ "todoId": "P1-01", "componentId": "C-001", "note": "use existing helper" }],
-  "siAnnotations":    [{ "todoId": "P1-02", "siId": "SI-4",  "note": "reads credential directly" }],
-  "sliceIssues":      [{ "todoId": "P1-03", "issue": "horizontal layer, not end-to-end" }],
-  "newCandidates":    [{ "name": "SafeUrlBuilder", "location": "src/utils/url.py", "description": "..." }]
+  "reuseAnnotations":    [{ "todoId": "P1-01", "componentId": "C-001", "note": "use existing helper" }],
+  "siAnnotations":       [{ "todoId": "P1-02", "siId": "SI-4",  "note": "reads credential directly" }],
+  "sliceIssues":         [{ "todoId": "P1-03", "issue": "horizontal layer, not end-to-end" }],
+  "newCandidates":       [{ "name": "SafeUrlBuilder", "location": "src/utils/url.py", "description": "..." }],
+  "peerRepoAnnotations": [{ "todoId": "P1-04", "mirrorPath": "template/.claude/workflows/wave-cycle.js", "note": "lands via commit+push to wailuen/a2a-agent-template per LRN-071" }]
 }
 ```
+
+All six keys (`issuesFound`, `reuseAnnotations`, `siAnnotations`, `sliceIssues`, `newCandidates`, `peerRepoAnnotations`) are required — `PLAN_RT_SCHEMA` in wave-cycle.js rejects a response missing any of them, including `peerRepoAnnotations`, with `additionalProperties: false`. Set `peerRepoAnnotations` to `[]` when no todo's `Creates:`/`Modifies:` touches `harness/workflows/*.js` or `.claude/workflows/*.js` without a matching `template/.claude/workflows/<file>.js` mirror entry (LRN-085).
 
 Set `issuesFound: true` when any array is non-empty. Set `issuesFound: false` (all arrays empty) when the plan is clean.
 
@@ -164,8 +199,12 @@ or **agent-domain**:
   wrong agent instruction), SDK internals bug (`build_app()`, `Agent`, `ToolSet`,
   `SourceAdapter` base, credential store, loop), template scaffold error, protocol
   surface bug caused by SDK behavior (not agent-specific code).
-- **Agent-domain**: bug in `src/tools/`, `src/sources/`, `src/config.py`, domain
-  test failures, agent-specific SI violation (fix the code, not the SDK).
+- **Agent-domain**: bug in an agent repo's own `src/tools/`, `src/sources/`,
+  `src/config.py`, domain test failures, agent-specific SI violation (fix the
+  code, not the SDK). This split is about OWNERSHIP, not path shape: when the
+  repo under review IS a2a-sdk (source root `agent_sdk/`), there is no
+  agent-domain half — every finding in `agent_sdk/` is SDK-level by definition
+  and gets `[SDK]`.
 
 Tag SDK-level findings with `[SDK]` in the finding ID: `**[RT-001][SDK]**`.
 

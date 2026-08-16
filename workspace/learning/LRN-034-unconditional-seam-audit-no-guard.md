@@ -16,10 +16,28 @@ No guard derives which files in the `creates` list are route files before schedu
 **Superseded by w036/GH-123/LRN-132 (2026-07-21):** the `seamPaths.length > 0` guard this learning asked for was deliberately REMOVED in w036 (GH-123), across `.claude/workflows/wave-cycle.js`, `harness/workflows/wave-cycle.js`, and `template/.claude/workflows/wave-cycle.js`. `SEAM_ROUTE_MARKERS` has no auth-path fragment, so a wave touching only an `AUTH_SURFACE` member not matched by any marker (e.g. `src/auth/middleware`, `src/auth/identity`) sets `runProtocol=true` — dispatching a2a-advisor/mcp-advisor/ag-ui-advisor — while `seamPaths` comes back empty. Gating the seam push on `seamPaths.length > 0` therefore skipped the one leg that checks "Auth mode enforced uniformly: no surface accepts a token type another rejects" for exactly the class of change most likely to violate it — the occasional wasted agent call on a genuinely route-free wave (the cost this learning was written to avoid) is the accepted, documented tradeoff (`sdk-wave.js` already dispatched the seam task unconditionally, so this brings wave-cycle.js to parity). `seamPaths` is still computed and passed into the prompt to narrow the "files to audit" hint, it just no longer gates dispatch. Do not re-add this guard — see LRN-066/LRN-131 on the oscillation risk of "fixing" an intentionally-reversed decision back to its prior state.
 
 ## Check
-```
-grep -n 'seamPaths\|SEAM_ROUTE_MARKERS' .claude/workflows/wave-cycle.js harness/workflows/wave-cycle.js template/.claude/workflows/wave-cycle.js
+```bash
+grep -n 'seamPaths\|SEAM_ROUTE_MARKERS' .claude/workflows/wave-cycle.js harness/workflows/wave-cycle.js
+test -d template/ && grep -n 'seamPaths\|SEAM_ROUTE_MARKERS' template/.claude/workflows/wave-cycle.js
 grep -n 'proto:seam\|proto:recheck:seam' .claude/workflows/sdk-wave.js
 ```
+
+RT-002 (round-7 fresh-lens debug) — corrects an RT-005/RT-014 rewrite that dropped
+the `template/` copy on the justification that "`test_workflow_sync.py`'s
+harness↔template axis already keeps the two byte-identical whenever it is checked
+out". That axis runs **nothing** in a checkout without `template/`:
+`HARNESS_TEMPLATE_SHARED` comes from `TEMPLATE_DIR.glob("*.js")` and is empty, so the
+identity test is parametrized over zero cases and both presence guards are
+`xfail(strict=True)`. A Check may only delegate its coverage to a test that actually
+runs. The template line is restored, guarded INLINE per LRN-054 (same line — a guard
+on its own line is still a dead-path guard).
+
+The `template/` copy of `wave-cycle.js` is also currently KNOWN divergent (see
+`workspace/todos/deferred/w039-group-G-budget-exhausted.md` RT-001) — so the `test -d
+template/ &&` branch above is expected to fail this Check in the only checkout it can
+currently run in, until RT-001 is closed. That is a real, visible failure to fix, not
+a reason to drop the branch.
+
 For the three `wave-cycle.js` copies: must return the `SEAM_ROUTE_MARKERS` constant definition and the `seamPaths` derivation. The seam advisor task push (`advisorTasks.push(...)` containing `'proto:seam'`) and the seam recheck push (`recheckTasks.push(...)` containing `'proto:recheck:seam'`) must NOT be wrapped in an `if (seamPaths.length ...)` guard of any spelling — both must sit at the same indentation as their unconditional sibling statements (`const seamPaths = wave.allScope.filter(...)` / `const recheckTasks = []`). Pinned by `tests/test_workflows.py::test_rt001_seam_task_not_gated_on_seam_route_markers` and `::test_rt001_seam_recheck_task_not_gated_on_seam_paths`, which assert this structurally (indentation parity), not just via substring absence.
 
 `sdk-wave.js` has no `seamPaths`/`SEAM_ROUTE_MARKERS` of its own — it never had this gating bug, so it dispatches `proto:seam`/`proto:recheck:seam` unconditionally by construction. That runner is pinned separately by `tests/test_workflows.py::test_rt001_sdk_wave_seam_task_not_gated_on_seam_route_markers` and `::test_rt001_sdk_wave_seam_recheck_task_not_gated_on_seam_paths`, which compare the `advisorTasks.push`/`recheckTasks.push` indentation against the unconditional `const advisorTasks = []` / `const recheckTasks = []` sibling statements — added because prior to that, sdk-wave.js's unconditional push had zero regression coverage of its own (only the wave-cycle.js mirrors were checked).
