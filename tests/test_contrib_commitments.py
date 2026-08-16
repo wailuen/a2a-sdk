@@ -485,6 +485,86 @@ async def test_executor_generic_exception_does_not_leak_message(tmp_path_str):
     assert secret not in str(dict(row))
 
 
+async def test_executor_records_stable_reason_for_invalid_tool_input(tmp_path_str):
+    """GH-135/RT-006 (C-012 cross-surface parity): the executor is the fourth
+    tool-dispatch surface. When the STORED args no longer satisfy the tool's
+    input model, invoke_any() raises ToolInputValidationError — which must
+    persist a stable, explicit reason, not type(exc).__name__.
+
+    Pinning the literal string is the point: the generic catch-all used to
+    persist the class name, so introducing ToolInputValidationError between the
+    raise site and the catch-all silently changed the stored value from
+    "ValidationError" to "ToolInputValidationError" for every existing
+    deployment. The reason is a contract, not an implementation detail.
+    """
+    from pydantic import BaseModel, ValidationError
+
+    from agent_sdk.agent.registry import ToolInputValidationError
+    from agent_sdk.contrib.commitments.executor import INVALID_TOOL_INPUT_REASON
+
+    class Inp(BaseModel):
+        n: int
+
+    try:
+        Inp.model_validate({"n": "not-an-int-SECRET-VALUE"})
+    except ValidationError as ve:
+        coercion_error = ve
+
+    s = _store(tmp_path_str)
+    cid = s.add(tool="boom", args={}, fire_at=_past())
+
+    async def _raise(args, adapters):
+        raise ToolInputValidationError(coercion_error, tool_name="boom")
+
+    ex = CommitmentExecutor(s, FakeRegistry({"boom": FakeEntry(_raise)}), {})
+    await ex.tick_once()
+
+    row = s._fetch_row(cid)
+    assert row["status"] == STATUS_FAILED
+    assert row["last_error"] == INVALID_TOOL_INPUT_REASON == "invalid_tool_input"
+    assert "ToolInputValidationError" not in str(dict(row)), (
+        "the persisted reason must not be the exception class name — renaming "
+        "the class would silently change stored data"
+    )
+    assert "SECRET-VALUE" not in str(dict(row)), (
+        "SI-2: the rejected input value must never reach the commitments DB"
+    )
+
+
+async def test_executor_body_validation_error_keeps_class_name_reason(tmp_path_str):
+    """The other half of the RT-006 contract: a ValidationError raised by the
+    tool BODY (not caller-input coercion) is not caller-correctable input and
+    must stay distinguishable from the invalid_tool_input case above.
+
+    RT-012: pins the LRN-044 carve-out — persisting type(exc).__name__ into
+    last_error is store-internal (never handed back through
+    CommitmentsSource), not a caller-facing error body, so it does not
+    violate the Check's "LOG-ONLY diagnostics" rule for the other three
+    dispatch surfaces."""
+    from pydantic import BaseModel, ValidationError
+
+    from agent_sdk.contrib.commitments.executor import INVALID_TOOL_INPUT_REASON
+
+    class Out(BaseModel):
+        n: int
+
+    s = _store(tmp_path_str)
+    cid = s.add(tool="boom", args={}, fire_at=_past())
+
+    async def _raise(args, adapters):
+        Out.model_validate({"n": "bad"})  # body-raised, not input coercion
+
+    ex = CommitmentExecutor(s, FakeRegistry({"boom": FakeEntry(_raise)}), {})
+    await ex.tick_once()
+
+    row = s._fetch_row(cid)
+    assert row["status"] == STATUS_FAILED
+    assert row["last_error"] == ValidationError.__name__
+    assert row["last_error"] != INVALID_TOOL_INPUT_REASON, (
+        "a tool-body ValidationError must not be reported as bad caller input"
+    )
+
+
 async def test_executor_fire_auth_wraps_invocation(tmp_path_str):
     s = _store(tmp_path_str)
     s.add(tool="send", args={}, fire_at=_past())

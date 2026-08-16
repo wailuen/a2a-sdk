@@ -41,6 +41,51 @@ from agent_sdk.example.agent import make_agent
 from agent_sdk.testing import FakeModelClient
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _keep_a_current_event_loop_installed():
+    """RT-007: remove the CAUSE of the spurious unraisable-exception warnings
+    instead of filtering them.
+
+    pytest-asyncio's per-test event-loop-policy bookkeeping calls
+    ``asyncio.get_event_loop()`` around every test. When nothing has a "current"
+    loop set for the main thread at that moment, Python fabricates a brand-new
+    throwaway loop as a side effect and installs it — a loop pytest-asyncio never
+    explicitly closes. It (and its AF_UNIX self-pipe socket pair) is reclaimed
+    only when cyclic gc later drops it, at which point ``__del__`` fires a
+    ResourceWarning that ``filterwarnings = ["error"]`` turns into a teardown
+    error — surfacing on whichever unrelated test's ``app`` fixture happens to
+    call ``gc.collect()`` next, never on the test that actually left no loop set.
+
+    The previous fix suppressed those two warnings globally in pyproject.toml,
+    which also silenced a genuine SDK-leaked loop or unix socket — the comment
+    there conceded it could not tell the two apart. Keeping one loop installed
+    for the whole session means ``get_event_loop()`` always finds a current loop
+    and never fabricates one, so the warnings never fire in the first place and
+    a real leak still fails the suite.
+
+    Session-scoped and closed at the end, so this fixture's own loop is not a
+    leak either. It is never run — pytest-asyncio creates and drives its own
+    per-test loops; this one exists only to occupy the "current loop" slot.
+
+    Honest status: the flake is ORDER-DEPENDENT and did not reproduce on the
+    full suite at the time this landed (green with the suppressions removed and
+    this fixture disabled), so the fixture is PREVENTIVE, not a fix for a
+    currently-failing run. It is kept anyway because it is nearly free and it
+    closes the loop the RT-007 comment documented — and because the alternative
+    that keeps getting reached for, a `filterwarnings` entry matching
+    `_UnixSelectorEventLoop` or `family=1`, cannot distinguish pytest-asyncio's
+    throwaway loop from a genuine SDK leak and therefore silences both. If this
+    flake resurfaces, fix the cause here; do not re-add the filter.
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    yield
+    # Whatever ends up installed at session end (pytest-asyncio may have swapped
+    # in its own), close ours and clear the slot so nothing survives the session.
+    asyncio.set_event_loop(None)
+    loop.close()
+
+
 @pytest.fixture
 def settings(tmp_path) -> BaseAgentSettings:
     return BaseAgentSettings(

@@ -541,10 +541,9 @@ async def oauth_authorize_page(request: Request) -> Response:
     """Render the consent page. The page itself is unauthenticated (it only
     reflects validated registration data); approval (the POST) is the gate.
 
-    One-time org consent (GH-136): when ``oauth_one_time_consent`` is enabled
+    One-time consent (GH-136): when ``oauth_one_time_consent`` is enabled
     AND this client has already been approved by an admin (``consented``, set
-    by the POST path), skip the page and issue the code directly — the
-    operator consents once at setup and the org's users connect silently.
+    by the POST path), skip the page and issue the code directly.
 
     This is a SHORT-CIRCUIT, never a bypass of validation: ``_validate_authorize``
     has already run, so an unknown client, an unregistered ``redirect_uri``, a
@@ -554,10 +553,22 @@ async def oauth_authorize_page(request: Request) -> Response:
     ``client_id`` with ``consented: False`` on every registration, so a
     self-registered client can never authorize itself.
 
-    Trust is bound to the *registration*, not to a person: everyone who
-    reaches the server through an approved client_id inherits that approval.
-    That is the point (org-wide access) and the risk (see the settings docs);
-    the auto-approval is logged at INFO for audit.
+    Trust is bound to the *registration* (``client_id``), not to a person or
+    an org (GH-138): everyone who reaches the server through an approved
+    client_id inherits that approval, but each connector's own DCR call
+    mints its OWN client_id — this does not, by itself, make a second user's
+    independent registration skip the gate. Two scopes fall out of that:
+
+    - per-registration (default behavior, no extra setup): a RETURNING
+      client skips repeat approval; a brand-new registration still hits the
+      gate once.
+    - per-org (opt-in, see ``python -m agent_sdk provision-org-oauth-client``):
+      an admin pre-mints and pre-approves ONE ``client_id`` offline, then
+      pins it into the connector platform's static/pre-registered OAuth
+      Client ID field so every org member shares that single registration
+      instead of each performing their own DCR call.
+
+    The auto-approval is logged at INFO for audit either way.
     """
     params = _clean_params(request.query_params)
     store = _oauth(request)

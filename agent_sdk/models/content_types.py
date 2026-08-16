@@ -34,6 +34,11 @@ from pydantic import (
     model_validator,
 )
 
+from ..common.redact import (
+    safe_block_text,
+    safe_cell_text,
+)
+
 CATALOG_ID = "urn:a2ui-profile:standard:v1"
 A2UI_VERSION = "v0.9.1"
 A2UI_EXTENSION_URI = "https://a2ui.org/a2a-extension/a2ui/v0.9.1"
@@ -42,6 +47,63 @@ A2UI_MIME_TYPE = "application/a2ui+json"
 RESERVED_COMPONENTS = ("TradeActivity", "CompanyInfo", "DealList", "InvestorProfile")
 
 _ARROWS = {"up": "▲", "down": "▼", "flat": "→"}
+
+
+# GH-130 / RT-002 — SEPARATOR ALPHABET, and the cell sanitiser that applies it,
+# now live in the shared C-007 redaction family at agent_sdk/common/redact.py and
+# are re-exported here.
+#
+# They were module-private (`_BARE_SEPARATORS`, `_SPACED_SEPARATORS`,
+# `_SPACED_SEPARATOR_RE`, `_sanitize_cell`) while the delimiter-safety contract
+# below declared them MANDATORY for third-party domain cards outside this module —
+# a rule downstream code could satisfy only by hand-rebuilding the alphabet, which
+# is exactly the divergent second copy C-007 exists to prevent, and which four
+# consecutive review rounds proved nobody gets right by hand (each round found one
+# more uncovered separator). The obligation and the helper that discharges it now
+# ship together: `agent_sdk.safe_cell_text`.
+#
+# The names are re-imported above rather than redefined so this module and
+# tests/test_content_types.py's completeness guards keep reading ONE alphabet.
+
+# Punctuation the renderers emit that is deliberately NOT neutralised, with the
+# reason it cannot fabricate a boundary. test_content_types.py asserts this set and
+# the separator maps together account for every punctuation character appearing in a
+# renderer template, so a future renderer that introduces a genuinely new separator
+# fails the build instead of shipping. Stays here, not in redact.py: it describes
+# THIS module's renderer templates, not the shared alphabet.
+_NON_SEPARATOR_GLYPHS = frozenset("-+%./")
+
+
+def _sanitize_cell(value: str) -> str:
+    """Thin alias for the public :func:`agent_sdk.common.redact.safe_cell_text`
+    (RT-002) — kept as the in-module name every renderer below calls, and as the
+    token tests/test_content_types.py's per-renderer enforcement greps for.
+
+    All behaviour, and the reasoning behind the separator alphabet, live on
+    ``safe_cell_text``. Do not reimplement either here: a second copy is the exact
+    failure this promotion removed. See the delimiter-safety contract on
+    ``ContentModel``."""
+    return safe_cell_text(value)
+
+
+def _sanitize_block(value: str) -> str:
+    """Neutralise control/escape characters inside an untrusted string that is
+    rendered as a MULTI-LINE MARKDOWN BLOCK, preserving newlines and ``|``
+    (RT-001).
+
+    The counterpart to :func:`_sanitize_cell`, and the correct helper for
+    exactly two fields: ``MarketBriefing.prose`` and ``TextSection.content``.
+    Those are the only free-form strings in this module whose declared
+    contract is a markdown *document* rather than a value interpolated into a
+    delimited line — ``MarketBriefing`` is the SDK's sole prose-exception type
+    and its ``to_markdown()`` output IS the wire value (a2ui/translator.py,
+    routes/mcp.py). Running them through ``_sanitize_cell`` collapses every
+    newline to a space and rewrites ``|`` to ``/``, which destroys headings,
+    lists, paragraphs and markdown tables in the one payload that is supposed
+    to carry them. Delimiter fabrication is not a threat for these fields:
+    ``to_markdown()`` joins *sections*, and nothing downstream re-parses the
+    rendered text positionally."""
+    return safe_block_text(value)
 
 
 _ASSERT_FINITE_MAX_DEPTH = 100
@@ -89,7 +151,93 @@ class _Wire(BaseModel):
 class ContentModel(_Wire, abc.ABC):
     """Base for renderable card payloads. ``wire()`` is the surface data
     model value; ``to_plain_text()`` is the mandatory text fallback sent to
-    clients without A2UI capability (and used in tool-result folding)."""
+    clients without A2UI capability (and used in tool-result folding).
+
+    Delimiter-safety contract (GH-130). ``to_plain_text()``/``to_markdown()``
+    interpolate untrusted field values into a delimited render — columns
+    joined with ``" | "``, entries joined with ``"\\n"``, and a dozen
+    renderer-owned separators besides (``": "``, ``", "``, ``"="``, the
+    ``<email>``/``(type)``/``[unread]`` pairs, the ``" – "``/``" — "``/
+    ``" @ "``/``" → "`` joiners). EVERY such value MUST go through
+    ``_sanitize_cell`` (SDK renderers) or, for domain subclasses outside this
+    module, the identical public helper it aliases:
+    ``agent_sdk.safe_cell_text(value)`` (RT-002 — exported from the package
+    root and from ``agent_sdk.common.redact``).
+
+    Do NOT satisfy this with ``safe_error_text`` plus a hand-written separator
+    translation. ``safe_error_text`` performs NO separator neutralisation at
+    all — it only collapses line breaks and controls — so a domain card that
+    follows that recipe is still wide open to the ``<``/``>``/``(``/``)``/
+    ``=``/``|`` identity-fabrication attacks GH-130 closed, and a hand-written
+    alphabet is the divergent second copy the component registry exists to
+    prevent (four consecutive review rounds each missed one more separator
+    doing exactly that). One call, one alphabet, one place to fix.
+
+    Without it a single attacker-controlled cell fabricates a boundary and one
+    field renders as two: a ``|`` invents a column, a ``str.splitlines()``
+    break (not just CR/LF — also VT, FF, NEL, U+2028/U+2029) invents a row, a
+    ``<`` invents a second ``name <email>`` identity, a ``,``/``=`` invents a
+    second category/value pair. The reader — human or model — sees a record
+    that does not exist. This applies to every untrusted free-form ``str``
+    interpolated into a render, including a card's own ``title``/
+    ``entity_type``/``as_of``, and to untrusted **dict keys** such as
+    ``MultiCategoryPeriod.categories`` (a lookup key is still attacker-shaped
+    text once rendered). Only ``Literal``-typed enum fields are exempt,
+    because pydantic has already constrained them to a fixed alphabet.
+
+    ACCEPTED RESIDUAL (RT-010): ``_sanitize_cell`` neutralises a compact
+    (non-whitespace-adjacent) ``,``/``:``/``–``/``—``/``→`` unless it sits
+    between two ASCII digits (preserving genuine numeric literals, ranges, and
+    timestamps — ``"1,234"``, ``"09:30"``). ``@`` alone keeps a narrower,
+    intentionally-not-closed exception: a compact ``@`` between letters survives
+    unneutralised anywhere it appears, because that shape is indistinguishable
+    at the value level from a real email address, which the SDK's own renderers
+    depend on surviving intact. A hostile compact ``@`` planted in a field that
+    is *not* an email (e.g. a location name) can therefore still read as the
+    ``" @ "`` joiner to a naive reader — closing that would require per-field
+    type information this value-level helper does not have. See
+    ``agent_sdk.common.redact``'s module comment for the full rationale.
+
+    COMPLETENESS IS ENFORCED, NOT DELEGATED. ``_sanitize_cell`` applies the
+    entire separator alphabet (``_BARE_SEPARATORS`` plus the boundary-aware
+    ``_SPACED_SEPARATORS``) unconditionally,
+    so a renderer cannot be delimiter-unsafe by omission and a new renderer
+    inherits the guarantee without its author knowing the rule exists. Two
+    tests in ``tests/test_content_types.py`` keep that true from both
+    directions, and they — not reviewer diligence — are what close this class:
+
+    - ``test_every_renderer_separator_is_neutralised`` parses this module's
+      renderer templates and fails if any punctuation they insert is neither
+      in ``_STRUCTURAL_SEPARATORS`` nor in the documented
+      ``_NON_SEPARATOR_GLYPHS`` allow-list. A future renderer that introduces
+      a new separator breaks the build.
+    - ``test_untrusted_value_cannot_alter_render_structure`` drives every
+      registered ``ContentModel`` with a hostile payload in every string
+      field and asserts the render's separator counts are identical to a
+      benign render. A renderer that forgets ``_sanitize_cell`` on some field
+      breaks the build.
+
+    Do not reintroduce per-renderer opt-in. The earlier design, in which each
+    renderer passed the subset of delimiters it used via ``extra=``, produced
+    four consecutive review rounds that each found one more uncovered
+    renderer/delimiter pair — the completeness obligation has to sit in one
+    place a test can check, not at ~25 call sites.
+
+    RT-001 carve-out — MULTI-LINE MARKDOWN FIELDS: the rule above is scoped to
+    values interpolated into a *delimited single-line* render. A field whose
+    declared contract is a markdown *document* must NOT be routed through
+    ``safe_error_text``/``_sanitize_cell``: there a newline is the payload's
+    own structure and ``|`` is table syntax, so collapsing them destroys the
+    very content the field exists to carry, and no delimiter is fabricated
+    because nothing re-parses the result positionally. Such fields use
+    ``agent_sdk.common.redact.safe_block_text`` (the ``_sanitize_block``
+    wrapper in this module), which preserves ``\\n``/``\\t``/``|`` while still
+    neutralising ANSI/terminal escape introducers and the rest of C0/DEL/C1.
+    In this module that is exactly ``MarketBriefing.prose`` and
+    ``TextSection.content`` — the sole prose-exception type, whose
+    ``to_markdown()`` output IS the A2A/AG-UI DataPart value and the MCP
+    ``structuredContent`` markdown payload. Choose the helper by the FIELD's
+    contract, never by the enclosing method's name."""
 
     data_type: ClassVar[str]
     component: ClassVar[str]
@@ -198,10 +346,10 @@ class KpiCard(ContentModel):
     metadata: dict[str, Any] | None = None
 
     def to_plain_text(self) -> str:
-        lines = [self.title] if self.title else []
+        lines = [_sanitize_cell(self.title)] if self.title else []
         for m in self.metrics:
-            unit = f" {m.unit}" if m.unit else ""
-            lines.append(f"{m.label}: {m.value}{unit}")
+            unit = f" {_sanitize_cell(m.unit)}" if m.unit else ""
+            lines.append(f"{_sanitize_cell(m.label)}: {_sanitize_cell(str(m.value))}{unit}")
             if isinstance(m.trend, KpiTrend):
                 arrow = _ARROWS[m.trend.direction]
                 bits = [arrow]
@@ -210,7 +358,7 @@ class KpiCard(ContentModel):
                 elif m.trend.delta is not None:
                     bits.append(f"{m.trend.delta:+g}")
                 if m.trend.period:
-                    bits.append(m.trend.period)
+                    bits.append(_sanitize_cell(m.trend.period))
                 lines.append(f"  trend: {' '.join(bits)}")
             elif isinstance(m.trend, str):
                 lines.append(f"  trend: {_ARROWS[m.trend]}")
@@ -281,13 +429,16 @@ class TimeSeriesChart(ContentModel):
         return values
 
     def to_plain_text(self) -> str:
-        lines = [self.title]
+        lines = [_sanitize_cell(self.title)]
         if self.data:
             first, last = self.data[0], self.data[-1]
             fv = first.value if first.value is not None else "N/A"
             lv = last.value if last.value is not None else "N/A"
+            first_date = _sanitize_cell(first.date)
+            last_date = _sanitize_cell(last.date)
             lines.append(
-                f"  {fv} @ {first.date} → {lv} @ {last.date} "
+                f"  {fv} @ {first_date} → "
+                f"{lv} @ {last_date} "
                 f"({len(self.data)} points)"
             )
         return "\n".join(lines)
@@ -313,10 +464,16 @@ class ComparisonTable(ContentModel):
     metadata: dict[str, Any] | None = None
 
     def to_plain_text(self) -> str:
-        header = " | ".join(c.label for c in self.columns)
-        lines = [self.title, header, "-" * len(header)] if self.title else [header, "-" * len(header)]
+        header = " | ".join(_sanitize_cell(c.label) for c in self.columns)
+        lines = (
+            [_sanitize_cell(self.title), header, "-" * len(header)]
+            if self.title
+            else [header, "-" * len(header)]
+        )
         for row in self.rows:
-            lines.append(" | ".join(str(row.get(c.key, "")) for c in self.columns))
+            lines.append(
+                " | ".join(_sanitize_cell(str(row.get(c.key, ""))) for c in self.columns)
+            )
         return "\n".join(lines)
 
 
@@ -336,8 +493,8 @@ class BarChart(ContentModel):
     metadata: dict[str, Any] | None = None
 
     def to_plain_text(self) -> str:
-        lines = [self.title] if self.title else []
-        lines += [f"  {b.category}: {b.value:g}" for b in self.bars]
+        lines = [_sanitize_cell(self.title)] if self.title else []
+        lines += [f"  {_sanitize_cell(b.category)}: {b.value:g}" for b in self.bars]
         return "\n".join(lines)
 
 
@@ -366,12 +523,17 @@ class EntityList(ContentModel):
         return self
 
     def to_plain_text(self) -> str:
-        lines = [self.title or f"{self.entity_type} list"]
+        heading = (
+            _sanitize_cell(self.title)
+            if self.title
+            else _sanitize_cell(f"{self.entity_type} list")
+        )
+        lines = [heading]
         lines.append(f"  showing {self.showing or len(self.items)} of {self.total_count}")
         for item in self.items:
-            lines.append(f"  - {item.name}")
+            lines.append(f"  - {_sanitize_cell(item.name)}")
             if item.summary:
-                lines.append(f"      {item.summary}")
+                lines.append(f"      {_sanitize_cell(item.summary)}")
         return "\n".join(lines)
 
 
@@ -443,26 +605,30 @@ class MarketBriefing(ContentModel):
     metadata: dict[str, Any] | None = None
 
     def to_markdown(self) -> str:
-        lines = [f"{self.title} ({self.as_of})"]
+        title = _sanitize_cell(self.title)
+        as_of = _sanitize_cell(self.as_of)
+        lines = [f"{title} ({as_of})"]
         if self.prose:
-            lines.append(self.prose)
+            lines.append(_sanitize_block(self.prose))
         for section in self.sections:
             if isinstance(section, KpiRowSection):
                 for item in section.items:
-                    bits = [f"  KPI {item.title}: {item.value}"]
+                    bits = [f"  KPI {_sanitize_cell(item.title)}: {_sanitize_cell(str(item.value))}"]
                     if item.unit:
-                        bits.append(item.unit)
+                        bits.append(_sanitize_cell(item.unit))
                     if item.trend:
                         bits.append(_ARROWS[item.trend])
                     if item.delta is not None:
                         bits.append(f"{item.delta:+g}")
                     lines.append(" ".join(bits))
             elif isinstance(section, TextSection):
-                lines.append(f"  {section.content}")
+                lines.append(f"  {_sanitize_block(section.content)}")
             elif isinstance(section, ChartSection):
-                lines.append(f"  CHART ({section.chart_type}): {section.data.get('title', '')}")
+                title = _sanitize_cell(str(section.data.get("title", "")))
+                lines.append(f"  CHART ({section.chart_type}): {title}")
             elif isinstance(section, TableSection):
-                lines.append(f"  TABLE: {section.data.get('title', '')}")
+                title = _sanitize_cell(str(section.data.get("title", "")))
+                lines.append(f"  TABLE: {title}")
         return "\n".join(lines)
 
     def to_plain_text(self) -> str:
@@ -495,9 +661,10 @@ class WaterfallChart(ContentModel):
     metadata: dict[str, Any] | None = None
 
     def to_plain_text(self) -> str:
-        lines = [self.title]
+        lines = [_sanitize_cell(self.title)]
         lines += [
-            f"  {s.label}: {s.value:+g} → {s.cumulative:g} ({s.type})"
+            f"  {_sanitize_cell(s.label)}: "
+            f"{s.value:+g} → {s.cumulative:g} ({s.type})"
             for s in self.segments
         ]
         return "\n".join(lines)
@@ -546,10 +713,12 @@ class MultiCategoryChart(ContentModel):
     metadata: dict[str, Any] | None = None
 
     def to_plain_text(self) -> str:
-        lines = [self.title]
+        lines = [_sanitize_cell(self.title)]
         for p in self.periods:
-            cats = ", ".join(f"{k}={v.value:g}" for k, v in p.categories.items())
-            lines.append(f"  {p.period}: {cats}")
+            cats = ", ".join(
+                f"{_sanitize_cell(k)}={v.value:g}" for k, v in p.categories.items()
+            )
+            lines.append(f"  {_sanitize_cell(p.period)}: {cats}")
         return "\n".join(lines)
 
 
@@ -594,7 +763,7 @@ class FundPerformance(ContentModel):
     def to_plain_text(self) -> str:
         bits: list[str] = []
         if self.fund_name:
-            bits.append(self.fund_name)
+            bits.append(_sanitize_cell(self.fund_name))
         if self.irr is not None:
             bits.append(f"IRR={self.irr:.1%}")
         if self.tvpi is not None:
@@ -604,9 +773,10 @@ class FundPerformance(ContentModel):
         if self.moic is not None:
             bits.append(f"MOIC={self.moic:.2f}x")
         if self.nav and self.nav.amount is not None:
-            bits.append(f"NAV={self.nav.amount:,.0f} {self.nav.currency or 'USD'}")
+            currency = _sanitize_cell(self.nav.currency or "USD")
+            bits.append(f"NAV={self.nav.amount:,.0f} {currency}")
         if self.as_of_date:
-            bits.append(f"as of {self.as_of_date}")
+            bits.append(f"as of {_sanitize_cell(self.as_of_date)}")
         return " | ".join(bits) or "fund performance (no data)"
 
 
@@ -641,9 +811,12 @@ class EmailList(ContentModel):
         lines = [f"{self.total_count} message(s)"]
         for m in self.messages:
             unread = "[unread] " if not m.is_read else ""
-            lines.append(f"  {unread}{m.received_at} | {m.from_.email} | {m.subject}")
+            lines.append(
+                f"  {unread}{_sanitize_cell(m.received_at)} | "
+                f"{_sanitize_cell(m.from_.email)} | {_sanitize_cell(m.subject)}"
+            )
             if m.preview:
-                lines.append(f"    {m.preview}")
+                lines.append(f"    {_sanitize_cell(m.preview)}")
         return "\n".join(lines)
 
 
@@ -685,13 +858,21 @@ class CalendarEvents(ContentModel):
     metadata: dict[str, Any] | None = None
 
     def to_plain_text(self) -> str:
-        lines = [f"{self.total_count} event(s) {self.date_range.start} – {self.date_range.end}"]
+        start = _sanitize_cell(self.date_range.start)
+        end = _sanitize_cell(self.date_range.end)
+        lines = [f"{self.total_count} event(s) {start} – {end}"]
         for e in self.events:
             loc = ""
             if e.location and e.location.display_name:
-                loc = f" @ {e.location.display_name}"
+                loc_name = _sanitize_cell(
+                    e.location.display_name
+                )
+                loc = f" @ {loc_name}"
             online = " [online]" if (e.is_online or (e.location and e.location.is_online)) else ""
-            lines.append(f"  {e.start} – {e.end}: {e.subject}{loc}{online}")
+            e_start = _sanitize_cell(e.start)
+            e_end = _sanitize_cell(e.end)
+            subject = _sanitize_cell(e.subject)
+            lines.append(f"  {e_start} – {e_end}: {subject}{loc}{online}")
         return "\n".join(lines)
 
 
@@ -745,13 +926,24 @@ class UserProfile(ContentModel):
     metadata: dict[str, Any] | None = None
 
     def to_plain_text(self) -> str:
-        lines = [f"{self.display_name} <{self.email}>"]
+        name = _sanitize_cell(self.display_name)
+        email = _sanitize_cell(self.email)
+        lines = [f"{name} <{email}>"]
         if self.job_title:
-            lines.append(f"  {self.job_title}" + (f", {self.department}" if self.department else ""))
+            dept = (
+                f", {_sanitize_cell(self.department)}"
+                if self.department
+                else ""
+            )
+            lines.append(
+                f"  {_sanitize_cell(self.job_title)}{dept}"
+            )
         if self.presence:
             lines.append(f"  presence: {self.presence.availability}")
         if self.manager:
-            lines.append(f"  manager: {self.manager.display_name} <{self.manager.email}>")
+            manager_name = _sanitize_cell(self.manager.display_name)
+            manager_email = _sanitize_cell(self.manager.email)
+            lines.append(f"  manager: {manager_name} <{manager_email}>")
         return "\n".join(lines)
 
 
@@ -778,8 +970,14 @@ class UserList(ContentModel):
     def to_plain_text(self) -> str:
         lines = [f"{self.total_count} user(s)"]
         for u in self.users:
-            title = f" — {u.job_title}" if u.job_title else ""
-            lines.append(f"  {u.display_name} <{u.email}>{title}")
+            title = (
+                f" — {_sanitize_cell(u.job_title)}"
+                if u.job_title
+                else ""
+            )
+            name = _sanitize_cell(u.display_name)
+            email = _sanitize_cell(u.email)
+            lines.append(f"  {name} <{email}>{title}")
         return "\n".join(lines)
 
 
@@ -814,10 +1012,14 @@ class DocumentList(ContentModel):
     def to_plain_text(self) -> str:
         lines = [f"{self.total_count} document(s)"]
         for d in self.documents:
-            type_suffix = f" ({d.type})" if d.type else ""
+            doc_type = _sanitize_cell(d.type) if d.type else ""
+            type_suffix = f" ({doc_type})" if d.type else ""
             when = d.last_modified or d.modified
-            date_suffix = f"  {when}" if when else ""
-            lines.append(f"  {d.name}{type_suffix}{date_suffix}")
+            date_suffix = (
+                f"  {_sanitize_cell(when)}" if when else ""
+            )
+            name = _sanitize_cell(d.name)
+            lines.append(f"  {name}{type_suffix}{date_suffix}")
         return "\n".join(lines)
 
 

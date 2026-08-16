@@ -93,6 +93,10 @@ Collect, then echo back a summary for confirmation before touching any file:
      with `api_version=None`. The API key (`azure_openai_api_key`) is seeded into
      the `__model__` namespace via
      `PUT /admin/api/credentials/__model__/azure_openai_api_key` — never in `.env`.
+   - **OpenAI/Azure OpenAI, optional**: `AGENT_SDK_OPENAI_MAX_RETRIES` (`int`)
+     and `AGENT_SDK_OPENAI_TIMEOUT` (`float`, seconds) in `.env`, forwarded
+     verbatim to the underlying `AsyncOpenAI`/`AsyncAzureOpenAI` constructor.
+     Leave unset to keep the openai SDK's own defaults (`max_retries=2`).
    - **Anthropic**: NOT YET IMPLEMENTED — reserved for a future release. Do not
      configure. (`ANTHROPIC_MODEL` config field and `_build_model_client` code path
      do not exist in the current SDK.)
@@ -270,6 +274,8 @@ will never fail with "no lockfile found". Stage it with the initial commit:
    - Bedrock: `BEDROCK_REGION=`, `BEDROCK_MODEL_ARN=`
    - OpenAI: `OPENAI_MODEL=`
    - Azure OpenAI: `AZURE_OPENAI_ENDPOINT=`, `AZURE_OPENAI_DEPLOYMENT=`, `AZURE_API_VERSION=`
+   - OpenAI/Azure OpenAI, optional: `AGENT_SDK_OPENAI_MAX_RETRIES=`,
+     `AGENT_SDK_OPENAI_TIMEOUT=` — leave unset for the openai SDK's own defaults.
    - OAuth one-time consent, if either scope was chosen in Phase 0:
      `AGENT_SDK_OAUTH_ONE_TIME_CONSENT=true`. Per-org additionally needs the
      Day-2 `provision-org-oauth-client` step (see Handoff) once a real

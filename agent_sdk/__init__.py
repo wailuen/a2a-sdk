@@ -16,8 +16,9 @@ except PackageNotFoundError:  # running from source tree without pip install
 from .agent.artifacts import ArtifactLoader
 from .agent.loop import LoopPolicies, ToolInterrupt
 from .agent.model_client import ModelClient, ModelResponse, ModelToolCall
-from .agent.registry import ToolSet
+from .agent.registry import ToolInputValidationError, ToolSet
 from .app import Agent
+from .common.redact import safe_block_text, safe_cell_text, safe_error_text
 from .config import BaseAgentSettings
 from .credentials.fields import CredentialField
 from .credentials.store import NS_MODEL
@@ -36,7 +37,11 @@ __all__ = [
     "ModelClient",
     "ModelResponse",
     "ModelToolCall",
+    "safe_block_text",
+    "safe_cell_text",
+    "safe_error_text",
     "SourceAdapter",
+    "ToolInputValidationError",
     "ToolInterrupt",
     "ToolSet",
     "__version__",

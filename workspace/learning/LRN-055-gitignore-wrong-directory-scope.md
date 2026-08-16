@@ -26,10 +26,18 @@ git check-ignore -v workspace/adr/ADR-001-dev-credentials.md
 If the command prints nothing (no match), the protection is missing. Also verify:
 
 ```
-grep -n 'ADR-001' template/.gitignore
+grep -n 'ADR-001' .gitignore
 ```
 
 Must return at least one matching glob line.
+
+RT-005/RT-014: checks the root `.gitignore` that actually protects
+`workspace/adr/` in this checkout (the "runtime-appended root .gitignore"
+outcome this learning asks for), not `template/.gitignore` directly — the peer
+repo (LRN-071) is not always checked out locally. Note this is deliberately
+NOT `harness/.gitignore`: that was the wrong-scope location this learning
+exists to document, so repointing there would silently reintroduce the bug
+this Check is meant to catch.
 
 ## Prevention
 

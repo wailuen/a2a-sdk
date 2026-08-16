@@ -49,6 +49,7 @@ surfaces never mix catalogs, and the standard catalog stays frozen:
 
 ```python
 from typing import ClassVar
+from agent_sdk import safe_cell_text
 from agent_sdk.models.content_types import ContentModel, register_content_type
 
 @register_content_type
@@ -61,7 +62,10 @@ class ClimateRiskReport(ContentModel):
     score: float
 
     def to_plain_text(self) -> str:
-        return f"{self.headline} (risk score {self.score})"
+        # Every untrusted field, one helper, the whole separator alphabet.
+        # score is a float — pydantic has already constrained it, so it needs
+        # no sanitising.
+        return f"{safe_cell_text(self.headline)} (risk score {self.score})"
 ```
 
 `register_content_type` validates: `ContentModel` subclass, `data_type` +
@@ -73,3 +77,110 @@ clients know which catalogs they must render.
 A tool then uses `emits=ClimateRiskReport` exactly like a Profile type.
 A plain `BaseModel` (not registered) is also accepted for `emits` — it
 yields the raw-data artifact and MCP `outputSchema` but no A2UI card.
+
+### Delimiter safety (GH-130)
+
+`to_plain_text()` is not a debug aid — it is the mandatory fallback sent
+to clients without A2UI capability, and it is also what the model itself
+reads (`agent_sdk/agent/runner.py`) and what MCP callers receive as
+`structuredContent` (`agent_sdk/routes/mcp.py`). Every untrusted
+free-form `str` field on your card — including a title/label/summary
+field, not just list or table entries — reaches that surface raw unless
+you sanitise it yourself. The SDK's own Profile renderers enforce this
+contract on themselves (see the docstring on
+`agent_sdk.models.content_types.ContentModel.to_plain_text`); domain
+cards get no free ride and must apply the same rule — with the same
+helper the SDK's own renderers use:
+
+**Route every untrusted free-form `str` through
+`agent_sdk.safe_cell_text(value)`** (also importable as
+`agent_sdk.common.redact.safe_cell_text`). One call per value, applied to
+every one of them. It collapses the full `str.splitlines()` break set —
+not just `\n`/`\r`, also VT, FF, NEL, U+2028/U+2029 — plus the remaining
+control characters, and then neutralises the entire separator alphabet.
+Only `Literal`-typed enum fields and non-`str` scalars are exempt, because
+pydantic has already constrained them.
+
+`safe_error_text` is **not** a substitute: it performs no separator
+neutralisation at all, so a value it returns can still fabricate a field
+boundary. Use `safe_cell_text` for anything interpolated into a rendered
+line.
+
+The one exception is a **multi-line markdown *document* field** — where
+the field's own contract is a block of markdown, not a delimited cell
+(free-form prose that intentionally carries headings/lists/paragraphs).
+Do not run those through `safe_cell_text`: flattening every newline to a
+space and rewriting `|` destroys the content the field exists to carry.
+Use `agent_sdk.safe_block_text(value)` instead — it strips ANSI/terminal
+escape introducers and other control characters while preserving
+`\n`/`\t`/`|` as legitimate content.
+
+### Why one helper, and not a per-renderer opt-in
+
+Each of these is a real boundary an unsanitised value fabricates, and
+each was found in a *separate* review round of the SDK's own renderers:
+
+- **Entries joined on `"\n"`** (one row/item per line): a value carrying
+  any `str.splitlines()` break invents an extra row.
+- **Columns joined on `" | "`**: a value containing `|` — or its visual
+  confusables `│` (U+2502) and `｜` (U+FF5C) — invents an extra column.
+- **Renderer-specific punctuation**: the `<`/`>` pair `UserProfile`/
+  `UserList` wrap an email in, the `(`/`)` pair `DocumentList` wraps a
+  type in, the `[unread]` marker `EmailList` prefixes, the `k=v` and
+  `", "` joins `MultiCategoryChart` uses, the `": "` label separator most
+  renderers use, and the `" – "`/`" — "`/`" @ "`/`" → "` joiners. For
+  example, `UserProfile.to_plain_text()` renders `f"{name} <{email}>"`; a
+  `display_name` of `"a> <ceo@corp.com"` next to the real `email`
+  `"attacker@evil.com"` renders unsanitised as
+  `a> <ceo@corp.com <attacker@evil.com>` — a second, forged
+  `name <email>` pair a reader can mistake for the real identity.
+
+**Do not hand-maintain this per renderer, and do not write your own
+sanitiser for your card module.** That is how the SDK's own renderers
+were originally written — each opting into the subset of delimiters it
+happened to use — and four consecutive review rounds each found one more
+uncovered renderer/delimiter pair. The SDK now applies the whole
+alphabet in one place, so a renderer is delimiter-safe by construction
+rather than by its author remembering, and `safe_cell_text` is that one
+place, exported so your cards share it instead of growing a second copy
+that drifts.
+
+Three properties of that alphabet are worth knowing, since they explain
+why your values survive it intact — and where one narrow, deliberate
+exception remains (RT-010).
+
+Separators used **bare** (`<`, `>`, `(`, `)`, `[`, `]`, `=`, `|`) are
+replaced everywhere, unconditionally, and no replacement is itself a
+separator, so a neutralised character can never re-fabricate the
+delimiter downstream.
+
+Separators that only ever appear **spaced** split into two groups.
+`,`, `:`, `–`, `—`, `→` are neutralised everywhere EXCEPT where the
+character sits between two ASCII digits — the shape of a genuine numeric
+literal, range, or timestamp (`"1,234"`, `"09:30"`, `"9–5"`, `"5→10"`).
+A compact occurrence anywhere else — between letters, punctuation, or at
+the value's own boundary — is neutralised too, closing the gap an
+earlier, purely whitespace-adjacency-based rule left open: `"a,b"` has no
+adjacent whitespace on either side, so it used to survive untouched and a
+category-key value shaped like `"a,b"` rendered as two categories where
+the true count was one.
+
+`@` alone keeps the original, narrower whitespace-adjacency rule: a
+compact `a@b` cannot match a `" @ "` join, so it is left alone, which is
+what keeps a real email address (`alice@corp.com`) intact. This is a
+knowingly ACCEPTED RESIDUAL, not an oversight — a digit-flanked rule can't
+apply here (an email's `@` is letter-flanked, not digit-flanked), and
+`safe_cell_text` sanitises one value at a time with no field-level type
+information, so it cannot distinguish a genuine compact email from a
+hostile compact `@` planted in a field that isn't one (e.g. a location
+name) — that field's `@` survives too, and a naive reader can still
+mistake it for the real `" @ "` joiner. Closing it fully would require
+per-field type information this value-level helper deliberately does
+not have.
+
+Choose the helper by what the *field* is declared to hold, never by
+which method you're writing it in. A single-value field like
+`ClimateRiskReport.headline` above still goes through `safe_cell_text`
+even though nothing is joined next to it — it reaches the same
+model-facing and MCP-facing surface as a delimited render and can still
+carry control/escape characters.

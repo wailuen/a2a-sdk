@@ -374,3 +374,55 @@ contract-level decision with a documented rejected alternative (major bump for a
 wire breaks) and an explicitly accepted risk to `~=0.5.x` pinners. DESIGN §4.0 is now the
 standing rule; CHANGELOG breaking-change entries cite it directly rather than re-arguing from
 0.5.40 precedent release-by-release. No code change required.**
+
+## Round 8 — RT-007 (GH-134/GH-135) Unreleased heading fix + GH-135 version sign-off (2026-08-15)
+
+RT-007 flagged that GH-134 and GH-135 (`CHANGELOG.md` `## [Unreleased]`) were filed under
+`### ⚠️ Behavior changes` instead of `### 🔴 Breaking changes`. GH-134 needed the dedicated
+heading to even be eligible for the §4.0 wire-shape conformance exemption (no heading meant no
+both-directions writeup and no Migration callout — the exemption's stated conditions). GH-135 is
+a different case entirely: it is not a `models/` wire shape and not driven by any external
+protocol spec, so the exemption is categorically unavailable to it regardless of heading — it had
+no recorded decision on whether it instead needs a major/minor-axis version bump. Both entries
+are now under `🔴 Breaking changes` in `CHANGELOG.md`, each with an explicit Migration callout;
+GH-134 additionally states its emit/parse split. This round gives GH-135's version question the
+same ADR-equivalent sign-off Round 6/7 gave the wrapper-key and exemption decisions.
+
+### Owned decision (not deferred): GH-135 requires a version bump, not an exemption
+
+| Scope | Sev | Finding | File:line | Decision |
+|---|---|---|---|---|
+| SemVer policy (stable core) | HIGH (RT-007) | `ToolEntry.invoke()`/`invoke_gen()` (`agent_sdk/agent/registry.py`) now raise `ToolInputValidationError`, a plain `Exception` that does **not** subclass `pydantic.ValidationError` — any `except pydantic.ValidationError` wrapped around a dispatch call silently stops catching it. `ToolSet`/`@tool` (dispatch) is stable core per DESIGN §4.0. The change is voluntary — an internal discriminator so tool-body `ValidationError`s aren't misreported as bad tool-call arguments (GH-135), sharpened for SI-2 by RT-003 — not required by any external protocol spec, and it is not a `models/` wire shape. §4.0's wire-shape conformance exemption therefore cannot be cited for it on either of its two conditions (wire-shape-in-`models/`; spec-conformance-driven). | CHANGELOG.md `## [Unreleased]` `🔴 Breaking changes` (GH-135) | **NOT exemption-eligible — requires a major/minor-axis bump.** Per DESIGN §4.0's own text ("A voluntary breaking change to the stable core — not required by spec conformance — still requires a major bump; this exemption cannot be cited for those"), GH-135 must ship as `0.6.0`, not folded into the next `0.5.x` patch. Rejected alternative: carve out a narrower exemption for "internal discriminator exceptions" that change caller-visible except-clauses — rejected because Round 7 deliberately scoped the exemption to external-spec-conformance wire shapes only; widening it to cover voluntary Python-API breaks by analogy would let any future voluntary stable-core break cite it, defeating that scope. **Accepted consequence:** this Unreleased batch cannot tag as a `0.5.x` patch while GH-135 is included — it ships as `0.6.0`, or GH-135 is cut from the batch and shipped in its own major/minor release; which of those is chosen is a release-cut decision for `/sdk-release`, not this review. GH-134, by contrast, IS exemption-eligible (an MCP `openWorldHint` conformance correction, not a voluntary redesign) and remains a patch/minor-bump candidate now that it carries its own dedicated heading, both-directions writeup, and Migration callout (done, this pass). |
+
+**Round 8 sign-off: SIGNED OFF. GH-135 is confirmed outside the §4.0 wire-shape conformance
+exemption on two independent grounds (not a `models/` wire shape; not spec-conformance-driven)
+and requires a major/minor-axis bump (`0.6.0`) to ship, per DESIGN §4.0's existing text as
+written — no change to §4.0 itself was needed or made. GH-134 is confirmed exemption-eligible and
+now carries the heading, both-directions writeup, and Migration callout the exemption requires.
+`CHANGELOG.md` `## [Unreleased]` updated accordingly; no other code change required.**
+
+## Round 9 — RT-004 (GH-134 exemption mis-citation) GH-134 version sign-off (2026-08-15)
+
+RT-004 flagged that GH-134's Round 8 clearance rested on a false locational claim: the CHANGELOG
+parenthetical cited `ToolDecl.annotations`, `models/` per DESIGN.md §4.0`, but `class ToolDecl` is
+defined at `agent_sdk/agent/registry.py:161` — there is no `models/` type for MCP tool
+declarations at all; `agent_sdk/routes/mcp.py` builds the `tools/list` `annotations` dict ad hoc
+from `ToolDecl.annotations` (`routes/mcp.py:342-343`). Round 8 itself established, and applied to
+GH-135, a two-condition **AND** test for the §4.0 exemption — wire-shape-in-`models/` **and**
+spec-conformance-driven — but cleared GH-134 on the spec-conformance condition alone, without
+checking the `models/` condition it had just used to disqualify GH-135. Applying Round 8's own
+test honestly to GH-134 closes that gap.
+
+### Owned decision (not deferred): GH-134 also requires a version bump, not an exemption
+
+| Scope | Sev | Finding | File:line | Decision |
+|---|---|---|---|---|
+| SemVer policy (stable core) | HIGH (RT-004) | GH-134's changed wire shape is the MCP `tools/list` `annotations` dict, sourced from `ToolDecl.annotations` (`agent_sdk/agent/registry.py:161`) and serialized in `agent_sdk/routes/mcp.py:342-343`. Neither file is under `agent_sdk/models/`, and `agent_sdk/models/` (`a2a.py`, `content_types.py`, `errors.py`) contains no MCP tool-declaration wire type at all — this shape has no `models/` home to satisfy the exemption's first condition, regardless of file path cited. The change IS spec-conformance-driven (correcting `openWorldHint` to MCP's 2025-06-18 semantics, not a voluntary redesign), satisfying the exemption's second condition — but DESIGN §4.0's exemption is conjunctive: both conditions are required, not either. | CHANGELOG.md `## [Unreleased]` `🔴 Breaking changes` (GH-134) | **NOT exemption-eligible — requires a major/minor-axis bump.** Failing one of the exemption's two required conditions is disqualifying regardless of the other, per the identical logic Round 8 already applied to GH-135 (which failed both). GH-134 therefore ships as `0.6.0`, not the next `0.5.x` patch, alongside GH-135. Rejected alternative: widen DESIGN §4.0's exemption text to cover any stable-core surface whose output is protocol wire content, not only `models/` types — rejected because that would retroactively legitimize the mis-citation this round exists to correct, and Round 7 already deliberately scoped the exemption narrowly with a documented rejected alternative; loosening it now, on the strength of a single convenient case, would undermine that prior sign-off rather than build on it. **Accepted consequence:** this Unreleased batch requires `0.6.0` for GH-134 independent of the GH-135 decision already reached in Round 8 — cutting GH-135 from the batch (an option Round 8 named) no longer keeps GH-134 patch/minor-eligible either; both entries need the major/minor bump, or both need to be cut. Which is chosen remains a release-cut decision for `/sdk-release`, not this review. |
+
+**Round 9 sign-off: SIGNED OFF. GH-134 is confirmed outside the §4.0 wire-shape conformance
+exemption on the `models/` condition (it is spec-conformance-driven but has no `models/` wire
+type to qualify under) and requires a major/minor-axis bump (`0.6.0`) to ship, on the same
+conjunctive reading of DESIGN §4.0 Round 8 already applied to GH-135 — no change to §4.0 itself
+was needed or made. `CHANGELOG.md` `## [Unreleased]` corrected: the false `models/` location
+claim is removed, the exemption claim is withdrawn, and a `0.6.0` **Version** line matching
+GH-135's is added. No other code change required.**

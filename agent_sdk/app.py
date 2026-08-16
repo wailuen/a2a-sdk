@@ -52,7 +52,16 @@ _DEV_MASTER_KEY = "agent-sdk-dev-mode-master-key-do-not-use-in-production"
 
 _SWEEP_INTERVAL_SECONDS = 60.0
 
+# Markers unique to the Azurite emulator shortcut (GH-129 / RT-010): a
+# connection string matching any of these points at a local emulator, never
+# production, so the DEV_MODE mismatch warning below would be a false alarm.
+_AZURITE_MARKERS = ("UseDevelopmentStorage=true", "devstoreaccount1", "127.0.0.1:10002")
+
 logger = logging.getLogger(__name__)
+
+
+def _is_azurite_emulator_connection_string(value: str) -> bool:
+    return any(marker in value for marker in _AZURITE_MARKERS)
 
 
 @dataclass(slots=True)
@@ -373,6 +382,8 @@ class Agent:
                 azure_endpoint=s.azure_openai_endpoint,
                 azure_api_version=s.azure_api_version,
                 azure_deployment=s.azure_openai_deployment,
+                max_retries=s.openai_max_retries,
+                timeout=s.openai_timeout,
             )
         # Default: Bedrock (IAM — no API key)
         if not s.bedrock_model_arn:
@@ -399,17 +410,26 @@ class Agent:
         if self.settings.azure_storage_connection_string is not None:
             from .credentials.azure_table import AzureTableCredentialStore
 
+            conn_str = self.settings.azure_storage_connection_string.get_secret_value()
+            if self.settings.dev_mode and not _is_azurite_emulator_connection_string(conn_str):
+                logger.warning(
+                    "Credential store: AZURE_STORAGE_CONNECTION_STRING is set with "
+                    "DEV_MODE=true. If this connection string points at a production "
+                    "Azure Storage account, local/test runs will write real "
+                    "credentials into it. For local development, use Azurite instead: "
+                    "set AZURE_STORAGE_CONNECTION_STRING=UseDevelopmentStorage=true "
+                    "and start Azurite (`azurite --silent --location /tmp/azurite`)."
+                )
             return AzureTableCredentialStore(
                 master_key,
-                connection_string=self.settings.azure_storage_connection_string.get_secret_value(),
+                connection_string=conn_str,
                 prefix=self.settings.azure_storage_table_prefix,
             )
         if self.settings.azure_storage_account_name is not None:
             from .credentials.azure_table import AzureTableCredentialStore
 
             if self.settings.dev_mode:
-                import logging as _logging
-                _logging.getLogger(__name__).warning(
+                logger.warning(
                     "Credential store: AZURE_STORAGE_ACCOUNT_NAME is set but "
                     "AZURE_STORAGE_CONNECTION_STRING is absent. In dev, this requires "
                     "`az login` (DefaultAzureCredential). Use Azurite instead: "
@@ -422,8 +442,7 @@ class Agent:
                 prefix=self.settings.azure_storage_table_prefix,
             )
         if not self.settings.dev_mode:
-            import logging as _logging
-            _logging.getLogger(__name__).warning(
+            logger.warning(
                 "Credential store: falling back to local SQLite (%s/credentials.db). "
                 "Set AZURE_STORAGE_CONNECTION_STRING (or AZURE_STORAGE_ACCOUNT_NAME) "
                 "to use Azure Table Storage as the primary store. "

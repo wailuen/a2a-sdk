@@ -21,6 +21,6 @@ intentional and map to the most specific `ErrorCategory` available.
 
 ## Check
 
-`grep -n "except Exception" agent_sdk/model_clients/*.py` — for every hit, verify
+`grep -n "except Exception" agent_sdk/agent/*.py` — for every hit, verify
 that no more-specific `ErrorCategory` applies to any exception the library below
 can raise at that call site. If one does, an explicit clause must precede it.

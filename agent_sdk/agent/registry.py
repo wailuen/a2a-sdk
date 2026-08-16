@@ -24,7 +24,7 @@ from typing import (
     cast,
 )
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ..models.errors import AgentError, ErrorCategory
 from ..sources import SourceAdapter
@@ -110,6 +110,41 @@ async def resolve_deferred_result(
     return result
 
 
+class ToolInputValidationError(Exception):
+    """GH-135: raised ONLY when ``input_model.model_validate(arguments)``
+    rejects the caller-supplied tool_call arguments — never when the tool
+    body itself raises ``ValidationError`` (e.g. constructing a ContentModel
+    with bad data downstream).
+
+    Discriminator type so ``agent/loop.py`` (and any other dispatch surface)
+    can tell "the MODEL's tool_call arguments failed schema coercion" apart
+    from "the tool body raised ValidationError for an unrelated reason".
+    Only the former is caller-correctable input; conflating the two (a bare
+    ``except ValidationError`` around both the coercion step and the tool
+    body call) reports the latter to the model as if its arguments were bad,
+    which triggers an unresolvable retry loop — the model has no way to fix
+    arguments that were never the problem.
+
+    Wraps the original ``pydantic.ValidationError`` (``.validation_error``)
+    so callers can still build a loc+type-only diagnostic via
+    ``safe_validation_message`` (SI-2: never echo the raw rejected value).
+
+    RT-003 (SI-2): this exception's OWN message is a fixed, non-interpolating
+    string — never ``str(validation_error)``. Pydantic renders a
+    ``ValidationError`` with each error's ``msg``/``input`` baked in (e.g. a
+    custom ``@field_validator`` that raises ``ValueError(f"bad token
+    {v!r}")`` puts the raw rejected value straight into that rendering), so
+    interpolating it here would arm a leak for any downstream ``except
+    Exception as e: str(e)`` handler. The raw ``ValidationError`` stays
+    reachable ONLY via ``.validation_error``.
+    """
+
+    def __init__(self, validation_error: ValidationError, *, tool_name: str) -> None:
+        self.validation_error = validation_error
+        self.tool_name = tool_name
+        super().__init__(f"tool {tool_name!r} input validation failed")
+
+
 @dataclass(slots=True)
 class ToolTerminalResult:
     """Sentinel yielded by ``ToolEntry.invoke_gen()`` as the last item.
@@ -176,15 +211,15 @@ class ToolSet:
         if tier not in (1, 2):
             raise ValueError("tier must be 1 (query: A2A+MCP) or 2 (composite: A2A only)")
         # ``read_only=True`` seeds the safe hints for a pure query; an explicit
-        # ``annotations`` dict overrides field-by-field.
-        ann: dict[str, Any] = {}
+        # ``annotations`` dict overrides field-by-field. ``openWorldHint`` is
+        # NOT seeded here — GH-134: it must reflect whether the tool talks to
+        # an external system (i.e. has a SourceAdapter-backed parameter), not
+        # tier or read_only, so it is derived in decorator() below once
+        # adapter_params is known from the function signature.
+        base_annotations: dict[str, Any] = {}
         if read_only:
-            ann["readOnlyHint"] = True
-            ann["destructiveHint"] = False
-        if tier == 1 or read_only:
-            ann["openWorldHint"] = False
-        ann.update(annotations or {})
-        merged_annotations = ann or None
+            base_annotations["readOnlyHint"] = True
+            base_annotations["destructiveHint"] = False
 
         def decorator(
             fn: Union[Callable[..., Awaitable[Any]], Callable[..., AsyncGenerator[Any, None]]],
@@ -267,6 +302,66 @@ class ToolSet:
                     raise TypeError(
                         f"tool {fn.__name__!r}: *args and **kwargs are not supported"
                     )
+            # GH-134: openWorldHint reflects whether this tool actually talks
+            # to an external system — true iff it has at least one
+            # SourceAdapter-backed parameter — not tier or read_only.
+            #
+            # Why `bool(adapter_params)` is a COMPLETE derivation and not a
+            # heuristic (the objection every review pass raises about the False
+            # case, answered here so it stays answered): the SDK's dependency-
+            # injection contract is that a tool receives external capability
+            # ONLY as an SDK-instantiated SourceAdapter passed by typed
+            # keyword-only parameter. There is no ambient handle to hand a tool
+            # reach by any other route — which is precisely why
+            # CommitmentsSource is modelled as a SourceAdapter rather than a
+            # module-level singleton (see agent_sdk/contrib/commitments/
+            # source.py's module docstring, which states the rule outright).
+            # The loop above enforces the injection side of it: every
+            # keyword-only parameter must be a SourceAdapter subclass or carry
+            # a default, and *args/**kwargs are rejected. So `adapter_params`
+            # is the complete record of this tool's declared reach, and False
+            # is a claim the SDK can stand behind, not an unknown.
+            #
+            # A tool body can of course still smuggle I/O in (Python enforces
+            # no capabilities) — but that is a violation of the contract above,
+            # not a supported pattern the annotation should hedge for, and the
+            # author's escape hatch is one keyword away: an explicit
+            # annotations={"openWorldHint": True} wins via the update() below.
+            resolved_annotations = dict(base_annotations)
+            resolved_annotations["openWorldHint"] = bool(adapter_params)
+            # RT-008: the derivation above is correct and complete under the
+            # SDK's DI contract (see the comment block above and LRN-043) —
+            # this warning does not change it. It only flags the one shape
+            # most likely to reach an external system by a route other than
+            # a declared adapter parameter (a tier-2 composite tool nesting
+            # a call into another tool's function, a contrib source that
+            # doesn't itself follow the SourceAdapter contract): tier=2, no
+            # adapter_params, and no explicit openWorldHint override. The
+            # author's fix is the same escape hatch as always —
+            # annotations={"openWorldHint": True} — just surfaced instead of
+            # silent.
+            if (
+                tier == 2
+                and not adapter_params
+                and "openWorldHint" not in (annotations or {})
+            ):
+                logger.warning(
+                    "tool %r is tier=2 with no SourceAdapter-backed parameter, "
+                    "so it is registered with openWorldHint=False (closed-world). "
+                    "If %r reaches an external system by any route other than a "
+                    "SourceAdapter keyword parameter (e.g. a nested call into "
+                    "another tool's function, a contrib source), pass "
+                    "annotations={'openWorldHint': True} explicitly to "
+                    "@tools.tool(...) — see docs/tools.md.",
+                    _tool_name,
+                    _tool_name,
+                )
+            resolved_annotations.update(annotations or {})
+            # RT-015: openWorldHint is now seeded unconditionally above, so
+            # resolved_annotations always contains at least that key and can
+            # never be empty — `or None` was dead code. annotations is
+            # therefore always a populated dict from here on (see CHANGELOG
+            # GH-134 entry for the resulting decl.annotations shape change).
             description = inspect.getdoc(fn) or fn.__name__.replace("_", " ")
             resolved_title = title if title is not None else " ".join(
                 word.capitalize() for word in _tool_name.split("_")
@@ -282,7 +377,7 @@ class ToolSet:
                     input_model=input_model,
                     adapter_params=adapter_params,
                     title=resolved_title,
-                    annotations=merged_annotations,
+                    annotations=resolved_annotations,
                     tags=list(tags or []),
                     is_generator=_is_generator,
                     long_running=long_running,
@@ -375,7 +470,10 @@ class ToolEntry:
         }
         coro_fn = cast(Callable[..., Awaitable[Any]], self.decl.fn)
         if self.decl.input_model is not None:
-            inp = self.decl.input_model.model_validate(arguments)
+            try:
+                inp = self.decl.input_model.model_validate(arguments)
+            except ValidationError as exc:
+                raise ToolInputValidationError(exc, tool_name=self.decl.name) from exc
             return await coro_fn(inp, **kwargs)
         return await coro_fn(**kwargs)
 
@@ -413,7 +511,10 @@ class ToolEntry:
         }
         gen_fn = cast(Callable[..., AsyncGenerator[Any, None]], self.decl.fn)
         if self.decl.input_model is not None:
-            inp = self.decl.input_model.model_validate(arguments)
+            try:
+                inp = self.decl.input_model.model_validate(arguments)
+            except ValidationError as exc:
+                raise ToolInputValidationError(exc, tool_name=self.decl.name) from exc
             agen = gen_fn(inp, **kwargs)
         else:
             agen = gen_fn(**kwargs)
