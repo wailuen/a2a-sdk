@@ -43,26 +43,20 @@ from .events import (
     UsageEvent,
 )
 from .model_client import ModelClient
-from .registry import ToolEntry, ToolRegistry, ToolTerminalResult
+from .registry import ToolEntry, ToolInputValidationError, ToolRegistry, ToolTerminalResult
 from .skills import SkillsRegistry
+from ..common.redact import frame_locations, safe_error_text
 from ..sources import SourceAdapter
 
 TIER_TIMEOUTS = {1: 130.0, 2: 180.0}
 LOAD_SKILL_TOOL = "load_skill"
 DEFAULT_MAX_OUTPUT_TOKENS = 8192
 
-# SI-2: map every Unicode control char to a space — C0 (0x00-0x1F), DEL
-# (0x7F) and C1 (0x80-0x9F). C1 is not optional: NEL (0x85) is treated as a
-# line break by many log/terminal consumers and CSI (0x9B) is a single-byte
-# ANSI escape introducer equivalent to ESC '[', so leaving 0x7F/C1 through
-# would defeat the very log/terminal-injection guard this helper exists for.
-_CONTROL_CHAR_MAP = dict.fromkeys([*range(0x20), 0x7F, *range(0x80, 0xA0)], " ")
-
 
 def _sanitize_model_name(s: str) -> str:
     """Strip control chars and cap length before a model-supplied name hits
     the wire or a log line (SI-2: model output is untrusted)."""
-    return s[:64].translate(_CONTROL_CHAR_MAP)
+    return safe_error_text(s, max_len=64)
 
 
 class ToolInterrupt(Exception):
@@ -488,11 +482,28 @@ async def run_loop(
                     ok, error = False, f"tool '{tc.name}' timed out after {timeout:g}s"
                 except AgentError as err:
                     ok, error = False, err.message
-                except ValidationError as exc:
+                except ToolInputValidationError as exc:
+                    # GH-135: only the input-model coercion step (registry.py)
+                    # raises this — a body-raised ValidationError does not
+                    # match and falls through to the generic Exception branch
+                    # below instead of being misreported as caller input.
                     ok, error = False, safe_validation_message(
-                        tc.name, exc, entry.decl.input_model
+                        tc.name, exc.validation_error, entry.decl.input_model
                     )
-                except Exception:
+                except Exception as exc:
+                    # RT-008/RT-004: bind + log the exception TYPE plus
+                    # frame_locations() (never exc's str/args — SI-2, can
+                    # embed body-supplied values; frame filename/lineno only,
+                    # never `.line` source text) so this failure class stays
+                    # diagnosable, at parity with the mcp.py/admin.py
+                    # siblings (C-012 cross-surface contract) — all four
+                    # dispatch sites share the same helper (LRN-044).
+                    logger.error(
+                        "tool %s failed error_type=%s frames=%s",
+                        tc.name,
+                        type(exc).__name__,
+                        frame_locations(exc),
+                    )
                     ok, error = False, f"tool '{tc.name}' failed"
             else:
                 try:
@@ -512,14 +523,27 @@ async def run_loop(
                     ok, error = False, f"tool '{tc.name}' timed out after {timeout:g}s"
                 except AgentError as err:
                     ok, error = False, err.message
-                except ValidationError as exc:
+                except ToolInputValidationError as exc:
+                    # GH-135: only the input-model coercion step (registry.py)
+                    # raises this — a body-raised ValidationError does not
+                    # match and falls through to the generic Exception branch
+                    # below instead of being misreported as caller input.
                     # loc + type only — e['msg']/e['input'] can leak input (SI-2).
                     # loc walked against input_model so user dict keys / extra
                     # field names are redacted, not echoed.
                     ok, error = False, safe_validation_message(
-                        tc.name, exc, entry.decl.input_model
+                        tc.name, exc.validation_error, entry.decl.input_model
                     )
-                except Exception:
+                except Exception as exc:
+                    # RT-008/RT-004: see the mirror comment in the
+                    # async-generator branch above — bind + log the exception
+                    # TYPE plus frame_locations().
+                    logger.error(
+                        "tool %s failed error_type=%s frames=%s",
+                        tc.name,
+                        type(exc).__name__,
+                        frame_locations(exc),
+                    )
                     ok, error = False, f"tool '{tc.name}' failed"
 
             # GH-87: deferred tool — emit DeferredEvent, do NOT emit DoneEvent
@@ -560,14 +584,28 @@ async def run_loop(
                             ok, error = False, err.message
                         except asyncio.TimeoutError:
                             ok, error = False, f"tool '{tc.name}' timed out after resume"
-                        except ValidationError as exc:
+                        except ToolInputValidationError as exc:
+                            # GH-135: resume_handler is arbitrary tool-body code,
+                            # never routed through registry input coercion, so
+                            # this branch does not fire today — kept for parity
+                            # with the other two dispatch sites (and any future
+                            # resume_handler that does route through it).
                             # loc + type only — e['msg']/e['input'] leak input (SI-2).
                             # loc walked against input_model so user dict keys /
                             # extra field names are redacted, not echoed.
                             ok, error = False, safe_validation_message(
-                                tc.name, exc, entry.decl.input_model
+                                tc.name, exc.validation_error, entry.decl.input_model
                             )
-                        except Exception:
+                        except Exception as exc:
+                            # RT-008/RT-004: see the mirror comment in the
+                            # async-generator branch above — bind + log the
+                            # exception TYPE plus frame_locations().
+                            logger.error(
+                                "tool %s failed error_type=%s frames=%s",
+                                tc.name,
+                                type(exc).__name__,
+                                frame_locations(exc),
+                            )
                             ok, error = False, f"tool '{tc.name}' failed after resume"
                     else:
                         result = {"interrupt": interrupted.reason, "user_response": resume_value}

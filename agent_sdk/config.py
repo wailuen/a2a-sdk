@@ -62,6 +62,18 @@ class BaseAgentSettings(BaseSettings):
     azure_openai_endpoint: str | None = Field(default=None, alias="AZURE_OPENAI_ENDPOINT")
     azure_api_version: str | None = Field(default=None, alias="AZURE_API_VERSION")
     azure_openai_deployment: str | None = Field(default=None, alias="AZURE_OPENAI_DEPLOYMENT")
+    # GH-133: forwarded verbatim to the underlying AsyncOpenAI/AsyncAzureOpenAI
+    # constructor, which owns its own retry/backoff. Unset (None) leaves the
+    # openai SDK's own defaults (max_retries=2) untouched.
+    # RT-005: unlike OPENAI_MODEL/OPENAI_BASE_URL/AZURE_* above — bare names
+    # kept for parity with the reference agents — these are new SDK settings,
+    # so per DESIGN.md §4.0 they carry the reserved AGENT_SDK_ prefix.
+    openai_max_retries: int | None = Field(
+        default=None, alias="AGENT_SDK_OPENAI_MAX_RETRIES"
+    )
+    openai_timeout: float | None = Field(
+        default=None, alias="AGENT_SDK_OPENAI_TIMEOUT"
+    )
 
     # ── Azure Storage ──
     # Use EITHER connection_string (shared-key / SAS) OR account_name (managed

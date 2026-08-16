@@ -9,7 +9,8 @@ description: "Primary development entry point after /analyze. Without a wave ID:
 The primary development command after `/analyze`. Without a wave ID it reads
 the PRD, plans all waves, redteams the plan, and executes each wave in sequence.
 Each wave runs a full 8-phase cycle — including a Todos Redteam pass before
-any implementation, zero-tolerance fix loops, and auto-codify at the end.
+any implementation, fix loops gated on a critical/high severity floor
+(medium/low are recorded, not blocking), and auto-codify at the end.
 
 ## Usage
 
@@ -65,6 +66,10 @@ For each wave whose `Depends:` items are all in `completed/`:
      args: { waveFile: "<absolute path to active wave file>", today: "<YYYY-MM-DD>" }
    })
    ```
+   `args.agentBudget` (optional, default `150`) overrides the hard agent-call
+   ceiling described in the Phase Redteam bullet below — e.g.
+   `args: { waveFile, today, agentBudget: 300 }`.
+
    The workflow runs 8 phases for this wave:
    - **Parse** — reads wave file; extracts groups, creates paths, inter-group dependency map (`groupDeps`), and LRN baseline.
    - **Todos Redteam** — annotates todos with `SI:` fields and `Reuses: C-NNN` before
@@ -72,14 +77,29 @@ For each wave whose `Depends:` items are all in `completed/`:
    - **Implement** — tier-based parallel execution: groups with no inter-group deps run
      concurrently; dependent groups wait for their tier's completion. Todos within each
      group also run in parallel. Test-first, SI-enforcing.
-   - **Unit Redteam** — zero-tolerance per group (debug fires after >3 failed rounds (r4+) and on stall).
-   - **Phase Redteam** — zero-tolerance full wave (debug fires after >3 failed rounds (r4+) and on stall).
-   - **Protocol Audit** — `a2a-advisor`, `mcp-advisor`, `ag-ui-advisor`, `a2ui-advisor` + seam check (protocol surfaces only).
+   - **Unit Redteam** — per-group fix loop; loop exits when zero critical/high findings
+     remain (severity floor, GH-132) — medium/low are recorded once to
+     `workspace/todos/deferred/<wave>-group-<label>-medium-low.md` and do not block.
+     Fix fan-out runs rounds 1–3; at round 4 (the only round above the fix-fan-out
+     threshold before the round-5 deferred exit) or on stall, `debug` REPLACES the
+     fix fan-out (not alongside it) for that round. Max 5 rounds, then the group is
+     deferred.
+   - **Phase Redteam** — same severity-floor/debug-replaces-fix-fan-out contract at
+     full-wave scope (medium/low → `workspace/todos/deferred/<wave>-phase-medium-low.md`);
+     max 8 rounds, then deferred. A hard agent-call ceiling backstops the whole wave
+     against runaway loops: `150` for the handful of Parse-phase calls, then recomputed
+     once the group count is known to `max(150, 45 × groups + 80)` (e.g. 260 for a
+     4-group wave) so the ceiling scales with the wave's own shape. `args.agentBudget`
+     in the `Workflow(...)` args (see step 2 above) is an explicit override that always
+     wins over both.
+   - **Protocol Audit** — `a2a-advisor`, `mcp-advisor`, `ag-ui-advisor`, `a2ui-advisor` + seam
+     check (triggered only for touched protocol surfaces in `src/routes/`).
    - **Codify** — SDK issue scan (sequential) → parallel LRN capture for critical/high
      findings → README index update → sequential C-NNN registration for new component
      candidates.
-   - **Archive** — wave file moved to `completed/`; `plan.md` and FR `Implementation:`
-     fields updated.
+   - **Archive** — pre-archive pytest gate → commit-intent check (uncommitted scope
+     files, harness deliverable dirs, or undeclared mid-wave imports block archive) →
+     wave file moved to `completed/`; `plan.md` and FR `Implementation:` fields updated.
 3. After the workflow returns, log progress:
    - ✅ archived → continue to the next wave automatically.
    - ⚠️ deferred items remain → continue (items are in `deferred/`; re-run after fixing).
@@ -101,7 +121,13 @@ Execute one specific wave. Used for:
 Steps:
 1. Resolve `workspace/todos/active/w<NNN>-*.md`.
 2. **Hard stop** if any `Depends:` item is not in `completed/` — report which dep is missing.
-3. Launch `wave-cycle.js` as in Mode A step 2.
+3. **Launch `wave-cycle.js`** — same invocation shape as Mode A step 2:
+   ```js
+   Workflow({
+     scriptPath: ".claude/workflows/wave-cycle.js",
+     args: { waveFile: "<absolute path to the resolved wave file>", today: "<YYYY-MM-DD>" }
+   })
+   ```
 4. Display the wave summary and suggest next step: `/wave` (continue next wave) or `/wave status`.
 
 ---
