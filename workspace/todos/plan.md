@@ -74,7 +74,7 @@ Fix 5 protocol conformance bugs surfaced by downstream agents after the 0.4.0 re
 | W34 [x] ✅ 2026-07-14 (GH-119–GH-121; RT-001/RT-002 group-G budget-exhausted findings fixed) | w034-gh-issues.md | G | 4 | — |
 | W35 [x] ✅ 2026-07-19 (GH-118, GH-122; target 0.5.42) | w035-gh-issues.md | G | 2 | — |
 | W36 [x] ✅ 2026-07-24 (GH-123 AUTH_SURFACE reconciliation; landed on main v0.5.44, commit 376f6cc) | completed/w036-gh-issues.md | G | 1 | — |
-| W39 [ ] (GH-129–GH-139; renamed from W36 per RT-004 — the original id collided with the completed W36 row above, whose archive `mv` would have overwritten it; hold lifted, see file header) | active/w039-gh-issues.md | G | 8 | — |
+| W39 [x] ✅ 2026-08-16 (GH-129–GH-139; renamed from W36 per RT-004 — the original id collided with the completed W36 row above, whose archive `mv` would have overwritten it) | completed/w039-gh-issues.md | G | 8 | — |
 
 ## Dependency graph
 

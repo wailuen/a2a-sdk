@@ -2,10 +2,22 @@ wave: w039
 group: G
 date: 2026-08-15
 round_count: 5
-status: 1-of-9-open
-open_findings: [RT-001]
-resolved_findings: [RT-002, RT-003, RT-004, RT-005, RT-006, RT-007, RT-008, RT-009]
-last_reconciled: 2026-08-15
+status: resolved
+resolved_date: 2026-08-16
+open_findings: []
+resolved_findings: [RT-001, RT-002, RT-003, RT-004, RT-005, RT-006, RT-007, RT-008, RT-009]
+last_reconciled: 2026-08-16
+
+## Resolution
+
+RT-001 closed 2026-08-16: template/ (wailuen/a2a-agent-template) cloned into
+this working tree, harness/workflows/wave-cycle.js copied over
+template/.claude/workflows/wave-cycle.js (diff confirmed empty), committed
+and pushed (wailuen/a2a-agent-template@de725dd). test_wave_cycle_is_harness_template_shared
+and test_harness_and_template_copies_are_identical now PASS (no longer xfail)
+in any checkout with template/ present. All nine findings in this file are
+now resolved. This note is retained for history; it is NOT an open work item.
+Do NOT re-run /wave w039 on account of this note.
 
 ## Findings
 
@@ -17,12 +29,11 @@ read nine open blockers where one exists. Re-verify and re-annotate as each
 lands — do not bulk-close.
 
 ### RT-001
-- **resolution: OPEN** — `test -d template` is still false in this checkout, so
-  the propagation step remains unrunnable and `test_workflow_sync.py`'s two
-  guards remain XFAIL (visible, not passing). This is the ONLY finding in this
-  file still open, and it is blocked on infrastructure (a peer-repo checkout),
-  not on code. Unblock by cloning wailuen/a2a-agent-template into `template/`,
-  then follow this finding's `fix:` verbatim.
+- **resolution: RESOLVED** — `template/` cloned; `template/.claude/workflows/wave-cycle.js`
+  is byte-identical to `harness/workflows/wave-cycle.js` (verified via `diff`,
+  exit 0); committed and pushed to wailuen/a2a-agent-template@de725dd.
+  `test_wave_cycle_is_harness_template_shared` and
+  `test_harness_and_template_copies_are_identical` both PASS.
 - severity: high
 - file: harness/workflows/wave-cycle.js
 - description: The peer-repo runtime mirror template/.claude/workflows/wave-cycle.js — declared in both GH-131's and GH-132's Creates: with the LRN-071/LRN-085 annotation — never received either fix: template/ is absent from this checkout so the mandated `git -C template/ commit && git -C template/ push` step could not run, and the only local clone (/Users/wailuen/Development/a2a-sdk/template) is still 1670 lines with `const TODAY = args.today || new Date().toISOString().slice(0, 10)` at line 20 and no blockingFindings/AGENT_CALL_BUDGET/offendingUndeclaredScope, with a partial uncommitted edit that leaves it byte-divergent from both in-repo mirrors; test_workflow_sync.py's two propagation guards are XFAIL, not pass, and this is the copy downstream agents' /wave actually executes.
