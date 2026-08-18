@@ -426,3 +426,37 @@ conjunctive reading of DESIGN §4.0 Round 8 already applied to GH-135 — no cha
 was needed or made. `CHANGELOG.md` `## [Unreleased]` corrected: the false `models/` location
 claim is removed, the exemption claim is withdrawn, and a `0.6.0` **Version** line matching
 GH-135's is added. No other code change required.**
+
+## Round 10 — Pre-release `/agent-stack-check` full-stack audit (0.6.0 gate) (2026-08-18)
+
+`/sdk-release 0.6.0`'s `/sdk-test` Leg 3 ran the full four-protocol conformance audit
+(`mcp-advisor`, `a2a-advisor`, `ag-ui-advisor`, `a2ui-advisor`, dispatched in parallel per
+`/agent-stack-check`'s Phase 1) against the merged `main` (post-#140/#141/#142) ahead of tagging.
+All four protocols verdicted **COMPLIANT** (zero Critical/High). The S1–S6 cross-protocol seam
+audit found no disagreement between layers: card↔impl (S1) matches on MCP tools/A2A
+skills/A2UI/AG-UI extension advertisement; the A2A `DataPart.data` object-wrapper vs. A2UI
+v0.9.1's bare-array binding (S2) is an internal agreement between this SDK's own emit and
+A2A-typing layers, already disclosed via the `dataEncoding` card hint and independently rated
+informational by both the A2A and A2UI advisors; A2UI-over-AG-UI (S3), MCP↔A2A auth/tool-source
+coherence (S4), version/capability alignment (S5 — including the already-documented,
+already-accepted AG-UI-CUSTOM-skips-tier-gating asymmetry, LRN-049/GH-124), and catalog
+coherence (S6) all passed. Two **Medium** findings were surfaced, both pre-existing (not
+introduced by #140/#141/#142) and neither gating the COMPLIANT verdict, but requiring disposition
+per `/sdk-test`'s Leg 3 rule ("MEDIUM/LOW findings must be acknowledged... fixed or recorded as
+deferred with a rationale").
+
+### Deferred (not fixed in this release): two pre-existing Medium findings
+
+| # | Protocol | Sev | Finding | File:line | Decision |
+|---|---|---|---|---|---|
+| 1 | MCP (D7 Security) | MEDIUM | `GET /mcp` opens an authenticated, indefinitely-held SSE heartbeat stream with no cap on concurrent connections — per-identity or global. `identity_limiter` only throttles the request that establishes the stream, not how many stay open. Legacy SSE transport IS capped (`_MAX_SSE_SESSIONS=500`); Streamable HTTP's GET channel is not. Single-process/single-worker deployment means exhausting this channel degrades the whole process for every tenant. | `agent_sdk/routes/mcp.py:688-724` | **DEFER to a future wave.** Real gap, worth a dedicated fix (mirror `_MAX_SSE_SESSIONS` pattern) rather than a rushed patch inside a release-gate audit. Not introduced by this release; latent since the Streamable HTTP GET channel was added. No production incident on record. Tracked for the next `/gh-review` triage cycle. |
+| 2 | A2A (D2 Transports & Methods) | MEDIUM | Same logical condition — sending to a terminal task by `taskId` — returns `-32004 UnsupportedOperation` (HTTP 501) via `message/send`'s `_resume_or_error`, but `-32001 TaskNotFound` (HTTP 404) via `message/stream`'s inline short-circuit, which bypasses `_resume_or_error` entirely. `-32001` is a semantic misuse (the task exists; it just can't accept new input) — an internal cross-method inconsistency, not a hard-MUST breach (both codes are valid A2A error codes; only one transport/pairing is implemented, so the multi-transport-equivalence MUST doesn't apply). | `agent_sdk/routes/a2a.py:200-204` vs `:330-335` | **DEFER to a future wave.** Fix is mechanical (route `message/stream`'s terminal-task-with-`taskId` case through the same check `_resume_or_error` uses) but touches error-response contract on a live RPC method — better scoped as its own reviewed change than folded into a release-gate pass. Not introduced by this release; both code paths predate #140/#141/#142. Tracked for the next `/gh-review` triage cycle. |
+
+**Round 10 sign-off: SIGNED OFF FOR RELEASE. Both Medium findings are genuine and worth fixing,
+but neither is a Critical/High conformance breach, neither was introduced by the code shipping in
+0.6.0, and neither blocks `0.6.0` from tagging under `/sdk-test`'s stated gate (Critical/High
+only are hard blockers; Medium/Low require acknowledgement, which this round provides). Both are
+deferred to the next `/gh-review` cycle as new GitHub issues rather than fixed ad hoc inside the
+release gate. No code change required by this round. Full per-protocol audit reports (dimension
+tables, protocol facts, remediation lists) are preserved in the `/sdk-release 0.6.0` session
+transcript; this entry is the durable summary and disposition record.**
