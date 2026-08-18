@@ -4,7 +4,7 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
-## [Unreleased]
+## [0.6.0] — 2026-08-18
 
 ### 🔴 Breaking changes
 - GH-134 (corrects GH-52): `ToolSet.tool()`'s `openWorldHint` MCP annotation
@@ -191,6 +191,26 @@ internals, `contrib/`) may change in minors with notice here.
   below, not here, matching the GH-134/GH-135 heading discipline (RT-007).
   (`agent_sdk/common/redact.py`,
   `agent_sdk/models/content_types.py`, `tests/test_content_types.py`)
+- GH-138: `AGENT_SDK_OAUTH_ONE_TIME_CONSENT` (GH-136) is **per-registration**
+  (per `client_id`), not automatically org-wide — DCR mints a fresh,
+  unconsented `client_id` on every registration, so a returning client skips
+  repeat approval but a brand-new user's own registration still hits the
+  admin-key gate. The `config.py` and `routes/oauth.py` docstrings previously
+  overclaimed "org-wide access... that is the point," which could lead an
+  operator to enable the flag expecting it alone to unblock every org member,
+  then hit the admin gate again on the second user with no documented reason
+  why. Both docstrings now describe the two real scopes (per-registration vs.
+  genuine org-wide) and point at the new CLI below for the latter.
+  - New: `python -m agent_sdk provision-org-oauth-client [--public-url <url>]
+    [--yes]` formalizes the "pin a static `client_id`" workaround as a guided
+    setup step — mints and pre-approves ONE client offline (the CLI's own
+    credential-store access is the trust boundary), prompts for explicit
+    confirmation before minting a client every org member will share (skippable
+    with `--yes`), validates the `redirect_uri` against the same
+    `_valid_redirect_uri` check the authorize route uses, and prints the
+    pin-in instructions for the connector platform.
+  (`agent_sdk/config.py`, `agent_sdk/routes/oauth.py`, `agent_sdk/__main__.py`,
+  `tests/test_provision_org_oauth_client.py`)
 
 ### ⚠️ Behavior changes
 - GH-130 / RT-001: `MarketBriefing.to_markdown()`'s output — the A2A/AG-UI
@@ -398,6 +418,36 @@ internals, `contrib/`) may change in minors with notice here.
   (`agent_sdk/agent/openai_client.py`, `agent_sdk/config.py`, `agent_sdk/app.py`,
   `tests/test_gh133_openai_retry_timeout.py`,
   `tests/test_rt009_openai_max_retries_timeout_seam.py`)
+- GH-136: new opt-in `oauth_one_time_consent`
+  (`AGENT_SDK_OAUTH_ONE_TIME_CONSENT`, default `False`) setting. When enabled,
+  a DCR client an admin has **already** approved re-authorizes without the
+  consent page on subsequent visits — the operator consents once, and that
+  same registration's users connect without needing an admin API key for
+  every visit. Previously every authorization required an admin key, and that
+  key also grants `/admin/api/credentials` — so org-wide connector rollout had
+  no safe path other than distributing the credential-store key itself. Reads
+  back the `consented` flag that already existed on the client record (set by
+  the POST approval path, previously read only by the LRU eviction guard) from
+  `GET /oauth/authorize`. Default `False` means no existing deployment changes
+  behavior on upgrade. **Scope note (GH-138, below):** this is per-registration
+  consent, not automatically org-wide — see the Security entry above for the
+  distinction and the CLI path for genuine org-wide sharing.
+  (`agent_sdk/app.py`, `agent_sdk/auth/middleware.py`, `agent_sdk/config.py`,
+  `agent_sdk/routes/oauth.py`, `tests/test_oauth_one_time_consent.py`)
+- `/setup`'s Phase 0 "Client auth model" interview now asks the per-user vs.
+  per-org OAuth consent scope question whenever OAuth is selected — GH-136's
+  one-time-consent feature had no discoverability path, so a new agent
+  developer would only learn the distinction existed after hitting the exact
+  confusion GH-138 documents (a second org member blocked after the first was
+  approved). Phase 3 now writes `AGENT_SDK_OAUTH_ONE_TIME_CONSENT=true` to
+  `.env` for either scope choice, and the Day-2 operations list surfaces
+  `provision-org-oauth-client` for the per-org follow-up against a real
+  `PUBLIC_URL`. Also closes a previously-unguarded `harness/` ↔ `template/`
+  drift on this skill file (uv vs. pip install instructions, a missing
+  retry-config interview step), with a new sync-guard test in the same
+  `xfail(strict)` pattern as the existing workflow-file guards.
+  (`harness/skills/setup/SKILL.md`, `template/.claude/skills/setup/SKILL.md`,
+  `tests/test_workflow_sync.py`)
 
 ## [0.5.44] — 2026-07-24
 
