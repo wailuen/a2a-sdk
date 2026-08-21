@@ -678,8 +678,14 @@ class Agent:
         # semantically an unsupported operation on that resource. The forward
         # A2A_HTTP_STATUS maps -32004 → 501 for capability-absent cases; the
         # asymmetry is intentional (HTTP method mismatch ≠ missing capability).
+        # 429 → -32000: every /v1/* rate/admission rejection (the identity
+        # rate limiter in auth/middleware.py, and RT-002's A2A stream
+        # admission cap in routes/a2a.py) raises a bare
+        # HTTPException(429, ...) and relies on this envelope, same as
+        # 401/403 — "implementation-defined server error" fits a transport-
+        # level rejection far better than the -32603 default below.
         _A2A_CODE: dict[int, int] = {
-            401: -32000, 403: -32000,
+            401: -32000, 403: -32000, 429: -32000,
             404: -32601, 405: -32004, 415: -32005,
         }
 

@@ -136,6 +136,38 @@ class BaseAgentSettings(BaseSettings):
     max_turns: int = Field(default=20, alias="AGENT_SDK_MAX_TURNS")
     max_output_tokens: int = Field(default=8192, alias="AGENT_SDK_MAX_OUTPUT_TOKENS")
 
+    # RT-001 (GH-143 follow-up): routes/mcp.py's per-identity GET-stream cap
+    # is keyed on Identity.subject, which is an OAuth client_id or API-key id
+    # — a *registration*, never an end user (auth/oauth_tokens.py,
+    # auth/api_keys.py). Org-wide OAuth client provisioning
+    # (`provision-org-oauth-client`) and a shared API key both collapse every
+    # caller in the org onto ONE identity key, so the default cap must admit
+    # an entire organization's concurrent connectors. None (default) leaves
+    # routes/mcp.py's own SDK default (see `_MAX_GET_STREAMS_PER_IDENTITY`);
+    # an operator with a larger org can raise this without touching code.
+    # RT-003 (round 5): `ge=1`, not a bare int. Both route guards read
+    # `if owner_count >= limit:`, so a 0 or negative limit is unconditionally
+    # true and denies EVERY stream for EVERY identity from the very first
+    # request — with no startup error and no log. `0` is the natural operator
+    # reading of "unlimited", which makes the silent failure mode the likely
+    # one. Verified before the bound: `=0` yielded an effective cap of 0 and
+    # `=-5` a cap of -5. Refuse at settings construction instead; "unlimited"
+    # is expressed by leaving the variable unset.
+    max_mcp_streams_per_identity: int | None = Field(
+        default=None, ge=1, alias="AGENT_SDK_MAX_MCP_STREAMS_PER_IDENTITY"
+    )
+
+    # RT-001 (A2A stream admission cap follow-up): routes/a2a.py's per-identity
+    # cap on concurrent open message:stream/tasks:subscribe connections is
+    # keyed the same way as max_mcp_streams_per_identity above — see that
+    # field's docstring for why org-wide provisioning modes need this
+    # overridable. None (default) leaves routes/a2a.py's own SDK default (see
+    # `_MAX_A2A_STREAMS_PER_IDENTITY`).
+    # RT-003 (round 5): `ge=1` for the same reason as the MCP cap above.
+    max_a2a_streams_per_identity: int | None = Field(
+        default=None, ge=1, alias="AGENT_SDK_MAX_A2A_STREAMS_PER_IDENTITY"
+    )
+
     # ── A2UI component allow-list (SC-D2) ──
     # None (default) = all registered component types are available.
     # A non-None list restricts the catalog to only the named component types.

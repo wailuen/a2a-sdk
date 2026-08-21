@@ -51,8 +51,19 @@ class InMemoryTaskStore(TaskStore):
         if record is None:
             return None
         if self._expired(record):
-            self.evict(task_id)
-            return None
+            # RT-001 (round 6, AG-UI cross-check): the same live-subscriber
+            # guard `_evict_over_capacity` uses must apply here too. This path
+            # is reachable from `find_interrupt()` — e.g. an AG-UI resume
+            # lookup on a DIFFERENT record than the one being resumed — so an
+            # unrelated caller's TTL/interrupt-deadline check could otherwise
+            # `evict()` a record some other subscriber is still actively
+            # streaming, severing it with no `final:true` frame. Reap first so
+            # a leaked (owner-task-finished) subscription can never pin an
+            # actually-expired record here forever.
+            self.reap_dead_subscriptions(record)
+            if not record.subscriptions:
+                self.evict(task_id)
+                return None
         if identity is not None and not (identity.kind == "api_key" and identity.admin):
             if record.identity != identity.binding:
                 return None  # existence is not leaked (§5.1)
@@ -69,9 +80,18 @@ class InMemoryTaskStore(TaskStore):
 
     def subscribe(self, task_id: str) -> Subscription:
         record = self._records[task_id]
-        sub = Subscription(maxsize=self._queue_maxsize)
-        record.subscriptions.append(sub)
-        return sub
+        # RT-001 (round 4) / RT-003 / RT-002 (round 7): reap-then-stamp-then-
+        # append is the WHOLE required body, and it now lives as one concrete
+        # method on the TaskStore base class (`new_subscription`) rather than
+        # being reproduced here. The reap reclaims subscriptions whose owning
+        # ASGI request task finished without unsubscribing — the case a bare
+        # generator `finally` and a response BackgroundTask both miss when the
+        # request task is hard-cancelled before the SSE body starts — and the
+        # `owner_task` stamp is what gives that reap anything to match on (see
+        # `new_subscription`'s docstring: reap without stamp is vacuous).
+        # Bounded here rather than by a cap because publish() walks this list
+        # for every frame.
+        return self.new_subscription(record, maxsize=self._queue_maxsize)
 
     def unsubscribe(self, task_id: str, sub: Subscription) -> None:
         record = self._records.get(task_id)
@@ -90,7 +110,15 @@ class InMemoryTaskStore(TaskStore):
         record = self._records.get(task_id)
         if record is None:
             return
-        record.updated_at = self._clock()
+        # RT-001 (round 5, fresh-lens): refresh the LRU position, not just
+        # `updated_at`. `_evict_over_capacity` walks `self._records` in
+        # insertion order, and before this call `publish()` touched only the
+        # TTL clock — so a task that had been streaming frames for an hour was
+        # still sitting at the LRU end and was the FIRST thing overflow
+        # eviction chose. `touch()` is the single place that keeps the two in
+        # step; delegating here is what gives it a call site (it previously had
+        # none repo-wide, which is why the LRU never reflected stream activity).
+        self.touch(task_id)
         for sub in record.subscriptions:
             sub.publish(event)
 
@@ -202,7 +230,17 @@ class InMemoryTaskStore(TaskStore):
         record.subscriptions.clear()
 
     def sweep(self) -> None:
+        # Same live-subscriber guard as `get()`/`_evict_over_capacity`: the
+        # periodic sweeper must not silently sever a still-actively-streamed
+        # record just because its TTL/interrupt-deadline lapsed while a live
+        # subscriber was waiting on it.
         for task_id in [tid for tid, r in self._records.items() if self._expired(r)]:
+            record = self._records.get(task_id)
+            if record is None:
+                continue
+            self.reap_dead_subscriptions(record)
+            if record.subscriptions:
+                continue
             self.evict(task_id)
 
     def close_all(self) -> None:
@@ -225,8 +263,37 @@ class InMemoryTaskStore(TaskStore):
         return now - record.updated_at > self._task_ttl
 
     def _evict_over_capacity(self) -> None:
-        # oldest first, skipping interrupted records (they pin paused
-        # workers and are bounded separately by max_interrupted)
+        # Oldest first, skipping records that must not be torn down merely
+        # because someone else filled the store:
+        #
+        #  - `interrupted` — they pin paused workers and are bounded
+        #    separately by `max_interrupted`.
+        #
+        #  - RT-001 (round 5, fresh-lens): records with LIVE SUBSCRIBERS.
+        #    `evict()` cancels the record's worker and `sub.close()`s every
+        #    subscriber, which pushes the bare `None` sentinel — routes/a2a.py's
+        #    `gen()` reads that as "stop" and returns WITHOUT emitting a
+        #    `final:true` TaskStatusUpdateEvent, so the client's SSE stream just
+        #    dies mid-flight and the task is gone from the store (a later
+        #    `tasks:subscribe` 404s and the work is lost). Because eviction is
+        #    driven by TOTAL store occupancy, the caller who overflows the store
+        #    is almost never the owner of the record that gets evicted: any
+        #    authenticated identity calling `POST /v1/message:send` — which has
+        #    no admission cap at all, and needs none — could sever another
+        #    tenant's in-flight stream. The route-layer admission caps cannot
+        #    fix this; they bound how many streams exist, not which record
+        #    overflow picks. Reproduced end-to-end: with one live subscriber
+        #    open, six `create()` calls from a different identity killed it.
+        #
+        #    This is the same reject-don't-evict rule routes/mcp.py's
+        #    `_MAX_GET_STREAMS` comment already states for stream admission,
+        #    finally applied at the layer that actually does the evicting.
+        #
+        # Both skips let occupancy exceed `capacity`, by design and boundedly:
+        # `interrupted` by `max_interrupted`, and subscribed records by the
+        # route-layer stream budgets (`_MAX_A2A_STREAMS` + `_MAX_GET_STREAMS`),
+        # which is precisely what those caps are for. A bounded overrun is the
+        # correct trade against silently severing a live stream.
         if len(self._records) <= self._capacity:
             return
         for task_id in list(self._records.keys()):
@@ -234,5 +301,12 @@ class InMemoryTaskStore(TaskStore):
                 break
             record = self._records[task_id]
             if record.interrupted:
+                continue
+            # Reap first, so a LEAKED subscription (owning request task already
+            # finished) can never pin a record here forever — that would trade
+            # a severed stream for an unbounded store. Only genuinely live
+            # subscribers protect a record.
+            self.reap_dead_subscriptions(record)
+            if record.subscriptions:
                 continue
             self.evict(task_id)

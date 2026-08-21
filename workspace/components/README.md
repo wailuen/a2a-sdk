@@ -25,6 +25,9 @@
 | C-021 | ToolInputValidationError | agent_sdk/agent/registry.py | present |
 | C-022 | ModelClientRetryPolicy | agent_sdk/agent/model_client.py | planned |
 | C-023 | workflow-args-normalization convention | harness/reference/workflow-args-normalization.md (new) | planned |
+| C-024 | stream admission bookkeeping (StreamSlot / identity_key / slot_table / prune_finished / count_for_owner / count_for_task / resolve_per_identity_limit) | agent_sdk/common/admission.py | present |
+| C-025 | bounded_stream_registry | agent_sdk/common/streams.py (new) | planned |
+| C-026 | resume_precondition | agent_sdk/routes/a2a.py (alongside _resume_or_error) | planned |
 
 ## Descriptions
 

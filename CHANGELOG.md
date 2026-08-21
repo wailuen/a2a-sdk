@@ -4,6 +4,358 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [Unreleased]
+
+## [0.7.0] — 2026-08-19
+
+### 🔴 Breaking changes
+- GH-144: `POST /v1/message:stream`'s `taskId` branch
+  (`agent_sdk/routes/a2a.py::message_stream`) now returns 501 `-32004`
+  (`UnsupportedOperation`) for a present-but-**terminal** task, instead of
+  404 `-32001` (`TaskNotFound`) — matching `/v1/message:send`'s existing
+  `_resume_or_error` behavior for the identical terminal-state condition
+  (A2A-F1). Both codes already existed, unchanged, in
+  `agent_sdk/models/errors.py` before this change; only the routing
+  decision in `a2a.py` — which of the two pre-existing codes to return for
+  this specific condition — changed.
+  **RT-002 correction:** an earlier revision of this entry claimed the
+  change satisfied both conditions of DESIGN.md §4.0's wire-shape
+  conformance exemption and could therefore ship without a major bump. That
+  claim does not survive verification: (a) *location* — the exemption is
+  scoped to "a breaking change to a stable-core wire shape in `models/`",
+  but `agent_sdk/models/errors.py` is untouched by this diff; only
+  `agent_sdk/routes/a2a.py`'s code selection changed. (b) *spec-driven* —
+  A2A v0.3.0's code→method table (`harness/reference/a2a-protocol-0_3_0.md`)
+  maps neither `-32001` nor `-32004` to `message/send`/`message/stream`,
+  and the spec's terminal-re-message rule requires only that the server
+  "MUST return an error" — a requirement either code already satisfied.
+  This repo's own Round 10 conformance audit (`REVIEWS.md`, finding "A2A
+  (D2 Transports & Methods)") classifies the pre-fix split as "an internal
+  cross-method inconsistency, not a hard-MUST breach (both codes are valid
+  A2A error codes)." The exemption **does not apply** here. This is
+  therefore a voluntary stable-core break — not one required by spec
+  conformance — and per DESIGN.md:141 ("A voluntary breaking change to the
+  stable core ... still requires a major bump; this exemption cannot be
+  cited for those") it must ship under a major-equivalent version bump
+  (`0.7.0`, per this repo's `0.MAJOR.MINOR` pre-1.0 convention — see
+  `0.5.44` → `0.6.0` for GH-134/GH-135's genuine major bump), never under
+  the `v0.6.1` patch this wave otherwise targets. The dedicated heading and
+  Migration callout below are kept regardless — the change remains
+  wire-visible and breaking with or without the exemption.
+  - **Emit:** `message/stream` with `taskId` pointing at a task whose
+    `status.state` is terminal (`completed`/`failed`/`canceled`) now
+    responds `HTTP 501` `{"error": {"code": -32004, "message": "task is in
+    a terminal state and cannot accept new messages"}}` — was `HTTP 404`
+    `{"error": {"code": -32001, "message": "task not found"}}`. A
+    genuinely unknown/foreign `taskId` is unaffected and still returns
+    `HTTP 404` `-32001` (identity-scoped lookup; existence is never leaked
+    per DESIGN.md:266).
+  - **Parse:** this SDK is an A2A server only and never parses its own
+    `message/stream` error responses, so there is no in-repo parse path
+    affected. The impact lands entirely on external A2A clients — see
+    Migration.
+  - **Migration:** any A2A client that branches on `-32001`/404 to detect
+    "task cannot be resumed" for `message/stream` must also handle
+    `-32004`/501 for the terminal-task case (matching the handling such a
+    client should already have for `message/send`, which has returned
+    `-32004`/501 for this condition since `_resume_or_error` was
+    introduced — only `message/stream` was inconsistent). Concretely: this
+    same change required updating `harness/skills/acceptance/SKILL.md`
+    (turn-continuation guidance) and rewriting `workspace/learning/LRN-103`
+    in this repo's own harness/docs, which is the giveaway that the break
+    is real and downstream-visible, not merely internal. `docs/protocols.md`
+    and `DESIGN.md`'s `-32004` error-table row are updated to match.
+  (`agent_sdk/routes/a2a.py`, `agent_sdk/tasks/store.py`,
+  `agent_sdk/tasks/memory.py`, `docs/protocols.md`, `DESIGN.md`,
+  `harness/skills/acceptance/SKILL.md`,
+  `workspace/learning/LRN-103-a2a-multiturn-contextid-continuation.md`,
+  `tests/test_gh144_terminal_resume_error_docs.py`,
+  `tests/test_w017_gh51_multiturn.py`)
+
+### 🟠 Security
+- GH-143 (+ RT-001 redteam follow-up): `GET /mcp` (Streamable HTTP heartbeat
+  stream) and `GET /mcp/sse` (legacy SSE) are now admitted against ONE
+  shared, reject-based concurrency cap — global (`_MAX_GET_STREAMS = 500`)
+  checked first, then per-identity (`_MAX_GET_STREAMS_PER_IDENTITY`, raised to
+  `200` and made operator-overridable before release — see the RT-001 round 2
+  entry below; it was `8` when this entry was first written) —
+  enforced BEFORE the indefinite `StreamingResponse` is created on either
+  route, and returning `429` (`Retry-After: 5`) once at capacity. Both
+  routes hold an authenticated, indefinitely-held `text/event-stream` open
+  on the same single-process connection pool (the server is
+  single-process/single-worker by design), so capping only one was
+  bypassable by calling the other. `GET /mcp/sse`'s prior admission control
+  — a dedicated `_MAX_SSE_SESSIONS` evict-oldest loop — is retired: it only
+  dropped the session-routing bookkeeping entry, never the live
+  heartbeat/poll loop (the generator kept running, untracked, until the
+  client itself disconnected), and it evicted regardless of owner, so one
+  caller could make another tenant's still-open session unroutable
+  (`POST /mcp/messages` → 404 "session not found" for the evicted tenant,
+  while that tenant's connection stayed open). Both routes now release
+  their slot on disconnect via a two-layer mechanism (a generator `finally`
+  plus a `StreamingResponse` `BackgroundTask`) and a liveness-based prune
+  keyed on the owning ASGI task's `.done()` state — never wall-clock TTL,
+  which would risk reclaiming a still-open stream under load. (`agent_sdk/routes/mcp.py`,
+  `agent_sdk/tasks/store.py`, `agent_sdk/tasks/memory.py`,
+  `tests/test_gh143_mcp_get_stream_cap.py`, `tests/test_rt001_mcp_sse_stream_cap.py`,
+  `tests/test_mcp_security_rt001_005.py`)
+- RT-001/RT-002/RT-003 (round 4 fresh-lens, redteam follow-up on GH-143):
+  the A2A admission cap ran in the wrong PLACE on `POST
+  /v1/message:stream`'s dominant no-`taskId` path, and one SSE surface had
+  no cap at all.
+  - **Admission now precedes every durable state mutation.** `_open_stream`
+    conflated the admission *decision* with the subscription *registration*
+    into one call needing a `TaskRecord`; on the no-`taskId` path no record
+    exists until `_create_task_record()` has already run
+    `task_store.create()`, so the load-shed check ran AFTER a durable write
+    to the LRU-bounded task store. Every 429-rejected request still
+    inserted an orphan `TaskRecord` (no worker, permanently `submitted`),
+    and `create()` → `_evict_over_capacity()` evicts oldest-first while
+    `evict()` cancels the evicted record's worker and `sub.close()`s its
+    subscribers — so shedding load severed **another tenant's** in-flight
+    SSE stream with no `final: true` frame, exactly the harm this wave's
+    reject-never-evict rule exists to prevent. Admission is now a separate
+    `_admit(request, identity, task_id)` that takes no record, mutates
+    nothing durable, and **claims** its slot in the same synchronous step as
+    the checks (so a caller may create state afterwards without risking a
+    second rejection). A shed `message:stream` is now a pure no-op.
+  - **`POST /ag-ui/run` is now admission-capped** against the same shared
+    budget as the A2A streams (wire-visible: it can now return `429` +
+    `Retry-After: 5` with the bare `{"detail": ...}` shape that surface's
+    other transport-level rejections already use, always *before*
+    `RUN_STARTED`, so it is never a `RUN_ERROR` frame). It was the third
+    authenticated, indefinitely-held `text/event-stream` on the same
+    single-process connection pool — sharing the task store, worker pool and
+    token budget — and had no cap, leaving the DoS GH-143 set out to close
+    fully reachable by calling it instead. A source-level completeness gate
+    now fails if any route returning `media_type="text/event-stream"` lacks
+    an admission check.
+  - **The 429 is now recorded on every spec surface** (DESIGN.md §5.5 and
+    §6 — rate limiting is now documented as *three* layers, not two — plus
+    `docs/protocols.md`'s A2A error table and MCP section, and both route
+    module docstrings), including an explicit citation of the two-outcome
+    `GET /mcp` rule (`text/event-stream` or 405) the 429 departs from and
+    the Claude.ai *"Couldn't connect"* operational consequence recorded in
+    `harness/reference/mcp-claude-platforms.md`.
+  (`agent_sdk/routes/a2a.py`, `agent_sdk/routes/ag_ui.py`,
+  `agent_sdk/routes/mcp.py`, `DESIGN.md`, `docs/protocols.md`,
+  `tests/test_rt001_admission_before_mutation.py`)
+- RT-001 (round 4, redteam follow-up on GH-143/GH-144): the same
+  release-on-disconnect leak GH-143 closed on `GET /mcp`/`GET /mcp/sse` also
+  applied to the A2A streaming surface — `POST /v1/message:stream`'s `taskId`
+  resume branch and `POST /v1/tasks/{id}:subscribe` both subscribe to the
+  task store EAGERLY, before their `StreamingResponse` exists, and relied
+  solely on the SSE generator's `finally` to unsubscribe. A request task
+  hard-cancelled at Starlette's `send(http.response.start)` checkpoint — the
+  same unwind GH-143 identified — never reaches that `finally` and skipped
+  the response's `BackgroundTask` too, leaking a `Subscription` onto
+  `TaskRecord.subscriptions`, an unbounded list `store.publish` walks for
+  every frame. Both routes now register `BackgroundTask(abort)` (`abort`
+  calls `store.unsubscribe`) in addition to the generator's `finally`, and
+  `InMemoryTaskStore.subscribe` reclaims any orphan whose owning ASGI task
+  has finished before registering a new one, keyed on that task's `.done()`
+  state — never wall-clock TTL, so a still-open stream is never reclaimed.
+  New public **`Subscription.owner_task`** (`agent_sdk/tasks/store.py`) — the
+  owning `asyncio.Task`, captured at `subscribe()` time, `None` when
+  `subscribe()` ran outside a task — and new public **`TaskStore.reap_dead_subscriptions(record)`**,
+  a concrete method on the `TaskStore` base class every `subscribe()`
+  implementation must call (stated on the now-documented abstract
+  `subscribe` contract) so a third-party `TaskStore` subclass gets the same
+  reclaim behavior without re-deriving it. Also fixes a related
+  thread-safety bug in both `release()` (`mcp.py`) and `abort()` (`a2a.py`):
+  as plain `def` closures, Starlette's `BackgroundTask` dispatched them via
+  `run_in_threadpool` (an AnyIO worker thread) while the event loop
+  concurrently iterated the same containers (`_prune_get_streams`,
+  `InMemoryTaskStore.publish`) — able to raise `RuntimeError: ... mutated
+  during iteration` or silently skip a live SSE subscriber. Both are now
+  `async def`, so Starlette awaits them in-loop instead; every caller
+  (`message_stream`'s early-return path included) now `await`s them.
+  (`agent_sdk/routes/a2a.py`, `agent_sdk/routes/mcp.py`,
+  `agent_sdk/tasks/store.py`, `agent_sdk/tasks/memory.py`,
+  `tests/test_rt001_stream_slot_release_on_hard_cancel.py`,
+  `tests/test_rt001_release_runs_on_loop_thread.py`,
+  `tests/test_rt003_task_store_reap_conformance.py`)
+- RT-001 (round 2, redteam follow-up on GH-143): the per-identity `GET /mcp`
+  cap this same wave introduced was keyed on `_identity_key()`
+  (`f"{identity.kind}:{identity.subject}"`), but `Identity.subject` is an
+  OAuth client_id (`auth/oauth_tokens.py`) or API-key id (`auth/api_keys.py`)
+  — never an end user. Under this SDK's own documented org-wide OAuth client
+  mode (`python -m agent_sdk provision-org-oauth-client`, `config.py`) or a
+  shared API key, every caller in an organization collapses onto ONE
+  identity key, so the old hardcoded `_MAX_GET_STREAMS_PER_IDENTITY = 8`
+  capped an entire org — not one caller — at 8 concurrent MCP connectors;
+  the 9th connector got 429 regardless of org size, with no override
+  available. Default raised to `200`, and a new setting
+  **`AGENT_SDK_MAX_MCP_STREAMS_PER_IDENTITY`**
+  (`settings.max_mcp_streams_per_identity`, `config.py`) lets an operator
+  raise it further for a larger org — resolved via new
+  `routes/mcp.py::_max_streams_per_identity()`, which also clamps any
+  override to never exceed the process-wide `_MAX_GET_STREAMS` budget.
+  (`agent_sdk/routes/mcp.py`, `agent_sdk/config.py`,
+  `tests/test_rt001_mcp_org_wide_identity_cap.py`)
+- RT-002 (redteam follow-up on GH-143): GH-143's admission cap covered
+  `GET /mcp`/`GET /mcp/sse` only — `POST /v1/message:stream`'s `taskId`
+  resume branch and `POST /v1/tasks/{id}:subscribe` remained authenticated,
+  indefinitely-held `text/event-stream` responses on the SAME single-process
+  connection pool with no concurrency accounting at all, so the DoS GH-143
+  set out to close stayed reachable through the other transport. Worse,
+  `tasks_resubscribe` could be invoked unboundedly against ONE task, each
+  call appending a `Subscription` onto `record.subscriptions` — the exact
+  "unbounded list `store.publish` walks for every frame" harm `_open_stream`'s
+  own docstring already named. Both routes now admit through
+  `routes/a2a.py::_admit()`
+  against a new shared budget (`routes/a2a.py::_a2a_streams()`, mirroring
+  `routes/mcp.py::_get_streams()`) in **three** layers, in this order:
+  global (`_MAX_A2A_STREAMS = 500`, bounds total process load), then
+  per-identity (`_MAX_A2A_STREAMS_PER_IDENTITY = 200`, overridable via the new
+  **`AGENT_SDK_MAX_A2A_STREAMS_PER_IDENTITY`** setting — see ✅ Features below
+  — the layer that stops one authenticated tenant consuming the whole budget
+  and locking every other tenant out), then a cap on concurrent subscribers to
+  the SAME task (`_MAX_A2A_STREAMS_PER_TASK = 16`, which bounds the
+  `record.subscriptions` growth `store.publish` walks per frame) wherever the
+  request names an existing task. All three are enforced BEFORE
+  `store.subscribe()`/the `StreamingResponse` is created — and, per the round-4
+  entry above, before any durable state mutation on the request path —
+  rejecting with `HTTPException(429,
+  Retry-After: 5)` (never evicting, for the identical reason GH-143's `mcp.py`
+  comment gives) which the existing `/v1/*` A2A error envelope
+  (`app.py::_a2a_auth_envelope`) translates into the spec error shape. Also
+  adds `429 -> -32000` to that envelope's status→code map (previously
+  unmapped 429s, including the pre-existing identity rate limiter's, fell
+  through to the misleading `-32603` Internal-error default).
+  **RT-001 correction (round 7):** an earlier revision of this entry described
+  only the global and per-task layers, omitting the per-identity one that
+  DESIGN.md §5.5 and `docs/protocols.md` both document as the cross-tenant
+  fairness layer. That omission mattered doubly: the per-task cap is vacuous on
+  `message:stream`'s dominant no-`taskId` path (a fresh uuid per call always
+  counts 0), so an entry naming only those two described a budget with no
+  cross-tenant dimension at all on the SDK's busiest streaming route.
+  (`agent_sdk/routes/a2a.py`, `agent_sdk/app.py`, `agent_sdk/config.py`,
+  `agent_sdk/common/admission.py`, `DESIGN.md`, `docs/protocols.md`,
+  `workspace/components/README.md`,
+  `tests/test_rt002_a2a_stream_admission_cap.py`)
+
+### ⚠️ Behavior changes
+- RT-001 (round 5, fresh-lens redteam follow-up on GH-143/GH-144):
+  `InMemoryTaskStore._evict_over_capacity()` (`agent_sdk/tasks/memory.py`) no
+  longer evicts a task record that has live subscribers, even when the store
+  is over `capacity`. Previously, LRU overflow eviction could pick ANY
+  oldest record regardless of whether it had an open SSE stream — `evict()`
+  cancels the worker and sentinel-closes every subscriber's queue, which
+  `routes/a2a.py`'s `gen()` reads as an unannounced stop, never emitting a
+  `final: true` `TaskStatusUpdateEvent`. Because eviction is driven by total
+  store occupancy, the identity whose `create()` call overflowed the store
+  was almost never the owner of the record that got evicted — any
+  authenticated identity calling `POST /v1/message:send` (which has no
+  admission cap) could silently sever another tenant's in-flight
+  `message:stream`/`tasks:subscribe` connection. `publish()` now also
+  refreshes the record's LRU position on every emitted frame (delegating to
+  `touch()`), not just on create/get — previously a record streaming frames
+  for an hour still sat at the LRU end and was the first eviction candidate.
+  A dead (owner-task-finished) subscription is reaped before the live-check
+  runs, so a leaked subscription can never pin a record forever.
+  **RT-001 round 6 (pre-release `/sdk-test` Leg 3, ag-ui-advisor):** the round
+  5 guard only covered the capacity-overflow eviction path. `get()`'s
+  TTL/interrupt-deadline expiry check, and the periodic background
+  `sweep()`, both called `evict()` unconditionally on the same expired
+  record with no live-subscriber guard at all — and `get()`'s path is
+  reachable from `find_interrupt()` (AG-UI's `_resume_target_task_id`
+  resume lookup), so a resume attempt for one interrupt could walk every
+  record and silently evict an unrelated, still-live-streamed task that
+  simply hadn't been touched in `task_ttl`/`interrupt_ttl`. Both `get()` and
+  `sweep()` now apply the identical reap-then-skip-if-still-subscribed guard
+  `_evict_over_capacity` already had.
+  - **Migration:** total occupancy in `InMemoryTaskStore` can now boundedly
+    exceed `capacity` while records have live subscribers — bounded by the
+    same route-layer admission caps (`_MAX_A2A_STREAMS`, `_MAX_GET_STREAMS`)
+    that already limit concurrent streams, not unbounded. No action needed
+    for typical deployments; a custom `TaskStore` subclass or a
+    capacity-planning script that assumed strict `capacity`/TTL enforcement
+    should account for this bounded overrun.
+  (`agent_sdk/tasks/memory.py`, `DESIGN.md` §5.2,
+  `tests/test_rt001_r6_expiry_never_severs_live_streams.py`)
+
+### ✅ Features
+
+RT-001 (round 7): the three stable-core additions below shipped in the
+🟠 Security work above with no entry of their own. DESIGN.md §4.0 puts
+`BaseAgentSettings` in the stable core under strict SemVer, so a new settable
+field is a public-API addition that must be recorded as one — documenting the
+behaviour in DESIGN.md does not discharge the SemVer accounting.
+`tests/test_changelog_gh143_gh144_wire_changes.py` now fails if any
+non-grandfathered `AGENT_SDK_*` alias in `agent_sdk/config.py` is absent from
+this file.
+
+- New setting **`AGENT_SDK_MAX_A2A_STREAMS_PER_IDENTITY`**
+  (`settings.max_a2a_streams_per_identity`, `agent_sdk/config.py`) — the
+  operator override for the per-identity layer of the A2A/AG-UI stream
+  admission budget (`POST /v1/message:stream`, `POST /v1/tasks/{id}:subscribe`,
+  `POST /ag-ui/run`). Default `None` selects the SDK default
+  `routes/a2a.py::_MAX_A2A_STREAMS_PER_IDENTITY = 200`; any override is clamped
+  to the process-wide `_MAX_A2A_STREAMS = 500`, since a per-identity cap above
+  the global budget is meaningless and would only mask misconfiguration.
+  Validated `ge=1` at settings construction: `0` is the natural operator
+  reading of "unlimited", but every call site guards with `count >= limit`, so
+  a `0` would deny every stream for every identity silently — "unlimited" is
+  expressed by leaving the variable unset. Sized in the low hundreds, and
+  overridable at all, for the same documented reason as its MCP twin
+  `AGENT_SDK_MAX_MCP_STREAMS_PER_IDENTITY`: `Identity.subject` is a client_id
+  or API-key id — a *registration*, never an end user — so org-wide OAuth
+  client provisioning or a shared API key collapses an entire org onto one
+  identity key. (`agent_sdk/config.py`, `agent_sdk/routes/a2a.py`,
+  `tests/test_rt002_a2a_stream_admission_cap.py`)
+- New module **`agent_sdk/common/admission.py`** (component **C-024**,
+  `workspace/components/README.md`) — the single implementation of the stream
+  admission bookkeeping every indefinitely-held `text/event-stream` route in
+  this SDK shares: `StreamSlot`, `SlotTable`, `identity_key`, `slot_table`,
+  `prune_finished`, `count_for_owner`, `count_for_task`,
+  `resolve_per_identity_limit`. It replaces a byte-identical second copy that
+  had been implemented once per transport in the same wave and had already
+  drifted (different record arities) — which is how the next fix lands in one
+  transport and not the other. The two *budgets* remain deliberately separate
+  tables (`app.state.mcp_get_streams` vs `app.state.a2a_streams`): merging them
+  would be a behaviour change, not a deduplication.
+  (`agent_sdk/common/admission.py`, `agent_sdk/routes/a2a.py`,
+  `agent_sdk/routes/mcp.py`, `agent_sdk/routes/ag_ui.py`,
+  `workspace/components/README.md`)
+- New public **`TaskStore.new_subscription(record, maxsize)`**
+  (`agent_sdk/tasks/store.py`) — a concrete method on the `TaskStore` base
+  class that performs the whole `subscribe()` body (reap dead subscriptions →
+  construct → stamp `Subscription.owner_task` → append), so every
+  implementation delegates to it rather than reproducing it. RT-002 (round 7):
+  the earlier `reap_dead_subscriptions` hoist stated only the *consume* half of
+  that contract. `reap_dead_subscriptions` keeps every `owner_task is None`
+  entry by design and `Subscription.__init__` defaults it to `None`, so a
+  third-party `TaskStore` (`Agent(task_store=...)` is a documented extension
+  point) that faithfully called the reap but never stamped `owner_task` had a
+  permanently **vacuous** backstop: `record.subscriptions` grew without bound
+  exactly as before, and such a subscription additionally pinned its record
+  against `InMemoryTaskStore._evict_over_capacity`'s live-subscriber skip for
+  the process lifetime. `InMemoryTaskStore.subscribe` is now a delegation, the
+  abstract `subscribe` docstring states both halves, and
+  `tests/test_rt003_task_store_reap_conformance.py` asserts both against every
+  factory in `_STORE_FACTORIES` — including end-to-end, on a subscription the
+  suite never touches, so a stamp-less implementation fails instead of passing
+  vacuously as it did before.
+  (`agent_sdk/tasks/store.py`, `agent_sdk/tasks/memory.py`,
+  `tests/test_rt003_task_store_reap_conformance.py`)
+
+### 📋 Release process (RT-003, gh-review triage correction)
+- The two issues fixed under 🔴 Breaking changes and the first two 🟠
+  Security entries above were resolved in `workspace/todos/active/w040-gh-issues.md`
+  (now archived), whose own RT-002 note already concluded the terminal-task
+  error-code fix is a voluntary stable-core break requiring this
+  major-equivalent version bump — never the `v0.6.1` patch the todo file
+  originally targeted. `pyproject.toml` was left unbumped after that
+  conclusion landed, leaving the tree self-contradictory: a version bump the
+  CHANGELOG itself demanded, an unbumped `pyproject.toml`, both todo
+  checkboxes still unticked, and `REVIEWS.md`'s Round 10 audit still
+  recording both findings as deferred to "the next gh-review triage cycle"
+  — this cycle. This release closes that gap: `pyproject.toml` bumped to
+  `0.7.0`, both todo checkboxes ticked and the file archived, and
+  `REVIEWS.md`'s two Round 10 deferred rows carry a resolution marker
+  naming this version.
+
 ## [0.6.0] — 2026-08-18
 
 ### 🔴 Breaking changes

@@ -4,9 +4,13 @@ RT-001  tools/list cursor must be clamped to ≥0; a crafted negative-offset
         cursor (e.g. base64('-1') = 'LTE=') must NOT wrap to the tail of the
         tool list.  (LRN-018)
 
-RT-003  Legacy SSE session map must be bounded; after _MAX_SSE_SESSIONS are
-        opened the oldest entry is evicted rather than growing unboundedly.
-        (Tested structurally — the dict never exceeds the cap.)
+RT-003  (superseded — see test_rt001_mcp_sse_stream_cap.py) Legacy SSE
+        session map used to be bounded by a dedicated _MAX_SSE_SESSIONS
+        evict-oldest loop. A later redteam finding (RT-001 on GH-143) found
+        that eviction dropped only the bookkeeping entry, not the live
+        stream, and was a cross-tenant DoS (it evicted regardless of owner).
+        GET /mcp/sse now shares GET /mcp's reject-based _get_streams() cap
+        instead; _MAX_SSE_SESSIONS no longer exists.
 
 RT-004  DELETE /mcp, GET /mcp/sse, and POST /mcp/messages all reject a
         non-allowlisted Origin with 403, mirroring the guard on POST /mcp and
@@ -19,13 +23,12 @@ RT-005  SI-2: tools/call with an unknown tool name returns the generic message
 
 from __future__ import annotations
 
-import asyncio
 import base64
 
 import httpx
 import pytest
 
-from agent_sdk.routes.mcp import _MAX_SSE_SESSIONS, _decode_cursor, _sse_queues
+from agent_sdk.routes.mcp import _decode_cursor
 
 
 # ---------------------------------------------------------------------------
@@ -128,66 +131,10 @@ async def test_negative_cursor_does_not_wrap_tool_list(client: httpx.AsyncClient
 
 
 # ---------------------------------------------------------------------------
-# RT-003 — SSE session dict bounded by _MAX_SSE_SESSIONS
+# RT-003 — superseded; GET /mcp/sse admission is now covered end-to-end by
+# test_rt001_mcp_sse_stream_cap.py (shared _get_streams() cap with GET /mcp,
+# reject-not-evict, per-identity isolation, disconnect release).
 # ---------------------------------------------------------------------------
-
-
-def test_sse_queue_cap_constant_is_set() -> None:
-    """_MAX_SSE_SESSIONS must be defined and < _MAX_SESSIONS (1_000)."""
-    from agent_sdk.routes.mcp import _MAX_SESSIONS
-
-    assert isinstance(_MAX_SSE_SESSIONS, int), "_MAX_SSE_SESSIONS must be an int"
-    assert 0 < _MAX_SSE_SESSIONS < _MAX_SESSIONS, (
-        f"_MAX_SSE_SESSIONS ({_MAX_SSE_SESSIONS}) must be > 0 and < _MAX_SESSIONS ({_MAX_SESSIONS})"
-    )
-
-
-async def test_sse_queue_dict_stays_bounded(app) -> None:
-    """Directly manipulate the SSE queue dict to confirm the eviction logic in
-    mcp_sse keeps it within _MAX_SSE_SESSIONS.
-
-    httpx.ASGITransport buffers the full response body before returning, so it
-    cannot be used with infinite SSE streams (the response never completes and
-    the call blocks forever).  Instead we exercise the eviction code directly:
-    the production handler runs the eviction and queue registration
-    synchronously in the route-handler body (before the StreamingResponse
-    generator starts), so we can verify the invariant by replicating that
-    exact sequence against the live queues dict.
-    """
-    import uuid
-
-    queues = _sse_queues(app)
-
-    # Pre-fill to exactly the cap.
-    fill_count = _MAX_SSE_SESSIONS
-    fake_ids: list[str] = []
-    for _ in range(fill_count):
-        sid = uuid.uuid4().hex
-        fake_ids.append(sid)
-        queues[sid] = (asyncio.Queue(maxsize=1), "fake:owner")
-
-    assert len(queues) == _MAX_SSE_SESSIONS
-
-    # Replicate the eviction + registration code from mcp_sse exactly.
-    # This is the same sequence the route handler executes before returning
-    # the StreamingResponse (i.e. it runs synchronously, before any streaming).
-    new_sid = uuid.uuid4().hex
-    while len(queues) >= _MAX_SSE_SESSIONS:
-        queues.pop(next(iter(queues)), None)
-    new_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
-    queues[new_sid] = (new_queue, "test:owner")
-
-    # The dict must not have grown beyond the cap.
-    assert len(queues) <= _MAX_SSE_SESSIONS, (
-        f"SSE queue dict grew to {len(queues)}, expected ≤ {_MAX_SSE_SESSIONS}"
-    )
-    # The new entry must have been registered.
-    assert new_sid in queues, "new session id was not added to the queue dict"
-
-    # Cleanup: drain all entries so other tests are unaffected.
-    queues.pop(new_sid, None)
-    for sid in fake_ids:
-        queues.pop(sid, None)
 
 
 # ---------------------------------------------------------------------------

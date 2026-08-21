@@ -233,9 +233,16 @@ DELIBERATELY_DIVERGENT_SKILLS = {
     "implement",
     # SDK learnings are filed against agent_sdk/; agent learnings against src/.
     "codify",
-    # SDK acceptance drives the alphageo example; the harness copy drives a
-    # provisioned downstream agent.
-    "acceptance",
+    # RT-004 (round 5): "acceptance" was exempted here on the rationale that the
+    # SDK copy drives the alphageo example while the harness copy drives a
+    # provisioned downstream agent. That exemption was load-bearing in the wrong
+    # direction: under it the two copies drifted into a HALF-reconciled GH-89/SI-2
+    # security fix — the .claude/ copy still interpolated the resolved admin key
+    # as `adminKey:` into a Workflow input (and thus into harness transcripts),
+    # while only harness/ had the chmod-600 keyFile externalisation. The run-context
+    # difference the rationale describes is already carried INSIDE the file, by the
+    # "Path note" comment above scriptPath, so it never needed a whole-file
+    # exemption. Reconciled and re-pinned to the byte-identity axis.
 }
 
 _skills_runtime_names = {

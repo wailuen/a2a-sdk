@@ -36,6 +36,19 @@ class Subscription:
     def __init__(self, maxsize: int = 256) -> None:
         self._queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=maxsize)
         self._killed = False
+        # RT-001 (round 4): the ASGI request task that owns this subscription,
+        # captured at subscribe() time. Routes subscribe EAGERLY — before the
+        # StreamingResponse exists, so no frame is missed — and then release in
+        # the SSE generator's `finally`. That `finally` is not a lifecycle hook:
+        # it never runs when the request task is cancelled at Starlette's
+        # send(http.response.start) checkpoint, before the body iterator is
+        # pulled, and that same unwind skips the response's BackgroundTask too.
+        # Recording the owner lets subscribe() reclaim such an orphan on a
+        # LIVENESS FACT (the owning task finished) rather than a timing guess —
+        # a still-open stream's task is never done, so a live subscriber can
+        # never be reaped. None when subscribe() ran outside a task (direct
+        # store use in tests): such a subscription is simply never auto-reaped.
+        self.owner_task: "asyncio.Task[Any] | None" = None
 
     def publish(self, event: Any) -> None:
         if self._killed:
@@ -85,6 +98,64 @@ class TaskRecord:
 
 
 class TaskStore(abc.ABC):
+    def reap_dead_subscriptions(self, record: TaskRecord) -> None:
+        """RT-003: shared layer-3 backstop every ``subscribe()`` implementation
+        must call. Drops any ``Subscription`` whose owning ASGI request task
+        has finished (``owner_task.done()``) — a liveness fact, never elapsed
+        time, so a still-open stream's subscription is never reaped. A
+        subscription whose ``owner_task`` is ``None`` (recorded outside a
+        running task — direct store use in tests) is never auto-reaped
+        either. Concrete rather than abstract: the filter depends only on
+        ``TaskRecord``/``Subscription`` fields this base class already
+        defines, so every implementation gets the identical, tested behavior
+        for free rather than re-deriving the filter (see ``subscribe``'s
+        docstring for why skipping this call is a leak, not a style choice)."""
+        if record.subscriptions:
+            record.subscriptions[:] = [
+                s
+                for s in record.subscriptions
+                if s.owner_task is None or not s.owner_task.done()
+            ]
+
+    def new_subscription(self, record: TaskRecord, maxsize: int = 256) -> Subscription:
+        """RT-002 (round 7): the COMPLETE ``subscribe()`` body every
+        implementation should delegate to — reap, construct, stamp
+        ``owner_task``, append — as ONE concrete method.
+
+        ``reap_dead_subscriptions`` alone was only half the contract, and the
+        unstated half was the half that makes it work.
+        ``reap_dead_subscriptions`` keeps every entry whose ``owner_task`` is
+        ``None``, and ``Subscription.__init__`` defaults it to ``None`` — so an
+        implementation that faithfully called the reap but never stamped
+        ``sub.owner_task`` had a permanently VACUOUS backstop:
+        ``record.subscriptions`` grew without bound exactly as before, and
+        ``publish()`` walked every leaked entry per frame. Mandating only the
+        consume half left the backstop a no-op for every implementation that
+        did not already do both, on a documented public extension point
+        (``Agent(task_store=...)``, DESIGN.md §4.1).
+
+        The stamp is a liveness fact, not a timing guess: the owning ASGI
+        request task stays not-done for the entire response cycle
+        (``StreamingResponse`` body and ``BackgroundTask`` included), so a
+        still-open stream can never be reaped, however long it holds its
+        connection. ``asyncio.current_task()`` raises ``RuntimeError`` with no
+        running loop (direct store use in a sync test), which folds to ``None``
+        — such a subscription is simply never auto-reaped.
+
+        Concrete, and reached through the store rather than assembled at the
+        call site, for the same reason ``routes/a2a.py``'s ``_ClaimedSlot``
+        exposes ``subscribe`` instead of a ``bind`` the route must remember:
+        a two-step contract is one a future implementation can satisfy halfway.
+        """
+        self.reap_dead_subscriptions(record)
+        sub = Subscription(maxsize=maxsize)
+        try:
+            sub.owner_task = asyncio.current_task()
+        except RuntimeError:  # no running loop (direct store use outside async)
+            sub.owner_task = None
+        record.subscriptions.append(sub)
+        return sub
+
     @abc.abstractmethod
     def create(self, task: Task, identity: Identity) -> TaskRecord: ...
 
@@ -95,7 +166,36 @@ class TaskStore(abc.ABC):
         admin api_key identity bypasses the binding."""
 
     @abc.abstractmethod
-    def subscribe(self, task_id: str) -> Subscription: ...
+    def subscribe(self, task_id: str) -> Subscription:
+        """Register a new consumer and return its ``Subscription``.
+
+        Resolve ``task_id`` to its ``TaskRecord`` and return
+        ``self.new_subscription(record, maxsize=...)``. That concrete helper is
+        the whole required body; an implementation that reproduces it by hand
+        MUST reproduce BOTH halves of the contract, in this order:
+
+        1. **Reap** dead subscriptions from the target record — call
+           ``self.reap_dead_subscriptions(record)`` (or reproduce its identical
+           ``owner_task.done()`` filter). A route may subscribe eagerly, before
+           its ``StreamingResponse`` exists, and then be hard-cancelled before
+           any of its own release paths run (bare generator ``finally``, the
+           response's ``BackgroundTask``) — see ``Subscription.owner_task``.
+           Without this reap, ``record.subscriptions`` grows without bound and
+           every subsequent ``publish()`` walks the leaked entries.
+        2. **Record the owner** on the subscription being returned — set
+           ``sub.owner_task = asyncio.current_task()`` (``None`` when there is
+           no running loop) BEFORE appending it. RT-002 (round 7): this half is
+           what makes step 1 non-vacuous. ``reap_dead_subscriptions`` keeps
+           every ``owner_task is None`` entry by design, and
+           ``Subscription.__init__`` defaults it to ``None`` — so an
+           implementation that reaps but never stamps leaks exactly as much as
+           one that never reaped at all, and additionally pins its record
+           against ``InMemoryTaskStore._evict_over_capacity``'s
+           live-subscriber skip for the process lifetime.
+
+        ``tests/test_rt003_task_store_reap_conformance.py`` asserts both halves
+        against every factory in its ``_STORE_FACTORIES`` list; a new
+        implementation should add itself there."""
 
     @abc.abstractmethod
     def unsubscribe(self, task_id: str, sub: Subscription) -> None:

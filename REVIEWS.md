@@ -449,8 +449,8 @@ deferred with a rationale").
 
 | # | Protocol | Sev | Finding | File:line | Decision |
 |---|---|---|---|---|---|
-| 1 | MCP (D7 Security) | MEDIUM | `GET /mcp` opens an authenticated, indefinitely-held SSE heartbeat stream with no cap on concurrent connections — per-identity or global. `identity_limiter` only throttles the request that establishes the stream, not how many stay open. Legacy SSE transport IS capped (`_MAX_SSE_SESSIONS=500`); Streamable HTTP's GET channel is not. Single-process/single-worker deployment means exhausting this channel degrades the whole process for every tenant. | `agent_sdk/routes/mcp.py:688-724` | **DEFER to a future wave.** Real gap, worth a dedicated fix (mirror `_MAX_SSE_SESSIONS` pattern) rather than a rushed patch inside a release-gate audit. Not introduced by this release; latent since the Streamable HTTP GET channel was added. No production incident on record. Tracked for the next `/gh-review` triage cycle. |
-| 2 | A2A (D2 Transports & Methods) | MEDIUM | Same logical condition — sending to a terminal task by `taskId` — returns `-32004 UnsupportedOperation` (HTTP 501) via `message/send`'s `_resume_or_error`, but `-32001 TaskNotFound` (HTTP 404) via `message/stream`'s inline short-circuit, which bypasses `_resume_or_error` entirely. `-32001` is a semantic misuse (the task exists; it just can't accept new input) — an internal cross-method inconsistency, not a hard-MUST breach (both codes are valid A2A error codes; only one transport/pairing is implemented, so the multi-transport-equivalence MUST doesn't apply). | `agent_sdk/routes/a2a.py:200-204` vs `:330-335` | **DEFER to a future wave.** Fix is mechanical (route `message/stream`'s terminal-task-with-`taskId` case through the same check `_resume_or_error` uses) but touches error-response contract on a live RPC method — better scoped as its own reviewed change than folded into a release-gate pass. Not introduced by this release; both code paths predate #140/#141/#142. Tracked for the next `/gh-review` triage cycle. |
+| 1 | MCP (D7 Security) | MEDIUM | `GET /mcp` opens an authenticated, indefinitely-held SSE heartbeat stream with no cap on concurrent connections — per-identity or global. `identity_limiter` only throttles the request that establishes the stream, not how many stay open. Legacy SSE transport IS capped (`_MAX_SSE_SESSIONS=500`); Streamable HTTP's GET channel is not. Single-process/single-worker deployment means exhausting this channel degrades the whole process for every tenant. | `agent_sdk/routes/mcp.py:688-724` | **RESOLVED in `0.7.0`** (GH-143, `workspace/todos/archive/w040-gh-issues.md`): global + per-identity admission cap landed on both `GET /mcp` and `GET /mcp/sse` (`_get_streams()`/`_MAX_GET_STREAMS`, `agent_sdk/routes/mcp.py`). A follow-up redteam pass (RT-001 round 2) found the per-identity half of that fix collapsed an entire org onto one quota under this SDK's own org-wide OAuth-client / shared-API-key modes — also fixed in `0.7.0` via a raised default and `AGENT_SDK_MAX_MCP_STREAMS_PER_IDENTITY`. See CHANGELOG.md `[0.7.0]` for full detail. |
+| 2 | A2A (D2 Transports & Methods) | MEDIUM | Same logical condition — sending to a terminal task by `taskId` — returns `-32004 UnsupportedOperation` (HTTP 501) via `message/send`'s `_resume_or_error`, but `-32001 TaskNotFound` (HTTP 404) via `message/stream`'s inline short-circuit, which bypasses `_resume_or_error` entirely. `-32001` is a semantic misuse (the task exists; it just can't accept new input) — an internal cross-method inconsistency, not a hard-MUST breach (both codes are valid A2A error codes; only one transport/pairing is implemented, so the multi-transport-equivalence MUST doesn't apply). | `agent_sdk/routes/a2a.py:200-204` vs `:330-335` | **RESOLVED in `0.7.0`** (GH-144, `workspace/todos/archive/w040-gh-issues.md`): `message/stream`'s terminal-task-with-`taskId` case now routes through the same `-32004`/501 check `message/send`'s `_resume_or_error` uses. Shipped as a voluntary stable-core break under a major-equivalent version bump per DESIGN.md:141 (see CHANGELOG.md `[0.7.0]`'s 🔴 Breaking changes entry and its RT-002 correction), not folded into a patch. A follow-up redteam pass (RT-002) also found the A2A SSE surface this fix touches had no concurrency admission cap at all — fixed in the same release; see CHANGELOG.md `[0.7.0]` for full detail. |
 
 **Round 10 sign-off: SIGNED OFF FOR RELEASE. Both Medium findings are genuine and worth fixing,
 but neither is a Critical/High conformance breach, neither was introduced by the code shipping in
@@ -460,3 +460,40 @@ deferred to the next `/gh-review` cycle as new GitHub issues rather than fixed a
 release gate. No code change required by this round. Full per-protocol audit reports (dimension
 tables, protocol facts, remediation lists) are preserved in the `/sdk-release 0.6.0` session
 transcript; this entry is the durable summary and disposition record.**
+
+## Round 11 — Pre-release `/agent-stack-check` full-stack audit (0.7.0 gate) (2026-08-21)
+
+`/sdk-release 0.7.0`'s `/sdk-test` Leg 3 ran the full four-protocol conformance audit
+(`mcp-advisor`, `a2a-advisor`, `ag-ui-advisor`, `a2ui-advisor`) against the working tree carrying
+the GH-143/GH-144 fixes (`workspace/todos/archive/w040-gh-issues.md`). MCP, A2A (both server and
+D7 consumer roles), and A2UI (emitter role) all verdicted **COMPLIANT** (zero Critical/High).
+AG-UI did not: `ag-ui-advisor` found one **HIGH** cross-cutting regression.
+
+### Fixed in this round (release blocker): AG-UI-surfaced TTL/interrupt-expiry eviction gap
+
+| # | Protocol | Sev | Finding | File:line | Disposition |
+|---|---|---|---|---|---|
+| 1 | AG-UI (C2 Event ordering / cross-cutting store lifecycle) | HIGH | RT-001 round 5 (Round 9 above, GH-143/GH-144 wave) fixed `InMemoryTaskStore._evict_over_capacity()` so it never evicts a record with live subscribers — but that guard was scoped to the capacity-overflow eviction path only. `get()`'s TTL/interrupt-deadline expiry check, and the periodic background `sweep()`, both still called `evict()` unconditionally with no such guard. `get()`'s path is reachable from `find_interrupt()` (AG-UI's `_resume_target_task_id` resume lookup, `agent_sdk/routes/ag_ui.py`), so a resume attempt for one interrupt walks every record in the store and could silently evict an unrelated, still-live-streamed task purely because it hadn't been touched within its TTL — severing that stream with no `final:true` frame, the exact harm class round 5 already fixed once at a different layer. | `agent_sdk/tasks/memory.py::get` (was `:49-60`), `::sweep` (was `:232-234`) | **FIXED.** Both `get()` and `sweep()` now apply the identical reap-then-skip-if-still-subscribed guard `_evict_over_capacity` already had (`agent_sdk/tasks/memory.py`). Regression test added: `tests/test_rt001_r6_expiry_never_severs_live_streams.py` (5 cases — TTL expiry, cross-task `find_interrupt()` lookup, `sweep()`, no-subscriber-still-evictable, leaked-subscription-still-evictable). Captured as [[LRN-213-eviction-guard-fixed-one-call-site-not-the-invariant]] (the same lesson as [[LRN-198-uncapped-sibling-stream-route]] one layer down: a guard fixed for one call site of a shared destructive method, and left off its siblings, is bypassable through a different door). `CHANGELOG.md` `[0.7.0]`'s `⚠️ Behavior changes` entry and `DESIGN.md` §5.2 updated to describe the full guard (not just the capacity-overflow half). |
+
+### Two Medium doc-drift findings (also from `ag-ui-advisor`), fixed inline
+
+- `docs/protocols.md`'s CUSTOM-events table omitted `TOOL_PROGRESS` (present on the card's
+  machine-readable `x-agui.customEvents` and in `chat.js`'s routing table — only the human
+  narrative doc had drifted). Added.
+- `docs/protocols.md` stated control characters trigger `RUN_ERROR`; the code has stripped, never
+  rejected, them since RT-001 (pre-existing drift, not introduced by this wave, but live in the
+  audited tree). Corrected to match actual behavior.
+
+### Re-verification after the fix
+
+Full `/sdk-test` Leg 1 (`.venv/bin/pytest -q tests/`): **2144 passed, 2 skipped, 0 failed** (was
+2139 before this round's 5 new tests). Leg 2 (`mypy agent_sdk/ --ignore-missing-imports`):
+**Success: no issues found in 97 source files.** Leg 3 re-scoped to the AG-UI finding only (not a
+full advisor re-dispatch): the specific regression is closed at the code level and pinned by the
+new test file; no new Critical/High surfaced by the fix itself.
+
+**Round 11 sign-off: SIGNED OFF FOR RELEASE. The one HIGH finding is fixed and tested (not
+deferred — Critical/High findings are hard blockers per `/sdk-test`'s Leg 3 rule and cannot ship
+under an acknowledged-and-deferred disposition the way Medium/Low can). The two Medium doc-drift
+findings are fixed inline. MCP, A2A (both roles), and A2UI remain COMPLIANT from Round 10's
+findings plus this round's independent full re-audit. `0.7.0` is clear to tag.**

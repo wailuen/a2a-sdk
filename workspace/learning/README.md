@@ -197,3 +197,24 @@ clauses relevant to touched files.
 | LRN-190 | Parse-phase hard-abort gate leaves wave permanently unresumable | [LRN-190](LRN-190-hard-abort-gate-no-escape-hatch.md) |
 | LRN-191 | Wave scope extraction accepts directory/glob tokens | [LRN-191](LRN-191-scope-extraction-accepts-directory-glob-tokens.md) |
 | LRN-192 | Check clause delegates coverage to a test that never actually runs | [LRN-192](LRN-192-check-vacuous-test-delegation.md) |
+| LRN-193 | Generator finally is not a lifecycle hook for pre-stream admission slots | [LRN-193](LRN-193-generator-finally-not-a-lifecycle-hook.md) |
+| LRN-194 | Identity-scoped error-code split lacks foreign-identity test | [LRN-194](LRN-194-identity-scoped-error-code-oracle.md) |
+| LRN-195 | Wire error code change must reconcile every learning/skill narrative | [LRN-195](LRN-195-wire-error-code-change-narrative-sweep.md) |
+| LRN-196 | TTL backstop reclaims a still-live concurrency-cap slot under load | [LRN-196](LRN-196-ttl-reclaims-live-concurrency-slot.md) |
+| LRN-197 | Error-code change lands without sweeping docs that pin the old code | [LRN-197](LRN-197-error-code-doc-sweep-gap.md) |
+| LRN-198 | Concurrency cap applied to one stream route, sibling route left uncapped | [LRN-198](LRN-198-uncapped-sibling-stream-route.md) |
+| LRN-199 | Wire error/status code change ships with zero CHANGELOG entry | [LRN-199](LRN-199-changelog-omits-wire-code-change.md) |
+| LRN-200 | Backstop reaper reclaims only half of a release surface | [LRN-200](LRN-200-partial-release-backstop-reaper.md) |
+| LRN-201 | CHANGELOG exemption claims need a spec citation, not prose | [LRN-201](LRN-201-changelog-exemption-audit-conflict.md) |
+| LRN-202 | Public API change lands outside declared todo/CHANGELOG scope | [LRN-202](LRN-202-unscoped-public-api-change.md) |
+| LRN-203 | Safety invariant lives in one ABC subclass, not contracted | [LRN-203](LRN-203-undeclared-abc-safety-contract.md) |
+| LRN-204 | Sync BackgroundTask closures race event-loop state off-thread | [LRN-204](LRN-204-background-task-sync-closure.md) |
+| LRN-205 | Two-condition exemption citation accepted without verifying either condition | [LRN-205](LRN-205-exemption-condition-verification-gap.md) |
+| LRN-206 | Route safety invariant relies on one ABC subclass, not the contract | [LRN-206](LRN-206-abc-single-impl-invariant.md) |
+| LRN-207 | Git-dirty file outside declared scope escapes review | [LRN-207](LRN-207-dirty-tree-file-outside-declared-scope.md) |
+| LRN-208 | Authoring SKILL.md fixed, sibling copies left stale | [LRN-208](LRN-208-mirrored-skill-copy-drift.md) |
+| LRN-209 | 429 tests assert status_code only, missing headers and body redaction | [LRN-209](LRN-209-status-code-only-429-assertion.md) |
+| LRN-210 | Registration-scoped identity used as per-user quota key | [LRN-210](LRN-210-registration-scoped-identity-as-user-quota-key.md) |
+| LRN-211 | Admission cap wired into one router module, sibling module's streams left unbounded | [LRN-211](LRN-211-admission-budget-module-scope-gap.md) |
+| LRN-212 | Breaking CHANGELOG entry must move version/todos/register together | [LRN-212](LRN-212-release-state-artifact-desync.md) |
+| LRN-213 | Live-subscriber eviction guard fixed one call site, not the store's invariant | [LRN-213](LRN-213-eviction-guard-fixed-one-call-site-not-the-invariant.md) |
