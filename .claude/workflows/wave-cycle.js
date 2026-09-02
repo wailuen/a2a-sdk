@@ -284,10 +284,17 @@ const PLAN_ROW_SCHEMA = {
 // cross-references against wave.allScope (Creates: ∪ Modifies:), and returns any offending paths.
 // GH-84 adds offendingHarnessPaths for dirty/untracked files under harness deliverable directories
 // (tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/, .claude/workflows/,
-// harness/workflows/). Post-archive w035 follow-up: the workflow-file dirs were added after a
+// harness/workflows/, .claude/agents/, harness/agents/, .claude/skills/, harness/skills/).
+// Post-archive w035 follow-up: the workflow-file dirs were added after a
 // GH-118 fix (RT-003, below) landed in wave-cycle.js without either wave.allScope or this dir
 // list watching wave-cycle.js/sdk-wave.js's own directories — an undeclared workflow-file edit
 // could evade offendingPaths (undeclared) AND offendingHarnessPaths (dir unwatched) at once.
+// RT-007 (w036): the identical double-blind-spot recurred for harness agent/skill files — a
+// todo touching .claude/agents/core/redteam.md, harness/agents/core/redteam.md, or
+// .claude/skills/wave/SKILL.md was neither declared in any todo's Creates:/Modifies: (evading
+// offendingPaths) nor watched by this dir list (evading offendingHarnessPaths) at once. Fix:
+// .claude/agents/, harness/agents/, .claude/skills/, and harness/skills/ were added to the dir
+// list above (and the matching schema description / prompt step 4 text below).
 // RT-002 (round-7): template/.claude/workflows/ is the third byte-identical mirror (synced via
 // test_workflow_sync.py). RT-001 (w036): that mirror lives inside a gitignored nested peer repo
 // (template/), so it can NEVER show up in the top-level `git status --short` this gate runs in
@@ -313,7 +320,7 @@ const ARCHIVE_INTENT_SCHEMA = {
     gitStatusOutput:      { type: 'string', description: 'Raw stdout of git status --short' },
     dirtyPaths:           { type: 'array', items: { type: 'string' }, description: 'All paths reported dirty or untracked by git' },
     offendingPaths:       { type: 'array', items: { type: 'string' }, description: 'Dirty paths that overlap with wave.allScope (Creates: ∪ Modifies:)' },
-    offendingHarnessPaths: { type: 'array', items: { type: 'string' }, description: 'Dirty/untracked paths under tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/, .claude/workflows/, or harness/workflows/ (step 4) — plus, per step 4b, any dirty .claude/workflows/ path from `git -C template status --short` (the nested template repo), resolved to template/.claude/workflows/<file> — even if not in allScope' },
+    offendingHarnessPaths: { type: 'array', items: { type: 'string' }, description: 'Dirty/untracked paths under tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/, .claude/workflows/, harness/workflows/, .claude/agents/, harness/agents/, .claude/skills/, or harness/skills/ (step 4) — plus, per step 4b, any dirty .claude/workflows/ path from `git -C template status --short` (the nested template repo), resolved to template/.claude/workflows/<file> — even if not in allScope' },
     offendingUndeclaredImports: { type: 'array', items: { type: 'string' }, description: 'GH-118/LRN-119/RT-001: resolved import targets (absolute agent_sdk.* OR relative from ./from ..) of dirty/scope .py files that are untracked (git ls-files empty) AND absent from wave.allScope' },
   },
 }
@@ -1405,7 +1412,8 @@ if (!protocolBlocked) {
     '   c. A scope entry starts with the dirty path (dirty parent directory).\n' +
     '4. Separately, collect any dirty/untracked paths whose relative path starts with\n' +
     '   tests/, workspace/learning/, workspace/scenarios/results/, workspace/prd/,\n' +
-    '   .claude/workflows/, or harness/workflows/\n' +
+    '   .claude/workflows/, harness/workflows/, .claude/agents/, harness/agents/,\n' +
+    '   .claude/skills/, or harness/skills/\n' +
     '   — put these in offendingHarnessPaths even if they do not appear in the scope list.\n' +
     '4b. RT-001 (w036): template/.claude/workflows/ is a THIRD byte-identical mirror\n' +
     '   (synced via test_workflow_sync.py) but lives inside template/, a nested peer git\n' +
