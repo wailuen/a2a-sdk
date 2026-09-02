@@ -24,7 +24,7 @@ from typing import (
     cast,
 )
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ..models.errors import AgentError, ErrorCategory
 from ..sources import SourceAdapter
@@ -40,6 +40,31 @@ logger = logging.getLogger(__name__)
 
 # Unique object used as "no item buffered yet" placeholder in invoke_gen.
 _SENTINEL = object()
+
+
+class ToolInputValidationError(Exception):
+    """Raised by ``ToolEntry.invoke``/``invoke_gen`` when ``input_model``
+    rejects ``arguments`` (RT-004).
+
+    Deliberately NOT a ``ValidationError`` subclass — a ``ValidationError``
+    raised elsewhere in the call (tool body construction of its return
+    ContentModel, a ``resume_handler``) must fall through to callers'
+    generic failure branch instead of being mistaken for this one. Callers
+    render the diagnostic via ``safe_validation_message(tool_name,
+    validation_error, input_model)``.
+    """
+
+    def __init__(
+        self,
+        tool_name: str,
+        validation_error: ValidationError,
+        input_model: type[BaseModel],
+    ) -> None:
+        super().__init__(tool_name)
+        self.tool_name = tool_name
+        self.validation_error = validation_error
+        self.input_model = input_model
+
 
 # GH-120: total DeferredResult handles invoke_any() will await before giving
 # up — the original handle plus at most one nested resolution. A handle
@@ -375,7 +400,16 @@ class ToolEntry:
         }
         coro_fn = cast(Callable[..., Awaitable[Any]], self.decl.fn)
         if self.decl.input_model is not None:
-            inp = self.decl.input_model.model_validate(arguments)
+            # RT-004: narrow try — ONLY model_validate. A ValidationError
+            # raised later, while coro_fn builds its ContentModel return
+            # value, must propagate as a bare ValidationError, not be
+            # mistaken for an input-shape defect.
+            try:
+                inp = self.decl.input_model.model_validate(arguments)
+            except ValidationError as exc:
+                raise ToolInputValidationError(
+                    self.decl.name, exc, self.decl.input_model
+                ) from exc
             return await coro_fn(inp, **kwargs)
         return await coro_fn(**kwargs)
 
@@ -413,7 +447,13 @@ class ToolEntry:
         }
         gen_fn = cast(Callable[..., AsyncGenerator[Any, None]], self.decl.fn)
         if self.decl.input_model is not None:
-            inp = self.decl.input_model.model_validate(arguments)
+            # RT-004: narrow try — see invoke()'s matching comment.
+            try:
+                inp = self.decl.input_model.model_validate(arguments)
+            except ValidationError as exc:
+                raise ToolInputValidationError(
+                    self.decl.name, exc, self.decl.input_model
+                ) from exc
             agen = gen_fn(inp, **kwargs)
         else:
             agen = gen_fn(**kwargs)

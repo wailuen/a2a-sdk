@@ -132,10 +132,9 @@ class SourceAdapter:
     async def post(self, url: str, **kwargs: Any) -> httpx.Response:
         return await self._request("POST", url, **kwargs)
 
-    async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
-        self._check_host(url)
+    async def _send(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         try:
-            resp = await self.client.request(method, url, **kwargs)
+            return await self.client.request(method, url, **kwargs)
         except httpx.TimeoutException as exc:
             raise AgentError(
                 ErrorCategory.TIMEOUT,
@@ -148,10 +147,18 @@ class SourceAdapter:
                 f"upstream '{self.source_name}' request failed",
                 source=self.source_name,
             ) from exc
+
+    async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        self._check_host(url)
+        resp = await self._send(method, url, **kwargs)
         if resp.status_code in (429, 503):
-            # retry-once policy (adapters own retries — tools never do)
+            # retry-once policy (adapters own retries — tools never do); the
+            # retry goes through _send too, so a TimeoutException/HTTPError
+            # on either attempt maps to AgentError (RT-012) instead of
+            # escaping as a raw httpx exception with credential-bearing
+            # request.url in its traceback.
             await asyncio.sleep(1.0)
-            resp = await self.client.request(method, url, **kwargs)
+            resp = await self._send(method, url, **kwargs)
         if resp.status_code == 401 or resp.status_code == 403:
             raise AgentError(
                 ErrorCategory.AUTH,

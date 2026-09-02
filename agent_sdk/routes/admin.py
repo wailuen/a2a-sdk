@@ -34,9 +34,10 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, HTMLResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from ..agent.loop import safe_validation_message
+from ..agent.registry import ToolInputValidationError
 from ..auth.middleware import AuthRuntime, _prm_challenge, require_admin, unauth_rate_limit
 from ..credentials.fields import CredentialField, validate_credential_url
 from ..credentials.store import NS_BEDROCK, NS_MODEL, RESERVED_NAMESPACES, CredentialStore
@@ -538,7 +539,12 @@ async def try_tool(
         result = await entry.invoke_any(arguments, _adapters(request), timeout=timeout)
     except AgentError as exc:
         return {"ok": False, "error": exc.public()}
-    except ValidationError as exc:
+    except ToolInputValidationError as exc:
+        # RT-004: raised ONLY by ToolEntry.invoke/invoke_gen's narrow
+        # model_validate try — never by the tool body — so this IS an
+        # input-shape defect, unlike a bare ValidationError (falls to the
+        # generic Exception branch below instead of being mislabeled as
+        # "validation").
         # SI-2: never build the error from raw Pydantic ``e['msg']`` —
         # ``include_input=False`` strips only ``input``, NOT ``msg``, and a
         # custom ``@field_validator`` that interpolates the rejected value
@@ -549,7 +555,9 @@ async def try_tool(
             "ok": False,
             "error": {
                 "category": "validation",
-                "message": safe_validation_message(name, exc, entry.decl.input_model),
+                "message": safe_validation_message(
+                    exc.tool_name, exc.validation_error, exc.input_model
+                ),
             },
         }
     except TimeoutError:

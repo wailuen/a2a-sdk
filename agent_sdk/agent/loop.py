@@ -43,7 +43,7 @@ from .events import (
     UsageEvent,
 )
 from .model_client import ModelClient
-from .registry import ToolEntry, ToolRegistry, ToolTerminalResult
+from .registry import ToolEntry, ToolInputValidationError, ToolRegistry, ToolTerminalResult
 from .skills import SkillsRegistry
 from ..sources import SourceAdapter
 
@@ -488,9 +488,13 @@ async def run_loop(
                     ok, error = False, f"tool '{tc.name}' timed out after {timeout:g}s"
                 except AgentError as err:
                     ok, error = False, err.message
-                except ValidationError as exc:
+                except ToolInputValidationError as exc:
+                    # RT-004: raised ONLY by ToolEntry.invoke_gen's narrow
+                    # model_validate try — never by the tool body — so this
+                    # IS actually an input-shape defect, unlike a bare
+                    # ValidationError (falls to the generic branch below).
                     ok, error = False, safe_validation_message(
-                        tc.name, exc, entry.decl.input_model
+                        exc.tool_name, exc.validation_error, exc.input_model
                     )
                 except Exception:
                     ok, error = False, f"tool '{tc.name}' failed"
@@ -512,12 +516,16 @@ async def run_loop(
                     ok, error = False, f"tool '{tc.name}' timed out after {timeout:g}s"
                 except AgentError as err:
                     ok, error = False, err.message
-                except ValidationError as exc:
-                    # loc + type only — e['msg']/e['input'] can leak input (SI-2).
-                    # loc walked against input_model so user dict keys / extra
-                    # field names are redacted, not echoed.
+                except ToolInputValidationError as exc:
+                    # RT-004: raised ONLY by ToolEntry.invoke's narrow
+                    # model_validate try — never by the tool body — so this
+                    # IS actually an input-shape defect, unlike a bare
+                    # ValidationError (falls to the generic branch below).
+                    # loc + type only — e['msg']/e['input'] can leak input
+                    # (SI-2). loc walked against input_model so user dict
+                    # keys / extra field names are redacted, not echoed.
                     ok, error = False, safe_validation_message(
-                        tc.name, exc, entry.decl.input_model
+                        exc.tool_name, exc.validation_error, exc.input_model
                     )
                 except Exception:
                     ok, error = False, f"tool '{tc.name}' failed"
@@ -560,14 +568,14 @@ async def run_loop(
                             ok, error = False, err.message
                         except asyncio.TimeoutError:
                             ok, error = False, f"tool '{tc.name}' timed out after resume"
-                        except ValidationError as exc:
-                            # loc + type only — e['msg']/e['input'] leak input (SI-2).
-                            # loc walked against input_model so user dict keys /
-                            # extra field names are redacted, not echoed.
-                            ok, error = False, safe_validation_message(
-                                tc.name, exc, entry.decl.input_model
-                            )
                         except Exception:
+                            # RT-004: resume_handler never goes through
+                            # ToolEntry.invoke's model_validate, so a
+                            # ValidationError here can only be a body-level
+                            # defect — it belongs in the generic branch, not
+                            # mislabeled against entry.decl.input_model (which
+                            # describes the tool's ORIGINAL arguments, not
+                            # resume_value).
                             ok, error = False, f"tool '{tc.name}' failed after resume"
                     else:
                         result = {"interrupt": interrupted.reason, "user_response": resume_value}

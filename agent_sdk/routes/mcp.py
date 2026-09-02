@@ -61,13 +61,14 @@ from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
 from ..common.origin import guard_origin
 from ..common.sse import HEARTBEAT, SSE_HEADERS
 from ..agent.loop import ToolInterrupt, resolve_tool_timeout, safe_validation_message
+from ..agent.registry import ToolInputValidationError
 from ..credentials import forwarding
 from ..models.content_types import ContentModel, MarketBriefing
 from ..models.errors import AgentError
@@ -432,13 +433,18 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
         text = f"tool '{name}' timed out after {timeout:g}s"
         logger.warning("mcp tool timeout tool=%s timeout=%s", name, timeout)
         return {"content": [{"type": "text", "text": text}], "isError": True}
-    except ValidationError as exc:
-        # RT-004: mirror agent/loop.py's ValidationError branch (lines 480-483/
-        # 504-510) — safe_validation_message keeps only loc + type (schema-
-        # declared field names and Pydantic type codes), never exc's raw
-        # msg/input (SI-2), so the model gets a correctable diagnostic instead
-        # of the opaque generic fallback below.
-        text = safe_validation_message(name, exc, entry.decl.input_model)
+    except ToolInputValidationError as exc:
+        # RT-004: raised ONLY by ToolEntry.invoke/invoke_gen's narrow
+        # model_validate try — never by the tool body — mirroring
+        # agent/loop.py's matching branch. A bare ValidationError (raised
+        # while the tool body builds its ContentModel return value) now
+        # falls to the generic Exception branch below instead of being
+        # mistaken for an input-shape defect. safe_validation_message keeps
+        # only loc + type (schema-declared field names and Pydantic type
+        # codes), never exc's raw msg/input (SI-2).
+        text = safe_validation_message(
+            exc.tool_name, exc.validation_error, exc.input_model
+        )
         logger.warning("mcp tool input validation failed tool=%s", name)
         return {"content": [{"type": "text", "text": text}], "isError": True}
     except Exception:
