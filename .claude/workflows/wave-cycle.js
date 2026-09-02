@@ -1,14 +1,14 @@
 export const meta = {
   name: 'wave-cycle',
-  description: 'Execute one wave: todos plan redteam (SI annotations + registry reuse) → fan-out implement per group → unit zero-tolerance redteam (debug fires unconditionally at round 4+ (uRound > 3) and at any round when stall is detected; round 5 exits via deferred note) → phase zero-tolerance redteam (debug fires unconditionally at round 4+ (pRound > 3) and at any round when stall is detected; round 8 exits) → protocol audit → codify LRNs + register new C-NNN components → archive',
+  description: 'Execute one wave: todos plan redteam (SI annotations + registry reuse) → fan-out implement per group → unit zero-tolerance redteam (groups run concurrently, each round\'s debug → fix → pytest gate step mutex-serialised across groups; sequential fallback when any two groups share a scope path; debug fires unconditionally at round 4+ (uRound > 3) and at any round when stall is detected; round 5 exits via deferred note) → phase zero-tolerance redteam (skipped for single-group waves — allScope is the sole group scope unit redteam already cleared; otherwise debug fires unconditionally at round 4+ (pRound > 3) and at any round when stall is detected; round 8 exits) → protocol audit → codify LRNs + register new C-NNN components → archive',
   phases: [
     { title: 'Parse',          detail: 'Read wave file; extract groups, creates paths, LRN baseline' },
     { title: 'Todos Redteam',  detail: 'Redteam the wave plan: SI risk annotation, registry reuse (Reuses: C-NNN), new component candidate flagging — annotated wave file written back before implement' },
     { title: 'Implement',      detail: 'Fan out todos per group in dependency order; smoke test each' },
-    { title: 'Unit Redteam',   detail: 'Per-group zero-tolerance fix loop (max 5 rounds/group; debug fires unconditionally at round 4+ (uRound > 3) and at any round when stall is detected (same findings as previous round); round 5 exits via deferred note)' },
-    { title: 'Phase Redteam',  detail: 'Full-wave zero-tolerance fix loop (max 8 rounds; debug fires unconditionally at round 4+ (pRound > 3) and at any round when stall is detected (same findings as previous round); round 8 exits)' },
+    { title: 'Unit Redteam',   detail: 'Per-group zero-tolerance fix loop, all groups concurrently (max 5 rounds/group; debug fires unconditionally at round 4+ (uRound > 3) and at any round when stall is detected (same findings as previous round); round 5 exits via deferred note). The read-only review overlaps freely; each round\'s debug → fix → pytest gate → fix-tests → re-gate step is serialised across groups by a mutex so the whole-repo gate never grades a neighbouring group mid-edit. Falls back to one group at a time when any two groups share a scope path' },
+    { title: 'Phase Redteam',  detail: 'Full-wave zero-tolerance fix loop (max 8 rounds; debug fires unconditionally at round 4+ (pRound > 3) and at any round when stall is detected (same findings as previous round); round 8 exits). Skipped for single-group waves — allScope == the sole group.scope Unit Redteam just cleared, so there is no cross-group surface to review' },
     { title: 'Protocol Audit', detail: 'A2A/MCP/AG-UI/A2UI conformance — parallel advisors + seam check (protocol-surface waves only)' },
-    { title: 'Codify',         detail: 'SDK issue scan (sequential) → parallel LRN capture for critical/high findings → README index update → sequential C-NNN registration for new component candidates' },
+    { title: 'Codify',         detail: 'SDK issue scan (sequential) → parallel LRN capture for critical/high findings, batched ~5 findings per codify agent (IDs = lrnBase + original index, unaffected by batching) → README index update → sequential C-NNN registration for new component candidates' },
     { title: 'Archive',        detail: 'Move wave file to completed/, update plan.md, backfill FR Implementation: fields' },
   ],
 }
@@ -589,7 +589,41 @@ while (remainingGroups.length > 0) {
 // ─── phase 3: unit redteam (per group, zero-tolerance) ───────────────────────
 phase('Unit Redteam')
 
-for (const group of wave.groups) {
+// Groups are partitioned by non-overlapping file scope (the planner groups conflicting
+// todos together — the same guarantee Implement relies on to run a tier concurrently), so
+// every group's review → diagnose → fix loop is independent and all groups run at once.
+// The one shared resource is the pytest gate: `python -m pytest -q` reads the WHOLE repo,
+// so a gate running while a neighbouring group's fix agents are mid-edit could grade a
+// transient state and misattribute the failure (LRN-017: the gate's exitCode is the sole
+// authoritative signal — it must never be uncertain about what it graded). The
+// mutate-and-verify section of each round (debug → fix → gate → fix-tests → re-gate) is
+// therefore serialised across groups by gateLock; the read-only rt review call stays
+// outside the lock so group B can review while group A fixes-and-gates. A stale review
+// read of a neighbour's file mid-edit is the same self-correcting risk Implement already
+// accepts — it yields a finding that is re-checked next round, never a wrong gate verdict.
+let gateLock = Promise.resolve()
+function withGateLock(fn) {
+  const run = gateLock.then(fn, fn)                        // run after the queue ahead of it, whatever its outcome
+  gateLock = run.then(function() {}, function() {})      // keep the chain alive even if fn throws
+  return run
+}
+
+// Disjointness guard: the concurrent path is only safe while no two groups share a scope
+// path. If the planner invariant does not hold for this wave, warn and fall back to the
+// one-group-at-a-time order (gateLock is then uncontended and behaves as a pass-through).
+const scopeOverlaps = []
+wave.groups.forEach(function(a, ai) {
+  wave.groups.slice(ai + 1).forEach(function(b) {
+    const bScope = new Set(b.scope)
+    const shared = a.scope.filter(function(p) { return bScope.has(p) })
+    if (shared.length > 0) scopeOverlaps.push({ a: a.label, b: b.label, shared: shared })
+  })
+})
+
+// WC-RT-006: const function expression, not a declaration (see Implement's makeGroupThunk).
+// Resolves to { label, rounds } on every normal exit so the fan-out below can tell a
+// finished group from one whose thunk threw (parallel() maps a throw to null).
+const runUnitRedteamForGroup = async function(group) {
   log('Unit redteam — group ' + group.label)
   let uRound       = 0
   let prevSigs     = new Set()
@@ -664,22 +698,233 @@ for (const group of wave.groups) {
       break
     }
 
-    // RT-006: Debug fires unconditionally at round 4+ (uRound > 3), and at any round when stall
-    // is detected (same findings as previous round). Round 5 exits via deferred note above.
-    if (uRound > 3 || stalled) {
-      log((stalled ? 'Stall detected — ' : 'Round 4+ — ') + 'escalating to debug agent')
+    // Mutate-and-verify critical section — serialised across groups by gateLock (see the
+    // phase preamble). Resolves true when this round hit a loop-exit path (null gate, or
+    // re-gate still red after the test-fix) so the caller breaks out of the round loop.
+    const exitLoop = await withGateLock(async function() {
+      // RT-006: Debug fires unconditionally at round 4+ (uRound > 3), and at any round when stall
+      // is detected (same findings as previous round). Round 5 exits via deferred note above.
+      if (uRound > 3 || stalled) {
+        log((stalled ? 'Stall detected — ' : 'Round 4+ — ') + 'escalating to debug agent')
+        await agent(
+          'Fix-loop requires fresh-lens analysis' + (stalled ? ' (stalled: same findings across 2 rounds)' : ' (round ' + uRound + ')') + '.\n\n' +
+          'Prior findings:\n' + JSON.stringify(rt.findings, null, 2) + '\n\n' +
+          'Scope:\n' + group.scope.join('\n') + '\n\n' +
+          'Read code cold. Diagnose root cause. Fix at the root.',
+          { label: 'debug:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam', agentType: 'debug' }
+        )
+      }
+      prevSigs = curSigs
+
+      // Bucket by file and dispatch fix specialists in parallel.
+      // Codify accumulates in allHighFindings for the dedicated phase 6 LRN pass.
+      const byFile = {}
+      for (const f of rt.findings) {
+        if (!byFile[f.file]) byFile[f.file] = []
+        byFile[f.file].push(f)
+      }
+
+      const fixTasks = Object.keys(byFile).map(function(file) {
+        return function() {
+          return agent(
+            'Fix these findings in ' + file + ':\n\n' +
+            JSON.stringify(byFile[file], null, 2) + '\n\n' +
+            'Enforce SDK SI-1…SI-7 in your fix. Run pytest -q after.',
+            { label: 'fix:unit:' + group.label + ':r' + uRound + ':' + file.replace(/\//g, '-'),
+              phase: 'Unit Redteam', agentType: 'python-implementer' }
+          )
+        }
+      })
+
+      const highFindings = rt.findings.filter(function(f) {
+        return (f.severity === 'critical' || f.severity === 'high') && f.codify
+      })
+      allHighFindings.push.apply(allHighFindings, highFindings)
+      await parallel(fixTasks)
+
+      // GH-19: consume gate result — red suite blocks loop continuation.
+      // RT-001: fail-closed — null gate response is unknown state, treated as failure.
+      const unitGate = await agent(
+        'Run: python -m pytest -q\n' +
+        'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
+        '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
+        { schema: GATE_SCHEMA, label: 'gate:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam' }
+      )
+      if (!unitGate) {
+        log('WARNING: unit gate agent returned null for group ' + group.label + ' round ' + uRound + ' — treating as gate failure (unknown state)')
+        testsRed = true
+        // WC-003: write a deferred note so the operator has a durable artifact indicating
+        // which group's gate failed, the round, and how to retry. Every other loop-exit
+        // path writes a deferred note; this path must too (RT-002: null gate blocks loop).
+        await agent(
+          'Write workspace/todos/deferred/' + wave.waveId + '-group-' + group.label + '-gate-null-r' + uRound + '.md\n\n' +
+          'Include: wave ID (' + wave.waveId + '), group (' + group.label + '), date (' + TODAY + '),\n' +
+          'round (' + uRound + '), reason: unit gate agent returned null (unknown test state).\n' +
+          'Instruction: "Re-run /wave ' + wave.waveId + ' to retry gate for this group."',
+          { label: 'defer:unit:' + group.label + ':gate-null:r' + uRound, phase: 'Unit Redteam' }
+        )
+        // RT-002: null gate blocks loop continuation — do not silently proceed.
+        return true
+      }
+      if (unitGate.exitCode !== 0) {
+        testsRed = true
+        log('Gate RED (' + unitGate.failCount + ' failing) — dispatching test-fix agent')
+        await agent(
+          'Fix the failing tests below. Read the test file and the source it covers.\n' +
+          'Failing tests:\n' + unitGate.failures.join('\n') + '\n\n' +
+          'Run `python -m pytest -q <failing-test-file>` to confirm GREEN before finishing.',
+          { label: 'fix:tests:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam' }
+        )
+        // RT-002: re-gate after test-fix to verify the fix succeeded before continuing the loop.
+        const unitReGate = await agent(
+          'Run: python -m pytest -q\n' +
+          'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
+          '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
+          { schema: GATE_SCHEMA, label: 'gate:unit:' + group.label + ':r' + uRound + ':recheck', phase: 'Unit Redteam' }
+        )
+        // RT-001: fail-closed — null re-gate is still unknown, treat as red.
+        if (!unitReGate || unitReGate.exitCode !== 0) {
+          const failCount = unitReGate ? unitReGate.failCount : '?'
+          log('Re-gate still RED (' + failCount + ' failing) after test-fix — deferring group ' + group.label)
+          await agent(
+            'Write workspace/todos/deferred/' + wave.waveId + '-group-' + group.label + '-tests-red-r' + uRound + '.md\n\n' +
+            'Include: wave ID (' + wave.waveId + '), group (' + group.label + '), date (' + TODAY + '),\n' +
+            'round (' + uRound + '), reason: test suite RED after fix attempt.\n' +
+            'Instruction: "Fix failing tests and re-run /wave ' + wave.waveId + '".',
+            { label: 'defer:unit:' + group.label + ':tests-red:r' + uRound, phase: 'Unit Redteam' }
+          )
+          return true
+        }
+      }
+      return false
+    })
+    if (exitLoop) break
+  }
+  return { label: group.label, rounds: uRound }
+}
+
+if (scopeOverlaps.length > 0) {
+  scopeOverlaps.forEach(function(o) {
+    log('WARNING: groups ' + o.a + ' and ' + o.b + ' share scope path(s): ' + o.shared.join(', '))
+  })
+  log('Scope overlap detected — planner disjointness invariant violated; running Unit Redteam ' +
+      'one group at a time for this wave (concurrent path skipped)')
+  for (const group of wave.groups) {
+    await runUnitRedteamForGroup(group)
+  }
+} else {
+  if (wave.groups.length > 1) {
+    log('Unit redteam — ' + wave.groups.length + ' groups concurrently (fix + gate serialised): ' +
+        wave.groups.map(function(g) { return g.label }).join(', '))
+  }
+  const unitResults = await parallel(wave.groups.map(function(group) {
+    return function() { return runUnitRedteamForGroup(group) }
+  }))
+  // parallel() resolves a thrown thunk to null instead of rejecting — surface it so a group
+  // whose round loop aborted mid-way is not mistaken for a clean exit.
+  unitResults.forEach(function(r, i) {
+    if (!r) log('WARNING: unit redteam for group ' + wave.groups[i].label + ' aborted with an error before a clean exit — not clean; re-run /wave ' + wave.waveId)
+  })
+}
+
+// ─── phase 4: phase redteam (whole wave, zero-tolerance) ─────────────────────
+phase('Phase Redteam')
+
+let pRound   = 0
+let prevSigs = new Set()
+
+// LRN-136: Phase Redteam reviews wave.allScope — the UNION of every group's scope. On a
+// single-group wave that union IS the one group's scope, which Unit Redteam has just
+// zero-tolerance-cleared with the identical 8-dimension checklist, the same debug
+// escalation (round 4+ / stall) and the same fix → gate → re-gate machinery. A second
+// pass over the same files adds no coverage — there is no second group, so no
+// cross-group interaction surface — while adding up to 8 more rounds of
+// redteam+debug+fix+gate dispatches, the dominant source of wall-clock growth on
+// one-group waves. Multi-group waves MUST still run it: groups are partitioned by
+// non-conflicting file scope (see Implement), so only a whole-wave pass can catch e.g.
+// group A changing a signature that group B's already-reviewed code calls. Skipping
+// leaves every downstream variable in the state a clean pass would (testsRed /
+// allHighFindings / protocolBlocked untouched; pRound stays 0, so the run summary reports
+// phaseRedteamRounds: 0, exhausted: false) — nothing after this block special-cases it.
+// Round budgets (5 unit / 8 phase) and the debug/gate rules inside the loop are unchanged.
+if (wave.groups.length === 1) {
+  log('Phase Redteam skipped — single-group wave (' + wave.groups[0].label + '): Unit Redteam already reviewed this exact scope ' +
+      'with the same 8-dimension checklist; no cross-group interaction surface exists.')
+} else {
+  while (true) {
+    pRound++
+
+    const rt = await agent(
+      'Adversarial review of the full wave ' + wave.waveId + '.\n\n' +
+      'Scope (all Creates: AND Modifies: paths across every group):\n' +
+      wave.allScope.join('\n') + '\n\n' +
+      'Also check transitive callers and importers. Re-expand scope every round.\n\n' +
+      'Run all 8 dimensions. SDK Security Invariants (SI-1…SI-7) fail closed.\n\n' +
+      'Return structured findings.',
+      { schema: RT_SCHEMA, label: 'rt:phase:r' + pRound, phase: 'Phase Redteam',
+        agentType: 'redteam' }
+    )
+
+    // RT-004: null redteam response is unknown state — must not be treated as clean (fail-open).
+    // WC-002: also enforce the budget cap on null rounds so persistent null responses
+    // cannot loop indefinitely — the budget check is mirrored here before the continue.
+    if (!rt) {
+      log('WARNING: phase redteam agent returned null at round ' + pRound + ' — treating as unknown (not clean)')
+      if (pRound >= 8) {
+        log('Null responses exceeded phase round budget — deferring')
+        await agent(
+          'Write workspace/todos/deferred/' + wave.waveId + '-phase-rt-null-budget.md\n\n' +
+          'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '),\n' +
+          'round (' + pRound + '), reason: phase redteam agent returned null on every round — unknown state.\n' +
+          'Instruction: "Re-run /wave ' + wave.waveId + ' to retry phase redteam."',
+          { label: 'defer:phase:rt-null-budget', phase: 'Phase Redteam' }
+        )
+        break
+      }
+      // RT-004: do NOT reset prevSigs — preserve the last real finding set so stall detection
+      // fires correctly on the next round if findings have not changed. Resetting prevSigs here
+      // would defeat stall detection: a null round followed by a round with the same findings as
+      // the prior real round would not trigger sigsEqual because prevSigs was cleared.
+      // continue to next round — do not fall through to fix/debug logic; prevSigs not reset so stall detection remains valid
+      continue
+    }
+
+    // WC-RT-004: cross-validate findingsCount against findings.length.
+    if (rt.findingsCount === 0 && rt.findings.length > 0) {
+      log('WARNING: findingsCount=0 but findings array has ' + rt.findings.length + ' item(s) — treating as non-clean')
+      rt.findingsCount = rt.findings.length
+    }
+
+    if (rt.findingsCount === 0) {
+      log('Phase redteam clean at round ' + pRound)
+      break
+    }
+
+    log('Phase redteam round ' + pRound + ': ' + rt.findingsCount + ' finding(s)')
+
+    const curSigs = sigs(rt.findings)
+    const pStalled = pRound > 1 && sigsEqual(curSigs, prevSigs)
+
+    // Budget-exit check before debug — avoids wasting a debug agent call that's immediately abandoned.
+    if (pRound >= 8) {
+      log('Phase round budget exhausted — continuing to Protocol Audit')
+      break
+    }
+
+    // RT-006: Debug fires unconditionally at round 4+ (pRound > 3), and at any round when stall
+    // is detected (same findings as previous round). Round 8 exits above.
+    if (pRound > 3 || pStalled) {
+      log((pStalled ? 'Stall detected — ' : 'Round 4+ — ') + 'escalating to debug agent')
       await agent(
-        'Fix-loop requires fresh-lens analysis' + (stalled ? ' (stalled: same findings across 2 rounds)' : ' (round ' + uRound + ')') + '.\n\n' +
-        'Prior findings:\n' + JSON.stringify(rt.findings, null, 2) + '\n\n' +
-        'Scope:\n' + group.scope.join('\n') + '\n\n' +
-        'Read code cold. Diagnose root cause. Fix at the root.',
-        { label: 'debug:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam', agentType: 'debug' }
+        'Phase fix-loop requires fresh-lens analysis' + (pStalled ? ' (stalled)' : ' (round ' + pRound + ')') + '.\n\n' +
+        'Findings:\n' + JSON.stringify(rt.findings, null, 2) + '\n\n' +
+        'Scope:\n' + wave.allScope.join('\n') + '\n\n' +
+        'Read cold; diagnose; fix at root.',
+        { label: 'debug:phase:r' + pRound, phase: 'Phase Redteam', agentType: 'debug' }
       )
     }
     prevSigs = curSigs
 
-    // Bucket by file and dispatch fix specialists in parallel.
-    // Codify accumulates in allHighFindings for the dedicated phase 6 LRN pass.
     const byFile = {}
     for (const f of rt.findings) {
       if (!byFile[f.file]) byFile[f.file] = []
@@ -689,11 +934,10 @@ for (const group of wave.groups) {
     const fixTasks = Object.keys(byFile).map(function(file) {
       return function() {
         return agent(
-          'Fix these findings in ' + file + ':\n\n' +
-          JSON.stringify(byFile[file], null, 2) + '\n\n' +
-          'Enforce SDK SI-1…SI-7 in your fix. Run pytest -q after.',
-          { label: 'fix:unit:' + group.label + ':r' + uRound + ':' + file.replace(/\//g, '-'),
-            phase: 'Unit Redteam', agentType: 'python-implementer' }
+          'Fix findings in ' + file + ':\n\n' + JSON.stringify(byFile[file], null, 2) + '\n\n' +
+          'Enforce SI-1…SI-7. Run pytest -q after.',
+          { label: 'fix:phase:r' + pRound + ':' + file.replace(/\//g, '-'),
+            phase: 'Phase Redteam', agentType: 'python-implementer' }
         )
       }
     })
@@ -706,215 +950,56 @@ for (const group of wave.groups) {
 
     // GH-19: consume gate result — red suite blocks loop continuation.
     // RT-001: fail-closed — null gate response is unknown state, treated as failure.
-    const unitGate = await agent(
+    const phaseGate = await agent(
       'Run: python -m pytest -q\n' +
       'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
       '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
-      { schema: GATE_SCHEMA, label: 'gate:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam' }
+      { schema: GATE_SCHEMA, label: 'gate:phase:r' + pRound, phase: 'Phase Redteam' }
     )
-    if (!unitGate) {
-      log('WARNING: unit gate agent returned null for group ' + group.label + ' round ' + uRound + ' — treating as gate failure (unknown state)')
+    if (!phaseGate) {
+      log('WARNING: phase gate agent returned null at round ' + pRound + ' — treating as gate failure (unknown state)')
       testsRed = true
       // WC-003: write a deferred note so the operator has a durable artifact indicating
-      // which group's gate failed, the round, and how to retry. Every other loop-exit
-      // path writes a deferred note; this path must too (RT-002: null gate blocks loop).
+      // which round's gate failed and how to retry. Mirrors the unit loop null-gate path.
       await agent(
-        'Write workspace/todos/deferred/' + wave.waveId + '-group-' + group.label + '-gate-null-r' + uRound + '.md\n\n' +
-        'Include: wave ID (' + wave.waveId + '), group (' + group.label + '), date (' + TODAY + '),\n' +
-        'round (' + uRound + '), reason: unit gate agent returned null (unknown test state).\n' +
-        'Instruction: "Re-run /wave ' + wave.waveId + ' to retry gate for this group."',
-        { label: 'defer:unit:' + group.label + ':gate-null:r' + uRound, phase: 'Unit Redteam' }
+        'Write workspace/todos/deferred/' + wave.waveId + '-phase-gate-null-r' + pRound + '.md\n\n' +
+        'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '),\n' +
+        'round (' + pRound + '), reason: phase gate agent returned null (unknown test state).\n' +
+        'Instruction: "Re-run /wave ' + wave.waveId + ' to retry phase gate."',
+        { label: 'defer:phase:gate-null:r' + pRound, phase: 'Phase Redteam' }
       )
       // RT-002: null gate blocks loop continuation — do not silently proceed.
       break
     }
-    if (unitGate.exitCode !== 0) {
+    if (phaseGate.exitCode !== 0) {
       testsRed = true
-      log('Gate RED (' + unitGate.failCount + ' failing) — dispatching test-fix agent')
+      log('Gate RED (' + phaseGate.failCount + ' failing) — dispatching test-fix agent')
       await agent(
         'Fix the failing tests below. Read the test file and the source it covers.\n' +
-        'Failing tests:\n' + unitGate.failures.join('\n') + '\n\n' +
+        'Failing tests:\n' + phaseGate.failures.join('\n') + '\n\n' +
         'Run `python -m pytest -q <failing-test-file>` to confirm GREEN before finishing.',
-        { label: 'fix:tests:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam' }
+        { label: 'fix:tests:phase:r' + pRound, phase: 'Phase Redteam' }
       )
       // RT-002: re-gate after test-fix to verify the fix succeeded before continuing the loop.
-      const unitReGate = await agent(
+      const phaseReGate = await agent(
         'Run: python -m pytest -q\n' +
         'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
         '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
-        { schema: GATE_SCHEMA, label: 'gate:unit:' + group.label + ':r' + uRound + ':recheck', phase: 'Unit Redteam' }
+        { schema: GATE_SCHEMA, label: 'gate:phase:r' + pRound + ':recheck', phase: 'Phase Redteam' }
       )
-      // RT-001: fail-closed — null re-gate is still unknown, treat as red.
-      if (!unitReGate || unitReGate.exitCode !== 0) {
-        const failCount = unitReGate ? unitReGate.failCount : '?'
-        log('Re-gate still RED (' + failCount + ' failing) after test-fix — deferring group ' + group.label)
+      // RT-001: fail-closed — null re-gate is still unknown, treat as red and stop the loop.
+      if (!phaseReGate || phaseReGate.exitCode !== 0) {
+        const failCount = phaseReGate ? phaseReGate.failCount : '?'
+        log('Re-gate still RED (' + failCount + ' failing) after test-fix — stopping phase redteam loop')
         await agent(
-          'Write workspace/todos/deferred/' + wave.waveId + '-group-' + group.label + '-tests-red-r' + uRound + '.md\n\n' +
-          'Include: wave ID (' + wave.waveId + '), group (' + group.label + '), date (' + TODAY + '),\n' +
-          'round (' + uRound + '), reason: test suite RED after fix attempt.\n' +
+          'Write workspace/todos/deferred/' + wave.waveId + '-phase-tests-red-r' + pRound + '.md\n\n' +
+          'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '),\n' +
+          'round (' + pRound + '), reason: test suite RED after fix attempt.\n' +
           'Instruction: "Fix failing tests and re-run /wave ' + wave.waveId + '".',
-          { label: 'defer:unit:' + group.label + ':tests-red:r' + uRound, phase: 'Unit Redteam' }
+          { label: 'defer:phase:tests-red:r' + pRound, phase: 'Phase Redteam' }
         )
         break
       }
-    }
-  }
-}
-
-// ─── phase 4: phase redteam (whole wave, zero-tolerance) ─────────────────────
-phase('Phase Redteam')
-
-let pRound   = 0
-let prevSigs = new Set()
-
-while (true) {
-  pRound++
-
-  const rt = await agent(
-    'Adversarial review of the full wave ' + wave.waveId + '.\n\n' +
-    'Scope (all Creates: AND Modifies: paths across every group):\n' +
-    wave.allScope.join('\n') + '\n\n' +
-    'Also check transitive callers and importers. Re-expand scope every round.\n\n' +
-    'Run all 8 dimensions. SDK Security Invariants (SI-1…SI-7) fail closed.\n\n' +
-    'Return structured findings.',
-    { schema: RT_SCHEMA, label: 'rt:phase:r' + pRound, phase: 'Phase Redteam',
-      agentType: 'redteam' }
-  )
-
-  // RT-004: null redteam response is unknown state — must not be treated as clean (fail-open).
-  // WC-002: also enforce the budget cap on null rounds so persistent null responses
-  // cannot loop indefinitely — the budget check is mirrored here before the continue.
-  if (!rt) {
-    log('WARNING: phase redteam agent returned null at round ' + pRound + ' — treating as unknown (not clean)')
-    if (pRound >= 8) {
-      log('Null responses exceeded phase round budget — deferring')
-      await agent(
-        'Write workspace/todos/deferred/' + wave.waveId + '-phase-rt-null-budget.md\n\n' +
-        'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '),\n' +
-        'round (' + pRound + '), reason: phase redteam agent returned null on every round — unknown state.\n' +
-        'Instruction: "Re-run /wave ' + wave.waveId + ' to retry phase redteam."',
-        { label: 'defer:phase:rt-null-budget', phase: 'Phase Redteam' }
-      )
-      break
-    }
-    // RT-004: do NOT reset prevSigs — preserve the last real finding set so stall detection
-    // fires correctly on the next round if findings have not changed. Resetting prevSigs here
-    // would defeat stall detection: a null round followed by a round with the same findings as
-    // the prior real round would not trigger sigsEqual because prevSigs was cleared.
-    // continue to next round — do not fall through to fix/debug logic; prevSigs not reset so stall detection remains valid
-    continue
-  }
-
-  // WC-RT-004: cross-validate findingsCount against findings.length.
-  if (rt.findingsCount === 0 && rt.findings.length > 0) {
-    log('WARNING: findingsCount=0 but findings array has ' + rt.findings.length + ' item(s) — treating as non-clean')
-    rt.findingsCount = rt.findings.length
-  }
-
-  if (rt.findingsCount === 0) {
-    log('Phase redteam clean at round ' + pRound)
-    break
-  }
-
-  log('Phase redteam round ' + pRound + ': ' + rt.findingsCount + ' finding(s)')
-
-  const curSigs = sigs(rt.findings)
-  const pStalled = pRound > 1 && sigsEqual(curSigs, prevSigs)
-
-  // Budget-exit check before debug — avoids wasting a debug agent call that's immediately abandoned.
-  if (pRound >= 8) {
-    log('Phase round budget exhausted — continuing to Protocol Audit')
-    break
-  }
-
-  // RT-006: Debug fires unconditionally at round 4+ (pRound > 3), and at any round when stall
-  // is detected (same findings as previous round). Round 8 exits above.
-  if (pRound > 3 || pStalled) {
-    log((pStalled ? 'Stall detected — ' : 'Round 4+ — ') + 'escalating to debug agent')
-    await agent(
-      'Phase fix-loop requires fresh-lens analysis' + (pStalled ? ' (stalled)' : ' (round ' + pRound + ')') + '.\n\n' +
-      'Findings:\n' + JSON.stringify(rt.findings, null, 2) + '\n\n' +
-      'Scope:\n' + wave.allScope.join('\n') + '\n\n' +
-      'Read cold; diagnose; fix at root.',
-      { label: 'debug:phase:r' + pRound, phase: 'Phase Redteam', agentType: 'debug' }
-    )
-  }
-  prevSigs = curSigs
-
-  const byFile = {}
-  for (const f of rt.findings) {
-    if (!byFile[f.file]) byFile[f.file] = []
-    byFile[f.file].push(f)
-  }
-
-  const fixTasks = Object.keys(byFile).map(function(file) {
-    return function() {
-      return agent(
-        'Fix findings in ' + file + ':\n\n' + JSON.stringify(byFile[file], null, 2) + '\n\n' +
-        'Enforce SI-1…SI-7. Run pytest -q after.',
-        { label: 'fix:phase:r' + pRound + ':' + file.replace(/\//g, '-'),
-          phase: 'Phase Redteam', agentType: 'python-implementer' }
-      )
-    }
-  })
-
-  const highFindings = rt.findings.filter(function(f) {
-    return (f.severity === 'critical' || f.severity === 'high') && f.codify
-  })
-  allHighFindings.push.apply(allHighFindings, highFindings)
-  await parallel(fixTasks)
-
-  // GH-19: consume gate result — red suite blocks loop continuation.
-  // RT-001: fail-closed — null gate response is unknown state, treated as failure.
-  const phaseGate = await agent(
-    'Run: python -m pytest -q\n' +
-    'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
-    '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
-    { schema: GATE_SCHEMA, label: 'gate:phase:r' + pRound, phase: 'Phase Redteam' }
-  )
-  if (!phaseGate) {
-    log('WARNING: phase gate agent returned null at round ' + pRound + ' — treating as gate failure (unknown state)')
-    testsRed = true
-    // WC-003: write a deferred note so the operator has a durable artifact indicating
-    // which round's gate failed and how to retry. Mirrors the unit loop null-gate path.
-    await agent(
-      'Write workspace/todos/deferred/' + wave.waveId + '-phase-gate-null-r' + pRound + '.md\n\n' +
-      'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '),\n' +
-      'round (' + pRound + '), reason: phase gate agent returned null (unknown test state).\n' +
-      'Instruction: "Re-run /wave ' + wave.waveId + ' to retry phase gate."',
-      { label: 'defer:phase:gate-null:r' + pRound, phase: 'Phase Redteam' }
-    )
-    // RT-002: null gate blocks loop continuation — do not silently proceed.
-    break
-  }
-  if (phaseGate.exitCode !== 0) {
-    testsRed = true
-    log('Gate RED (' + phaseGate.failCount + ' failing) — dispatching test-fix agent')
-    await agent(
-      'Fix the failing tests below. Read the test file and the source it covers.\n' +
-      'Failing tests:\n' + phaseGate.failures.join('\n') + '\n\n' +
-      'Run `python -m pytest -q <failing-test-file>` to confirm GREEN before finishing.',
-      { label: 'fix:tests:phase:r' + pRound, phase: 'Phase Redteam' }
-    )
-    // RT-002: re-gate after test-fix to verify the fix succeeded before continuing the loop.
-    const phaseReGate = await agent(
-      'Run: python -m pytest -q\n' +
-      'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
-      '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
-      { schema: GATE_SCHEMA, label: 'gate:phase:r' + pRound + ':recheck', phase: 'Phase Redteam' }
-    )
-    // RT-001: fail-closed — null re-gate is still unknown, treat as red and stop the loop.
-    if (!phaseReGate || phaseReGate.exitCode !== 0) {
-      const failCount = phaseReGate ? phaseReGate.failCount : '?'
-      log('Re-gate still RED (' + failCount + ' failing) after test-fix — stopping phase redteam loop')
-      await agent(
-        'Write workspace/todos/deferred/' + wave.waveId + '-phase-tests-red-r' + pRound + '.md\n\n' +
-        'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '),\n' +
-        'round (' + pRound + '), reason: test suite RED after fix attempt.\n' +
-        'Instruction: "Fix failing tests and re-run /wave ' + wave.waveId + '".',
-        { label: 'defer:phase:tests-red:r' + pRound, phase: 'Phase Redteam' }
-      )
-      break
     }
   }
 }
@@ -1298,31 +1383,55 @@ if (toCodeify.length > 0) {
 }
 
 if (toCodeify.length > 0) {
-  await parallel(toCodeify.map(function(f, i) {
+  // LRN writes are batched ~LRN_BATCH_SIZE findings per codify agent (one dispatch writes
+  // N files) instead of one agent per finding — each agent pays full spin-up to write one
+  // small file, so a wide per-finding fan-out is mostly overhead. Numbering is unchanged:
+  // every finding carries lrnBase + its ORIGINAL index in toCodeify, computed before
+  // batching, so an ID never depends on batch position. Batches still run concurrently.
+  const LRN_BATCH_SIZE  = 5
+  const lrnAssignments  = toCodeify.map(function(f, i) {
+    const lrnNum = lrnBase + i
+    return { lrnId: 'LRN-' + String(lrnNum).padStart(3, '0'), finding: f }
+  })
+  const lrnBatches = []
+  for (let start = 0; start < lrnAssignments.length; start += LRN_BATCH_SIZE) {
+    lrnBatches.push(lrnAssignments.slice(start, start + LRN_BATCH_SIZE))
+  }
+  log('Writing ' + lrnAssignments.length + ' LRN file(s) in ' + lrnBatches.length + ' batch(es) of up to ' + LRN_BATCH_SIZE)
+
+  await parallel(lrnBatches.map(function(batch) {
     return function() {
-      const lrnNum = lrnBase + i
-      const lrnId  = 'LRN-' + String(lrnNum).padStart(3, '0')
+      const ids = batch.map(function(a) { return a.lrnId })
+      const entries = batch.map(function(a, k) {
+        const f     = a.finding
+        const lrnId = a.lrnId
+        return '### Learning file ' + (k + 1) + ' of ' + batch.length + ' — ' + lrnId + '\n' +
+          'Assigned ID: ' + lrnId + '\n' +
+          'File path: workspace/learning/' + lrnId + '-<slug>.md\n' +
+          'Slug: 2-4 kebab-case words for the bug CLASS (not this instance).\n\n' +
+          'Finding:\n' + JSON.stringify(f, null, 2) + '\n\n' +
+          'Format (frontmatter mandatory):\n' +
+          '---\n' +
+          'id: ' + lrnId + '\n' +
+          'title: <short title>\n' +
+          'category: security | protocol | sdk | testing | ops\n' +
+          'severity: ' + f.severity + '\n' +
+          'source: ' + (f.file === 'protocol-surface' ? 'protocol-audit' : 'redteam') + '\n' +
+          'date: ' + TODAY + '\n' +
+          '---\n\n' +
+          '## What happened\n<2-3 sentences from the finding>\n\n' +
+          '## Root cause\n<1-2 sentences>\n\n' +
+          '## Check\n<specific grep or test to verify>\n\n' +
+          '## Prevention\n<actionable planner constraint>\n\n' +
+          'Keep the file under 1KB.'
+      }).join('\n\n')
       return agent(
-        'Write a learning file. Do NOT touch workspace/learning/README.md yet.\n\n' +
-        'Assigned ID: ' + lrnId + '\n' +
-        'File path: workspace/learning/' + lrnId + '-<slug>.md\n' +
-        'Slug: 2-4 kebab-case words for the bug CLASS (not this instance).\n\n' +
-        'Finding:\n' + JSON.stringify(f, null, 2) + '\n\n' +
-        'Format (frontmatter mandatory):\n' +
-        '---\n' +
-        'id: ' + lrnId + '\n' +
-        'title: <short title>\n' +
-        'category: security | protocol | sdk | testing | ops\n' +
-        'severity: ' + f.severity + '\n' +
-        'source: ' + (f.file === 'protocol-surface' ? 'protocol-audit' : 'redteam') + '\n' +
-        'date: ' + TODAY + '\n' +
-        '---\n\n' +
-        '## What happened\n<2-3 sentences from the finding>\n\n' +
-        '## Root cause\n<1-2 sentences>\n\n' +
-        '## Check\n<specific grep or test to verify>\n\n' +
-        '## Prevention\n<actionable planner constraint>\n\n' +
-        'Keep the file under 1KB.',
-        { label: 'codify:' + lrnId, phase: 'Codify', agentType: 'codify' }
+        'Write ' + batch.length + ' learning file(s) — one file per entry below, each with its own\n' +
+        'Write call, using exactly the Assigned ID and File path given for that entry.\n' +
+        'Do NOT touch workspace/learning/README.md yet.\n\n' +
+        entries,
+        { label: 'codify:' + ids[0] + (ids.length > 1 ? '..' + ids[ids.length - 1] : ''),
+          phase: 'Codify', agentType: 'codify' }
       )
     }
   }))

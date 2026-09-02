@@ -139,3 +139,5 @@ Entries ordered by LRN number.
 | LRN-133 | Reversing a decision must supersede its learning's Check in the same wave | [LRN-133](LRN-133-learning-check-reversal-reconciliation.md) |
 | LRN-134 | A2UI-over-A2A DataPart "messages" wrapper key satisfies A2A v0.3.0 but contradicts A2UI v0.9.1's own literal binding | [LRN-134](LRN-134-a2ui-a2a-datapart-messages-key-not-spec-mandated.md) |
 | LRN-135 | Portable a2ui-advisor oracle rewritten to teach this SDK's private `data.messages` deviation as the canonical A2UI-over-A2A rule, burying the spec's bare-array binding | [LRN-135](LRN-135-portable-oracle-encodes-deviation.md) |
+| LRN-136 | Phase Redteam duplicates Unit Redteam on single-group waves — skip when groups.length === 1 | [LRN-136](LRN-136-phase-redteam-single-group-duplicate-pass.md) |
+| LRN-137 | Unit Redteam reviewed groups one at a time despite planner-guaranteed disjoint scope — run concurrently with a gate mutex | [LRN-137](LRN-137-unit-redteam-groups-run-concurrently.md) |

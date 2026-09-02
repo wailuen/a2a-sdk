@@ -5,10 +5,10 @@ export const meta = {
     { title: 'Parse',          detail: 'Read wave file; extract groups, creates paths, groupDeps, LRN baseline' },
     { title: 'Todos Redteam',  detail: 'Redteam the wave plan: SI risk annotation, registry reuse (Reuses: C-NNN), new component candidate flagging' },
     { title: 'Implement',      detail: 'Tier-based parallel fan-out (groupDeps); scoped pytest per todo; no full-suite run until gate' },
-    { title: 'Unit Redteam',   detail: 'Per-group zero-tolerance fix loop (max 5 rounds; debug fires after >3 failed rounds and on stall)' },
-    { title: 'Phase Redteam',  detail: 'Full-wave zero-tolerance fix loop (max 8 rounds; debug fires after >3 failed rounds and on stall)' },
+    { title: 'Unit Redteam',   detail: 'Per-group zero-tolerance fix loop, all groups concurrently (max 5 rounds; debug fires after >3 failed rounds and on stall); each round\'s fix+gate step is mutex-serialized across groups so the full-suite gate never grades a neighbour mid-edit; falls back to sequential when any two group scopes overlap' },
+    { title: 'Phase Redteam',  detail: 'Full-wave zero-tolerance fix loop (max 8 rounds; debug fires after >3 failed rounds and on stall); skipped for single-group waves — allScope == the sole group.scope Unit Redteam just cleared' },
     { title: 'Protocol Audit', detail: 'a2a-advisor / mcp-advisor / ag-ui-advisor / a2ui-advisor in parallel (only for touched protocol surfaces) + seam check' },
-    { title: 'Codify',         detail: 'SDK issue scan → parallel LRN capture → README index → C-NNN registration' },
+    { title: 'Codify',         detail: 'SDK issue scan → batched LRN capture (~5 findings per codify agent, batches in parallel; LRN IDs fixed by finding index) → README index → C-NNN registration' },
     { title: 'Archive',        detail: 'Pre-archive pytest gate + commit-intent guard (GH-40/GH-84) → move to completed/ → update plan.md' },
   ],
 }
@@ -529,7 +529,47 @@ while (remainingGroups.length > 0) {
 // ─── phase 3: unit redteam ────────────────────────────────────────────────────
 phase('Unit Redteam')
 
-for (const group of wave.groups) {
+// Groups are planner-guaranteed disjoint in file scope — the Implement phase above already
+// fans independent groups out concurrently on that guarantee, and Unit Redteam runs every
+// group's review loop concurrently on the same trust model. The one shared resource is the
+// pytest gate: it runs the FULL suite and reads the whole repo, so if two groups' fix
+// batches landed at the same moment group B's gate could grade group A's half-edited file
+// and pin the failure on the wrong group (LRN-017: the gate must be the sole, unambiguous
+// authority on repo state). gateLock therefore serializes each round's mutate-and-verify
+// section (debug → fixTasks → gate → fix-tests) across groups. The read-only review call
+// stays OUTSIDE the lock so group B can review while group A is mid fix-and-verify; a
+// review that glimpses a neighbour's file mid-edit via transitive callers is self-
+// correcting (the stale finding is re-checked next round) and never taints a gate verdict.
+let gateLock = Promise.resolve()
+function withGateLock(fn) {
+  const run = gateLock.then(fn, fn)                    // run after the queue ahead, whatever its outcome
+  gateLock = run.then(function() {}, function() {})    // keep the chain alive even if fn throws
+  return run
+}
+
+// Two scope paths collide when equal, or when one is a directory prefix of the other —
+// the same three-way rule the archive-commit gate applies (exact / dir-prefix / parent).
+function scopePathsOverlap(a, b) {
+  if (a === b) return true
+  const aDir = a.charAt(a.length - 1) === '/' ? a : a + '/'
+  const bDir = b.charAt(b.length - 1) === '/' ? b : b + '/'
+  return b.indexOf(aDir) === 0 || a.indexOf(bDir) === 0
+}
+
+function findScopeOverlaps(groups) {
+  const overlaps = []
+  for (let i = 0; i < groups.length; i++) {
+    for (let j = i + 1; j < groups.length; j++) {
+      const shared = groups[i].scope.filter(function(p) {
+        return groups[j].scope.some(function(q) { return scopePathsOverlap(p, q) })
+      })
+      if (shared.length > 0) overlaps.push({ a: groups[i].label, b: groups[j].label, paths: shared })
+    }
+  }
+  return overlaps
+}
+
+async function runUnitRedteamForGroup(group) {
   log('Unit redteam — group ' + group.label)
   let uRound   = 0
   let prevSigs = new Set()
@@ -575,59 +615,89 @@ for (const group of wave.groups) {
       break
     }
 
-    if (uRound > 3 || stalled) {
-      log((stalled ? 'Stall detected — ' : 'Round 4+ — ') + 'escalating to fresh-lens analysis')
-      await agent(
-        'Fix-loop requires fresh-lens analysis' + (stalled ? ' (stalled)' : ' (round ' + uRound + ')') + '.\n\n' +
-        'Prior findings:\n' + JSON.stringify(rt.findings, null, 2) + '\n\n' +
-        'Scope:\n' + group.scope.join('\n') + '\n\n' +
-        'Read code cold. Diagnose root cause. Fix at the root.',
-        { label: 'debug:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam', agentType: 'debug' }
+    // Mutate-and-verify — serialized across groups via gateLock (see above). Everything
+    // that writes repo files or grades repo state lives inside this section.
+    await withGateLock(async function() {
+      if (uRound > 3 || stalled) {
+        log((stalled ? 'Stall detected — ' : 'Round 4+ — ') + 'escalating to fresh-lens analysis')
+        await agent(
+          'Fix-loop requires fresh-lens analysis' + (stalled ? ' (stalled)' : ' (round ' + uRound + ')') + '.\n\n' +
+          'Prior findings:\n' + JSON.stringify(rt.findings, null, 2) + '\n\n' +
+          'Scope:\n' + group.scope.join('\n') + '\n\n' +
+          'Read code cold. Diagnose root cause. Fix at the root.',
+          { label: 'debug:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam', agentType: 'debug' }
+        )
+      }
+      prevSigs = curSigs
+
+      const byFile = {}
+      for (const f of rt.findings) {
+        if (!byFile[f.file]) byFile[f.file] = []
+        byFile[f.file].push(f)
+      }
+
+      const fixTasks = Object.keys(byFile).map(function(file) {
+        return function() {
+          return agent(
+            'Fix these findings in ' + file + ':\n\n' +
+            JSON.stringify(byFile[file], null, 2) + '\n\n' +
+            'Run `.venv/bin/pytest -q tests/` (scoped to changed files) after fixing.',
+            { label: 'fix:unit:' + group.label + ':r' + uRound + ':' + file.replace(/\//g, '-'),
+              phase: 'Unit Redteam', agentType: 'python-implementer' }
+          )
+        }
+      })
+
+      const highFindings = rt.findings.filter(function(f) {
+        return (f.severity === 'critical' || f.severity === 'high') && f.codify
+      })
+      allHighFindings.push.apply(allHighFindings, highFindings)
+      await parallel(fixTasks)
+
+      const unitGate = await agent(
+        'Run: .venv/bin/pytest -q tests/\n' +
+        'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
+        '"test_file.py::test_name: reason" for each failing test). Return all fields.',
+        { schema: GATE_SCHEMA, label: 'gate:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam' }
       )
-    }
-    prevSigs = curSigs
-
-    const byFile = {}
-    for (const f of rt.findings) {
-      if (!byFile[f.file]) byFile[f.file] = []
-      byFile[f.file].push(f)
-    }
-
-    const fixTasks = Object.keys(byFile).map(function(file) {
-      return function() {
-        return agent(
-          'Fix these findings in ' + file + ':\n\n' +
-          JSON.stringify(byFile[file], null, 2) + '\n\n' +
-          'Run `.venv/bin/pytest -q tests/` (scoped to changed files) after fixing.',
-          { label: 'fix:unit:' + group.label + ':r' + uRound + ':' + file.replace(/\//g, '-'),
-            phase: 'Unit Redteam', agentType: 'python-implementer' }
+      if (unitGate && unitGate.exitCode !== 0) {
+        testsRed = true
+        log('Gate RED (' + unitGate.failCount + ' failing) — dispatching test-fix agent')
+        await agent(
+          'Fix the failing tests. Read the test file and the source it covers.\n' +
+          'Failing tests:\n' + unitGate.failures.join('\n') + '\n\n' +
+          'Run `.venv/bin/pytest -q <failing-test-file>` to confirm GREEN before finishing.',
+          { label: 'fix:tests:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam' }
         )
       }
     })
-
-    const highFindings = rt.findings.filter(function(f) {
-      return (f.severity === 'critical' || f.severity === 'high') && f.codify
-    })
-    allHighFindings.push.apply(allHighFindings, highFindings)
-    await parallel(fixTasks)
-
-    const unitGate = await agent(
-      'Run: .venv/bin/pytest -q tests/\n' +
-      'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
-      '"test_file.py::test_name: reason" for each failing test). Return all fields.',
-      { schema: GATE_SCHEMA, label: 'gate:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam' }
-    )
-    if (unitGate && unitGate.exitCode !== 0) {
-      testsRed = true
-      log('Gate RED (' + unitGate.failCount + ' failing) — dispatching test-fix agent')
-      await agent(
-        'Fix the failing tests. Read the test file and the source it covers.\n' +
-        'Failing tests:\n' + unitGate.failures.join('\n') + '\n\n' +
-        'Run `.venv/bin/pytest -q <failing-test-file>` to confirm GREEN before finishing.',
-        { label: 'fix:tests:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam' }
-      )
-    }
   }
+
+  return { label: group.label, rounds: uRound }
+}
+
+function makeUnitRedteamThunk(group) {
+  return function() { return runUnitRedteamForGroup(group) }
+}
+
+const scopeOverlaps = findScopeOverlaps(wave.groups)
+if (scopeOverlaps.length > 0) {
+  // The disjointness invariant the parallel path depends on does not hold for this wave —
+  // run the groups one at a time (gateLock is then always free; behaviour is the old loop).
+  log('WARNING: group scopes overlap — running Unit Redteam sequentially for this wave:')
+  scopeOverlaps.forEach(function(o) { log('  ' + o.a + ' ∩ ' + o.b + ': ' + o.paths.join(', ')) })
+  for (const group of wave.groups) {
+    await runUnitRedteamForGroup(group)
+  }
+} else {
+  if (wave.groups.length > 1) {
+    log('Unit redteam — ' + wave.groups.length + ' groups in parallel (fix+gate serialized): ' +
+        wave.groups.map(function(g) { return g.label }).join(', '))
+  }
+  const unitResults = await parallel(wave.groups.map(makeUnitRedteamThunk))
+  unitResults.forEach(function(r, i) {
+    if (!r) log('WARNING: Unit redteam for group ' + wave.groups[i].label + ' aborted on an agent error — its remaining rounds did not run')
+  })
 }
 
 // ─── phase 4: phase redteam ───────────────────────────────────────────────────
@@ -641,85 +711,97 @@ if (!wave.allScope || wave.allScope.length === 0) {
 let pRound   = 0
 let prevSigs = new Set()
 
-while (true) {
-  pRound++
+// LRN-136: Phase Redteam reviews wave.allScope — the union of every group's scope. On a
+// single-group wave that is exactly the one group's scope Unit Redteam just cleared with
+// the same review dimensions, debug escalation, and fix/gate machinery, so a second pass
+// adds no coverage (no cross-group surface exists) while adding up to 8 more rounds of
+// dispatches. Multi-group waves MUST still run it — only a whole-wave pass sees cross-group
+// integration (group A changes a signature group B's already-reviewed code calls). pRound
+// stays 0; testsRed / allHighFindings are untouched — nothing downstream special-cases it.
+if (wave.groups.length === 1) {
+  log('Phase Redteam skipped — single-group wave (' + wave.groups[0].label + '): Unit Redteam already reviewed this exact scope ' +
+      'with the same review dimensions; no cross-group interaction surface exists.')
+} else {
+  while (true) {
+    pRound++
 
-  const rt = await agent(
-    'Adversarial review of the full wave ' + wave.waveId + ' in the a2a-sdk repo.\n\n' +
-    'Scope (all Creates: AND Modifies: paths):\n' + wave.allScope.join('\n') + '\n\n' +
-    'Also check transitive callers and importers. Re-expand scope every round.\n\n' +
-    'Review dimensions: protocol spec conformance, type correctness, test coverage,\n' +
-    'public API stability, error handling, code quality, backward compatibility.\n' +
-    'Dimension 5: no partial implementations, stubs, TODOs, or placeholder returns —\n' +
-    'every AC in the todo body must be satisfied in the landed code.\n\n' +
-    'Return structured findings.',
-    { schema: RT_SCHEMA, label: 'rt:phase:r' + pRound, phase: 'Phase Redteam', agentType: 'redteam' }
-  )
-
-  if (!rt || rt.findingsCount === 0) {
-    log('Phase redteam clean at round ' + pRound)
-    break
-  }
-
-  log('Phase redteam round ' + pRound + ': ' + rt.findingsCount + ' finding(s)')
-
-  const curSigs = sigs(rt.findings)
-  const pStalled = pRound > 1 && sigsEqual(curSigs, prevSigs)
-
-  if (pRound >= 8) {
-    log('Phase round budget exhausted — continuing to Protocol Audit')
-    break
-  }
-
-  if (pRound > 3 || pStalled) {
-    log((pStalled ? 'Stall detected — ' : 'Round 4+ — ') + 'escalating to fresh-lens analysis')
-    await agent(
-      'Phase fix-loop requires fresh-lens analysis' + (pStalled ? ' (stalled)' : ' (round ' + pRound + ')') + '.\n\n' +
-      'Findings:\n' + JSON.stringify(rt.findings, null, 2) + '\n\n' +
-      'Scope:\n' + wave.allScope.join('\n') + '\n\n' +
-      'Read cold; diagnose; fix at root.',
-      { label: 'debug:phase:r' + pRound, phase: 'Phase Redteam', agentType: 'debug' }
+    const rt = await agent(
+      'Adversarial review of the full wave ' + wave.waveId + ' in the a2a-sdk repo.\n\n' +
+      'Scope (all Creates: AND Modifies: paths):\n' + wave.allScope.join('\n') + '\n\n' +
+      'Also check transitive callers and importers. Re-expand scope every round.\n\n' +
+      'Review dimensions: protocol spec conformance, type correctness, test coverage,\n' +
+      'public API stability, error handling, code quality, backward compatibility.\n' +
+      'Dimension 5: no partial implementations, stubs, TODOs, or placeholder returns —\n' +
+      'every AC in the todo body must be satisfied in the landed code.\n\n' +
+      'Return structured findings.',
+      { schema: RT_SCHEMA, label: 'rt:phase:r' + pRound, phase: 'Phase Redteam', agentType: 'redteam' }
     )
-  }
-  prevSigs = curSigs
 
-  const byFile = {}
-  for (const f of rt.findings) {
-    if (!byFile[f.file]) byFile[f.file] = []
-    byFile[f.file].push(f)
-  }
+    if (!rt || rt.findingsCount === 0) {
+      log('Phase redteam clean at round ' + pRound)
+      break
+    }
 
-  const fixTasks = Object.keys(byFile).map(function(file) {
-    return function() {
-      return agent(
-        'Fix findings in ' + file + ':\n\n' + JSON.stringify(byFile[file], null, 2) + '\n\n' +
-        'Run `.venv/bin/pytest -q tests/` after fixing.',
-        { label: 'fix:phase:r' + pRound + ':' + file.replace(/\//g, '-'), phase: 'Phase Redteam',
-          agentType: 'python-implementer' }
+    log('Phase redteam round ' + pRound + ': ' + rt.findingsCount + ' finding(s)')
+
+    const curSigs = sigs(rt.findings)
+    const pStalled = pRound > 1 && sigsEqual(curSigs, prevSigs)
+
+    if (pRound >= 8) {
+      log('Phase round budget exhausted — continuing to Protocol Audit')
+      break
+    }
+
+    if (pRound > 3 || pStalled) {
+      log((pStalled ? 'Stall detected — ' : 'Round 4+ — ') + 'escalating to fresh-lens analysis')
+      await agent(
+        'Phase fix-loop requires fresh-lens analysis' + (pStalled ? ' (stalled)' : ' (round ' + pRound + ')') + '.\n\n' +
+        'Findings:\n' + JSON.stringify(rt.findings, null, 2) + '\n\n' +
+        'Scope:\n' + wave.allScope.join('\n') + '\n\n' +
+        'Read cold; diagnose; fix at root.',
+        { label: 'debug:phase:r' + pRound, phase: 'Phase Redteam', agentType: 'debug' }
       )
     }
-  })
+    prevSigs = curSigs
 
-  const highFindings = rt.findings.filter(function(f) {
-    return (f.severity === 'critical' || f.severity === 'high') && f.codify
-  })
-  allHighFindings.push.apply(allHighFindings, highFindings)
-  await parallel(fixTasks)
+    const byFile = {}
+    for (const f of rt.findings) {
+      if (!byFile[f.file]) byFile[f.file] = []
+      byFile[f.file].push(f)
+    }
 
-  const phaseGate = await agent(
-    'Run: .venv/bin/pytest -q tests/\n' +
-    'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures. Return all fields.',
-    { schema: GATE_SCHEMA, label: 'gate:phase:r' + pRound, phase: 'Phase Redteam' }
-  )
-  if (phaseGate && phaseGate.exitCode !== 0) {
-    testsRed = true
-    log('Gate RED (' + phaseGate.failCount + ' failing) — dispatching test-fix agent')
-    await agent(
-      'Fix the failing tests.\n' +
-      'Failing tests:\n' + phaseGate.failures.join('\n') + '\n\n' +
-      'Run `.venv/bin/pytest -q <failing-test-file>` to confirm GREEN.',
-      { label: 'fix:tests:phase:r' + pRound, phase: 'Phase Redteam' }
+    const fixTasks = Object.keys(byFile).map(function(file) {
+      return function() {
+        return agent(
+          'Fix findings in ' + file + ':\n\n' + JSON.stringify(byFile[file], null, 2) + '\n\n' +
+          'Run `.venv/bin/pytest -q tests/` after fixing.',
+          { label: 'fix:phase:r' + pRound + ':' + file.replace(/\//g, '-'), phase: 'Phase Redteam',
+            agentType: 'python-implementer' }
+        )
+      }
+    })
+
+    const highFindings = rt.findings.filter(function(f) {
+      return (f.severity === 'critical' || f.severity === 'high') && f.codify
+    })
+    allHighFindings.push.apply(allHighFindings, highFindings)
+    await parallel(fixTasks)
+
+    const phaseGate = await agent(
+      'Run: .venv/bin/pytest -q tests/\n' +
+      'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures. Return all fields.',
+      { schema: GATE_SCHEMA, label: 'gate:phase:r' + pRound, phase: 'Phase Redteam' }
     )
+    if (phaseGate && phaseGate.exitCode !== 0) {
+      testsRed = true
+      log('Gate RED (' + phaseGate.failCount + ' failing) — dispatching test-fix agent')
+      await agent(
+        'Fix the failing tests.\n' +
+        'Failing tests:\n' + phaseGate.failures.join('\n') + '\n\n' +
+        'Run `.venv/bin/pytest -q <failing-test-file>` to confirm GREEN.',
+        { label: 'fix:tests:phase:r' + pRound, phase: 'Phase Redteam' }
+      )
+    }
   }
 }
 
@@ -1002,31 +1084,51 @@ if (toCodeify.length > 0) {
     log('SDK issue scan: no SDK-level findings in this wave')
   }
 
-  await parallel(toCodeify.map(function(f, i) {
+  // LRN writes are batched: ~LRN_BATCH_SIZE findings per codify agent, each agent writing
+  // N files in one dispatch (N Write calls) instead of one agent per finding. Every finding
+  // keeps the ID it would have had one-per-agent — lrnBase + its index in the deduped
+  // toCodeify list — precomputed here so numbering never shifts with batch position.
+  const LRN_BATCH_SIZE = 5
+  const lrnAssignments = toCodeify.map(function(f, i) {
+    const lrnNum = lrnBase + i
+    return { lrnId: 'LRN-' + String(lrnNum).padStart(3, '0'), finding: f }
+  })
+  const lrnBatches = []
+  for (let b = 0; b < lrnAssignments.length; b += LRN_BATCH_SIZE) {
+    lrnBatches.push(lrnAssignments.slice(b, b + LRN_BATCH_SIZE))
+  }
+
+  await parallel(lrnBatches.map(function(batch) {
     return function() {
-      const lrnNum = lrnBase + i
-      const lrnId  = 'LRN-' + String(lrnNum).padStart(3, '0')
+      const firstId = batch[0].lrnId
+      const lastId  = batch[batch.length - 1].lrnId
       return agent(
-        'Write a learning file. Do NOT touch workspace/learning/README.md yet.\n\n' +
-        'Assigned ID: ' + lrnId + '\n' +
-        'File path: workspace/learning/' + lrnId + '-<slug>.md\n' +
+        'Write ' + batch.length + ' learning file(s) — one file per assignment below, each via its own\n' +
+        'Write call. Do NOT touch workspace/learning/README.md yet.\n\n' +
+        batch.map(function(a) {
+          return '### Assignment ' + a.lrnId + '\n' +
+                 'Assigned ID: ' + a.lrnId + '\n' +
+                 'File path: workspace/learning/' + a.lrnId + '-<slug>.md\n' +
+                 'severity: ' + a.finding.severity + '\n' +
+                 'source: ' + (a.finding.file === 'protocol-surface' ? 'protocol-audit' : 'redteam') + '\n' +
+                 'Finding:\n' + JSON.stringify(a.finding, null, 2)
+        }).join('\n\n') + '\n\n' +
         'Slug: 2-4 kebab-case words for the bug CLASS (not this instance).\n\n' +
-        'Finding:\n' + JSON.stringify(f, null, 2) + '\n\n' +
-        'Format (frontmatter mandatory):\n' +
+        'Format for EVERY file (frontmatter mandatory; use that assignment\'s ID, severity, source):\n' +
         '---\n' +
-        'id: ' + lrnId + '\n' +
+        'id: <assigned ID>\n' +
         'title: <short title>\n' +
         'category: security | protocol | sdk | testing | ops\n' +
-        'severity: ' + f.severity + '\n' +
-        'source: ' + (f.file === 'protocol-surface' ? 'protocol-audit' : 'redteam') + '\n' +
+        'severity: <assignment severity>\n' +
+        'source: <assignment source>\n' +
         'date: ' + TODAY + '\n' +
         '---\n\n' +
         '## What happened\n<2-3 sentences>\n\n' +
         '## Root cause\n<1-2 sentences>\n\n' +
         '## Check\n<specific grep or test to verify>\n\n' +
         '## Prevention\n<actionable planner constraint>\n\n' +
-        'Keep under 1KB.',
-        { label: 'codify:' + lrnId, phase: 'Codify', agentType: 'codify' }
+        'Keep each file under 1KB. Use each assigned ID exactly as given — never renumber.',
+        { label: 'codify:' + firstId + (batch.length > 1 ? '..' + lastId : ''), phase: 'Codify', agentType: 'codify' }
       )
     }
   }))
