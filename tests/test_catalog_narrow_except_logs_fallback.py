@@ -1,19 +1,25 @@
-"""catalog.py:50 -- ``_own_annotation_names`` (and ``_field_summary``) must not
-swallow every exception with a bare ``except Exception``.
+"""catalog.py:50 -- ``_own_annotation_names`` must not swallow every
+exception with a bare ``except Exception``.
 
-Before this fix, an unexpected failure inside ``inspect.get_annotations`` (or
-inside the field-enumeration loop in ``_field_summary``) was caught by a
-catch-all and silently downgraded to a fallback value -- an empty
-``frozenset`` / a bare ``"{...}"`` summary -- with no signal that anything had
-gone wrong. That flips ``_field_summary``'s ``declared_here`` test to False
-and silently drops a domain card's own redeclared metadata from the
-LLM-facing compact-schema line.
+Before this fix, an unexpected failure inside ``inspect.get_annotations`` was
+caught by a catch-all and silently downgraded to a fallback value -- an empty
+``frozenset`` -- with no signal that anything had gone wrong. That flips
+``_field_summary``'s ``declared_here`` test to False and silently drops a
+domain card's own redeclared metadata from the LLM-facing compact-schema
+line.
 
-The fix narrows the except clauses to the errors these helpers can actually
-raise (``NameError`` / ``TypeError`` / ``AttributeError``) and logs a WARNING
-whenever the fallback path is taken, so the degraded summary is observable
-instead of silently wrong. An exception outside that narrowed set must
-propagate rather than be swallowed.
+The fix narrows ``_own_annotation_names``'s except clause to the errors it
+can actually raise (``NameError`` / ``TypeError`` / ``AttributeError``) and
+logs a WARNING whenever the fallback path is taken, so the degraded summary
+is observable instead of silently wrong. An exception outside that narrowed
+set must propagate rather than be swallowed.
+
+``_field_summary`` itself keeps a broad ``except Exception`` (RT-010): it
+produces only a best-effort, cosmetic teaching string for the system prompt
+and is invoked once during app startup (``get_system_prompt_section()`` from
+app build) -- an exotic failure while walking a domain card's annotations
+must degrade to the ``"{...}"`` fallback rather than ever propagate and fail
+app boot. Its handler still logs a WARNING so the degradation is observable.
 """
 
 from __future__ import annotations
@@ -108,13 +114,22 @@ def test_field_summary_logs_warning_on_narrowed_exception(
     ), "fallback path must log a WARNING so the degraded summary is observable"
 
 
-def test_field_summary_does_not_swallow_unrelated_exceptions(
-    monkeypatch: pytest.MonkeyPatch,
+def test_field_summary_never_fails_app_boot_on_unrelated_exceptions(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """RT-010: a cosmetic summary must never be able to fail app boot --
+    unlike ``_own_annotation_names``, ``_field_summary`` degrades to the
+    ``"{...}"`` fallback for ANY exception, not just the narrowed set."""
+
     def _boom(ann: object, required: bool) -> tuple[str, bool]:
         raise RuntimeError("not one of the narrowed types")
 
     monkeypatch.setattr(catalog, "_annotation_str", _boom)
 
-    with pytest.raises(RuntimeError):
-        _field_summary(_CardWithBrokenField)
+    with caplog.at_level(logging.WARNING, logger=catalog.__name__):
+        result = _field_summary(_CardWithBrokenField)
+
+    assert result == "{...}"
+    assert any(
+        record.levelno == logging.WARNING for record in caplog.records
+    ), "fallback path must log a WARNING so the degraded summary is observable"

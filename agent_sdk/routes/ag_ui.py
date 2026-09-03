@@ -3,8 +3,11 @@
 The task worker publishes ``StreamItem``s carrying raw loop events; this
 route owns a per-request state machine that maps them to AG-UI wire frames
 (camelCase JSON, ``data:`` lines only). Transport-level rejections —
-disallowed Origin (403), wrong Content-Type (415), oversized body (413) —
-are returned/raised before the stream is ever constructed. Once the stream
+disallowed Origin (403), wrong Content-Type (415), oversized body (413),
+stream admission at capacity (429 + ``Retry-After``, RT-002: this route
+holds an indefinite ``text/event-stream`` and is admitted against the same
+shared budget as the A2A streams, ``routes/a2a.py``'s ``_admit``) — are
+returned/raised before the stream is ever constructed. Once the stream
 begins, each request's stream is a self-contained run: ``RUN_STARTED`` is
 always the first frame, ``STATE_SNAPSHOT`` second, exactly one terminal
 ``RUN_FINISHED`` | ``RUN_ERROR``; every failure after ``RUN_STARTED`` is
@@ -27,6 +30,7 @@ from typing import Any, AsyncIterator, Sequence
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 from ..a2ui.translator import A2uiCapabilities, translate
 from ..agent.runner import new_task, run_task_worker, split_a2ui_delivery_validated
@@ -38,6 +42,14 @@ from ..common.sse import HEARTBEAT, SSE_HEADERS, sse_data
 from ..credentials import forwarding
 from ..models.content_types import ContentModel
 from ..tasks.store import StreamTerminated, TaskRecord
+# RT-002: POST /ag-ui/run is the THIRD authenticated, indefinitely-held
+# text/event-stream on the same single-process connection pool, and it
+# shares the task store, the worker pool and the token budget with the A2A
+# streams. It is admitted against the SAME `_a2a_streams()` budget for the
+# identical reason routes/mcp.py's comment gives for sharing one budget
+# across GET /mcp and GET /mcp/sse: capping one transport is trivially
+# bypassed by calling the other.
+from .a2a import _admit as _admit_stream
 from ..agent.events import (
     ArtifactEvent,
     DoneEvent,
@@ -411,6 +423,60 @@ def _capabilities(body: dict[str, Any]) -> A2uiCapabilities:
     return A2uiCapabilities.gated(True, forwarded["a2uiClientCapabilities"])
 
 
+def _parse_body(raw: bytes) -> dict[str, Any]:
+    try:
+        body = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _resume_interrupt_id(body: dict[str, Any]) -> str:
+    """The interrupt id this run would resume, or ``""`` when it is a fresh
+    run. Shared by the pre-admission task-id lookup and ``_run()`` itself so
+    the two can never disagree about which entry is being resumed."""
+    resume_raw = body.get("resume")
+    if not isinstance(resume_raw, list) or not resume_raw:
+        return ""
+    entry = resume_raw[0]
+    if not isinstance(entry, dict):
+        return ""
+    return str(entry.get("interruptId") or entry.get("interrupt_id") or "")
+
+
+def _resume_target_task_id(
+    request: Request, body: dict[str, Any], identity: Identity
+) -> str | None:
+    """Task id this run will subscribe to when it is a resume, else ``None``.
+
+    RT-001 (round 6): the shared budget's per-task subscriber cap is documented
+    (DESIGN.md §5.5, docs/protocols.md) as covering ``/ag-ui/run``, and this
+    route's resume branch is the one AG-UI path that subscribes to an ALREADY
+    EXISTING task — the growth of ``record.subscriptions`` that the cap exists
+    to bound, since ``store.publish`` walks that list for every frame. Resolving
+    the id here, before ``_admit``, is what lets the cap be enforced as a real
+    ``429`` alongside the route's other transport-level rejections.
+
+    It cannot be checked later, inside ``_run()``: everything there is past
+    ``RUN_STARTED``, where §5.3 forbids an HTTP error, so an over-cap resume
+    could only be reported as a ``RUN_ERROR`` frame on a run that had already
+    been announced. And it does not weaken RT-001 (round 4)'s ordering rule —
+    an identity-bound interrupt lookup creates no task and sheds no other
+    caller's stream, so a request rejected after it is still a pure no-op on
+    the capacity-bounded store.
+
+    ``None`` covers both "fresh run" (the task is minted inside ``_run()``, so a
+    per-task count would be vacuously 0 anyway, exactly as on A2A's no-taskId
+    ``message:stream`` path) and "no such interrupt" (``_run()`` answers that
+    with ``RUN_ERROR``, which is the accurate outcome — not a capacity 429).
+    """
+    interrupt_id = _resume_interrupt_id(body)
+    if not interrupt_id:
+        return None
+    record = request.app.state.task_store.find_interrupt(interrupt_id, identity)
+    return record.task.id if record is not None else None
+
+
 def _start_worker(
     request: Request,
     record: TaskRecord,
@@ -449,12 +515,29 @@ async def ag_ui_run(
     raw = await request.body()
     if len(raw) > _MAX_BODY_BYTES:
         return Response(status_code=413, content=b"request body too large")
-    try:
-        body = json.loads(raw)
-        if not isinstance(body, dict):
-            body = {}
-    except (json.JSONDecodeError, ValueError):
-        body = {}
+
+    # Parsed BEFORE admission (RT-001, round 6) purely so the resume branch's
+    # target task id is known to `_admit`. Parsing allocates nothing durable,
+    # so this does not move any state mutation ahead of the load-shed check.
+    body = _parse_body(raw)
+
+    # RT-002: admit against the shared A2A stream budget BEFORE any durable
+    # state mutation (store.create() happens inside stream() below) and
+    # before the StreamingResponse — the same ordering rule RT-001 forced on
+    # message:stream. This sits with the other transport-level rejections
+    # (403/415/413) and therefore precedes RUN_STARTED, so the §5.3 rule
+    # "every failure AFTER RUN_STARTED is a RUN_ERROR frame, not an HTTP
+    # error" is preserved: a shed request never starts a run at all.
+    #
+    # RT-001 (round 6): the task id is the resume target when this is a resume
+    # run — that branch subscribes to an EXISTING task, so it is the AG-UI path
+    # the shared budget's per-task subscriber cap has to cover (see
+    # `_resume_target_task_id`). It stays None for a fresh run, whose task is
+    # minted inside `_run()`; the global and per-identity caps, which bound
+    # process load and cross-tenant fairness, apply on both branches.
+    slot = await _admit_stream(
+        request, identity, _resume_target_task_id(request, body, identity)
+    )
 
     # threadId/runId echo back on every frame; synthesize when absent so we
     # never emit empty correlation ids (§5.3).
@@ -465,11 +548,12 @@ async def ag_ui_run(
     store = request.app.state.task_store
     mapper = _RunMapper(thread_id, run_id, _capabilities(body))
 
-    async def stream() -> AsyncIterator[bytes]:
+    async def _run() -> AsyncIterator[bytes]:
         # Transport-level rejections (Origin 403, Content-Type 415, body
-        # size 413) already happened above, before this generator was ever
-        # constructed. From here on, RUN_STARTED is ALWAYS first; every
-        # failure after it becomes a RUN_ERROR frame, not an HTTP error (§5.3)
+        # size 413, admission 429) already happened above, before this
+        # generator was ever constructed. From here on, RUN_STARTED is ALWAYS
+        # first; every failure after it becomes a RUN_ERROR frame, not an
+        # HTTP error (§5.3)
         yield sse_data({"type": "RUN_STARTED", "threadId": thread_id, "runId": run_id})
         yield sse_data({"type": "STATE_SNAPSHOT", "snapshot": body.get("state") or {}})
 
@@ -490,13 +574,20 @@ async def ag_ui_run(
                     return
                 entry = resume[0]
                 # accept both casings; emit camelCase (interruptId) ourselves
-                interrupt_id = str(entry.get("interruptId") or entry.get("interrupt_id") or "")
+                interrupt_id = _resume_interrupt_id(body)
                 record = store.find_interrupt(interrupt_id, identity)
                 if record is None:
                     for frame in mapper.run_error("unknown or expired interrupt"):
                         yield sse_data(frame)
                     return
-                sub = store.subscribe(record.task.id)  # subscribe BEFORE resuming
+                # RT-001 (round 6): subscribe THROUGH the admission slot, never
+                # against the store directly. That is what registers this task
+                # id on the slot — so the shared budget's per-task cap counts
+                # AG-UI subscribers instead of under-counting them for the A2A
+                # routes that share it — and what makes `slot.release` this
+                # subscription's teardown on all three release layers, not just
+                # the inner generator's `finally` below.
+                sub = slot.subscribe(record.task.id)  # subscribe BEFORE resuming
                 delivered = store.deliver_resume(
                     record.task.id,
                     {"status": entry.get("status"), "payload": entry.get("payload")},
@@ -514,7 +605,10 @@ async def ag_ui_run(
                 task = new_task(thread_id)
                 record = store.create(task, identity)
                 record.messages.extend(folded)
-                sub = store.subscribe(task.id)
+                # Through the slot, for the same reason as the resume branch:
+                # the freshly minted id is what the per-task cap and
+                # `slot.release`'s unsubscribe both have to see (RT-001, r6).
+                sub = slot.subscribe(task.id)
                 # RT-001: context_reusable_messages() scans EVERY terminal
                 # task in this thread, not only the most recent one —
                 # AG-UI's TaskRecord.messages never inherits a prior run's
@@ -564,4 +658,22 @@ async def ag_ui_run(
             for frame in mapper.run_error("stream ended unexpectedly"):
                 yield sse_data(frame)
 
-    return StreamingResponse(stream(), media_type="text/event-stream", headers=SSE_HEADERS)
+    async def stream() -> AsyncIterator[bytes]:
+        # RT-002: release the admission slot however the run ends. Layered
+        # exactly like the A2A path: this `finally` is the fast path, the
+        # BackgroundTask below covers a request task cancelled at Starlette's
+        # send(http.response.start) checkpoint before the generator body ever
+        # starts, and `_prune_a2a_streams` is the liveness backstop.
+        # `slot.release` is idempotent, so the layers overlap harmlessly.
+        try:
+            async for chunk in _run():
+                yield chunk
+        finally:
+            await slot.release()
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+        background=BackgroundTask(slot.release),
+    )

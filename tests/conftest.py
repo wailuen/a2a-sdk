@@ -75,6 +75,46 @@ async def client(app) -> AsyncIterator[httpx.AsyncClient]:
             yield c
 
 
+@pytest.fixture(autouse=True)
+def _restore_sdk_log_propagation():
+    """Keep ``agent_sdk`` log records reaching pytest's ``caplog``, whatever
+    earlier tests did to the logger (debug round 6).
+
+    ``agent_sdk.observability.logging.configure_logging()`` ends with
+    ``logging.getLogger("agent_sdk").propagate = False`` — correct in
+    production (uvicorn's handlers are left alone and records are not
+    double-emitted), and irreversible for the rest of the process. Loggers are
+    process-global singletons, so the FIRST test in a session that builds an
+    app silently switches propagation off for every ``agent_sdk.*`` logger for
+    every test that follows.
+
+    ``caplog`` works by attaching a handler to the stdlib ROOT logger, so from
+    that point on it reads empty for any assertion against an ``agent_sdk.*``
+    logger. The failure mode is the nastiest kind: those tests pass when run
+    alone and fail only at full-suite scope, and the ones that "pass" are worse
+    than the ones that fail — an assertion of the form "no ERROR was logged"
+    becomes vacuously true and stops testing anything at all.
+
+    Forcing propagation back on per-test, and restoring whatever was there
+    afterwards, makes plain ``caplog`` deterministic for every test regardless
+    of ordering. The SDK's own JSON stderr handler stays attached and keeps
+    working; records simply reach the root logger as well, which is what a test
+    session wants. A test that deliberately manipulates propagation itself
+    (``test_a2ui_group_d.py``) still wins for its own duration — this runs
+    before the test body and restores after it.
+
+    ``sdk_caplog`` below remains the explicit, propagation-independent option
+    and is still the better choice for a test asserting on one specific logger.
+    """
+    sdk_root = logging.getLogger("agent_sdk")
+    previous = sdk_root.propagate
+    sdk_root.propagate = True
+    try:
+        yield
+    finally:
+        sdk_root.propagate = previous
+
+
 @pytest.fixture
 def sdk_caplog():
     """Factory fixture: capture log records directly from a named ``agent_sdk.*``

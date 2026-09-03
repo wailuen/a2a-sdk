@@ -4,6 +4,958 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [0.8.0] — 2026-09-02
+
+**RT-002 (redteam, high, versioning discipline): this release was drafted under a same-minor
+patch bump (`0.5.45`) even though two of the entries below are VOLUNTARY breaking changes to the
+stable core — the `metadata` base-class hoist and the `to_plain_text()`/`_body_text()` split are
+internal SDK redesigns, not required by any external protocol spec (A2A/AG-UI/A2UI/MCP). DESIGN.md
+§4.0's wire-shape conformance exemption only covers a break "driven by external protocol
+conformance (not a voluntary redesign)" and states plainly that "a voluntary breaking change to the
+stable core — not required by spec conformance — still requires a major bump; this exemption cannot
+be cited for those." The `FundPerformance.fund_name` removal below is exemption-eligible on its own
+(it brings the wire shape into conformance with the frozen A2UI Standard Profile v1 contract), but it
+ships in the same release as the two voluntary breaks, and a release's version number covers the
+whole release, not per-entry — so the release as a whole requires this project's major-bump
+convention (bumping the middle digit pre-1.0, per precedent elsewhere in this file, e.g. the 0.6.0
+alternative discussed under 0.5.44 below). Retitled from `[0.5.45]` to `[0.8.0]` for that reason.
+**Numbering note:** `0.6.0` and `0.7.0` were found already tagged in this repository's git history
+(pushed to `origin`, on a branch that diverged from local `main` right after `v0.5.44` — `main` here
+has never merged that lineage) — see the `w041` git-divergence finding surfaced alongside this fix.
+Reusing either number for this unrelated content would collide with real, differently-scoped
+releases, so this entry uses the next unused number, `0.8.0`, instead. The branch divergence itself
+is NOT resolved by this entry and needs separate, deliberate reconciliation before any tag is cut.
+
+### 🔴 Breaking changes
+- **`FundPerformance.fund_name` (wire alias `fundName`) removed** (`agent_sdk/models/content_types.py`) —
+  GH-149. `fund_name` was never part of the frozen A2UI Standard Profile v1 `FundPerformance`
+  contract (`.claude/agents/a2ui-advisor.md` / `harness/agents/a2ui-advisor.md`, 19-field table under
+  `urn:a2ui-profile:standard:v1`): it shared that catalog id with every other frozen type despite not
+  being one of its contracted fields, and the SDK has no gating/versioned-extension mechanism to mark
+  a field as an intentional per-agent addition to a frozen profile type. Removed rather than
+  retroactively frozen into the profile. `FundPerformance.to_plain_text()` no longer leads with the
+  fund name; the remaining bits (every other field the type declares — see RT-002 below) still
+  produce a non-empty summary on their own. The LLM-facing example payload and compact wire schema
+  (`agent_sdk/a2ui/catalog.py`, `_FEW_SHOT_EXAMPLES["FundPerformance"]` / `_COMPACT_SCHEMAS["FundPerformance"]`)
+  no longer mention `fundName`. **Migration:** any agent emitting `fundName` on `FundPerformance`
+  must drop it — the field is no longer declared on the model, so a `fundName` key in constructor
+  input is now silently ignored (pydantic's default `extra="ignore"`) rather than populating a field,
+  and it will never appear in `wire()` output going forward. **Fund identity has no dedicated
+  replacement field on `FundPerformance` — do not add one back.** An agent that needs to say *which*
+  fund a card describes must carry that identity through one of: (1) surrounding assistant text
+  (e.g. "Here's Fund III's performance:" ahead of the card), (2) the SDK-wide `metadata` envelope
+  every `ContentModel` inherits (e.g. `metadata={"fund": "Fund III"}`, distinct from the frozen
+  per-type fields — see the `metadata` docstring at the top of `content_types.py`), or (3) a
+  domain-specific card type registered under its own `catalog_id` via `register_content_type` (see
+  "Domain extension" in that same docstring) when fund identity belongs on the card itself. Absent
+  one of these, sibling `FundPerformance` cards in one response are indistinguishable: the console
+  card title is the fixed string `"Fund performance"` (`console/static/a2ui.js::renderFundPerformance`),
+  `get_system_prompt_section` (`agent_sdk/a2ui/catalog.py`) instructs the model to emit `pbId` only
+  when a tool result supplied one and never invent one, and `to_plain_text()` on a card without
+  `pbId` emits only metric bits with no identifying prefix. A multi-fund comparison response is
+  expected to use one of the three replacements above per card; N identically-titled cards with no
+  text-fallback way to tell them apart is a bug in the calling agent, not intended SDK behavior.
+- **`metadata: dict[str, Any] | None = None` moved onto `ContentModel` itself** (RT-003, RT-006
+  follow-up; `agent_sdk/models/content_types.py`) — previously redeclared on each of the 14
+  `ContentModel` subclasses, now declared once on the base class and inherited by every subclass,
+  including every third-party domain card type registered via `register_content_type`. This is a
+  public-surface change, not a no-op refactor, with three observable effects. (1) **Every external
+  `ContentModel` subclass silently gains a `metadata` field it never declared** — widening what that
+  type accepts on construction and emits in `wire()`, whether or not the owning agent wants a
+  `metadata` key on that card. (2) **`wire()` key order changed for all 14 profile types** — pydantic
+  orders base-class fields ahead of subclass fields in `model_fields`, so e.g.
+  `list(FundPerformance.model_fields)[:4]` is now `['metadata', 'pb_id', 'as_of_date', 'irr']` where
+  `metadata` previously sorted with the type's own fields; a consumer relying on wire key order (a
+  strict JSON diff, a positional parser) sees a different shape. (3) **An external subclass that
+  already assigns a plain, unannotated class attribute named `metadata`** now fails at
+  class-definition time (`PydanticUserError`: "Field 'metadata' defined on a base class was
+  overridden by a non-annotated attribute") — the same "adding to a public ABC breaks external
+  subclasses" class of break as `workspace/learning/LRN-113-public-abc-new-abstractmethod.md`. A
+  `@property` or plain method named `metadata` does NOT raise at class-definition time — pydantic
+  silently accepts the descriptor/function object itself as the field's new default, so an instance
+  that doesn't pass `metadata=` explicitly gets that raw `property`/`function` object back from
+  `.metadata` instead of `None`, and the break instead surfaces later, on the first `wire()` call
+  (`PydanticSerializationError: Unable to serialize unknown type: <class 'property'>`). **Migration:**
+  search third-party `ContentModel` subclasses for any `metadata` attribute — field, property, or
+  method — before upgrading; rename it if found. No action is needed for a subclass that neither
+  defines its own `metadata` nor depends on `wire()` key order.
+  `agent_sdk/a2ui/catalog.py`'s `_field_summary` now skips `metadata` explicitly so it doesn't precede
+  a type's real required fields in the LLM-facing compact-schema line for a registered type with no
+  `_COMPACT_SCHEMAS` entry. `agent_sdk/models/content_types.py`'s module docstring records the move as
+  intentional and SDK-wide. **RT-004 (REVIEWS.md Round 10) correction:** this entry originally also
+  claimed all three a2ui-advisor copies (`.claude/agents/a2ui-advisor.md`, `harness/agents/a2ui-advisor.md`,
+  `template/.claude/agents/a2ui-advisor.md`) were edited in this same release to drop `TimeSeriesChart`'s
+  frozen per-type `metadata` row in favor of a cross-cutting note — that edit was a wave self-authorizing
+  a change to a frozen A2UI Standard Profile v1 field contract (DESIGN.md stable core) to match its own
+  code, mirroring GH-149's opposite-direction resolution with no comparable sign-off, and REVIEWS.md
+  Round 8 recorded it as PROPOSED, never SIGNED OFF. It has been **reverted**: the frozen row is back in
+  all three copies pending a maintainer's explicit Profile v1.1 ratification (tracked in
+  `workspace/sdk-candidates.md`). The base-class `metadata` field itself, and everything else in this
+  bullet, is unaffected. `tests/test_rt002_a2ui_wire_shape_mirror_parity.py` and
+  `tests/test_round8_metadata_ratification_gate.py` now fail the suite if any copy drops the row again
+  while unratified, rather than only warning on a revert. (`agent_sdk/models/content_types.py`,
+  `agent_sdk/a2ui/catalog.py`, `.claude/agents/a2ui-advisor.md`, `harness/agents/a2ui-advisor.md`,
+  `template/.claude/agents/a2ui-advisor.md`)
+- **`to_plain_text()` now appends a trailing `\nkey=value` metadata suffix for every `ContentModel`**
+  (RT-A06, direct follow-up to the `metadata` base-class move above; `agent_sdk/models/content_types.py`)
+  — before this release no type emitted `metadata` into its text fallback at all; the shared
+  `_metadata_suffix()` helper now has exactly ONE call site, inside the concrete base-class
+  `ContentModel.to_plain_text()` (`self._body_text() + self._metadata_suffix()`), which every one of
+  the 14 profile types and every domain card inherits. It is never called per subclass — see the
+  next bullet for why that mechanism, not a 14-site edit, is the fix. This changes
+  wire-visible output on two surfaces the bullet above does not cover: the A2A dual-part `TextPart`
+  built in `agent_sdk/agent/runner.py`'s `build_artifact` (`TextPart(text=payload.to_plain_text())`)
+  and the MCP `tools/call` text block in `agent_sdk/routes/mcp.py`'s `_tool_text` (line 363). An
+  operator diffing either text fallback before/after this release will see an unexplained
+  `\nkey=value` tail on any card constructed with `metadata=...`. Each rendered key and value is now
+  routed through `agent_sdk.common.redact.sanitize_text` (C-007's control-char-strip + length-cap
+  helper, SI-2 — see the C-007 entry below; this release also deletes `agent/loop.py`'s former
+  private copy, `_sanitize_model_name`, now that every caller has moved onto the shared helper)
+  before reaching the wire,
+  and the assembled suffix as a whole is capped at 4096 chars — `metadata` is a caller-/tool-supplied
+  `dict[str, Any]` and was previously interpolated into the suffix with no sanitization and no bound.
+  (`agent_sdk/models/content_types.py`, `agent_sdk/common/redact.py`)
+- **`ContentModel` subclasses now implement `_body_text()`, not `to_plain_text()`** (RT-003;
+  `agent_sdk/models/content_types.py`) — `to_plain_text()` is now CONCRETE on the base class, defined
+  as `self._body_text() + self._metadata_suffix()`, and `_body_text()` is the abstract hook. As the
+  bullet above states, before this release **no card — built-in or domain — emitted `metadata` into
+  its text fallback at all**; the previous bullet's single base-class `_metadata_suffix()` call ships
+  in this same release, not restoring a prior convention. None of the 14 built-ins declares
+  `to_plain_text()` any more — each now declares `_body_text()` instead. Adding the suffix call by
+  hand, one per subclass, would invite the failure this bullet exists to close off: a
+  card — built-in, and especially a future domain card registered via `register_content_type`, which
+  this module never controls — forgets the call, and its `wire()` carries the GH-63 disclosure
+  annotation while its `to_plain_text()` silently drops it, for exactly the no-A2UI-capability clients
+  (A2A `TextPart`, MCP `tools/call` text) the annotation exists for. A field declared once on a base
+  class cannot have a rendering obligation discharged per subclass, so the base class
+  now renders it once for every subclass that will ever exist. **Migration: none required** for a
+  domain card that does not already declare a method or attribute named `_body_text` — see the
+  RT-005 correction below for the one shape that does need migration. An
+  existing domain card that overrides `to_plain_text()` keeps working and additionally gains the
+  suffix — `ContentModel.__init_subclass__` adopts the override as that class's `_body_text()` and
+  rebinds `to_plain_text()` to the base implementation (the original stays reachable as
+  `cls._body_text`). New code should implement `_body_text()` directly.
+  **RT-003 (round 2, redteam, high) — corrected here:** an earlier draft of this migration note
+  claimed "no code can exist against the previous API" that calls `super().to_plain_text()` from a
+  `_body_text()`/`to_plain_text()` override, since that call "resolved to the abstract `...` stub and
+  returned `None`." That is true only for a class subclassing `ContentModel` DIRECTLY. It is false —
+  and was a live `RecursionError`, reproduced in CI — for the equally legal, more common pattern of a
+  card subclassing a CONCRETE built-in (e.g. `class MyKpi(KpiCard)`) and extending its rendering via
+  `super().to_plain_text()`: the rebound `to_plain_text()` calls `self._body_text()`, which dispatches
+  on `type(self)` and lands right back on the same adopted override, unboundedly. Fixed structurally,
+  not just documented around: `ContentModel.to_plain_text()` now detects it is being re-entered from
+  inside an adopted override executing for the same instance and resolves the call to the next
+  ancestor's `_body_text()` directly (`_ADOPTED_OVERRIDE_STACK` / `_NEXT_BODY_TEXT`,
+  `agent_sdk/models/content_types.py`), without a second metadata-suffix append — only the outermost
+  call adds one. **Migration: still none required** — both `super()._body_text()` (new code) and
+  `super().to_plain_text()` (adopted legacy code, any ancestor) now resolve correctly; prefer
+  `super()._body_text()` in new code only because it skips one indirection, not because the other form
+  is unsafe. Covered by `tests/test_rt003_super_to_plain_text_no_recursion.py`.
+  **RT-005 (redteam, high) — the "Migration: none required" claim above is false for one pre-existing
+  shape:** a domain card written before this split could legally declare a PRIVATE helper method named
+  `_body_text()` alongside its `to_plain_text()` override — `_body_text` had no reserved meaning in the
+  SDK until this release. `ContentModel.__init_subclass__` only adopts the legacy `to_plain_text()`
+  override when the subclass has not also declared its own `_body_text` in its own `__dict__`; a class
+  declaring both now raises `TypeError` at class-DEFINITION time (import time), not at render time,
+  because silently skipping adoption would leave the stale `to_plain_text()` override in place,
+  shadowing the concrete base method and dropping the `metadata` suffix — the exact drift this whole
+  mechanism exists to make impossible. **Migration required for this one shape only:** grep third-party
+  `ContentModel` subclasses for `_body_text` — any subclass defining both `_body_text` (in any sense,
+  including a private helper unrelated to text rendering) and `to_plain_text` will fail to import.
+  Rename the pre-existing `_body_text` member (e.g. to `_render_body`) and move the body of
+  `to_plain_text()` into a new `_body_text()` override; the error message raised at class-definition
+  time repeats this exact guidance. A subclass declaring only one of the two names is unaffected —
+  this migration step applies solely to the both-declared collision. Covered by
+  `tests/test_rt005_both_body_text_and_to_plain_text_declared.py`.
+  (`agent_sdk/models/content_types.py`, `docs/content-types.md`)
+- **`ContentModel.metadata` now rejects non-finite floats at construction** (RT-006;
+  `agent_sdk/models/content_types.py`) — a `field_validator` routes it through the existing
+  `_assert_finite`, matching `ChartSection.data` / `TableSection.data` / `BriefingKpiItem.value`.
+  `metadata` is the only free-form `dict[str, Any]` present on every card and the only one reaching
+  BOTH halves of a dual-part artifact: `KpiCard(..., metadata={"x": float("inf")})` previously
+  constructed fine, then emitted `{"metadata": {"x": null}}` from `wire()` (pydantic's
+  `ser_json_inf_nan` null default) while `to_plain_text()` rendered `x=inf` — the A2UI `DataPart` and
+  the mandatory `TextPart` disagreeing about the same value, which is precisely the split GH-95's
+  guard exists to prevent. **Migration:** a caller passing `inf`/`-inf`/`nan` anywhere inside
+  `metadata` (nested dicts and lists included) now gets a `ValidationError` at construction instead
+  of a silently reshaped wire value; pass `None` or a string sentinel instead. Fields outside GH-95's
+  scope (`MetricItem.value`, `BarItem.value`, `WaterfallSegment.value`, `ComparisonTable.rows`,
+  `FundPerformance`'s numerics) still accept non-finite floats, unchanged.
+  (`agent_sdk/models/content_types.py`)
+
+### 🟡 Protocol surface changes
+- RT-B-004: `ToolEntry.input_schema(include_reuse_hint=True)` (`agent_sdk/agent/registry.py:550-612`,
+  loop-only — see that method's RT-005 docstring paragraph for why every other tool-schema-advertising
+  surface must keep the hint off) now widens a `ReuseKind` field whose advertised type excludes
+  strings — `Annotated[int, ReuseKind("entity_id")]` otherwise renders as plain `{"type": "integer"}` —
+  to `{"anyOf": [<original constraints>, {"type": "string", "pattern": "^\$"}]}`
+  (`_widen_for_reuse_token`, `agent_sdk/agent/registry.py:212-231`) so the `$ref:<kind>`/`$raw:<value>`
+  reuse token, itself a string sentinel, is actually representable in the schema a schema-enforcing
+  model provider (Bedrock Converse and similar) constrains tool arguments to — without it the GH-148
+  reuse mechanism was silently unreachable on every non-string `ReuseKind` field on such a provider,
+  even though `reuse_fields_for_model` accepted the annotation without complaint. The same widening
+  applies to a string-typed field whose own schema narrows its value space via `pattern`/`const`/
+  `format`/`minLength`/`maxLength` (a regex-validated or UUID-formatted id), and resolves a `$ref`
+  (against the schema's own `$defs`) or `allOf` composition first so an `Enum`-typed `ReuseKind` field
+  is widened too, not silently skipped (`_schema_permits_string`,
+  `agent_sdk/agent/registry.py:133-209`). A plain, unconstrained string-typed field is untouched — the
+  token is already representable and the emitted schema is byte-identical to before. Only the
+  `include_reuse_hint=True` rendering changes; the tool's own `input_model` validation, and every
+  agent-card/MCP schema advertisement (which never sets that flag), are unaffected. Covered by
+  `tests/test_rt_b004_reuse_kind_nonstring_scalar_schema.py`,
+  `tests/test_rt004_string_value_constraint_widening.py` and
+  `tests/test_rt006_reuse_kind_enum_schema_widening.py`. (`agent_sdk/agent/registry.py`)
+- RT-B-203: `GET /v1/tasks` (`tasks_list`) and `GET /v1/tasks/{id}` (`tasks_get`) no longer echo
+  `X-A2A-Extensions` unconditionally off the request's own header (`agent_sdk/routes/a2a.py`).
+  `X-A2A-Extensions` means an extension was ACTIVATED for this response (§5.1) — a conformant
+  consumer is expected to parse a response for A2UI `DataPart`s only when the header comes back
+  activated (the project's own a2a-advisor D7.11 guidance). Both routes run no extension logic at
+  all (no `_capabilities()` call, nothing forwarded), so echoing unconditionally meant a client
+  that opted into `A2UI_EXTENSION_URI` on a `tasks/get` against a task that was NOT created with
+  A2UI active got the header back anyway, alongside a Task with no A2UI parts — a false activation
+  signal on the wire, not just a misleading code comment. `tasks_get`/`tasks_list` now echo
+  `A2UI_EXTENSION_URI` (`_echo_a2ui_if_present`) only when a Task actually being returned carries a
+  part whose `metadata.mimeType` is `application/a2ui+json`; the credential-forwarding extension
+  URI is never echoed on either route at all — nothing is forwarded on a read. The four mutating
+  routes (`message:send`, `message:stream`, `tasks/cancel`, `tasks/resubscribe`) are unchanged —
+  each can genuinely activate both extensions on its own request. Covered by
+  `tests/test_rtb203_a2ui_echo_activation_only.py`. (`agent_sdk/routes/a2a.py`)
+
+### ✅ Features
+- GH-148 (LRN-355 re-test): new `Reusable`/`ReuseKind` mechanism (`agent_sdk/agent/reuse.py`) gives
+  a tool-resolved value a cross-turn reference the model can cite instead of retyping it from memory.
+  Before this fix `run_loop`'s only cross-turn memory was replaying the full `messages` transcript
+  verbatim — the task-local result cache only dedupes byte-identical repeat calls WITHIN one task —
+  so nothing stopped the model from retyping a value it resolved in an earlier turn, and live testing
+  (8 fresh runs) found it substitutes a different-but-real, WRONG entity id in 7/8 runs: a silent
+  data-correctness failure with no validation-layer signal, since the substituted value is itself a
+  real, valid id. A tool now marks a return value reusable via `Reusable(value=result,
+  kind="entity_id", label="PT IMC Pelita Logistik")`; `agent/loop.py` unwraps it before the model sees
+  the result (the model receives `.value`, exactly like a plain return) and folds a `__resolved__`
+  marker (`kind`/`label`/`value`) into that tool call's existing result block in `messages` — no new
+  store, no new `TaskRecord` field, no expiry rule; the mechanism rides `messages`, but carrying a
+  marker across a request boundary depends on the transport's fold (RT-001, see below).
+  A downstream tool opts an input field into the contract via `Annotated[<type>,
+  ReuseKind("entity_id")]` on its Pydantic `input_model` (detected once at `@tools.tool` decoration
+  time by scanning `input_model.model_fields[<field>].metadata` for a `ReuseKind` instance
+  (`agent_sdk/agent/reuse.py`, `reuse_fields_for_model`), stored on `ToolDecl.reuse_fields`); at
+  the start of every `run_loop` call the loop rebuilds a "resolved this conversation" index by
+  scanning `messages`, then before invoking such a tool: a
+  literal `$ref:<kind>` or `$ref:<kind>:<label>` token (the label disambiguates multiple resolutions
+  of the same kind) is substituted with the matching resolved value and the substitution is recorded
+  as an auditable `AuditEvent` — never a `NoteEvent` (RT-009: that channel is folded into user-facing
+  agent chat text by both transports, and this is internal plumbing that must never reach it) — and
+  the event itself carries only the schema-declared field name and kind, never the resolved value or
+  label (SI-2); a raw value that does NOT match any resolution of a kind that HAS at least one is
+  rejected with a generic, SI-2-safe tool error (`ToolEntry.invoke`/`invoke_gen` signatures are
+  unchanged — this is the exact GH-148 failure mode, now caught instead of silently executed) naming
+  only the schema-declared field and kind, never the mismatched raw value or any resolved value's
+  content verbatim; a raw value is passed through unchanged when no resolution of that kind exists
+  yet, or it already matches. A tool that returns a plain value and an `input_model` with no
+  `ReuseKind`-annotated fields is unaffected — byte-identical behavior to before this feature existed.
+  Additive, non-breaking.
+  **RT-008 (two escape hatches, same release) — corrected by RT-002 in this same release:** the
+  mismatch rejection above has no path for a genuinely new, legitimate raw value, which without one
+  leaves the model stuck retrying a resolver tool it has no reason to call until the turn budget runs
+  out. `ReuseKind("entity_id", allow_raw_override=True)` is an OPERATOR opt-in, per field, defaulting
+  to `False` (`ReuseKind.allow_raw_override`, `agent_sdk/agent/reuse.py:171`) — it is not a
+  caller-discoverable escape hatch. Only when an operator has set it `True` on a field does the
+  per-call literal token `$raw:<value>` on that field pass `<value>` through as-is for that one call,
+  bypassing the match check entirely, itself recorded as a substitution
+  (`AuditEvent(code="reuse_raw_override", ...)`, `ReuseSubstitution.via_raw_override=True`) so the
+  bypass is auditable, not silent. RT-002 found that naming `$raw:` in the mismatch rejection error —
+  as an earlier draft of this feature did, to let the model "recover in-turn" — handed the exact
+  adversary this mechanism exists to stop (a model that just supplied a wrong raw value) a documented
+  bypass, so by design the rejection text never mentions the token, on any field, opted in or not
+  (`tests/test_gh148_reuse_kind_substitution.py::test_mismatch_error_does_not_name_the_raw_override_escape_hatch`).
+  **RT-005:** a field left at the default (`allow_raw_override=False`, i.e. most fields) rejects a
+  `$raw:`-prefixed string outright, unconditionally (`agent_sdk/agent/reuse.py`'s
+  `resolve_reuse_fields`, the `is_raw_override_token and not raw_override_allowed` branch) — the token
+  is never treated as an ordinary candidate raw value there, so it never falls through to the
+  mismatch check and never reaches the tool body, regardless of whether any resolution of that kind
+  exists yet
+  (`tests/test_gh148_reuse_kind_substitution.py::test_raw_override_token_rejected_on_field_without_opt_in`,
+  `tests/test_rt005_loop_raw_token_no_opt_in_parity.py`). Set
+  `allow_raw_override=True` only on a field whose operator has deliberately accepted that trade-off;
+  until then, `$raw:` grants the model nothing. Separately, `ReuseKind("entity_id", strict=False)` turns off the mismatch
+  rejection for that field for every call, not just one: `$ref` still resolves normally, but a raw
+  value is never checked against prior resolutions. Trade-off: `strict=False` restores full liveness
+  (nothing the model or user supplies directly is ever blocked) at the cost of exactly the
+  silent-wrong-substitution risk GH-148 exists to catch — pick it only for a field where an operator
+  has judged that risk acceptable for that tool. `allow_raw_override=True` is the narrower opt-in
+  (per call, always audited, and never advertised to the model) and is the default escape hatch to
+  reach for; reserve `strict=False` for fields where even the per-call prompt is worse than the risk.
+  **Note for `TaskStore` subclassers:** across an A2A `contextId` continuation (a new task started on
+  a context that already has a terminal prior task), the resolved-value index this mechanism scans is
+  rebuilt from whatever `messages` the new task starts with — for that transport, the sole carrier of
+  the prior task's `__resolved__` markers into the new task is `TaskStore.context_messages()`. Its
+  base-class implementation (`agent_sdk/tasks/store.py`, non-abstract) returns `[]`; an
+  external durable `TaskStore` that does not override it will not error or warn — it silently starts
+  every continued task with an empty index, so the mismatch check silently stops applying for every
+  reference resolved in a prior turn of that context: a raw value simply passes through unvalidated,
+  while an explicit `$ref:<kind>` token still fails loudly with an error, not closed, since the empty
+  index has no entry for it to resolve against. A single task with no continuation involved is
+  unaffected, since `run_loop` reads and writes the same in-memory `messages` list throughout.
+  **RT-001 correction: cross-turn carriage is A2A-only, not both-transport as first described above.**
+  A2A qualifies because `TaskStore.context_messages()` returns the prior task's Converse-format
+  `messages` verbatim (server-persisted, never round-tripped through the client) — a marker folded in
+  turn N survives into turn N+1's fresh `run_loop` call. AG-UI does not: `routes/ag_ui.py::_fold_history`
+  collapses every resent message, including a prior toolResult block, down to a single `{"text": ...}`
+  entry built only from `type == "text"` parts, and every `POST /ag-ui/run` creates a brand-new
+  `TaskRecord` with no `context_messages` equivalent — so the resolved-value index is always empty at
+  the start of a fresh AG-UI run, and `$ref:<kind>` substitution across two separate AG-UI runs is a
+  silent no-op (a raw value is simply passed through, since the index looks empty rather than
+  mismatched). The mechanism still works WITHIN a single AG-UI run — `resolved_index` is grown in place
+  across the multiple model turns `run_loop` drives for one request — it just does not survive to the
+  next request. If AG-UI carriage is ever added (e.g. persisting the index server-side per `threadId`,
+  or round-tripping markers through `state`/`forwardedProps`), note that AG-UI's transcript is
+  client-resent and therefore caller-controllable: the resolved index must not be described as a
+  data-integrity control on that transport the way the A2A rejection path is. Covered by
+  `tests/test_gh148_reuse_kind_substitution.py`'s AG-UI-shaped regression tests.
+  **RT-A-004 correction: AG-UI carriage landed this same release — the "if ever added" note above is
+  now stale.** The gap was operator-invisible (no log, no CHANGELOG caveat until this correction) and
+  the mismatch check itself simply never fired across an AG-UI thread, silently reopening exactly the
+  wrong-but-real-id failure GH-148 exists to catch, on the one transport the issue's own repro
+  methodology was modeled on. Fixed by reusing the SAME `TaskStore.context_messages(context_id)` A2A
+  already relies on — `thread_id` and `context_id` are the same value for an AG-UI task
+  (`routes/ag_ui.py`'s `new_task(thread_id)`) — but routed differently: `run_loop` gained a new
+  keyword-only `extra_resolved_messages` parameter (`agent_sdk/agent/loop.py`), scanned to seed the
+  resolved-value index ONLY, never appended to `messages` and never shown to the model. `routes/a2a.py`
+  still extends `record.messages` with `context_messages()` directly (unchanged — the model there is
+  meant to see the prior turn's history verbatim); `routes/ag_ui.py`'s non-resume run branch instead
+  calls `context_messages(thread_id, identity)` and passes it through `run_task_worker` (which gained
+  the same new parameter, forwarded to `run_loop`) as `extra_resolved_messages` — so AG-UI's smaller,
+  text-only model-visible transcript is unchanged, only the reuse mechanism's internal index gains
+  cross-run memory. A resume run (continuing the SAME `TaskRecord`) is unaffected — its `messages`
+  already carries everything relevant from within that run. Covered by
+  `tests/test_gh148_reuse_kind_substitution.py::test_route_level_ref_substitution_survives_ag_ui_thread_continuation`,
+  which drives two real `POST /ag-ui/run` requests on the same `threadId` through the live ASGI app —
+  mirroring `test_route_level_ref_substitution_survives_a2a_context_continuation`'s existing A2A
+  coverage. Non-breaking: `extra_resolved_messages` defaults to `None` on both new parameters, so
+  every existing `run_loop`/`run_task_worker` caller is unaffected. (`agent_sdk/agent/loop.py`,
+  `agent_sdk/agent/runner.py`, `agent_sdk/routes/ag_ui.py`, `agent_sdk/agent/reuse.py`)
+  **RT-001/RT-009 correction: the RT-A-004 fix above survived exactly ONE run hop, not a
+  conversation, and could leak across identities.** `routes/ag_ui.py` seeded `resolved_index` from
+  `TaskStore.context_messages(thread_id, identity)` — the SINGLE most recent terminal task's
+  `messages` only. An AG-UI `TaskRecord.messages` never inherits a prior run's `messages` the way
+  A2A's does (it stays scoped to that run's own folded text), so a `__resolved__` marker folded
+  while completing run N was visible only while run N remained the newest terminal task in the
+  thread. One intervening, unrelated run N+1 — which completes with no marker of its own — became
+  the new "most recent terminal task", and run N+2's seed went silently empty: `$ref:<kind>` stopped
+  resolving, and a WRONG raw id was silently executed instead of rejected — reopening the exact
+  wrong-but-real-id substitution GH-148 exists to catch, on the one transport its own repro
+  methodology was modeled on. Separately, `InMemoryTaskStore.context_messages()` short-circuits its
+  per-identity filter for admin api_key identities (operator task inspection); reusing it for the
+  reuse-index seed meant an admin AG-UI caller who supplied ANOTHER identity's `threadId` inherited
+  that identity's resolved values through a side channel that produces no frame and no user-visible
+  history. Fixed by a new store method, `TaskStore.context_reusable_messages(context_id, identity)`
+  (`agent_sdk/tasks/store.py`, default no-op `[]`; implemented on `InMemoryTaskStore`,
+  `agent_sdk/tasks/memory.py`) that scans EVERY terminal task in the context, oldest first, and
+  never honours the admin cross-identity override — `routes/ag_ui.py`'s non-resume run branch now
+  calls it instead of `context_messages()`. `context_messages()` itself and A2A's use of it are
+  unchanged. Covered by
+  `tests/test_gh148_reuse_kind_substitution.py::test_route_level_ag_ui_ref_substitution_survives_intervening_unrelated_run`
+  (three real `POST /ag-ui/run` requests on one `threadId` with an intervening unrelated run) and
+  `::test_route_level_ag_ui_admin_key_cannot_seed_resolved_index_from_other_identity_thread`, plus
+  store-level unit coverage in `tests/test_context_reusable_messages.py`. (`agent_sdk/tasks/store.py`,
+  `agent_sdk/tasks/memory.py`, `agent_sdk/routes/ag_ui.py`, `agent_sdk/agent/reuse.py`,
+  `agent_sdk/agent/loop.py`)
+  **RT-A-006: the mismatch check compared a raw value against the UNION of every resolution of a
+  kind, regardless of label — so it only ever caught a value that was never resolved at all.**
+  Verified: with `entity_id: [("Acme Corp", "ENT_1"), ("Beta Ltd", "ENT_2")]` on record, supplying
+  `"ENT_2"` where Acme was meant passed silently — `"ENT_2"` really was resolved, just under the
+  wrong label, and the check had no way to tell which resolution the call actually meant. Fixed:
+  `resolve_reuse_fields` (`agent_sdk/agent/reuse.py`) now rejects a raw value outright, ambiguity-
+  worded, whenever MORE than one resolution of the kind is on record — before checking whether the
+  raw value happens to match one of them — sending the model to `$ref:<kind>:<label>` (or a
+  re-resolve) instead of guessing. A single resolution of a kind is unambiguous and raw-value
+  matching against it is unchanged. Covered by
+  `tests/test_rt_a006_reuse_label_confusion.py`.
+  (`agent_sdk/agent/reuse.py`, `agent_sdk/agent/loop.py`, `agent_sdk/agent/registry.py`)
+
+### 🔧 Fixes
+- RT-001: `agent_sdk/a2ui/catalog.py`'s `_field_summary` no longer reads
+  `vars(cls).get("__annotations__", {})` to decide whether a card declared a field itself. That is a
+  CPython implementation detail, not a portable check: under PEP 649 (Python 3.14+) a class body's
+  annotations compile to a lazy `__annotate__` and `__annotations__` is absent from the class
+  `__dict__` until something forces it, but only for classes in a module WITHOUT
+  `from __future__ import annotations` (which still stores strings eagerly). The RT-008 "a domain card
+  that redeclares `metadata` keeps it in its LLM teaching string" carve-out was therefore inert on
+  3.14 — the check answered False for every field — while working on 3.12/3.13, silently dropping the
+  field across the declared `requires-python = ">=3.12"` range. The three regression tests that were
+  meant to lock it (`tests/test_a2ui_wire.py`) could not catch it: that module declares the future
+  import at line 9, so its card classes took the eager-string path and passed against broken code.
+  Replaced with `_own_annotation_names()`, which uses `inspect.get_annotations` (non-inheriting and
+  PEP-649-aware), requesting `annotationlib.Format.FORWARDREF` on 3.14+ so an unresolvable forward
+  reference in a domain card's annotation yields a placeholder instead of raising. New coverage pins
+  the cards in `tests/_rt001_no_future_annotations_cards.py`, a helper module that deliberately omits
+  the future import, plus a guard asserting the raw read cannot return
+  (`tests/test_rt001_field_summary_pep649_portable.py`). (`agent_sdk/a2ui/catalog.py`)
+- RT-003: a domain `ContentModel` subclass's `metadata` now reaches `to_plain_text()`. See the
+  `_body_text()` entry under Breaking changes above for the mechanism and migration (none required).
+  (`agent_sdk/models/content_types.py`)
+- RT-004: the admin console now renders the SDK-wide `metadata` envelope for every component type
+  (`agent_sdk/console/static/a2ui.js`, `console.css`). `metadata` is declared on `ContentModel`
+  itself, so no per-component renderer owned it — and none of the 14 read it, leaving the console
+  (the surface `/acceptance --ux` drives) blind to the whole GH-63 envelope. That made the GH-149
+  migration path unrenderable on the only renderer the SDK ships: with `fundName` removed and the
+  card title fixed to the string "Fund performance", the migration callout in this release names
+  `metadata={"fund": "Fund III"}` as a supported way to carry fund identity, yet an agent following
+  it saw N identically-titled cards with nothing to tell them apart. A new `appendMetadataFootnote()`
+  is applied once at `paintSurface`'s single dispatch point rather than inside `card()` (which
+  receives only title/subtitle/children, never the data), so all 14 renderers and every future domain
+  card are covered — mirroring `ContentModel.to_plain_text()` appending `_metadata_suffix()` once on
+  the base class. Values land as text nodes (the file's untrusted-output invariant), object values are
+  JSON-stringified rather than `[object Object]`, and a non-object binding — `MarketBriefing`'s prose
+  exception — renders no footnote instead of throwing out of the renderer. Covered by
+  `tests/test_rt004_console_renders_metadata_envelope.py`, which runs the real shipped function under
+  node. (`agent_sdk/console/static/a2ui.js`, `agent_sdk/console/static/console.css`)
+- RT-005: `BedrockModelClient.converse()`'s botocore version-floor escape hatch now actually reaches
+  the operator, and only fires for that one condition (`agent_sdk/agent/bedrock.py`). The RT-A05
+  `except RuntimeError: raise` delivered neither: (1) the escaping exception is not an `AgentError`,
+  so `run_loop` (which catches only `AgentError`) does not handle it and it lands in
+  `run_task_worker`'s generic handler, which logs `type(exc).__name__` with no message and no
+  `exc_info` and maps the wire response to the fixed literal "internal error" — the
+  "upgrade boto3>=1.39" instruction reached neither the log nor the wire, and the only observable
+  change from the original fix was 502 UPSTREAM becoming 500 internal error; (2) the catch was
+  unconditional, so any other `RuntimeError` from boto3 or the bounded executor (e.g.
+  `ThreadPoolExecutor`'s "cannot schedule new futures after shutdown" after `shutdown()`) also escaped
+  as a non-`AgentError` and bypassed `run_loop`'s `AgentError` → `DoneEvent` path.
+  `require_bearer_auth_botocore()` now raises a dedicated `BedrockBearerAuthUnsupported` (a
+  `RuntimeError` subclass, so `app.py`'s Layer-2 startup probe is unaffected); `converse()` catches
+  that class only, logs the instruction at `ERROR` (the string is SDK-authored, so SI-2 holds), then
+  re-raises. `tests/test_rta05_bedrock_bearer_runtime_error_unmasked.py` now asserts the text reaches
+  an operator log and that an unrelated `RuntimeError` still maps to `AgentError(UPSTREAM)`.
+  (`agent_sdk/agent/bedrock.py`)
+- RT-002: deleted `agent_sdk/agent/loop.py`'s byte-identical private copy of component C-007 —
+  `_CONTROL_CHAR_MAP` and `_sanitize_model_name` duplicated `agent_sdk/common/redact.py`'s
+  `_CONTROL_CHAR_MAP` and `sanitize_text(s, max_len=64)` character-for-character, comment block
+  included, while `content_types.py` already imported the shared helper. Both model-supplied-name call
+  sites now call `sanitize_text` (its default cap is 64, matching the deleted copy), so the two cannot
+  drift on the control-char set (C0 + DEL + C1 — a narrower `range(0x20)` copy would defeat the SI-2
+  guard) or on the length cap. `workspace/components/README.md`'s C-007 row moved from `planned` to
+  `present` and its body now lists the landed call sites; it previously still read "the pattern is
+  currently inline at loop.py" and "the existing `redact.py` only masks secret-named keys/bearer
+  values, not control chars" — both false once the helper landed, and exactly the stale description
+  that invites a third divergent copy. `tests/test_rt002_c007_sanitize_text_single_definition.py`
+  asserts the control-char map is defined in one file only. (`agent_sdk/agent/loop.py`)
+- GH-147: `run_loop`'s no-tool-call completion branch (`agent_sdk/agent/loop.py`) now folds the
+  assistant's final plain-text turn into `messages` before returning. Previously the fold block
+  that appends `{"role": "assistant", "content": [...]}` only ran on the tool-call path — the
+  no-tool-call branch returned first — so a completed task's `record.messages` never contained
+  the model's own final reply (it only ever reached the wire via `status.message`). A2A `contextId`
+  continuation (`context_messages()` replay in `agent_sdk/routes/a2a.py`) therefore never showed the
+  model what it said on the prior turn. Same root cause produced a second defect: a tool-using
+  task's stored transcript always ended on the `user` toolResult message, and continuation appended
+  another `user` message — two consecutive same-role entries, malformed for Converse-shaped
+  backends (Bedrock). When every text segment is empty/whitespace there is nothing to fold, so
+  `run_loop` instead calls `bridge_trailing_user` (`agent_sdk/agent/loop.py`), which appends a fixed,
+  SDK-authored synthetic assistant turn (`"(no response)"`, never derived from model or tool output —
+  SI-2) so `messages` still never ends on `user`. AG-UI is unaffected — it folds the client-resent
+  transcript and never calls `context_messages()`.
+  **Note for `TaskStore` subclassers:** this changes the persisted shape of `record.messages` — a
+  completed no-tool-call task now carries a trailing assistant message it did not carry before.
+  `bridge_trailing_user` is not limited to that one branch: `run_loop` calls it on every exit that
+  can land with `messages` still ending on a `user` turn — deadline exceeded (`loop.py:430`), token
+  budget exceeded (`loop.py:434`), an upstream `AgentError` from `model.converse` (`loop.py:448`),
+  and max-turns exceeded (`loop.py:817`), in addition to the empty-text no-tool-call branch
+  (`loop.py:476`) — so the fixed `"(no response)"` synthetic assistant turn can land in persisted
+  `record.messages` on any of these five FAILED/max-turns exits too, not only on a completed
+  no-tool-call task. Any external durable `TaskStore` implementation that reads or replays
+  `messages` directly should account for the new entry on all five paths. Landed first in w039
+  group:A — GH-150 below was developed and tested against this already-updated fold logic. Covered by
+  `tests/test_gh147_assistant_turn_fold.py`. (`agent_sdk/agent/loop.py`)
+- GH-145: `BedrockModelClient._boto_client()`'s bearer-token branch (`agent_sdk/agent/bedrock.py`)
+  now pins `config=botocore.client.Config(signature_version="bearer")` on the boto3 client instead
+  of relying on botocore's own signer selection. botocore's choose-signer handler chain
+  (`_set_auth_scheme_preference_signer` / `_should_prefer_bearer_auth`) decides bearer-vs-sigv4 by
+  reading the REAL process `os.environ` for `AWS_BEARER_TOKEN_BEDROCK` directly — it never
+  consults the isolated `token_provider` component this client registers on its own botocore
+  session. Since the bearer token is deliberately never written to the real env (SI-6), that check
+  always saw no token, silently fell back to sigv4, and sigv4 then failed with
+  `NoCredentialsError` because no real IAM credentials exist in a bearer-only deployment. This was
+  not a macOS-vs-Linux botocore difference — macOS only appeared to work when
+  `AWS_BEARER_TOKEN_BEDROCK` happened to be ambiently present in that machine's real env (itself a
+  quiet SI-6 leak); Linux correctly has no such var and failed honestly. SI-6 isolation is
+  unchanged: the fix pins a client config value and does not write the token to `os.environ` or
+  argv. Covered by `tests/test_bedrock_credential_store.py` (asserts
+  `meta.config.signature_version == "bearer"`, and that resolution still succeeds with
+  `AWS_BEARER_TOKEN_BEDROCK` absent from the real env). (`agent_sdk/agent/bedrock.py`)
+- RT-006: `BedrockModelClient.converse`'s catch-all (`agent_sdk/agent/bedrock.py`) had started
+  interpolating `type(exc).__name__` into `AgentError.message` as part of the GH-145 diagnosis work
+  above — but that message is not operator-only: `run_loop` turns it into `DoneEvent(ok=False,
+  error=...)`, which `runner.py` echoes verbatim to the untrusted A2A caller as both the wire
+  `WireError` and the user-facing `Message`. A client could therefore learn the upstream provider is
+  Bedrock and its exact auth/quota failure mode (`NoCredentialsError` / `UnauthorizedException` /
+  `ThrottlingException`) from a failed run. No GH-145 AC asked for a wire-message change. The class
+  name now goes to `logger.warning` before the raise instead; the wire message is back to the fixed,
+  generic `"model invocation failed"`, matching `OpenAIModelClient`'s existing behavior
+  (`agent_sdk/agent/openai_client.py`). SI-2 unchanged: only the class name is ever logged, never
+  `str(exc)`. Covered by `tests/test_rtb002_bedrock_error_class_enrichment.py`.
+  (`agent_sdk/agent/bedrock.py`)
+- GH-150: `tasks_cancel` (`agent_sdk/routes/a2a.py`) now repairs a cancellation-induced dangling
+  `toolUse` block. `run_loop` folds a turn's assistant `toolUse` message into `record.messages`
+  before running that turn's per-tool-call loop, and only appends the matching `toolResult`
+  message once every tool call in the turn finishes (`agent_sdk/agent/loop.py`) — `run_loop` is
+  called with `messages=record.messages` by reference, and `run_task_worker`'s `CancelledError`
+  handler deliberately re-raises without repairing `messages` ("the canceller owns cleanup"). A
+  task cancelled while a tool call was still in flight — blocked inside the tool's own execution,
+  or parked in `input-required`/`auth-required` awaiting an interrupt's resume — therefore left
+  `record.messages` ending on the assistant `toolUse` message with no matching `toolResult`.
+  `context_messages()` (§3 contextId continuation) then replayed that broken transcript verbatim
+  on the next turn, which Converse-API-shaped backends (Bedrock) reject outright. Before
+  committing the `CANCELED` transition, `tasks_cancel` now detects an unresolved `toolUse` tail
+  (the last message is `assistant` with one or more `toolUse` blocks) and appends a synthetic
+  `{"role": "user", "content": [{"toolResult": {..., "status": "error"}}]}` message — one error
+  `toolResult` per dangling `toolUseId` — immediately after the `toolUse` message, restoring the
+  alternating assistant/user Converse shape the SDK relies on; the repair's success/failure outcome
+  is then threaded into `set_task_status`, which gates the durable `CANCELED` `persist_status`
+  flush on that transcript repair (and its own `persist_messages` flush) having actually landed —
+  fail-closed, so a client is never told a task is durably `CANCELED` while a store might still
+  hold the unrepaired, replay-breaking transcript. SI-2: the synthetic `toolResult`
+  text (`_CANCELLED_TOOL_RESULT_TEXT`) is a single fixed SDK-authored string; it never
+  interpolates the tool name, arguments, or an upstream exception. Landed against GH-147's
+  already-updated assistant-turn-fold logic in `agent_sdk/agent/loop.py` (w039 group:B, after
+  group:A). Covered by `tests/test_gh150_cancel_dangling_tooluse.py` — cancellation mid-tool-call
+  via a blocking tool, cancellation while parked awaiting an interrupt resume, and a `contextId`
+  continuation replay after cancellation, all asserting no `toolUse` block anywhere in
+  `record.messages` (or the replayed prior-turn history) ever lacks an immediately-following
+  matching `toolResult`. (`agent_sdk/routes/a2a.py`)
+  **Note for `TaskStore` subclassers (RT-005):** `tasks_cancel` (and `agent_sdk/agent/runner.py`'s
+  deferred background awaiter and terminal exception handlers, which call the same
+  `repair_dangling_tool_use` helper) mutate `record.messages`/`record.pending_tool_results` directly
+  on the `TaskRecord` object `TaskStore.get()` returned — there is no separate write call.
+  `InMemoryTaskStore` needs nothing further, since its `get()` hands back the live record by
+  reference: the in-place mutation IS the write. A durable `TaskStore` (the external
+  `AzureTableTaskStore` shape this ABC exists for) whose `get()` deserializes a FRESH copy from
+  storage on every call will silently drop every such repair unless it overrides the new
+  `TaskStore.persist_messages(record)` hook (`agent_sdk/tasks/store.py`, non-abstract, default
+  no-op — mirrors the `interrupt_ttl_remaining` precedent from 0.5.40) to flush `record.messages`
+  back to the backing store keyed by `record.task.id`. **`record.pending_tool_results` is NOT part
+  of this flush** — despite also being mutated in place by the same repair, it is runtime-only turn
+  state (never serialized, per its own field comment on `TaskRecord`, `agent_sdk/tasks/store.py`)
+  exactly like `worker`/`resume_future`; a subclass whose own resume path needs to reconstruct
+  mid-turn sibling-tool-call results has to track that field itself. `repair_dangling_tool_use` now
+  takes an optional `store=` keyword and calls this
+  hook once, unconditionally, after its own repair/bridge — every one of its five call sites
+  (`routes/a2a.py`'s `tasks_cancel`, and `runner.py`'s deferred-success path, deferred-failure
+  `_fail`, and both `run_task_worker` terminal exception handlers) now passes its own `store`.
+  Covered by `tests/test_rt005_gh150_taskstore_persist_messages_hook.py`, including a
+  copy-on-`get()` fake store proving a repair is silently lost without the override and survives
+  with it.
+  **RT-B-003 follow-up: overriding `persist_messages` alone is NOT sufficient.** `tasks_cancel`
+  also mutates `record.task.status` directly on the same `TaskRecord` object, right before it
+  calls `repair_dangling_tool_use(store=store)` — and until now there was no matching write hook
+  for that field. A durable `TaskStore` that overrode only `persist_messages` never learned the
+  task went `CANCELED`: `context_messages()` filters continuation candidates on
+  `r.task.status.state in TERMINAL_STATES`, so the repaired transcript `persist_messages` just
+  flushed was never read back — a cancelled task was never a `contextId` continuation candidate at
+  all. `TaskStore.persist_status(record)` (`agent_sdk/tasks/store.py`, non-abstract, default
+  no-op, same precedent) closes this; `tasks_cancel` now calls it right after the `CANCELED`
+  assignment. **A durable subclasser must override both `persist_messages` AND `persist_status` —
+  either alone still loses data.** Covered by
+  `tests/test_rtb003_taskstore_persist_status_hook.py`, including the same
+  gap-without-override/survives-with-override pairing, asserted via `context_messages()` staying
+  empty vs. non-empty.
+  **RT-B-008: `TaskStore.persist_status` gained ten more call sites, not documented above.**
+  `tasks_cancel` was, until now, `persist_status`'s ONLY caller in the SDK — the note above
+  describes exactly that one call site. `agent_sdk/agent/runner.py`'s `_set_status` is now the
+  single choke point for every in-place `record.task.status` mutation the worker makes (WORKING,
+  COMPLETED, FAILED, AUTH_REQUIRED, INPUT_REQUIRED, across both `run_task_worker` and
+  `_run_deferred_background`) and flushes `persist_status` after each one when given its own
+  `store=` — including every streamed `TextEvent`/`ProgressEvent`/`NoteEvent`/`ToolProgressEvent`
+  chunk's WORKING transition, not only the terminal one. `TaskStore.persist_status`'s own
+  docstring (`agent_sdk/tasks/store.py`) previously described only the single `tasks_cancel` call
+  site and has been updated to state the real call pattern. **This is a contract change for
+  external subclassers, not merely an internal refactor:** a durable override sized against "one
+  write per task, at cancel" now receives one write per status transition — including several per
+  streamed chat turn. A subclasser that wants a write only on the terminal transition must filter
+  on `record.task.status.state` itself; the hook does not do that filtering. No behavior change in
+  this release (the per-transition call pattern was already shipping, covered by
+  `tests/test_rtb008_set_status_persist_status_choke_point.py`) — this entry closes the
+  documentation gap RT-B-003 (redteam) found between that shipped behavior and both this
+  CHANGELOG and the ABC docstring.
+  **RT-B-001 (round 2): the "override both hooks" guarantee above was not actually true.**
+  `TaskStore.persist_messages` had exactly ONE call site in the whole SDK —
+  `repair_dangling_tool_use` — which never runs on a normal completion (there is no dangling
+  `toolUse` tail to repair). RT-B-008's `persist_status`-on-every-transition fix therefore let a
+  durable store observe a task going COMPLETED/FAILED on the dominant, non-cancelled happy path
+  without `persist_messages` ever having been called for it — so a subclasser who faithfully
+  overrode both hooks, exactly as instructed above, still got a durable record that was terminal
+  over an empty or stale transcript, and `context_messages()`'s `TERMINAL_STATES` filter would
+  select and replay it on the next `contextId` continuation. `set_task_status`
+  (`agent_sdk/agent/runner.py`) now also flushes `TaskStore.persist_messages(record)` itself on
+  every `TERMINAL_STATES` transition, BEFORE `persist_status` — mirroring `tasks_cancel`'s own
+  RT-B-007 fail-closed ordering: `persist_status` runs only once the messages flush has actually
+  succeeded, so a failure leaves the durable record correctly non-terminal rather than terminal
+  over a transcript that never arrived. RT-B-104: the same pair of flushes, under the same
+  ordering, now also fires on an `INTERRUPT_STATES` transition (`AUTH_REQUIRED`/`INPUT_REQUIRED`)
+  — status alone is not a coherent record of an interrupted task without its matching
+  `record.messages` transcript alongside it, so a durable store needs both to have anything to
+  resume from restart. (`record.pending_tool_results` is explicitly NOT covered by this flush —
+  see the `persist_messages` docstring correction above; it stays runtime-only, exactly like
+  `worker`/`resume_future`, on both the terminal and interrupt paths.) **The "override both hooks"
+  guarantee is now actually satisfied**: a
+  durable subclasser overriding both `persist_messages` and `persist_status` gets a correct
+  transcript-then-status flush on every terminal and interrupt transition, cancelled or not,
+  repaired or not — `persist_messages` is no longer reachable only through the cancel/repair
+  path. Covered by `tests/test_rtb001_terminal_persist_messages_flush.py`, including a
+  copy-on-`get()` durable double proving `context_messages()` returns the real transcript (not
+  `[]`) after a normal, non-cancelled completion, and an ASGI-level end-to-end reproduction of the
+  original finding.
+  **Redteam follow-up (RT-004): `TaskStore.context_messages()`'s admin cross-identity override,
+  framed as "operator task inspection," was materially wider exposure than that framing suggested
+  — and a prior pass had ratified it as intended SDK policy without ever putting the decision to
+  the user.** `routes/a2a.py`'s `_create_task_record` calls this method on every fresh
+  `message/send`/`:stream` (no `taskId`) and folds the result straight into the new task's
+  `record.messages`, which is then sent to the model — this is `contextId` continuation, the same
+  path a same-identity caller uses to keep talking in their own thread, not a side, read-only
+  inspection view. An admin `api_key` identity had no separate inspection-only entry point into
+  this data: submitting a fresh `message/send` against ANOTHER identity's `contextId` (there is no
+  ownership check on a bare `contextId`, only on an existing `taskId` — DESIGN.md §5.1) inherited
+  that identity's transcript straight into the admin's own new task and, from there, the upstream
+  model's context — a data-exposure policy decision no wave's own redteam pass may self-ratify.
+  **The bypass is removed, not documented further:** `context_messages()` is now identity-scoped
+  exactly like `context_reusable_messages()` already was (no admin exception, RT-004) — a
+  cross-identity `contextId` now simply starts a fresh continuation with no inherited history,
+  admin or not. Genuine operator inspection of another identity's task remains available, safely,
+  as a read that never seeds a new task's model context: `GET /v1/tasks/{id}` (unaffected). The
+  now-dead `agent.reuse.strip_resolved_markers` mitigation (added when the bypass was only
+  partially closed) is deleted along with it. Covered end-to-end by
+  `tests/test_admin_continuation_scoped_to_own_identity.py`, which drives two real
+  `POST /v1/message:send` requests on the same `contextId` (a non-admin identity, then the default
+  admin identity with no `taskId`) through the live ASGI app and asserts the admin's continuation
+  turn never receives the other identity's prior text. (`agent_sdk/tasks/store.py`,
+  `agent_sdk/tasks/memory.py`, `agent_sdk/agent/reuse.py`, `DESIGN.md`)
+- **RT-B-003: corrects the "no behavior change" claim in the RT-B-008 entry above — there now is
+  one.** `set_task_status` (`agent_sdk/agent/runner.py`) flushed `TaskStore.persist_status` on
+  every in-place status mutation, including the repeated `WORKING` transition applied once per
+  streamed `TextEvent`/`ProgressEvent`/`NoteEvent`/`ToolProgressEvent` chunk — a durable write per
+  chunk of agent text, on a plain synchronous hook a durable subclass's own network call can block
+  the event loop from inside. `set_task_status` now flushes this hook by default only for
+  `TERMINAL_STATES` and `INTERRUPT_STATES` — the transitions durability actually depends on — never
+  for `WORKING`. A subclass that still wants the old every-transition granularity (e.g. to drive a
+  live status dashboard) opts back in with the new `TaskStore.persist_every_status = True` class
+  attribute (`agent_sdk/tasks/store.py`); `persist_status`'s own docstring has been rewritten to
+  describe this exact call pattern and the opt-in, replacing the single-caller ("`tasks_cancel`
+  only") description it carried before RT-B-008. Covered by
+  `tests/test_rtb008_set_status_persist_status_choke_point.py` (now asserting the gated pattern)
+  and `tests/test_rtb007_persist_status_ordered_after_repair.py`. (`agent_sdk/agent/runner.py`,
+  `agent_sdk/tasks/store.py`)
+- **RT-B-002: `repair_dangling_tool_use`'s RT-005 `persist_messages` flush was unguarded at 3 of
+  its 5 call sites.** `tasks_cancel` (`routes/a2a.py`) already wrapped its call in try/except; the
+  other three — `_run_deferred_background`'s `_fail` closure, and `run_task_worker`'s `except
+  AgentError`/`except Exception` terminal handlers, all in `agent_sdk/agent/runner.py` — called the
+  raw helper directly, all three sitting BEFORE the try/finally that guarantees the terminal FAILED
+  transition, the terminal publish, and `close_streams`. A durable store whose `persist_messages`
+  override raised on its own write failure escaped each of these three sites — out of a
+  fire-and-forget `asyncio.Task` for `_fail`, straight out of `run_task_worker` for the other two —
+  leaving the task stuck WORKING (or, for the deferred path, un-terminated) with its streams never
+  sentinel-closed, until the TTL sweep. New `repair_dangling_tool_use_safe` (`agent_sdk/agent/runner.py`)
+  is the one guarded entry point every out-of-loop caller now uses instead of hand-rolling its own
+  try/except around the raw helper (the exact drift that left `tasks_cancel`'s copy diverging from
+  the other four): it degrades a `persist_messages` failure to a logged `error_type`-only
+  `logger.error` (SI-2) and returns `False`, never propagating the raise. Covered by
+  `tests/test_rtb002_runner_repair_failure_still_terminates.py` (all three sites) and
+  `tests/test_rtb002_cancel_repair_failure_still_publishes_final.py` (the pre-existing
+  `tasks_cancel` site, migrated onto the same wrapper). (`agent_sdk/agent/runner.py`)
+- RT-B-007 / RT-B-008: two hardening fixes inside `repair_dangling_tool_use` itself
+  (`agent_sdk/agent/runner.py`), independent of any `TaskStore`. **RT-B-007:** every synthetic
+  `toolResult` block built for a turn with several dangling `toolUseId`s embedded the SAME
+  `content` list object by reference — the caller's own `default_content`, or a shared
+  pending/override entry — across every one of them, and that object was still reachable by the
+  caller; a later mutation of it (by the caller, or by a store's serializer) silently rewrote every
+  one of those transcript entries at once. Each block now embeds `list(content)`, a copy, so the
+  transcript owns its own list regardless of which source (default/pending/override) supplied it.
+  **RT-B-008:** the tail-message read (`messages[-1].get("role")`) had no `isinstance(messages[-1],
+  dict)` guard, unlike the `pending_tool_results` loop just above it (which already checks each
+  block) — a non-dict tail entry (a durable store deserialising loosely, or a future caller
+  appending something other than a plain dict) raised `AttributeError`, which — per RT-B-002 above
+  — escaped every one of this helper's callers before that fix landed. The tail read, and the
+  `toolUse` block iteration over its content, both now guard with `isinstance(block, dict)`; a
+  non-dict tail is treated as "nothing to repair" rather than crashing. Covered by
+  `tests/test_rtb007_rtb008_repair_dangling_tool_use_hardening.py`. (`agent_sdk/agent/runner.py`)
+- RT-007: `reuse_fields_for_model` (`agent_sdk/agent/reuse.py`) now raises `TypeError` at
+  `@tools.tool` registration time for either shape `ReuseKind` cannot actually support, instead of
+  shipping a silent no-op or a permanently-failing tool. `ReuseKind` only works on a top-level
+  scalar field: (1) a container field (`Annotated[list[str], ReuseKind("entity_id")]`) — the
+  substitution/validation contract in `resolve_reuse_fields` matches a raw argument against a
+  resolved value with a single equality check, so a *correct* list argument (e.g. `["ENT_1"]` when
+  `ENT_1` IS the resolved id) was permanently rejected as a mismatch, with no way to ever satisfy
+  the check; (2) `ReuseKind` on a field of a nested model — `reuse_fields_for_model` and the loop
+  only ever look at `input_model`'s own top-level fields, so the annotation was silently inert and
+  any `$ref:` token there reached the tool verbatim with no substitution and no validation. Both are
+  now detected at decoration time (checked recursively through Optional/list/tuple/set/dict, so a
+  nested model buried inside a container field is caught too) and documented as unsupported on
+  `ReuseKind`'s own docstring. Covered by `tests/test_rt007_reuse_kind_scalar_only.py`.
+  (`agent_sdk/agent/reuse.py`)
+- RT-002: `ToolEntry.invoke_any()` (`agent_sdk/agent/registry.py`) now unwraps a `Reusable`-returning
+  tool's result to `.value`, mirroring `agent/loop.py`'s own unwrap (`loop.py:756-772`) instead of
+  returning the raw `Reusable` dataclass verbatim to every OTHER dispatch surface. `invoke_any()` is
+  the shared helper behind three callers with no `messages` transcript of their own — MCP
+  `tools/call` (`routes/mcp.py`), the admin try-tool endpoint (`routes/admin.py`), and the
+  commitments executor (`contrib/commitments/executor.py`) — so a Tier-1 tool returning `Reusable`
+  broke identically on the first two: MCP folded the wrapper's dataclass repr
+  (`"Reusable(value='ENT_5831', kind='entity_id', label='...')"`) onto the wire for a tool with no
+  `emits`, and raised the SC-C1 coercion's `ValidationError` ("tool output coercion failed") for a
+  tool that DOES declare `emits` (coercing the raw wrapper, not `.value`, against the declared
+  model) — the identical call succeeding over A2A/AG-UI, a §5.6 surface-parity violation. The admin
+  try-tool endpoint leaked the wrapper's raw fields (`{"value": ..., "kind": ..., "label": ...}`)
+  through `_safe_result` instead of the tool's actual result shape. The unwrap runs AFTER any
+  `DeferredResult` chain is resolved, since a deferred handle may itself resolve to a `Reusable`.
+  **By design, not fixed here:** the `ReuseKind` `$ref:<kind>` substitution/validation gate
+  (`resolve_reuse_fields`) stays conversation-scoped — it only runs on `agent/loop.py`'s direct
+  `invoke`/`invoke_gen` path, which is the sole caller with a `messages` transcript to scan for prior
+  `__resolved__` markers and fold an `AuditEvent` audit into. A `Reusable`-returning tool invoked via
+  MCP, the admin console, or a commitment never grows the resolved index and never accepts a
+  `$ref:<kind>` token on that same call — those three surfaces do not participate in the GH-148
+  cross-turn mechanism at all, only in not leaking its wrapper type (see RT-A-009 below for what
+  "never accepts" means in practice on those three surfaces). Covered by
+  `tests/test_rt002_invoke_any_reusable_unwrap.py`. (`agent_sdk/agent/registry.py`)
+- RT-A-009: closes a gap the RT-002 entry above left open — "never accepts a `$ref:<kind>` token"
+  shipped as silent PASSTHROUGH, not rejection. `ToolEntry.invoke_any()` handed a `$ref:<kind>` or
+  `$raw:<value>` token on a `ReuseKind` field straight to the tool body as an ordinary string
+  (validated and executed like any other value), instead of erroring, on all three transcript-free
+  surfaces — MCP `tools/call`, the admin try-tool endpoint, the commitments executor. A tool would
+  then look up an entity literally named `"$ref:entity_id"` and return a wrong-but-successful result;
+  an MCP client (or any caller of these surfaces) that read the token syntax off this very CHANGELOG
+  entry or the loop-side `input_schema(include_reuse_hint=True)` description had no way to know it
+  would silently misfire rather than error. `invoke_any()` now rejects any `decl.reuse_fields`
+  argument starting with `REF_PREFIX` (`$ref:`) or `RAW_PREFIX` (`$raw:`) — regardless of the field's
+  own `strict`/`allow_raw_override` flags, which only govern the loop.py path and have no meaning
+  here — via a generic `AgentError(ErrorCategory.VALIDATION, ...)` that every caller already maps to
+  its existing failure shape (`isError: true` for MCP, `ok: false` for admin, `mark_failed` for the
+  commitments executor). Covered by `tests/test_rt_a009_invoke_any_reuse_token_rejection.py`
+  (registry-level + a real `CommitmentExecutor` end-to-end) and
+  `tests/test_gh148_reuse_kind_substitution.py`'s renamed
+  `test_mcp_tools_call_ref_token_rejected_no_conversation_transcript` /
+  `test_mcp_tools_call_raw_override_token_rejected_no_conversation_transcript` (MCP end-to-end).
+  (`agent_sdk/agent/registry.py`)
+- RT-004: `agent_sdk.agent.loop._fold_result_content` is renamed to the public `fold_result_content` —
+  `agent_sdk/agent/runner.py`'s deferred (GH-87) background awaiter now imports and calls it directly
+  so a deferred tool's terminal `toolResult` message folds through the exact same content-shaping
+  rule as every synchronous tool call, instead of duplicating that logic. No behavior change for
+  existing callers. (`agent_sdk/agent/loop.py`, `agent_sdk/agent/runner.py`)
+- RT-A-008: a `ReuseKind` field left at every default (`strict=True`, `allow_raw_override=False`) had
+  no in-band recovery path for a genuinely new, legitimate raw value once any resolution of its kind
+  existed — the mismatch rejection is deliberately silent about the `$raw:` override token (RT-002),
+  and that token is off by default anyway, so the model could only keep calling the resolver tool
+  until `max_turns` was exhausted: a correctness gate with no documented recovery path traded a
+  correctness bug for a liveness bug. `resolve_reuse_fields` (`agent_sdk/agent/reuse.py`) gained an
+  optional `reject_counts` parameter — a caller-owned `(tool_name, field_name) -> consecutive
+  rejection count` map as shipped in this entry (**RT-C-001 below narrows the key** to
+  `(tool_name, field_name, repr(raw value))` — see that entry for why the field-only key is unsafe;
+  every description below of what increments/resets the count refers to the narrowed key), mutated in
+  place — and `agent/loop.py` now threads one through, scoped to a
+  single `run_loop` call (`reuse_reject_counts`, initialized alongside `resolved_index`). Once a field
+  has been rejected `MAX_CONSECUTIVE_REUSE_REJECTIONS` (2) times in a row for the mismatch reason, the
+  next call passes the raw value through unchanged instead of rejecting again, recorded as a
+  `ReuseSubstitution(via_forced_passthrough=True)` and surfaced as a distinct, auditable
+  `AuditEvent(code="reuse_forced_passthrough")` (and a `logger.warning`, not the `logger.info` the
+  `$ref`/`$raw:` substitution paths use, since this is an automatic liveness fallback, not an
+  operator-authorized bypass) — never silence. The count resets whenever that same field resolves via
+  `$ref`, a `$raw:` override, or a raw value that actually matches: the budget guards a stuck retry
+  loop on the SAME wrong value, not a running total across the whole conversation. This is
+  unconditional — it applies regardless of `strict`/`allow_raw_override`, since it exists precisely
+  for the field that opted into neither. As shipped in this entry the bound covers the raw-value-mismatch
+  rejection only — the raw-value-**ambiguity** rejection (RT-A-006 above: a bare raw value submitted
+  while more than one resolution of the kind is on record) is exempt too, via its own early `return`
+  ahead of the counter, and therefore rejects forever with no liveness fallback even though it has no
+  more of an in-band recovery move than the mismatch case does. **RT-B-002 below closes that gap**,
+  folding the ambiguity rejection into the same bound. Neither shape ever counted, nor counts now, a
+  `$ref`-token rejection — malformed `$ref`, wrong-kind `$ref`, unresolved `$ref`, a `$ref` that
+  resolves to more than one value, or a label matching nothing — since the model already has a real
+  in-band recovery move for any of those: fix the `$ref` token itself.
+  `reject_counts` defaults to `None` (every caller predating RT-A-008, and every direct unit
+  test of `resolve_reuse_fields`) and preserves the original reject-forever behavior byte-for-byte.
+  Covered by `tests/test_rt_a008_reuse_bounded_recovery.py` — the `resolve_reuse_fields(reject_counts=
+  ...)` contract directly (recovery after the bound, per-`(tool, field)` scoping, reset-on-success,
+  the unchanged rejection text up to the bound) and an end-to-end `run_loop` repro of the exact stuck
+  shape RT-A-008 describes. (`agent_sdk/agent/reuse.py`, `agent_sdk/agent/loop.py`)
+- RT-C-001: the RT-A-008 bounded-recovery budget above is scoped to the exact `(tool_name, field_name,
+  repr(raw value))` triple, not merely `(tool_name, field_name)` — keying on the field alone let a
+  sequence of three *different* hallucinated raw values exhaust one shared budget, forcing the third
+  through unvalidated and reopening the exact GH-148 failure mode this mechanism exists to catch. Only
+  a genuinely stuck retry of the identical value now earns the passthrough. `resolve_reuse_fields`
+  gained `max_consecutive_rejections` (the threshold `reject_counts` is checked against), which
+  `agent/loop.py` threads through from the new `LoopPolicies.reuse_forced_passthrough_limit`.
+  (`agent_sdk/agent/reuse.py`, `agent_sdk/agent/loop.py`)
+- RT-B-002: the RT-A-008 bound above shipped counting only the plain mismatch rejection reason —
+  the RT-A-006 raw-value ambiguity rejection (more than one resolution of the kind on record) was
+  decided and returned early, ahead of the `reject_counts` check, so it never incremented or consulted
+  the counter and rejected forever regardless of `reject_counts`/`max_consecutive_rejections`, even
+  though it has no more of an in-band recovery move for a genuinely new value than the mismatch case
+  does (the `$ref:<kind>:<label>` disambiguation it points to is itself rejected by RT-A-007 for a
+  label not already on record) — the RT-A-008 liveness fallback silently didn't cover the shape most
+  conversations that resolve two entities of one kind actually hit. `resolve_reuse_fields`
+  (`agent_sdk/agent/reuse.py`'s `resolve_reuse_fields`, the `elif resolved_for_kind and (strict_fields
+  ...)` branch) now decides the rejection reason (mismatch vs. ambiguity) into
+  one `reject_reason` local first, then runs both through the SAME `reject_counts` boundary — a `$ref`-
+  token rejection (malformed, wrong-kind, unresolved, multi-match, label-matches-nothing) is unchanged
+  and still never counted, since the model already has a real in-band recovery move there (fix the
+  `$ref` token itself). Covered by `tests/test_rt_b002_reuse_bounded_recovery_ambiguity.py`
+  (`test_ambiguity_rejection_is_bounded_like_the_mismatch_rejection`,
+  `test_ambiguity_and_mismatch_share_one_consecutive_budget`,
+  `test_ref_token_rejections_are_not_counted`). (`agent_sdk/agent/reuse.py`)
+- RT-020: `resolve_reuse_fields`'s raw-value match check used exact type identity
+  (`_raw_matches_resolved`), so a value pydantic would coerce and accept as identical to an
+  already-resolved one — e.g. the string `"5831"` on an `int`-typed field already resolved to `5831` —
+  was rejected here, before the tool was ever reached, purely because the model's raw JSON argument
+  and the resolved value differ in Python type. New `ToolDecl.reuse_field_types`
+  (`agent_sdk/agent/registry.py:372-378`, built by `reuse_field_types_for_model` in
+  `agent_sdk/agent/reuse.py`) maps each `ReuseKind` field to its declared, Optional-stripped
+  scalar type; `resolve_reuse_fields` (new `field_types` parameter) runs a raw value through
+  `_coerce_raw_for_match` — the same coercion `input_model.model_validate` would apply — before the
+  match check, so `"5831"` now matches a resolved `5831`. Coercion never crosses the `bool`/`int`
+  boundary in either direction (`bool` is an `int` subclass; a bare `TypeAdapter` would silently turn
+  `True` into `1` or `1` into `True`, undoing the RT-014 type-boundary guard `_raw_matches_resolved`
+  enforces), and only affects the comparison — `effective_arguments` still carries the raw, uncoerced
+  value, so the tool's own `model_validate` performs the real coercion, unchanged. A field absent from
+  `field_types`, or `field_types` itself `None` (every caller predating RT-020), falls back to the
+  original exact-type-identity check byte-for-byte. Covered by `tests/test_rt020_reuse_type_coercion.py`.
+  (`agent_sdk/agent/reuse.py`, `agent_sdk/agent/registry.py`)
+- RT-002: `LoopPolicies.reuse_forced_passthrough_limit` now **defaults to `0`** (reject-forever),
+  down from `MAX_CONSECUTIVE_REUSE_REJECTIONS` (2). The RT-A-008/RT-C-001 entries above shipped this
+  policy defaulting to the module's ceiling constant, which meant the GH-148 gate failed OPEN by
+  default: the third consecutive identical wrong raw value was executed unvalidated with no operator
+  opt-in. A correctness gate must never default to fail-open — an operator who wants the liveness
+  fallback now opts IN by setting a positive `reuse_forced_passthrough_limit`, the same opt-in shape
+  `ReuseKind`'s own `strict`/`allow_raw_override` flags already use. DESIGN.md §8.1 and `docs/tools.md`
+  now document this as a third escape hatch (the two `ReuseKind` field-level flags being the first two)
+  with its default stated explicitly — DESIGN.md previously said only "two escape hatches, both
+  operator opt-ins", with no mention of this policy at all. (`agent_sdk/agent/loop.py`, `DESIGN.md`,
+  `docs/tools.md`)
+- RT-001: every `ReuseKind` map (`reuse_fields`/`reuse_strict`/`reuse_raw_override`/`reuse_field_types`
+  on `ToolDecl`, built by `agent_sdk/agent/reuse.py`'s `reuse_*_for_model` functions) is now ALSO keyed
+  by the field's bare python attribute name — alongside its wire alias, never instead of it — on a
+  model whose config declares `populate_by_name=True`/`validate_by_name=True` (new
+  `_accepts_field_name_alias` helper; a bare `alias_generator` with neither flag set does NOT trigger
+  this — verified live that pydantic still rejects the field name there). Such a model accepts a tool
+  call keyed by EITHER name — contrary to `_wire_field_name`'s previous docstring claim that
+  `model_validate` "rejects the plain field name outright, even with `populate_by_name=True`" (verified
+  false). Keying the reuse maps on the alias alone therefore let a call keyed by the python field name
+  skip the entire GH-148 substitution/validation gate on such a model — both the `$ref:`/`$raw:`
+  resolution in `agent/loop.py` and the `invoke_any` RT-A-009 rejection in `agent/registry.py` — while
+  `model_validate` accepted it without complaint: the exact silent wrong-but-successful substitution
+  GH-148 exists to close, on precisely the field shape (an aliased, camelCase-friendly model with
+  `populate_by_name=True`) most likely to use `ReuseKind`. A model that has not opted in — every
+  pre-RT-001 `ReuseKind` model — is unaffected: its maps stay keyed by the alias alone, byte-for-byte
+  as before. (`agent_sdk/agent/reuse.py`)
+- RT-007: the resolved-value index's de-duplication (`agent_sdk/agent/reuse.py`'s `scan_resolved` and
+  `agent_sdk/agent/loop.py`'s marker-append) now keys on `(label, type(value).__name__, repr(value))`
+  via the new `_index_entry_key` helper, not plain `(label, value)` tuple equality. Python's tuple `==`
+  conflates `1`/`True`/`1.0` across a type boundary, so a `Reusable(value=1, ...)` and a later
+  `Reusable(value=True, ...)` of the same kind and label collapsed into one index entry — after which
+  `_raw_matches_resolved` (which deliberately enforces type identity at MATCH time to stop exactly
+  that conflation) could only ever compare against whichever one was indexed first. Mirrors
+  `resolve_reuse_fields`'s own `repr`-based `reject_counts` keying. (`agent_sdk/agent/reuse.py`,
+  `agent_sdk/agent/loop.py`)
+- RT-006: `ToolEntry.input_schema`'s reuse-hint widening (`agent_sdk/agent/registry.py`'s
+  `_schema_permits_string`) now resolves a `$ref` (against the schema's own `$defs`) and an `allOf`
+  composition before deciding whether a `ReuseKind` field's advertised schema already permits the
+  `$ref:<kind>`/`$raw:<value>` string sentinel, and treats any schema carrying an `enum` key — resolved
+  or inline — as excluding it, even when every member is itself a string. Previously an unresolved
+  `$ref`/`allOf` was assumed to permit a string unconditionally, so an `Enum`-typed `ReuseKind` field
+  (accepted by `reuse_fields_for_model` — it is neither a container nor a `BaseModel`) advertised only
+  its enum members with no widened string branch: a schema-enforcing provider could never emit the
+  `$ref:<kind>` token, and the mechanism silently no-opped on that field — precisely the failure mode
+  this widening exists to prevent, just narrowed from "any non-`str`/`int`/`float`/`bool` scalar" down
+  to "closed". (`agent_sdk/agent/registry.py`)
+- RT-D-001: `resolve_reuse_fields`'s two rejections that recommend `$ref:<kind>:<label>` as the recovery
+  move — the multi-match `$ref:<kind>` rejection and the raw-value ambiguity rejection (RT-A-006) —
+  now name the kind's own on-record LABELS directly in the rejection text (new `_known_labels_hint`
+  helper, `agent_sdk/agent/reuse.py`). Live testing against a real AG-UI thread (3 real
+  `POST /ag-ui/run` calls on one `threadId`) found the recovery move those rejections recommend was
+  UNREACHABLE there: once two resolutions of a kind existed, both the CORRECT raw value and the bare
+  `$ref:<kind>` token were rejected, and the only recovery, `$ref:<kind>:<label>`, needed a label that
+  `routes/ag_ui.py::_fold_history` strips from every model-visible transcript (module docstring,
+  RT-A-004/RT-001 above) — with `LoopPolicies.reuse_forced_passthrough_limit` defaulting to `0`
+  (RT-002 above), this was reject-forever, taking the tool offline for the steady state of any
+  multi-entity AG-UI thread (the resolved-index dedup means `InMemoryTaskStore.MAX_REUSABLE_TASKS=50`
+  is easily reached by ordinary use). Only the on-record LABELS are now surfaced — tool-author-supplied
+  display names, never a resolved VALUE and never the caller's own (possibly wrong) supplied label, so
+  SI-2 is unaffected; RT-A-007's own label-mismatch rejection (a label WAS supplied and matched
+  nothing) is unchanged. The fix needs no transport-specific plumbing: the rejection text is the tool
+  result for THIS call, delivered back to the model on every transport regardless of what a later
+  request replays. Covered by a new route-level regression,
+  `tests/test_gh148_reuse_kind_substitution.py::test_route_level_ag_ui_ambiguity_rejection_names_a_usable_label_across_runs`
+  (two entities resolved on separate `POST /ag-ui/run` calls, a third run's correct raw id rejected
+  with a usable label, the follow-up `$ref:entity_id:<label>` call succeeding within that same run) —
+  the two-resolution shape only had A2A-shaped (one shared `messages` list) coverage before. Updated
+  `tests/test_rt_a006_reuse_label_confusion.py` and
+  `tests/test_rt_b002_reuse_bounded_recovery_ambiguity.py`'s exact-rejection-text assertions to match.
+  (`agent_sdk/agent/reuse.py`)
+- RT-004 (GH-149 follow-up): `FundPerformance.to_plain_text()` (`agent_sdk/models/content_types.py`)
+  now includes `pb_id` (as a provenance suffix, mirroring the admin console card's subtitle in
+  `a2ui.js`) plus `net_irr`/`gross_irr`/`rvpi`/`quartile` when set. GH-149 moved `pbId` into the
+  console card's subtitle but left the mandatory text fallback — sent to every client without A2UI
+  capability (DESIGN.md §5.1/§5.4 dual-part `TextPart`) — unaware of it and (at the time) of four
+  other wire fields: a `FundPerformance(pbId=..., netIrr=..., grossIrr=..., rvpi=..., quartile=...)`
+  card with none of the original irr/tvpi/dpi/moic fields set rendered the literal string
+  `"fund performance (no data)"` to those clients even though `wire()` carried real data. RT-004 did
+  not reach every wire field, though — six more (`calledDownPct`, `dryPowder`, `dryPowderPct`,
+  `distributed`, `remainingValue`, `distributedPlusRemaining`) plus `asOfQuarter`/`asOfYear` were
+  still silently dropped by the text fallback; see RT-002 below for the fix that closes the rest of
+  the gap. (`agent_sdk/models/content_types.py`)
+- RT-002: `FundPerformance.to_plain_text()` (`agent_sdk/models/content_types.py`) now also includes
+  `dry_powder`, `dry_powder_pct`, `distributed`, `remaining_value`, `distributed_plus_remaining`,
+  `called_down_pct`, `as_of_quarter` and `as_of_year` when set — the six most recently added wire
+  fields (four of which the A2UI console card already renders in `a2ui.js::renderFundPerformance`)
+  plus the two as-of-period fields were reaching `wire()` and the console card but silently vanishing
+  from the mandatory text fallback sent to clients without A2UI capability. A card carrying only
+  `calledDownPct`/`dryPowder`/`distributed`/`remainingValue` — a fully populated real-world payload —
+  previously rendered the literal string `"fund performance (no data)"` to those clients.
+  (`agent_sdk/models/content_types.py`, `tests/test_content_types.py`)
+- RT-B-202: `_create_task_record` (`agent_sdk/routes/a2a.py`) no longer calls `bridge_trailing_user`
+  directly to re-assert the never-ends-on-`user` invariant on the transcript
+  `TaskStore.context_messages()` returns. LRN-144's Check pins that bridge to exactly one call
+  site — inside `agent/runner.py::repair_dangling_tool_use` — and an unamended second direct call
+  site silently converts that Check into a permanently-failing audit. The re-assertion now routes
+  through a new, narrowly-scoped `bridge_context_messages` helper (`agent_sdk/agent/loop.py`): it
+  copies the store-supplied `Sequence[dict]` into a fresh list, bridges that copy, and returns it —
+  `routes/a2a.py` imports and calls only this wrapper, so `grep -n "bridge_trailing_user"
+  agent_sdk/routes/a2a.py` is back to zero matches. LRN-144 updated in the same change to describe
+  both call sites explicitly (out-of-loop repair writers vs. this read-side consumption helper) and
+  to fix a stale `_repair_dangling_tool_use_safe` reference (the landed symbol has always been the
+  public `repair_dangling_tool_use_safe`). (`agent_sdk/agent/loop.py`, `agent_sdk/routes/a2a.py`,
+  `workspace/learning/LRN-144-transcript-bridge-must-cover-out-of-loop-writers.md`)
+- RT-B-204: `tasks_cancel` (`agent_sdk/routes/a2a.py`) now publishes its terminal `StreamItem` with
+  `event=DoneEvent(ok=False, error="task canceled")` instead of `event=None`. A `StreamItem`'s
+  `frame` serves A2A SSE consumers; its `event` serves AG-UI's `_RunMapper` (`routes/ag_ui.py`),
+  which maps only `.event` — `_RunMapper.map(None)` returns `[]`. Every other terminal publisher in
+  the SDK (`run_task_worker`'s terminal handlers, `_run_deferred_background._fail`) already attaches
+  a `DoneEvent`; `tasks_cancel` was rewritten in a recent wave and carried `event=None` forward
+  unexamined. Before this fix, an AG-UI subscriber streaming a task cancelled through the A2A route
+  broke out of its frame loop with `terminal_sent` still `False` and fell through to the generic
+  `RUN_ERROR: "stream ended unexpectedly"` — a misleading error for a deliberate, successful
+  cancellation — while the A2A SSE consumer of the same task correctly saw `final:true`; the two
+  transports disagreed about what happened. Covered by a new end-to-end regression that starts a run
+  on `/ag-ui/run`, cancels the underlying task via `POST /v1/tasks/{id}:cancel` while the run is
+  still WORKING, and asserts the AG-UI stream's terminal frame is `RUN_ERROR` with message
+  `"task canceled"`, not `"stream ended unexpectedly"`:
+  `tests/test_rtb204_agui_cancel_terminal_event.py`. (`agent_sdk/routes/a2a.py`)
+- RT-002 (redteam, high): `InMemoryTaskStore.context_messages()` (`agent_sdk/tasks/memory.py`)
+  no longer silently disables A2A `contextId` continuation for a thread whose most recent task
+  produced more than `MAX_CONTEXT_MESSAGES` (default 50) messages with no genuine turn boundary in
+  the trailing cap-sized window. A single task that never finishes folds `2 * max_turns + 2`
+  messages (a `toolUse`/`toolResult` pair per turn, plus the seed and the final
+  `bridge_trailing_user` close), with its ONLY plain user-authored turn boundary at the seed
+  message — so once `AGENT_SDK_MAX_TURNS` (default 20) rises past roughly 24, that per-task
+  message count exceeds the default cap and `_turn_boundary_slice` found no boundary in the
+  trailing window at all, returning `[]`: not a truncation, a total silent loss of every prior
+  message, with no log line and no fallback. Numerically confirmed: `max_turns=24` carries all 50
+  messages (fits under the cap); `max_turns=25` and above carried zero. `_turn_boundary_slice` now
+  widens its search backward past the cap for the nearest earlier turn boundary when the trailing
+  window has none, logging a `WARNING` (`agent_sdk.tasks.memory`) each time it does — this cannot
+  reopen the unbounded cross-task growth `MAX_CONTEXT_MESSAGES` itself guards against (RT-007,
+  0.5.x), since a single task's own message list is already finite, bounded by that task's
+  `max_turns`. Still returns `[]`, now also logged, on the residual case where no turn boundary
+  exists anywhere in the transcript. Documented the `MAX_CONTEXT_MESSAGES`/`max_turns` coupling in
+  DESIGN.md §5.2 and docs/deployment.md — previously undocumented outside the module's own
+  docstrings. New regression coverage at `max_turns=25` (and a `max_turns=24` control, confirming
+  no fallback/warning fires under the cap): `tests/test_rt002_context_messages_max_turns_cliff.py`.
+  (`agent_sdk/tasks/memory.py`, `agent_sdk/tasks/store.py`, `DESIGN.md`, `docs/deployment.md`)
+
 ## [0.5.44] — 2026-07-24
 
 ### 🔴 Breaking changes

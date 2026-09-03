@@ -244,13 +244,30 @@ function appendMetadataFootnote(node, data) {
   const entries = Object.entries(meta);
   if (!entries.length) return;
 
-  // RT-008: metadata is caller-/tool-supplied (RT-A06), so it must carry the
-  // SAME bounds as content_types.py's _metadata_suffix() -- per-field
-  // control-char strip + 256-char cap (_METADATA_SUFFIX_FIELD_MAX_LEN), and a
-  // 4096-char cap on the assembled footnote as a whole
-  // (_METADATA_SUFFIX_MAX_LEN) -- otherwise a metadata dict with thousands of
-  // keys or embedded C0/C1 control chars renders unbounded in the console.
+  // RT-008/RT-010: metadata is caller-/tool-supplied (RT-A06), so it must
+  // carry the SAME bounds as content_types.py's _metadata_suffix() --
+  // per-field control-char strip + 256-char cap
+  // (_METADATA_SUFFIX_FIELD_MAX_LEN), and a 4096-char cap on the assembled
+  // footnote as a whole (_METADATA_SUFFIX_MAX_LEN) -- otherwise a metadata
+  // dict with thousands of keys or embedded C0/C1 control chars renders
+  // unbounded in the console.
   //
+  // RT-010: the 4096 budget below is spent against the per-entry length
+  // Python's _metadata_suffix() assembles -- "\n" + key + "=" + value, 2
+  // separator chars -- not against this console's own "key: value" display
+  // string, even though both happen to carry 2 separator chars too (and so
+  // land at an identical cutoff for the same string-valued metadata dict --
+  // cross-checked entry-for-entry against the real _metadata_suffix() in
+  // tests/test_rt010_metadata_footnote_budget_matches_metadata_suffix.py).
+  // Pinning the budget arithmetic to Python's literal formula, rather than
+  // to whatever this console happens to display, means a future change to
+  // the ": " display separator can't silently desync the two budgets by
+  // changing `rendered.length` out from under this comment's guarantee.
+  // This is a length/count parity, not a content one: a value that renders
+  // to a DIFFERENT string per language (null here is "—" vs Python's
+  // str(None) == "None"; an object goes through JSON.stringify here vs
+  // Python's dict repr there) can still shift where the shared budget runs
+  // out, since the two sides are then spending it on different content.
   // RT-006: byte-matches Python's sanitize_text (agent_sdk/common/redact.py,
   // C-007) -- `s[:max_len].translate(...)` -- which slices to max_len FIRST
   // and never appends an ellipsis. Stripping before truncating (as this used
@@ -259,7 +276,17 @@ function appendMetadataFootnote(node, data) {
   // "…" pushed the rendered field to 257 chars against Python's hard 256 cap.
   const FIELD_MAX_LEN = 256;
   const SUFFIX_MAX_LEN = 4096;
-  const sanitize = (s) => s.slice(0, FIELD_MAX_LEN).replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
+  // RT-011 (debug round 6): the truncation counts CODE POINTS, not UTF-16 code
+  // units, because Python's `s[:256]` counts code points. `s.slice(0, 256)`
+  // counts code units, so every non-BMP character (emoji, astral CJK) is 2
+  // units to JS and 1 char to Python: a 256-emoji value is cut to 128 emoji
+  // here against Python's 256, the two sides then spend the shared 4096
+  // SUFFIX_MAX_LEN budget at different rates, and the "byte-matches
+  // sanitize_text" claim above silently stops holding. `slice` can also cut
+  // between a surrogate pair and leave a lone surrogate. Array.from() iterates
+  // by code point, so both problems go away together.
+  const sanitize = (s) =>
+    Array.from(s).slice(0, FIELD_MAX_LEN).join("").replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
 
   const row = el("div", { class: "dim a2ui-meta" });
   let budget = SUFFIX_MAX_LEN;
@@ -283,9 +310,28 @@ function appendMetadataFootnote(node, data) {
     } else {
       text = String(v);
     }
-    const rendered = `${sanitize(String(k))}: ${sanitize(text)}`;
-    row.appendChild(el("span", { class: "a2ui-meta-item" }, rendered.slice(0, budget)));
-    budget -= rendered.length;
+    const key = sanitize(String(k));
+    const value = sanitize(text);
+    const rendered = `${key}: ${value}`;
+    // Budget spend mirrors "\n" + key + "=" + value (_metadata_suffix()'s own
+    // per-entry length), not rendered.length -- see the RT-010 comment above.
+    // RT-011: both the length AND the final slice below must count CODE
+    // POINTS, not UTF-16 code units -- same reason as the sanitize() fix
+    // above. key/value already passed through sanitize()'s Array.from() cap,
+    // but they can still hold non-BMP characters (a 256-emoji value stays
+    // 256 code points / 512 UTF-16 units after that cap), so `.length` here
+    // would spend the shared 4096 SUFFIX_MAX_LEN budget roughly twice as fast
+    // as Python's code-point-counting len() once several such entries are
+    // rendered -- desyncing which entries survive long before FIELD_MAX_LEN
+    // is ever reached. Array.from(...).length / slicing by code point keeps
+    // the running budget code-point-for-code-point identical to Python's.
+    const keyLen = Array.from(key).length;
+    const valueLen = Array.from(value).length;
+    const pythonEntryLen = 1 + keyLen + 1 + valueLen;
+    row.appendChild(
+      el("span", { class: "a2ui-meta-item" }, Array.from(rendered).slice(0, budget).join(""))
+    );
+    budget -= pythonEntryLen;
   }
   node.appendChild(row);
 }

@@ -211,6 +211,20 @@ def test_azure_credential_store_wired(tmp_path, azurite_conn_str):
 
 
 # ---------------------------------------------------------------------------
+# Note: GH-129 — DEV_MODE mismatch boot warning on the connection_string path
+# ---------------------------------------------------------------------------
+#
+# RT-008: the SI-2 regression test for this warning (GH-129) does NOT live in
+# this module. This module is skipped whenever `npx` is absent (see the
+# module-level `pytestmark` above), so an SI-2-mandated gate placed here would
+# silently not run on any CI runner or dev box without Node — exactly the
+# failure RT-008 flagged. The warning is emitted by
+# `Agent._build_credential_store()` *before* `AzureTableCredentialStore` is
+# constructed, so the test needs no Azurite/emulator to exercise it. Its
+# unguarded, unconditionally-run canonical home is
+# tests/test_gh129_dev_mode_connection_string_warning.py.
+#
+# ---------------------------------------------------------------------------
 # Test: Round-trip read/write on the real Azurite-backed store
 # ---------------------------------------------------------------------------
 

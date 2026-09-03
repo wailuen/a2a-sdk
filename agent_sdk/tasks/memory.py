@@ -8,6 +8,7 @@ import time
 from collections import OrderedDict
 from typing import Any, Callable, Sequence
 
+from ..agent.loop import is_user_turn_boundary
 from ..agent.reuse import extract_resolved_markers
 from ..auth.identity import Identity
 from ..models.a2a import Task
@@ -44,21 +45,6 @@ MAX_REUSABLE_TASKS = 50
 MAX_CONTEXT_MESSAGES = 50
 
 
-def _is_turn_boundary(msg: Any) -> bool:
-    """A genuine user-authored turn start — ``role == "user"`` with no
-    ``toolResult`` block in its content. Never a ``toolResult`` continuation
-    message, which Bedrock's Converse API rejects as a slice HEAD (see
-    ``_turn_boundary_slice``)."""
-    if not (isinstance(msg, dict) and msg.get("role") == "user"):
-        return False
-    content = msg.get("content")
-    if isinstance(content, list) and any(
-        isinstance(block, dict) and "toolResult" in block for block in content
-    ):
-        return False
-    return True
-
-
 def _turn_boundary_slice(
     messages: list[dict[str, Any]], cap: int
 ) -> list[dict[str, Any]]:
@@ -67,7 +53,14 @@ def _turn_boundary_slice(
     no genuine turn boundary in it at all (e.g. an out-of-loop repair-only
     tail with no organic user turn, GH-150). Otherwise, the trailing ``cap``
     messages, advanced forward to the next genuine turn boundary
-    (``_is_turn_boundary``).
+    (``agent.loop.is_user_turn_boundary`` — RT-004, debug round 5: the ONE
+    C-017-registered implementation of that predicate, imported and shared
+    with the read-side head repair in
+    ``agent/loop.py::bridge_context_messages`` rather than kept as a second
+    byte-equivalent private copy in this module. Note the two callers apply it
+    to different questions: this one caps and so must leave an already-fitting
+    transcript alone, while the read-side one REPAIRS and so must trim an
+    illegal head unconditionally.)
 
     A raw ``messages[-cap:]`` slice can land mid-tool-round: on a
     ``toolResult`` continuation message whose matching ``toolUse`` fell
@@ -101,10 +94,10 @@ def _turn_boundary_slice(
         return list(messages)
     tail_start = len(messages) - cap
     for i in range(tail_start, len(messages)):
-        if _is_turn_boundary(messages[i]):
+        if is_user_turn_boundary(messages[i]):
             return messages[i:]
     for i in range(tail_start - 1, -1, -1):
-        if _is_turn_boundary(messages[i]):
+        if is_user_turn_boundary(messages[i]):
             logger.warning(
                 "context continuation: no turn boundary within the trailing "
                 "%d-message cap (transcript has %d messages) — falling back "
@@ -176,8 +169,19 @@ class InMemoryTaskStore(TaskStore):
         if record is None:
             return None
         if self._expired(record):
-            self.evict(task_id)
-            return None
+            # RT-001 (round 6, AG-UI cross-check): the same live-subscriber
+            # guard `_evict_over_capacity` uses must apply here too. This path
+            # is reachable from `find_interrupt()` — e.g. an AG-UI resume
+            # lookup on a DIFFERENT record than the one being resumed — so an
+            # unrelated caller's TTL/interrupt-deadline check could otherwise
+            # `evict()` a record some other subscriber is still actively
+            # streaming, severing it with no `final:true` frame. Reap first so
+            # a leaked (owner-task-finished) subscription can never pin an
+            # actually-expired record here forever.
+            self.reap_dead_subscriptions(record)
+            if not record.subscriptions:
+                self.evict(task_id)
+                return None
         if identity is not None and not (identity.kind == "api_key" and identity.admin):
             if record.identity != identity.binding:
                 return None  # existence is not leaked (§5.1)
@@ -194,9 +198,7 @@ class InMemoryTaskStore(TaskStore):
 
     def subscribe(self, task_id: str) -> Subscription:
         record = self._records[task_id]
-        sub = Subscription(maxsize=self._queue_maxsize)
-        record.subscriptions.append(sub)
-        return sub
+        return self.new_subscription(record, maxsize=self._queue_maxsize)
 
     def unsubscribe(self, task_id: str, sub: Subscription) -> None:
         record = self._records.get(task_id)
@@ -215,7 +217,12 @@ class InMemoryTaskStore(TaskStore):
         record = self._records.get(task_id)
         if record is None:
             return
-        record.updated_at = self._clock()
+        # RT-001 (round 5, fresh-lens): refresh the LRU position, not just
+        # the TTL clock — `_evict_over_capacity` walks `self._records` in
+        # insertion order, so a task that had been streaming frames for an
+        # hour must not still sit at the LRU end as the first thing overflow
+        # eviction picks.
+        self.touch(task_id)
         for sub in record.subscriptions:
             sub.publish(event)
 
@@ -376,7 +383,17 @@ class InMemoryTaskStore(TaskStore):
         record.subscriptions.clear()
 
     def sweep(self) -> None:
+        # Same live-subscriber guard as `get()`/`_evict_over_capacity`: the
+        # periodic sweeper must not silently sever a still-actively-streamed
+        # record just because its TTL/interrupt-deadline lapsed while a live
+        # subscriber was waiting on it.
         for task_id in [tid for tid, r in self._records.items() if self._expired(r)]:
+            record = self._records.get(task_id)
+            if record is None:
+                continue
+            self.reap_dead_subscriptions(record)
+            if record.subscriptions:
+                continue
             self.evict(task_id)
 
     def close_all(self) -> None:
@@ -399,8 +416,32 @@ class InMemoryTaskStore(TaskStore):
         return now - record.updated_at > self._task_ttl
 
     def _evict_over_capacity(self) -> None:
-        # oldest first, skipping interrupted records (they pin paused
-        # workers and are bounded separately by max_interrupted)
+        # Oldest first, skipping records that must not be torn down merely
+        # because someone else filled the store:
+        #
+        #  - `interrupted` — they pin paused workers and are bounded
+        #    separately by `max_interrupted`.
+        #
+        #  - RT-001 (round 5, fresh-lens): records with LIVE SUBSCRIBERS.
+        #    `evict()` cancels the record's worker and `sub.close()`s every
+        #    subscriber, which pushes the bare `None` sentinel — routes/a2a.py's
+        #    `gen()` reads that as "stop" and returns WITHOUT emitting a
+        #    `final:true` TaskStatusUpdateEvent, so the client's SSE stream just
+        #    dies mid-flight and the task is gone from the store (a later
+        #    `tasks:subscribe` 404s and the work is lost). Because eviction is
+        #    driven by TOTAL store occupancy, the caller who overflows the store
+        #    is almost never the owner of the record that gets evicted: any
+        #    authenticated identity calling `POST /v1/message:send` — which has
+        #    no admission cap at all, and needs none — could sever another
+        #    tenant's in-flight stream. The route-layer admission caps cannot
+        #    fix this; they bound how many streams exist, not which record
+        #    overflow picks.
+        #
+        # Both skips let occupancy exceed `capacity`, by design and boundedly:
+        # `interrupted` by `max_interrupted`, and subscribed records by the
+        # route-layer stream budgets, which is precisely what those caps are
+        # for. A bounded overrun is the correct trade against silently
+        # severing a live stream.
         if len(self._records) <= self._capacity:
             return
         for task_id in list(self._records.keys()):
@@ -408,5 +449,12 @@ class InMemoryTaskStore(TaskStore):
                 break
             record = self._records[task_id]
             if record.interrupted:
+                continue
+            # Reap first, so a LEAKED subscription (owning request task already
+            # finished) can never pin a record here forever — that would trade
+            # a severed stream for an unbounded store. Only genuinely live
+            # subscribers protect a record.
+            self.reap_dead_subscriptions(record)
+            if record.subscriptions:
                 continue
             self.evict(task_id)

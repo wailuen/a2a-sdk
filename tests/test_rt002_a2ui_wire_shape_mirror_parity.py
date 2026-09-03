@@ -19,15 +19,31 @@ gitignored, so no diff-based check ever covers it — a fix landing in
 `.claude/`+`harness/` alone can silently stay unpropagated there. Unlike the
 DataPart wire-shape content above (template deliberately still diverges there
 per the tracked GH-128 follow-on, issue #151 — do not fold it into the
-byte-identical check), the RT-006 `metadata`-is-cross-cutting content below
-IS expected to already match in all three copies, so it is checked directly
-off disk (present on disk despite being untracked), following the same
+byte-identical check), the frozen `TimeSeriesChart.metadata` row below IS
+expected to already match in all three copies, so it is checked directly off
+disk (present on disk despite being untracked), following the same
 gitignored-template-read precedent as `tests/test_workflow_sync.py`.
+
+RT-004 follow-up (REVIEWS.md Round 10): w040 (RT-005/RT-006, REVIEWS.md
+Round 8) deleted the frozen `TimeSeriesChart.metadata` row from all three
+copies and replaced it with a free-form "metadata is cross-cutting" note +
+a "MUST NOT flag" directive — self-authorized inside the same wave that used
+the OPPOSITE argument (GH-149) to delete a *code* field in order to conform
+to this exact table. REVIEWS.md Round 8 recorded the doc edit as PROPOSED,
+pending maintainer ratification, never SIGNED OFF — but the prior version of
+this test only warned if the row was reverted, so nothing blocked the
+unratified loosening itself from shipping. RT-004 reverts the doc edit (the
+row is restored below) and inverts the gate: while
+`ROUND_8_METADATA_ROW_REMOVAL_RATIFIED` is False, an advisor copy that
+removes the frozen row (or reintroduces the cross-cutting override) now
+FAILS the suite, not just warns. The underlying gap this documented — no
+shipped code has ever implemented the typed sub-shape — is tracked
+separately in `workspace/sdk-candidates.md` for a maintainer to decide as
+its own Profile v1.1 amendment, not a silent same-wave doc edit.
 """
 
 from __future__ import annotations
 
-import warnings
 from pathlib import Path
 
 import agent_sdk.app as _app_module
@@ -58,24 +74,28 @@ AGENT_MIRROR_PAIRS = [
 
 TEMPLATE_A2UI_ADVISOR = "template/.claude/agents/a2ui-advisor.md"
 
-# RT-006: the SDK-wide `metadata` field must be documented once, as
-# cross-cutting, never redeclared as a per-type table row.
-METADATA_CROSS_CUTTING_MARKER = (
-    "`metadata` is a cross-cutting field, not a per-type one."
-)
+# RT-004: the frozen TimeSeriesChart.metadata row is part of the A2UI
+# Standard Profile v1 field contract (DESIGN.md stable core) and must not be
+# edited by a wave to match its own code without maintainer ratification.
 STALE_TIME_SERIES_METADATA_ROW = (
     "| `metadata` | `{identifier?, metric?, frequency?, source?}` | — | |"
 )
+# The unratified w040 replacement — a copy carrying this while the row above
+# is absent is exactly the self-authorized loosening RT-004 reverted.
+METADATA_CROSS_CUTTING_MARKER = (
+    "`metadata` is a cross-cutting field, not a per-type one."
+)
 
-# RT-003 (w040 follow-up): REVIEWS.md Round 8 records the removal of this row
-# as PROPOSED, pending user ratification — explicitly NOT SIGNED OFF, per the
-# standing rule that a wave's own redteam/implementer cannot ratify a
-# frozen-contract doc change alone
+# RT-004 (w040 follow-up, REVIEWS.md Round 10): REVIEWS.md Round 8 recorded
+# the row's removal as PROPOSED, pending user ratification — explicitly NOT
+# SIGNED OFF, per the standing rule that a wave's own redteam/implementer
+# cannot ratify a frozen-contract doc change alone
 # (memory/feedback-wave-signoff-needs-user-ratification). Flip this to True
-# ONLY alongside a REVIEWS.md Round 8 edit that records a maintainer's
-# SIGNED OFF ruling — never as a bare test edit. Until then, a reverted row
-# must warn, not hard-fail, so the enforced status here matches the
-# provisional status recorded in REVIEWS.md.
+# ONLY alongside a REVIEWS.md entry that records a maintainer's SIGNED OFF
+# ruling — never as a bare test edit. Until then, an advisor copy that
+# removes the frozen row (the unratified direction) must hard-fail, not warn
+# — inverted from the pre-RT-004 gate, which only warned on a *revert* of
+# the removal and let the removal itself ship unchecked.
 ROUND_8_METADATA_ROW_REMOVAL_RATIFIED = False
 
 
@@ -87,19 +107,28 @@ def _read(relative: str) -> str:
     return (_repo_root() / relative).read_text()
 
 
-def _assert_metadata_row_removed_or_warn(
+def _assert_metadata_row_present_or_fail(
     path: str, text: str, *, ratified: bool = ROUND_8_METADATA_ROW_REMOVAL_RATIFIED
 ) -> None:
-    if STALE_TIME_SERIES_METADATA_ROW not in text:
-        return
-    message = (
-        f"{path} still carries the stale per-type `metadata` row on "
-        f"TimeSeriesChart's field table — REVIEWS.md Round 8 proposed "
-        f"removing it (RT-006) but this is not yet ratified"
-    )
     if ratified:
-        raise AssertionError(message)
-    warnings.warn(message, stacklevel=2)
+        return
+    if STALE_TIME_SERIES_METADATA_ROW not in text:
+        raise AssertionError(
+            f"{path} is missing the frozen TimeSeriesChart.metadata row "
+            f"while its removal remains UNRATIFIED "
+            f"(ROUND_8_METADATA_ROW_REMOVAL_RATIFIED=False) — a wave may not "
+            f"edit a frozen A2UI Standard Profile v1 field contract to "
+            f"conform to its own code without maintainer sign-off; see "
+            f"REVIEWS.md Round 10 / RT-004"
+        )
+    if METADATA_CROSS_CUTTING_MARKER in text:
+        raise AssertionError(
+            f"{path} carries the unratified cross-cutting `metadata` "
+            f"override note — REVIEWS.md Round 10 reverted this edit "
+            f"pending maintainer ratification; it must not reappear until "
+            f"ROUND_8_METADATA_ROW_REMOVAL_RATIFIED is flipped alongside a "
+            f"SIGNED OFF REVIEWS.md entry"
+        )
 
 
 def test_repo_and_harness_mirrors_are_byte_identical():
@@ -138,12 +167,14 @@ def test_every_mirror_states_the_reconciled_spec_conflict_and_hint():
             )
 
 
-def test_all_three_a2ui_advisor_copies_state_metadata_is_cross_cutting():
+def test_all_three_a2ui_advisor_copies_keep_the_frozen_metadata_row():
     """RT-A08: the untracked `template/` copy must not silently drift from
-    the two git-tracked copies on RT-006 content just because no diff
-    watches it. RT-003: the template copy is a hard requirement here — its
-    absence must fail loudly, not silently shrink the 'all three copies'
-    check down to two."""
+    the two git-tracked copies just because no diff watches it. RT-003: the
+    template copy is a hard requirement here — its absence must fail
+    loudly, not silently shrink the 'all three copies' check down to two.
+    RT-004: the frozen `TimeSeriesChart.metadata` row is the enforced state
+    (REVIEWS.md Round 10) — no copy may drop it, or reintroduce the w040
+    cross-cutting override, without maintainer ratification."""
     template_path = _repo_root() / TEMPLATE_A2UI_ADVISOR
     assert template_path.exists(), (
         f"{TEMPLATE_A2UI_ADVISOR} is missing — this test must fail rather "
@@ -158,9 +189,4 @@ def test_all_three_a2ui_advisor_copies_state_metadata_is_cross_cutting():
     }
 
     for path, text in copies.items():
-        assert METADATA_CROSS_CUTTING_MARKER in text, (
-            f"{path} is missing the RT-006 cross-cutting `metadata` note — "
-            f"every a2ui-advisor copy must document `metadata` once, not "
-            f"per FROZEN-type table"
-        )
-        _assert_metadata_row_removed_or_warn(path, text)
+        _assert_metadata_row_present_or_fail(path, text)

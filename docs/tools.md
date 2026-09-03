@@ -40,6 +40,27 @@ Rules the decorator enforces:
   happens without an explicit `name=` override, the SDK logs a `WARNING`
   at registration time; pass `name="foo"` to `@tools.tool(...)` to fix it.
 
+## MCP annotations
+
+`readOnlyHint`/`destructiveHint` come from `read_only=`. `openWorldHint` is
+derived from the function signature, not from `tier` or `read_only`: it is
+`True` iff the tool has at least one `SourceAdapter`-backed keyword-only
+parameter, `False` otherwise. This is a claim about the SDK's dependency-
+injection contract — a tool receives external capability **only** as an
+`SourceAdapter` passed by typed keyword-only parameter, never ambiently — so
+a tool with no such parameter is closed-world by declared contract.
+
+If a tool reaches an external system by any other route — a nested call into
+another tool's function, a contrib source, anything not expressed as its own
+`SourceAdapter` parameter — that is a contract violation to fix at the tool,
+*or* pass `annotations={"openWorldHint": True}` explicitly to override the
+seed (it always wins). A tier-2 composite tool with no adapter parameter and
+no explicit override logs a `WARNING` at registration time for exactly this
+reason.
+
+An explicit `annotations={...}` always overrides the seeded fields,
+field-by-field.
+
 ## Tiers
 
 - **Tier 1 (query):** exposed on A2A *and* MCP `tools/list`. 130s timeout.

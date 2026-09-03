@@ -16,6 +16,14 @@ this surface. A client SHOULD therefore read ``response.json()["error"]``
 here. Only the MCP (``/mcp``) and AG-UI (``/ag-ui/run``) surfaces, which have
 no such envelope handler, return the guard's bare ``{"detail": ...}`` shape.
 
+Both streaming verbs here (``POST /v1/message:stream``, ``POST
+/v1/tasks/{id}:subscribe``) hold an indefinite ``text/event-stream`` and are
+admitted against a bounded concurrency budget shared with AG-UI's ``POST
+/ag-ui/run`` — at capacity they return ``429`` + ``Retry-After: 5`` (error
+code ``-32000``) rather than evicting a live stream. Recorded in DESIGN.md
+§5.5/§6 and docs/protocols.md; see ``_admit`` for the mechanism and the
+ordering rule it enforces.
+
 RT-B-203: ``X-A2A-Extensions`` means an extension was ACTIVATED for this
 response, not merely that the caller asked for it (§5.1) — a conformant
 consumer is expected to parse a response for an extension's content only
@@ -67,11 +75,13 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Any, AsyncIterator, Sequence
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Awaitable, Callable, Sequence
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
+from starlette.background import BackgroundTask
 
 from ..a2ui.translator import A2uiCapabilities
 from ..agent.events import DoneEvent
@@ -86,6 +96,16 @@ from ..agent.runner import (
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
 from ..credentials import forwarding
+from ..common.admission import (
+    SlotTable,
+    StreamSlot,
+    count_for_owner,
+    count_for_task,
+    identity_key,
+    prune_finished,
+    resolve_per_identity_limit,
+    slot_table,
+)
 from ..common.origin import guard_origin
 from ..common.sse import SSE_HEADERS, sse_data
 from ..common.wire_errors import a2a_error, a2a_invalid_params, a2a_parse_error
@@ -108,7 +128,7 @@ from ..models.errors import (
     A2A_TASK_NOT_FOUND,
     A2A_UNSUPPORTED_OPERATION,
 )
-from ..tasks.store import StreamTerminated, TaskRecord
+from ..tasks.store import StreamTerminated, Subscription, TaskRecord
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +136,139 @@ router = APIRouter()
 
 _SUPPORTED_MODES = {"text", "text/plain", "application/json", A2UI_MIME_TYPE}
 _MAX_BODY_BYTES = 1 * 1024 * 1024  # 1 MB — consistent with AG-UI cap
+
+# RT-002 (GH-143 follow-up): message_stream's taskId-resume branch and
+# tasks_resubscribe both hold an authenticated, indefinitely-held
+# text/event-stream open on the SAME single-process connection pool GET
+# /mcp's admission cap (routes/mcp.py's _get_streams()) already protects —
+# capping only that surface left this one trivially reachable, including the
+# specific harm _open_stream's own docstring names: tasks_resubscribe can be
+# invoked unboundedly against ONE task, each call appending a Subscription
+# onto record.subscriptions, an unbounded list store.publish walks for every
+# frame. Mirrors routes/mcp.py's _get_streams()/_prune_get_streams() pattern:
+# a stream id -> (task id, owning ASGI request task, release) slot,
+# registered BEFORE store.subscribe()/the StreamingResponse, admitted
+# against a global cap (bounds total process load) then a cap on concurrent
+# subscribers to THIS task (bounds the specific per-task growth above) —
+# reject via HTTPException(429), never evict, for the identical reason
+# mcp.py's comment gives: evicting only the admission slot would not stop
+# the live gen() loop or free its connection.
+#
+# RT-001 (round 2): the global cap alone bounds total process load but has NO
+# cross-tenant dimension — one identity can consume the entire budget and
+# lock every other tenant out of message:stream/tasks:subscribe. The
+# per-task cap is vacuous on message:stream's dominant no-taskId path
+# (_create_task_record mints a fresh uuid task id on every call, so
+# task_count is always 0 there). Mirrors routes/mcp.py's
+# _MAX_GET_STREAMS_PER_IDENTITY / _max_streams_per_identity() exactly,
+# including the same org-wide-provisioning caveat: Identity.subject is a
+# client_id/api-key id, not an end user, so a shared org credential
+# collapses every caller in the org onto ONE identity_key() value. See
+# _max_a2a_streams_per_identity().
+_MAX_A2A_STREAMS = 500
+_MAX_A2A_STREAMS_PER_IDENTITY = 200
+_MAX_A2A_STREAMS_PER_TASK = 16
+
+# RT-001 (round 4, fresh-lens): the three caps above were correct but ran in
+# the wrong PLACE on message:stream's dominant no-taskId path. `_open_stream`
+# conflated two different things — the admission DECISION (a pure capacity
+# check) and the subscription REGISTRATION (state mutation) — into one call
+# that needs a `TaskRecord`. On the no-taskId path there is no record until
+# `_create_task_record()` has already run `task_store.create()`, so the
+# load-shed check necessarily ran AFTER a durable write to the
+# capacity-bounded store: every 429-rejected request still inserted an
+# orphan TaskRecord (no worker, permanently 'submitted'), and `create()` ->
+# `_evict_over_capacity()` then evicted oldest-first, and `evict()` cancels
+# that record's worker, cancels its resume_future and `sub.close()`s its
+# subscribers — so the shed path became an eviction vector that severed
+# ANOTHER tenant's in-flight SSE stream with no final:true frame. That
+# directly contradicts this wave's own reject-not-evict rationale
+# (routes/mcp.py's _MAX_GET_STREAMS comment).
+#
+# The fix is structural, not a rescue: admission is now `_admit()`, which
+# takes an identity and an OPTIONAL task id (never a record), performs the
+# capacity decision and CLAIMS its slot in the same synchronous step, and
+# mutates nothing durable. Callers that must create state run `_admit()`
+# first and hand the resulting `_ClaimedSlot` to `_open_stream()`. Claiming
+# at decision time (rather than re-checking later) is what makes this safe:
+# there is no await between the checks and the insert, so no interleaved
+# request can take the last slot in between and force a second rejection
+# after the store has already been written.
+#
+# RT-002 (round 5): the slot record, the identity key, the lazy-init table
+# accessor, the liveness prune loop and the override-and-clamp limit resolver
+# all now live in `common/admission.py` (C-024) and are shared with
+# routes/mcp.py, which held a byte-identical second copy. What stays here is
+# only what is genuinely A2A-specific: the cap constants above, the per-task
+# cap, `HTTPException`-shaped rejection (so app.py's `_a2a_auth_envelope` wraps
+# it in the A2A error shape), and the deferred task binding below.
+#
+# RT-001 (round 6, fresh-lens): that deferred binding used to be a bare
+# `bind(task_id, sub)` callable the admitting route had to remember to call
+# AFTER its own `store.subscribe()`. Only `_open_stream` ever remembered;
+# `/ag-ui/run` — the other route documented (DESIGN.md §5.5, docs/protocols.md)
+# as sharing this budget's per-task subscriber cap — subscribed directly
+# against the store and never bound. An unbound slot keeps the `""` placeholder
+# task id, so `count_for_task` could not see AG-UI subscribers at all: the
+# documented per-task cap was unenforceable on that route AND under-counted for
+# the routes that do bind (an A2A client still got its full
+# `_MAX_A2A_STREAMS_PER_TASK` subscribers on top of the AG-UI ones on the same
+# `record.subscriptions` — the per-frame `store.publish` walk the cap exists to
+# bound). Its `release()` also never unsubscribed, leaving AG-UI's subscription
+# teardown on the inner generator's `finally` alone — the exact layer
+# `_open_stream`'s docstring documents as insufficient — so the layer-2
+# BackgroundTask and layer-3 `prune_finished` backstops reclaimed strictly less
+# for AG-UI than for A2A.
+#
+# The fix removes the forgettable step rather than adding it back at the second
+# call site: a slot no longer exposes `bind` at all, it exposes `subscribe`,
+# which performs `store.subscribe()` and the slot update as ONE synchronous
+# operation. Subscribing under an admitted slot without registering the task id
+# is now unrepresentable, so a future third stream route cannot reintroduce
+# this class of bug by omission.
+
+
+@dataclass
+class _ClaimedSlot:
+    """A claimed admission slot, returned by ``_admit``.
+
+    ``release`` is the slot's single, idempotent teardown callable — it drops
+    the slot and unsubscribes whatever ``subscribe`` attached to it (nothing,
+    if the caller never got that far).
+
+    ``subscribe(task_id)`` is the ONLY way an admitted stream may attach a
+    ``Subscription``: it subscribes against the task store and upgrades this
+    slot — reserved with no task id — to the real task in the same synchronous
+    step. Deliberately not a separate ``bind`` the caller invokes afterwards
+    (RT-001, round 6): that made registration an optional courtesy every stream
+    route had to remember, and the route that forgot silently disabled the
+    per-task cap for itself and under-counted it for everyone else.
+    """
+
+    stream_id: str
+    release: Callable[[], Awaitable[None]]
+    subscribe: Callable[[str], Subscription]
+
+
+def _max_a2a_streams_per_identity(app: Any) -> int:
+    """Effective per-identity A2A-stream cap (RT-001), via the shared resolver.
+
+    ``AGENT_SDK_MAX_A2A_STREAMS_PER_IDENTITY`` overrides the SDK default for an
+    org larger than it accommodates; the shared helper clamps to
+    ``_MAX_A2A_STREAMS`` and documents why a ``0`` can never reach it."""
+    return resolve_per_identity_limit(
+        app,
+        "max_a2a_streams_per_identity",
+        _MAX_A2A_STREAMS_PER_IDENTITY,
+        _MAX_A2A_STREAMS,
+    )
+
+
+def _a2a_streams(app: Any) -> SlotTable:
+    """Shared admission budget for every indefinite A2A text/event-stream —
+    both streaming verbs here plus ``/ag-ui/run``."""
+    return slot_table(app, "a2a_streams")
+
 
 # GH-150: fixed, SDK-authored — never interpolates a tool name, argument, or
 # upstream exception text (SI-2). The synthetic toolResult is replayed back
@@ -418,15 +571,160 @@ async def message_send(
     return JSONResponse(_task_wire(record, history_length), headers=dict(response.headers))
 
 
-def _open_stream(
-    request: Request, record: TaskRecord
+async def _admit(
+    request: Request, identity: Identity, task_id: str | None
+) -> _ClaimedSlot:
+    """Reserve one admission slot for an indefinite A2A ``text/event-stream``.
+
+    RT-002: the shared ``_a2a_streams()`` budget — global cap first (bounds
+    total process load), then per-identity (RT-001: stops one authenticated
+    tenant consuming the whole budget and locking out every other tenant),
+    then per-task when ``task_id`` is known (bounds the unbounded
+    ``record.subscriptions`` growth ``tasks_resubscribe`` could otherwise
+    drive, since ``store.publish`` walks that list for every frame). Rejects
+    with ``HTTPException(429)`` and never evicts, for the identical reason
+    ``routes/mcp.py``'s ``_MAX_GET_STREAMS`` comment gives: evicting a slot
+    would not stop the live generator or free its connection.
+
+    RT-001 (round 4): this function is the ENTIRE admission decision and it
+    deliberately takes no ``TaskRecord`` — only an identity and an optional
+    task id — so it can be called before the task exists, i.e. before ANY
+    durable state mutation on the request path. It mutates nothing but the
+    in-memory admission map, so a rejection here is a pure no-op: no task
+    record is written, and therefore nothing can be evicted from the
+    capacity-bounded task store as a side effect of shedding load.
+
+    The slot is CLAIMED here, not merely checked: the three checks and the
+    ``streams[stream_id] = ...`` insert are separated by no await, so the
+    decision is atomic with respect to the event loop. A caller may therefore
+    create state after ``_admit`` returns and pass the slot to
+    ``_open_stream`` knowing no interleaved request can have taken the last
+    slot in the meantime.
+
+    ``HTTPException(429)`` rides the app-level A2A error envelope
+    (``app.py``'s ``_a2a_auth_envelope``), the same path ``guard_origin``'s
+    403 and the identity rate limiter's 429 already use, so the ``/v1/*``
+    caller sees the spec error shape with ``Retry-After`` preserved. On
+    ``/ag-ui/run``, which has no such handler, it surfaces as the bare
+    ``{"detail": ...}`` shape that surface's other transport-level
+    rejections already use.
+    """
+    streams = _a2a_streams(request.app)
+    await prune_finished(streams)
+    if len(streams) >= _MAX_A2A_STREAMS:
+        raise HTTPException(
+            status_code=429,
+            detail="too many concurrent A2A streams",
+            headers={"Retry-After": "5"},
+        )
+    owner = identity_key(identity)
+    if count_for_owner(streams, owner) >= _max_a2a_streams_per_identity(request.app):
+        raise HTTPException(
+            status_code=429,
+            detail="too many concurrent A2A streams for this identity",
+            headers={"Retry-After": "5"},
+        )
+    if task_id is not None:
+        if count_for_task(streams, task_id) >= _MAX_A2A_STREAMS_PER_TASK:
+            raise HTTPException(
+                status_code=429,
+                detail="too many concurrent subscribers for this task",
+                headers={"Retry-After": "5"},
+            )
+
+    store = request.app.state.task_store
+    stream_id = uuid.uuid4().hex
+    # RT-001: the ASGI request task itself is the liveness fact
+    # prune_finished keys on — it stays not-done for the entire response
+    # cycle, StreamingResponse body and background task included, so a
+    # still-open stream is never mistaken for a stale one.
+    owning_task = asyncio.current_task()
+    assert owning_task is not None
+    bound: tuple[str, Subscription] | None = None
+
+    async def release() -> None:
+        # RT-001: MUST be `async def` — Starlette's BackgroundTask dispatches
+        # a plain `def` via run_in_threadpool (an AnyIO worker thread), which
+        # would mutate `streams`/`record.subscriptions` (event-loop-owned
+        # state `prune_finished`/`InMemoryTaskStore.publish` concurrently
+        # iterate) off-loop — racing that iteration and able to skip a live
+        # subscriber rather than merely raising. `async def` makes Starlette
+        # await it in-loop instead, and every caller (the BackgroundTask and
+        # the early-return paths) must `await` it rather than call it bare.
+        # Idempotent, so the generator `finally` / BackgroundTask / prune
+        # layers overlap harmlessly.
+        streams.pop(stream_id, None)
+        if bound is not None:
+            store.unsubscribe(bound[0], bound[1])
+
+    def subscribe(bound_task_id: str) -> Subscription:
+        """Subscribe to ``bound_task_id`` THROUGH this slot.
+
+        Attaches the real task id + ``Subscription`` to the slot, so `release`
+        becomes the subscription's lifecycle teardown too and the per-task cap
+        can see the slot. Synchronous by design, and it owns the
+        ``store.subscribe()`` call itself: there is no point between the
+        subscription existing and the slot knowing about it at which the loop
+        can be yielded to, and no way for a caller to perform one half without
+        the other (RT-001, round 6 — that was exactly how ``/ag-ui/run``
+        escaped the per-task cap while still consuming the budget)."""
+        nonlocal bound
+        sub = store.subscribe(bound_task_id)
+        bound = (bound_task_id, sub)
+        slot = streams.get(stream_id)
+        if slot is not None:
+            slot.task_id = bound_task_id
+        return sub
+
+    streams[stream_id] = StreamSlot(
+        owner=owner,
+        owning_task=owning_task,
+        release=release,
+        task_id=task_id or "",
+    )
+    return _ClaimedSlot(stream_id=stream_id, release=release, subscribe=subscribe)
+
+
+async def _open_stream(
+    request: Request,
+    record: TaskRecord,
+    identity: Identity,
+    slot: _ClaimedSlot | None = None,
 ) -> tuple[AsyncIterator[bytes], Any]:
     """Subscribe + snapshot the full-Task first frame EAGERLY (before the
     worker can mutate the record or publish), then return the SSE generator
-    plus an abort callback for paths that never iterate it. A severed-
-    without-final stream is the documented re-subscribe signal (§5.2)."""
-    store = request.app.state.task_store
-    sub = store.subscribe(record.task.id)
+    plus an abort callback for paths that never iterate it. A
+    severed-without-final stream is the documented re-subscribe signal
+    (§5.2).
+
+    Admission is ``_admit``'s job, never this function's (see its docstring
+    and the module comment above ``_MAX_A2A_STREAMS``). Callers that hold no
+    state yet may let this call ``_admit`` for them by omitting ``slot``;
+    callers that must create durable state first MUST call ``_admit``
+    themselves BEFORE that mutation and pass the resulting ``_ClaimedSlot``
+    here, so a 429 can never be raised on a request path that has already
+    written to the capacity-bounded task store (RT-001, round 4).
+
+    RT-001 (round 4): ``abort`` is not only for the early-return paths — it
+    is the slot's and the subscription's lifecycle release, and EVERY caller
+    must also hand it to the ``StreamingResponse`` as a ``BackgroundTask``.
+    ``gen()``'s ``finally`` is not a lifecycle hook: it runs only once the
+    generator body has actually started, so a request task cancelled at
+    Starlette's ``send(http.response.start)`` checkpoint would never
+    unsubscribe, leaking a ``Subscription`` onto ``record.subscriptions`` —
+    an unbounded list that ``store.publish`` walks for every frame.
+    ``store.unsubscribe`` is idempotent, so the two layers overlap
+    harmlessly."""
+    if slot is None:
+        slot = await _admit(request, identity, record.task.id)
+
+    # Subscribing THROUGH the slot is what makes the slot own the
+    # subscription's teardown from the instant it exists, and what lets the
+    # per-task cap see the real task id before any other request can be
+    # served. There is no store.subscribe() call here to get out of step with
+    # it (RT-001, round 6).
+    sub = slot.subscribe(record.task.id)
+    release = slot.release
     snapshot = record.task.wire()
     terminal = record.task.status.state in TERMINAL_STATES
 
@@ -457,10 +755,10 @@ def _open_stream(
                 if item.final:
                     return
         finally:
-            store.unsubscribe(record.task.id, sub)
+            await release()
 
-    def abort() -> None:
-        store.unsubscribe(record.task.id, sub)
+    async def abort() -> None:
+        await release()
 
     return gen(), abort
 
@@ -480,21 +778,40 @@ async def message_stream(
     if params.message.task_id:
         # subscribe BEFORE delivering the resume so no frame is missed
         record = request.app.state.task_store.get(params.message.task_id, identity)
-        if record is None or record.task.status.state in TERMINAL_STATES:
-            # not found OR terminal: no resumable task (consistent with resume path)
+        if record is None:
             return a2a_error(A2A_TASK_NOT_FOUND, "task not found")
-        stream, abort = _open_stream(request, record)
+        if record.task.status.state in TERMINAL_STATES:
+            # A2A-F1 (matches _resume_or_error's message/send behavior): the task
+            # exists but is terminal, so -32001 (TaskNotFound) would misrepresent
+            # the failure. Return -32004 directly, never opening a stream
+            # subscription for a task that cannot be resumed.
+            return a2a_error(
+                A2A_UNSUPPORTED_OPERATION, "task is in a terminal state and cannot accept new messages"
+            )
+        stream, abort = await _open_stream(request, record, identity)
         resumed = _resume_or_error(request, params, identity)
         if isinstance(resumed, JSONResponse):
-            abort()
+            await abort()
             return resumed
         # RT-005: a resume never calls _capabilities()/forwarding.bind, so
         # only A2UI can ever be echoed here, and only when the task's OWN
         # (already-existing) artifacts genuinely carry an A2UI part.
         _echo_a2ui_if_present([record.task], request, response)
     else:
+        # RT-001 (round 4): admit BEFORE _create_task_record, never after.
+        # _create_task_record() -> task_store.create() is a durable write to
+        # an LRU-bounded store whose overflow eviction cancels the evicted
+        # record's worker and sub.close()s its subscribers — so shedding load
+        # after it would sever another tenant's in-flight stream with no
+        # final:true frame. The task id does not exist yet, hence None: the
+        # per-task cap is vacuous on this path anyway (a fresh uuid per call
+        # always counts 0), while the global and per-identity caps — the two
+        # that actually bound process load and cross-tenant fairness — are
+        # fully enforced here. The slot is claimed, not merely checked, so
+        # passing it to _open_stream below cannot 429 a second time.
+        slot = await _admit(request, identity, None)
         record = _create_task_record(request, params, identity)
-        stream, _ = _open_stream(request, record)
+        stream, abort = await _open_stream(request, record, identity, slot=slot)
         _start_worker(request, record, _capabilities(params.message, request))
         # RT-005: the sole path on this route that can activate either
         # extension — echoed only now that _capabilities()/_start_worker
@@ -504,6 +821,7 @@ async def message_stream(
         stream,
         media_type="text/event-stream",
         headers={**SSE_HEADERS, **dict(response.headers)},
+        background=BackgroundTask(abort),
     )
 
 
@@ -680,9 +998,10 @@ async def tasks_resubscribe(
     record = request.app.state.task_store.get(task_id, identity)
     if record is None:
         return a2a_error(A2A_TASK_NOT_FOUND, "task not found", headers=hdrs)
-    stream, _ = _open_stream(request, record)
+    stream, abort = await _open_stream(request, record, identity)
     return StreamingResponse(
         stream,
         media_type="text/event-stream",
         headers={**SSE_HEADERS, **hdrs},
+        background=BackgroundTask(abort),
     )

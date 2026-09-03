@@ -39,6 +39,7 @@ from pydantic import BaseModel
 from ..agent.loop import safe_validation_message
 from ..agent.registry import ToolInputValidationError
 from ..auth.middleware import AuthRuntime, _prm_challenge, require_admin, unauth_rate_limit
+from ..common.redact import frame_locations
 from ..credentials.fields import CredentialField, validate_credential_url
 from ..credentials.store import NS_BEDROCK, NS_MODEL, RESERVED_NAMESPACES, CredentialStore
 from ..models.errors import AgentError, ErrorCategory
@@ -551,12 +552,16 @@ async def try_tool(
         # (e.g. ``raise ValueError(f'bad token {v!r}')``) surfaces that value
         # in ``msg``.  Route through the same SI-2-safe helper the MCP sibling
         # surface uses (routes/mcp.py), which keeps only loc + type.
+        # GH-135: this discriminator is raised ONLY by the input-model
+        # coercion step, never by the tool body, so a body-raised
+        # ValidationError falls through to the generic except-Exception
+        # branch below instead of being misreported as caller input here.
         return {
             "ok": False,
             "error": {
                 "category": "validation",
                 "message": safe_validation_message(
-                    exc.tool_name, exc.validation_error, exc.input_model
+                    name, exc.validation_error, entry.decl.input_model
                 ),
             },
         }
@@ -565,8 +570,23 @@ async def try_tool(
             "ok": False,
             "error": {"category": "timeout", "message": f"tool exceeded {timeout:.0f}s"},
         }
-    except Exception:  # noqa: BLE001 — internals stay out of the response
-        logger.exception("tool try failed: %s", name)
+    except Exception as exc:  # noqa: BLE001 — internals stay out of the response
+        # SI-2/RT-011: a body-raised ValidationError's __str__ embeds the raw
+        # rejected value (`input_value=...`) — same for any other exception
+        # whose message interpolates caller/tool-derived data. `logger.exception`
+        # would format that message (and traceback) straight into the log, so
+        # we never log exc's message. RT-004: log the exception TYPE plus
+        # frame_locations() (common/redact.py, SI-2-safe: filename/lineno
+        # only, never `.line`) — mirroring routes/mcp.py's identical catch-all
+        # branch (RT-010) and every agent/loop.py dispatch site, all backed
+        # by the same helper so this parity claim holds (LRN-044).
+        frames = frame_locations(exc)
+        logger.error(
+            "tool try failed name=%s error_type=%s frames=%s",
+            name,
+            type(exc).__name__,
+            frames,
+        )
         return {
             "ok": False,
             "error": {"category": "internal", "message": "tool raised an unexpected error"},

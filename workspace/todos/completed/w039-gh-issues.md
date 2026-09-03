@@ -93,11 +93,26 @@ them), group:B runs after group:A completes (GH-150).
 
 ## Archival note (RT-002 follow-up)
 
-All four ACs above landed in code with passing regression tests before this
-wave's own Phase Redteam reached Archive — see the two `w039-group-{A,B}-
-budget-exhausted.md` deferred notes (archived alongside this file) for the
-12 findings raised against the round-5 state and their fixes, all since
-verified against current code. The wave stalled short of self-archiving
+**Correction (RT-001, post-archive):** the paragraph below originally read "All
+four ACs above landed in code with passing regression tests" without
+qualification. That is true of the code/test ACs only. GH-149's CHANGELOG AC
+("CHANGELOG.md entry under a 🔴 Breaking changes heading … with a Migration
+callout") and GH-150's CHANGELOG AC ("CHANGELOG.md entry in the repo's
+existing GH-XXX format") were NOT part of commit `5b669b3` —
+`git show 5b669b3:CHANGELOG.md` (and `231e370`, the commit that archived this
+file) both top out at `[0.5.44]`, with no entry for GH-145/147/149/150. The
+corrected CHANGELOG.md text (and a related DESIGN.md §4.3 fix, since §4.3
+described the pre-refactor `to_plain_text()` contract this same code line
+later changed) sat as an uncommitted working-tree draft as of this
+correction. Check a doc-file AC against `git show <landing-commit>:<file>`,
+never against the working tree — see LRN entry filed alongside this
+correction.
+
+All four code/test ACs above landed in code with passing regression tests
+before this wave's own Phase Redteam reached Archive — see the two
+`w039-group-{A,B}-budget-exhausted.md` deferred notes (archived alongside
+this file) for the 12 findings raised against the round-5 state and their
+fixes, all since verified against current code. The wave stalled short of self-archiving
 because a second wave (w040, GH-148) started its own Implement phase
 against this same working tree before this one committed, per
 `CHECKPOINT-2026-09-02.md` — leaving 106+ modified/added paths uncommitted

@@ -39,9 +39,19 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
+from ...agent.registry import ToolInputValidationError
+from ...common.redact import frame_locations
 from ...models.errors import AgentError
 from .backend import CommitmentBackend
 from .store import Commitment, CommitmentStore
+
+# GH-135/RT-006: stable persisted reason for "the stored tool_call arguments no
+# longer satisfy the tool's input model". Explicit rather than
+# type(exc).__name__ so the string written to the commitments DB is part of the
+# contract and cannot silently change when an exception class is renamed — which
+# is exactly what GH-135 did by introducing ToolInputValidationError between the
+# ValidationError raise site and this catch-all.
+INVALID_TOOL_INPUT_REASON = "invalid_tool_input"
 
 if TYPE_CHECKING:  # avoid importing FastAPI / registry types at module import
     from fastapi import FastAPI
@@ -140,11 +150,47 @@ class CommitmentExecutor:
                 "commitment %s failed category=%s", commitment.id, exc.category.value
             )
             return
+        except ToolInputValidationError:
+            # GH-135/RT-006 (C-012 cross-surface parity): the executor is the
+            # FOURTH tool-dispatch surface, alongside agent/loop.py, routes/mcp.py
+            # and routes/admin.py — a tool-body ValidationError must classify
+            # identically on all four. Without this branch the generic catch-all
+            # below persisted type(exc).__name__, so the stored reason silently
+            # changed from "ValidationError" to "ToolInputValidationError" on
+            # upgrade, and a caller-input coercion failure stayed
+            # indistinguishable from a body failure. Never log/store the
+            # exception's payload: .validation_error renders the rejected value
+            # (SI-2).
+            self._store.mark_failed(commitment.id, INVALID_TOOL_INPUT_REASON)
+            logger.error(
+                "commitment %s failed reason=%s tool=%s",
+                commitment.id,
+                INVALID_TOOL_INPUT_REASON,
+                commitment.tool,
+            )
+            return
         except Exception as exc:
             # Never log/store the message — it can embed args or upstream bodies.
+            # frame_locations() (common/redact.py, SI-2-safe: filename/lineno
+            # only, never the source line) keeps this FOURTH tool-dispatch
+            # surface at the C-012 cross-surface parity loop.py/mcp.py/admin.py
+            # already carry (LRN-044) — a bare error_type=%s here was
+            # undiagnosable when a genuine tool-body bug fired in the
+            # background with no caller observing the failure.
+            #
+            # Persisting type(exc).__name__ as last_error (rather than logging
+            # it only) is the RT-012 carve-out in LRN-044's Check: last_error
+            # is a durable, operator-facing DB column, never a caller/model-
+            # facing error body — Commitment (backend.py) has no last_error
+            # field, so CommitmentsSource.get()/.list() never hand it to a
+            # tool. If that ever changes, switch this to a stable enumerated
+            # reason alongside INVALID_TOOL_INPUT_REASON.
             self._store.mark_failed(commitment.id, type(exc).__name__)
             logger.error(
-                "commitment %s failed error_type=%s", commitment.id, type(exc).__name__
+                "commitment %s failed error_type=%s frames=%s",
+                commitment.id,
+                type(exc).__name__,
+                frame_locations(exc),
             )
             return
         if self._store.mark_fired(commitment.id):

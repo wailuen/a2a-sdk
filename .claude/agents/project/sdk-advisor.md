@@ -68,8 +68,10 @@ FundPerformance, EmailList, CalendarEvents, UserProfile, UserList, DocumentList)
 plus **4 RESERVED** (TradeActivity, CompanyInfo, DealList, InvestorProfile): name-only,
 no field contract yet — never `emits` them. Domain cards live in the agent
 repo: subclass `ContentModel`, set `data_type`/`component`/`catalog_id` (a domain
-`urn:…` — the Profile catalog is frozen/closed), implement `to_plain_text()` (the
-REQUIRED A2A text fallback — the only thing a non-supporting client sees), and
+`urn:…` — the Profile catalog is frozen/closed), implement `_body_text()` (the
+hook behind `to_plain_text()`, the REQUIRED A2A text fallback — the only thing a
+non-supporting client sees; do NOT override `to_plain_text()`, which is concrete on
+`ContentModel` and is what appends the SDK-wide `metadata` suffix), and
 `register_content_type(...)`, imported in `main.py` so registration runs. Defer the
 card's field shape + catalog coherence to `a2ui-advisor`.
 

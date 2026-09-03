@@ -32,11 +32,15 @@ so signer selection never depends on the real env var. Do not remove this in
 a future simplification — without it, the env-var-sniffing path silently
 comes back and bearer-only deployments break with a sigv4 credentials error.
 
-Error mapping (RT-004): ``converse()`` maps a botocore ``ThrottlingException``
-(matched by error CODE, never the dynamic exception class) to
+Error mapping (RT-004/RT-010): ``converse()`` maps a botocore
+``ClientError`` carrying a throttling/quota code (``ThrottlingException``,
+``TooManyRequestsException``, ``ServiceQuotaExceededException`` — matched by
+error CODE, never the dynamic exception class) to
 ``ErrorCategory.RATE_LIMITED``; every other upstream failure stays a fixed,
 generic ``ErrorCategory.UPSTREAM`` (RT-006 — the wire message never names the
-failing exception class). ``require_bearer_auth_botocore()`` is the
+failing exception class), logged with the exception type plus
+``frame_locations()`` (RT-002/LRN-044) so it stays diagnosable via server
+logs. ``require_bearer_auth_botocore()`` is the
 botocore>=1.39 floor check for bearer-token auth, called both eagerly from
 ``app.py``'s ``_build_model_client()`` at startup and again from
 ``_boto_client()`` as a hot-path fallback (LRN-104). The Layer-3 fallback
@@ -69,18 +73,28 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from ..common.redact import frame_locations
 from ..models.errors import AgentError, ErrorCategory
 from .model_client import ModelResponse, ModelToolCall
 
 logger = logging.getLogger(__name__)
 
 _EXECUTOR_MAX_WORKERS = 8
+# botocore ClientError codes that mean "retry later", not a fatal upstream
+# failure (RT-010/GH-94 parity — see openai_client.py's RateLimitError clause).
+_RATE_LIMIT_ERROR_CODES = frozenset(
+    {"ThrottlingException", "TooManyRequestsException", "ServiceQuotaExceededException"}
+)
 
 _BEARER_AUTH_BOTOCORE_SYMBOLS = ("ScopedEnvTokenProvider", "TokenProviderChain")
 
 
 class BedrockBearerAuthUnsupported(RuntimeError):
-    """The installed botocore predates Bedrock bearer-token auth (LRN-104).
+    """Bearer-token auth cannot proceed: either the installed botocore
+    predates bearer-token support (LRN-104), it has no 'bearer' signer
+    registered (RT-002), or client construction otherwise failed in a way
+    that must not be mistaken for an ambient-profile-free build (RT-002
+    defense in depth, see ``_boto_client()``).
 
     RT-005: a dedicated class, not a bare ``RuntimeError``, because
     ``converse()`` re-raises this ONE condition unmasked past its broad
@@ -127,21 +141,6 @@ def require_bearer_auth_botocore() -> None:
         )
 
 
-def _bedrock_error_code(exc: Exception) -> str | None:
-    """The botocore error CODE (e.g. ``ThrottlingException``), never the
-    dynamic exception class name -- botocore generates a distinct exception
-    subclass per service error at runtime, but every one of them (and the
-    base ``ClientError``) carries the stable code in ``.response``."""
-    response = getattr(exc, "response", None)
-    if not isinstance(response, dict):
-        return None
-    error = response.get("Error")
-    if not isinstance(error, dict):
-        return None
-    code = error.get("Code")
-    return code if isinstance(code, str) else None
-
-
 class BedrockModelClient:
     def __init__(
         self,
@@ -182,6 +181,29 @@ class BedrockModelClient:
 
             if self._bearer_token:
                 require_bearer_auth_botocore()
+                import botocore.auth
+
+                # RT-002 (debug round 6): `Config(signature_version="bearer")`
+                # below is a REQUEST for a signer, not a guarantee that one
+                # exists. botocore resolves that string against
+                # `botocore.auth.AUTH_TYPE_MAPS` lazily, at REQUEST time — so a
+                # botocore past the 1.39 floor that renamed or dropped the
+                # bearer signer builds this client cleanly and then fails on
+                # the first `converse()` with `UnknownSignatureVersionError`,
+                # which `converse()`'s broad `except Exception` masks as the
+                # generic "model invocation failed". `require_bearer_auth_
+                # botocore()` cannot catch that: it only probes
+                # `botocore.tokens` symbols, never the signer registry. Probe
+                # the registry HERE, where the failure is still actionable.
+                if "bearer" not in botocore.auth.AUTH_TYPE_MAPS:
+                    raise BedrockBearerAuthUnsupported(
+                        "the installed botocore build has no 'bearer' signer "
+                        "registered in botocore.auth.AUTH_TYPE_MAPS, so "
+                        "Config(signature_version='bearer') would fail at "
+                        "first call with UnknownSignatureVersionError. Pin a "
+                        "botocore version known to implement the bearer "
+                        "signer."
+                    )
                 # Minimal single-key dict — never copies the full process env (SI-6).
                 bcore_session = botocore.session.Session()
                 isolated_env = {"AWS_BEARER_TOKEN_BEDROCK": self._bearer_token}
@@ -191,12 +213,63 @@ class BedrockModelClient:
                     ]
                 )
                 bcore_session.register_component("token_provider", token_provider)
+                # RT-002 (debug round 6): botocore's `Session.create_client()`
+                # calls `self.get_credentials()` UNCONDITIONALLY
+                # (botocore/session.py), before any signer is consulted and
+                # regardless of `signature_version="bearer"`. On a bearer-only
+                # deployment that walk goes looking for SigV4 credentials the
+                # deployment deliberately does not have, and resolves against
+                # the HOST's ambient AWS configuration — ~/.aws/config,
+                # AWS_PROFILE, SSO, `credential_process` — none of which this
+                # client has any business reading (SI-6). It does not merely
+                # return None: a provider in that chain can RAISE, and then
+                # the bearer client is never constructed at all. Reproduced on
+                # a stock botocore 1.43 host, where the login provider raises
+                # `MissingDependencyException` ("requires botocore[crt]")
+                # during `create_client` — surfaced to the caller as the
+                # generic "model invocation failed" because `_boto_client()`
+                # runs inside `converse()`'s broad `except Exception`.
+                #
+                # Pre-seeding static placeholder credentials makes
+                # `get_credentials()` return immediately from the session's own
+                # cache and never start the chain walk. The values are never
+                # used to sign anything — the pinned bearer signer below owns
+                # signing — so they are deliberately non-secret, fixed strings
+                # rather than anything credential-shaped.
+                bcore_session.set_credentials(
+                    "bedrock-bearer-auth-unused", "bedrock-bearer-auth-unused"
+                )
                 boto_session = boto3.Session(botocore_session=bcore_session)
                 # Pin the signer explicitly — botocore's choose-signer handler
                 # otherwise reads the REAL os.environ for AWS_BEARER_TOKEN_BEDROCK
                 # (see module docstring, GH-145), which SI-6 never sets.
                 kwargs["config"] = botocore.client.Config(signature_version="bearer")
-                self._client = boto_session.client("bedrock-runtime", **kwargs)
+                try:
+                    self._client = boto_session.client("bedrock-runtime", **kwargs)
+                except ModuleNotFoundError:
+                    # LRN-104 Layer 3: a missing optional botocore extra (e.g.
+                    # botocore[crt]) must surface as an install hint, not be
+                    # relabelled as an ambient-profile misconfiguration below.
+                    raise
+                except Exception as exc:
+                    # RT-002: defense in depth. The pre-seeded credentials
+                    # above prevent the KNOWN ambient-chain-walk failure, but
+                    # that is not a guarantee for every botocore build. If
+                    # construction still fails here, the raw vendor exception
+                    # must not reach `converse()`'s broad `except Exception`,
+                    # which would mask it as the generic "model invocation
+                    # failed" with no actionable detail. SI-2: `exc` itself is
+                    # never interpolated below — botocore construction
+                    # failures can carry request ids or credential-process
+                    # detail.
+                    raise BedrockBearerAuthUnsupported(
+                        "failed to construct the Bedrock bearer-token client; "
+                        "bearer-token auth is scoped to the token alone and "
+                        "must not depend on the host's ambient AWS profile or "
+                        "credential chain (~/.aws/config, AWS_PROFILE, "
+                        "SSO/login sessions, credential_process, etc.) — "
+                        "check whether an ambient profile is interfering"
+                    ) from exc
             else:
                 if self._aws_access_key_id and self._aws_secret_access_key:
                     kwargs["aws_access_key_id"] = self._aws_access_key_id
@@ -237,12 +310,25 @@ class BedrockModelClient:
             }
         loop = asyncio.get_running_loop()
         try:
+            # Deferred import INSIDE the try: when the optional boto3/botocore
+            # extra is not installed, this line is what raises, so leaving it
+            # above the try made the ModuleNotFoundError branch below
+            # unreachable in exactly the case it exists for. `botocore` is only
+            # dereferenced by the ClientError clause, which Python never
+            # evaluates when the earlier ModuleNotFoundError clause matches.
+            import botocore.exceptions
             raw = await loop.run_in_executor(
                 self._executor, lambda: self._boto_client().converse(**request)
             )
-        except ModuleNotFoundError:
+        except ModuleNotFoundError as exc:
             # LRN-104 Layer 3: a missing optional dependency (e.g. boto3 not
             # installed) must never be masked as a generic upstream failure.
+            # A bare re-raise alone does not surface it as an install hint:
+            # runner.py's catch-all around run_loop has no logger of its own,
+            # so log it HERE, at the last point the exception is still typed.
+            # str(exc) is safe for an import error: it names a module, never
+            # request content (SI-2).
+            logger.error("bedrock model backend unavailable: %s", exc)
             raise
         except BedrockBearerAuthUnsupported as exc:
             # RT-A05 / LRN-104 Layer 3: require_bearer_auth_botocore()'s
@@ -264,36 +350,52 @@ class BedrockModelClient:
             # text, so it carries no request id, ARN or credential context.
             logger.error("bedrock bearer auth unsupported: %s", exc)
             raise
+        except botocore.exceptions.ClientError as exc:
+            # RT-004/RT-010/LRN-105: throttling/quota codes are distinguished
+            # from every other failure so the caller gets a 429 + back-off
+            # signal instead of a bare 502 (matches OpenAIModelClient's
+            # RateLimitError handling, GH-94). Matched on the stable botocore
+            # error CODE, never the dynamic exception class object — a code
+            # string is not credential or request-payload text, so this stays
+            # within SI-2.
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in _RATE_LIMIT_ERROR_CODES:
+                raise AgentError(
+                    ErrorCategory.RATE_LIMITED,
+                    "model rate limit exceeded; retry later",
+                    source="bedrock",
+                ) from exc
+            logger.error(
+                "bedrock converse failed error_type=%s frames=%s",
+                type(exc).__name__,
+                frame_locations(exc),
+            )
+            raise AgentError(
+                ErrorCategory.UPSTREAM,
+                "model invocation failed",
+                source="bedrock",
+            ) from exc
         except Exception as exc:  # boto errors are dynamic classes
             # RT-006: run_loop turns AgentError.message into
             # DoneEvent(ok=False, error=...), which reaches the untrusted A2A
             # caller verbatim (runner.py folds it into both the WireError and
             # the user-facing Message) — nothing here reaches an operator log
             # by itself. The exception CLASS name (NoCredentialsError /
-            # UnauthorizedException / ThrottlingException, distinguishing
-            # auth from quota from validation failures) is therefore kept out
-            # of the wire message and logged instead, matching
-            # OpenAIModelClient's fixed "model invocation failed" wire text
-            # (openai_client.py) — no upstream provider or failure-mode
-            # fingerprint is disclosed to the caller.
-            # SI-2: only the class name is logged, never str(exc) — botocore
-            # error strings can embed request ids, ARNs and credential
-            # context.
-            logger.warning(
-                "bedrock converse failed error_type=%s", type(exc).__name__
+            # UnauthorizedException, distinguishing auth from validation
+            # failures) is therefore kept out of the wire message and logged
+            # instead, matching OpenAIModelClient's fixed "model invocation
+            # failed" wire text (openai_client.py) — no upstream provider or
+            # failure-mode fingerprint is disclosed to the caller.
+            # RT-002/LRN-044: bind the exception TYPE plus frame_locations()
+            # (never exc's str/args — SI-2, can embed vendor-response detail;
+            # frame filename/lineno only, never `.line` source text) so any
+            # boto/botocore failure stays diagnosable via server logs even
+            # though the wire-facing AgentError message stays generic.
+            logger.error(
+                "bedrock converse failed error_type=%s frames=%s",
+                type(exc).__name__,
+                frame_locations(exc),
             )
-            # RT-004 / LRN-105: throttling is distinguished from every other
-            # failure so the caller gets a 429 + back-off signal instead of a
-            # bare 502 (matches OpenAIModelClient's RateLimitError handling).
-            # Matched on the stable botocore error CODE, never the dynamic
-            # exception class object — a code string is not credential or
-            # request-payload text, so this stays within SI-2.
-            if _bedrock_error_code(exc) == "ThrottlingException":
-                raise AgentError(
-                    ErrorCategory.RATE_LIMITED,
-                    "model rate limit exceeded; retry later",
-                    source="bedrock",
-                ) from exc
             raise AgentError(
                 ErrorCategory.UPSTREAM,
                 "model invocation failed",

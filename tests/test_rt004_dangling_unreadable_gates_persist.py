@@ -20,6 +20,18 @@ carries no ``toolUse`` block at all), ``repair_dangling_tool_use`` lets it
 propagate, and ``repair_dangling_tool_use_safe`` — which already catches any
 in-memory repair failure — reports ``False`` for it like any other.
 
+RT-006 (debug round 4) narrows "that shape". The original fix used
+"``content`` is not a list" as its unreadability test, which swept in a plain
+``str`` tail — a shape that provably cannot contain a ``toolUse`` block at
+all, and one both other tail-shape helpers in ``agent/loop.py``
+(``_is_user_turn_boundary``, ``append_assistant_turn``) already read as text.
+That false unreadable failed the persist gate for transcripts that were never
+dangling, permanently stranding a durable record non-terminal. The
+unreadability test is now "could this be carrying a ``toolUse`` claim I
+cannot read": a ``str``/``bytes`` or empty ``content`` is clean, a bare
+``dict`` or any other non-sequence still raises. See
+``tests/test_dbg4_plain_text_assistant_tail.py`` for the harm chain.
+
 This module pins the WRITE-side gate end-to-end (``repair_dangling_tool_use_safe``
 → ``set_task_status``, with neither durable hook firing) plus the low-level
 ``close_dangling_tool_use`` contract and the READ-side (``bridge_context_messages``)
@@ -64,7 +76,20 @@ _MALFORMED_TAIL_MISSING_TOOLUSEID = [
 
 _MALFORMED_TAIL_NON_LIST_CONTENT = [
     {"role": "user", "content": [{"text": "go"}]},
-    {"role": "assistant", "content": "not-a-list"},
+    # RT-006 (debug round 4): this case used to be the string "not-a-list".
+    # A ``str`` provably cannot contain a ``toolUse`` block, so calling it
+    # unreadable was a FALSE positive that failed the persist gate for a
+    # transcript that was never dangling — see the module docstring and
+    # ``tests/test_dbg4_plain_text_assistant_tail.py``. A bare ``dict`` is
+    # the shape that genuinely CAN be an attempted, unreadable toolUse claim
+    # (a durable store deserialising a single block loosely), so it is what
+    # this "content is not a list" case must pin.
+    {"role": "assistant", "content": {"toolUse": {"name": "t", "input": {}}}},
+]
+
+_PLAIN_TEXT_STRING_TAIL = [
+    {"role": "user", "content": [{"text": "go"}]},
+    {"role": "assistant", "content": "done"},
 ]
 
 
@@ -78,7 +103,7 @@ _MALFORMED_TAIL_NON_LIST_CONTENT = [
         _MALFORMED_TAIL_MISSING_TOOLUSEID,
         _MALFORMED_TAIL_NON_LIST_CONTENT,
     ],
-    ids=["toolUse-not-dict", "missing-toolUseId", "content-not-list"],
+    ids=["toolUse-not-dict", "missing-toolUseId", "content-bare-dict"],
 )
 def test_close_dangling_tool_use_raises_on_unreadable_tail(messages: list[Any]) -> None:
     with pytest.raises(DanglingToolUseUnreadable):
@@ -95,11 +120,33 @@ def test_close_dangling_tool_use_still_returns_false_for_a_genuinely_clean_tail(
     assert close_dangling_tool_use(list(healthy), default_content=[{"text": "x"}]) is False
 
 
-def test_close_dangling_tool_use_still_returns_false_for_a_non_dict_tail() -> None:
-    """RT-B-008 case (a completely non-dict tail entry, so we cannot even
-    tell it's an assistant turn) is unrelated to RT-004 and must remain a
-    quiet no-op, not an unreadable-tail raise."""
-    assert close_dangling_tool_use(["not a dict"], default_content=[{"text": "x"}]) is False
+def test_close_dangling_tool_use_returns_false_for_a_plain_string_tail() -> None:
+    """RT-006: the same "plain text assistant reply" principle as the test
+    above, for the ``str`` spelling of it. A string cannot contain a toolUse
+    block, so it is clean — not unreadable."""
+    assert (
+        close_dangling_tool_use(list(_PLAIN_TEXT_STRING_TAIL), default_content=[{"text": "x"}])
+        is False
+    )
+
+
+def test_repair_safe_reports_persistable_for_a_plain_string_tail() -> None:
+    """RT-006: and the gate above it must therefore report SAFE to persist."""
+    record = _record(list(_PLAIN_TEXT_STRING_TAIL))
+    assert repair_dangling_tool_use_safe(record, default_content=[{"text": "x"}]) is True
+
+
+def test_close_dangling_tool_use_raises_for_a_non_dict_tail() -> None:
+    """RT-005 (supersedes RT-B-008): a completely non-dict tail entry — we
+    cannot even tell it's an assistant turn, let alone a clean one — is no
+    longer a quiet False no-op. RT-B-008's original "degrade to False"
+    behavior let a non-dict tail from a durable store's own loose
+    deserialisation reach ``repair_dangling_tool_use_safe`` reporting
+    "confirmed clean", the exact fail-open this whole gate exists to close —
+    see tests/test_rt005_non_dict_tail_unreadable_gate.py for the full
+    write-side/read-side reconciliation."""
+    with pytest.raises(DanglingToolUseUnreadable):
+        close_dangling_tool_use(["not a dict"], default_content=[{"text": "x"}])
 
 
 # ── repair_dangling_tool_use_safe: reports unsafe, does not mutate ─────────
@@ -112,7 +159,7 @@ def test_close_dangling_tool_use_still_returns_false_for_a_non_dict_tail() -> No
         _MALFORMED_TAIL_MISSING_TOOLUSEID,
         _MALFORMED_TAIL_NON_LIST_CONTENT,
     ],
-    ids=["toolUse-not-dict", "missing-toolUseId", "content-not-list"],
+    ids=["toolUse-not-dict", "missing-toolUseId", "content-bare-dict"],
 )
 def test_repair_dangling_tool_use_safe_reports_false_for_unreadable_tail(
     messages: list[Any], caplog: pytest.LogCaptureFixture

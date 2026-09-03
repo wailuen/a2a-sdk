@@ -7,10 +7,35 @@ Three verbs at ``/mcp``:
   unknown/expired session id → 404 (initialize itself is the recovery path).
 - ``GET /mcp`` — server→client SSE channel, held open with heartbeats.
   Returning 405 here breaks Claude.ai Desktop (pitchbook LRN-053) — never.
+  Two outcomes per spec, three here: see the stream-admission deviation
+  below.
 - ``DELETE /mcp`` — session termination, idempotent, 204.
 
 Legacy SSE pair (``GET /mcp/sse`` + ``POST /mcp/messages?session_id=``)
-retained for older clients; same dispatch path.
+retained for older clients; same dispatch path. ``GET /mcp`` and
+``GET /mcp/sse`` both hold an indefinite ``text/event-stream`` open and are
+admitted against the SAME global + per-identity cap (RT-001/GH-143 —
+``_get_streams()``), rejecting once at capacity rather than evicting, since
+they consume the same single-process connection pool.
+
+**Stream-admission deviation (RT-003, documented — DESIGN.md §5.5 and
+docs/protocols.md carry the same ruling; the A2A/AG-UI half of the shared
+rule lives in routes/a2a.py's ``_admit``).** ``harness/reference/
+mcp-protocol.md`` §"GET (optional SSE)" specifies exactly TWO outcomes for
+this verb — ``text/event-stream``, or **405** if no stream is offered. At
+capacity we return a THIRD: ``429`` + ``Retry-After: 5``. Deliberate: the
+server is single-process/single-worker by design (config.py,
+template/Dockerfile ``--workers 1``), so an unbounded number of open
+streams degrades the whole process for every tenant, and the spec offers no
+in-band way to say "offered, but not right now". Scoped strictly to
+load-shedding — never returned on a first connection under normal load.
+``harness/reference/mcp-claude-platforms.md`` records a 429 on this path as
+a known Claude.ai *"Couldn't connect"* failure mode (its P8 checklist), and
+mcp_get is connection-critical per the LRN-053 note above, which is why the
+per-identity default is sized in the low hundreds (an org-wide OAuth client
+collapses an entire org onto one ``_identity_key()``) and is operator-
+raisable via ``AGENT_SDK_MAX_MCP_STREAMS_PER_IDENTITY`` without a code
+change. See ``_MAX_GET_STREAMS`` for the reject-over-evict rationale.
 
 Methods: ``initialize`` (echo the client's protocolVersion when supported,
 else our highest), ``ping``, ``tools/list`` (Tier 1 only — surface parity rule
@@ -62,10 +87,21 @@ from typing import Any, AsyncIterator
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
+from ..common.admission import (
+    SlotTable,
+    StreamSlot,
+    count_for_owner,
+    identity_key,
+    prune_finished,
+    resolve_per_identity_limit,
+    slot_table,
+)
 from ..common.origin import guard_origin
+from ..common.redact import frame_locations
 from ..common.sse import HEARTBEAT, SSE_HEADERS
 from ..agent.loop import ToolInterrupt, resolve_tool_timeout, safe_validation_message
 from ..agent.registry import ToolInputValidationError
@@ -100,11 +136,65 @@ _SESSION_ID_HEADER = "Mcp-Session-Id"
 
 SESSION_TTL_SECONDS = 30 * 60  # idle TTL
 _MAX_SESSIONS = 1_000
-# RT-003: cap legacy SSE sessions to prevent unbounded queue growth under
-# long-lived connections (each entry holds an asyncio.Queue(maxsize=256)).
-_MAX_SSE_SESSIONS = 500
 _MAX_BODY_BYTES = 2 * 1024 * 1024
 _HEARTBEAT_SECONDS = 15.0
+# GH-143 (+ RT-001 follow-up): bound concurrent open indefinite
+# text/event-stream connections — global first, then per-identity — before a
+# StreamingResponse (and its indefinite heartbeat loop) is ever created. The
+# server is single-process/single-worker by design (config.py,
+# template/Dockerfile --workers 1), so an unbounded number of open streams
+# degrades the whole process for every tenant.
+#
+# This budget is shared by BOTH transports that hold such a stream open —
+# Streamable HTTP's GET /mcp (mcp_get) and the legacy GET /mcp/sse (mcp_sse)
+# — via the same _get_streams()/_prune_get_streams() tracking structure.
+# They consume the same single-process connection pool, so a cap on only one
+# of them is trivially bypassed by calling the other.
+#
+# Strategy: 429-reject, NOT evict-oldest, on both routes. Evicting a stream's
+# bookkeeping entry would not stop its live loop or free its connection: the
+# generator keeps running, untracked, until the client itself goes away —
+# and for mcp_sse specifically, evict-oldest also let one caller silently
+# make another tenant's still-open session unroutable (POST /mcp/messages
+# -> 404 "session not found") purely by opening enough streams of their own,
+# regardless of who owned the evicted entry. Only refusing new streams once
+# at capacity keeps the number of live streams actually bounded, for every
+# tenant.
+_MAX_GET_STREAMS = 500
+# RT-001 (round 2, GH-143 follow-up): Identity.subject is an OAuth client_id
+# (auth/oauth_tokens.py) or API-key id (auth/api_keys.py) — a *registration*,
+# never an end user. Org-wide OAuth client provisioning
+# (`python -m agent_sdk provision-org-oauth-client`, config.py) and a shared
+# API key both deliberately collapse every caller in the org onto ONE
+# _identity_key() value, so a per-identity cap here is really a per-ORG cap
+# under that (documented, supported) deployment mode. 8 was sized for "one
+# caller can't consume every other tenant's share" without accounting for
+# that collapse — it silently capped an entire org at 8 concurrent
+# connectors. Default raised to the low hundreds; operators with a larger
+# org can raise it further via AGENT_SDK_MAX_MCP_STREAMS_PER_IDENTITY
+# (config.py) without a code change. See _max_streams_per_identity().
+_MAX_GET_STREAMS_PER_IDENTITY = 200
+# RT-001: a slot is registered in _get_streams() before the StreamingResponse
+# is ever constructed, so nothing guarantees the generator body — and thus
+# heartbeats()'s `finally` — ever runs (Starlette's spec_version<2.4 path can
+# cancel stream_response() at the send(http.response.start) checkpoint before
+# the async-for pulls the first chunk). A wall-clock TTL backstop is NOT safe
+# here: a live stream whose send() is backpressured, or whose heartbeat sleep
+# overshoots under event-loop congestion (exactly the load this cap exists to
+# bound), would age out and be reclaimed while still open, defeating the cap.
+# _prune_get_streams therefore reclaims a slot only on a liveness fact — the
+# owning ASGI request task has actually finished (task.done()) — never on
+# elapsed time.
+#
+# RT-001 (round 4): _MAX_SSE_SESSIONS — the old hard bound on _sse_queues() —
+# is deliberately NOT reinstated, because the slot record now carries its own
+# release callable and _prune_get_streams invokes it (see _get_streams()).
+# mcp_sse registers its _get_streams() slot and its _sse_queues() record
+# together and releases them together, on every one of the three layers, so
+#     set(_sse_queues()) ⊆ set(_get_streams())
+# is an invariant and _sse_queues() is bounded by _MAX_GET_STREAMS by
+# construction. A second, independent bound would be dead code that hides a
+# broken invariant rather than enforcing one.
 
 # JSON-RPC 2.0 standard error codes.
 _PARSE_ERROR = -32700
@@ -119,9 +209,26 @@ _INTERNAL_ERROR = -32603
 # ---------------------------------------------------------------------------
 
 
-def _identity_key(identity: Identity) -> str:
-    """Stable per-caller key used to bind a session to its owner."""
-    return f"{identity.kind}:{identity.subject}"
+# RT-002 (round 5): `_identity_key` is now `common.admission.identity_key`
+# (C-024), shared with routes/a2a.py which held a byte-identical copy. Aliased
+# rather than renamed at ~8 call sites, several of which key `_sse_queues()`
+# session ownership rather than stream admission.
+_identity_key = identity_key
+
+
+def _max_streams_per_identity(app: Any) -> int:
+    """Effective per-identity GET-stream cap (RT-001, GH-143 follow-up), via
+    the shared resolver (C-024).
+
+    ``AGENT_SDK_MAX_MCP_STREAMS_PER_IDENTITY`` overrides the SDK default for an
+    org larger than it accommodates; the shared helper clamps to
+    ``_MAX_GET_STREAMS`` and documents why a ``0`` can never reach it."""
+    return resolve_per_identity_limit(
+        app,
+        "max_mcp_streams_per_identity",
+        _MAX_GET_STREAMS_PER_IDENTITY,
+        _MAX_GET_STREAMS,
+    )
 
 
 def _sessions(app: Any) -> "OrderedDict[str, tuple[float, str]]":
@@ -163,6 +270,62 @@ def _session_alive(
     sessions[session_id] = (time.time(), owner)
     sessions.move_to_end(session_id)
     return True
+
+
+# RT-002 (round 5): the slot record is `common.admission.StreamSlot` (C-024),
+# shared with routes/a2a.py. Its `release` field is the slot's COMPLETE
+# teardown — every structure the admitting route registered under this key, not
+# just this dict — which is what lets the layer-3 backstop reclaim the whole
+# surface (RT-001). See that dataclass's docstring for the full contract.
+
+
+def _get_streams(app: Any) -> SlotTable:
+    """Shared admission budget for every indefinite text/event-stream this
+    router holds open: stream id -> (owner identity key, owning ASGI request
+    task, release callable). Both ``mcp_get`` (Streamable HTTP ``GET /mcp``)
+    and ``mcp_sse`` (legacy ``GET /mcp/sse``) register their stream here
+    before their
+    ``StreamingResponse`` is created and count against the SAME
+    ``_MAX_GET_STREAMS``/``_MAX_GET_STREAMS_PER_IDENTITY`` cap — they consume
+    the same single-process connection pool, so a cap on only one transport
+    is trivially bypassed by calling the other (RT-001). Mirrors
+    ``_sse_queues()``'s lazy-init accessor pattern; ``_sse_queues()`` itself
+    remains a separate structure, purely for legacy session→queue routing.
+
+    RELEASE IS LAYERED THREE WAYS (RT-001 — a bare generator ``finally`` is
+    not a lifecycle hook and does not run when the generator body never
+    starts):
+    1. ``heartbeats()``'s ``finally`` — fast path, fires whenever the
+       generator body actually started (normal disconnect/cancellation).
+    2. The ``StreamingResponse``'s ``BackgroundTask`` — fires after the ASGI
+       response cycle completes even when the generator body was never
+       entered (e.g. Starlette's spec_version<2.4 path cancelling
+       ``stream_response`` at the ``send(http.response.start)`` checkpoint).
+    3. ``_prune_get_streams`` — reclaims any entry neither of the above
+       released, keyed on the owning task's ``.done()`` (a liveness fact,
+       never a wall-clock guess), so a missed release is bounded without
+       ever discounting a slot that is still genuinely open. It reclaims by
+       CALLING the record's own ``release``, so it always reclaims exactly
+       what the fast paths reclaim — see ``_prune_get_streams``.
+
+    RT-001 (round 4): the third element exists because layers 1 and 2 can
+    BOTH be skipped — a hard cancellation of the owning ASGI request task
+    (as opposed to a client disconnect, which Starlette absorbs in the
+    StreamingResponse cancel scope so the BackgroundTask still runs) unwinds
+    the response cycle before ``stream_response`` pulls the first chunk AND
+    before ``await self.background()`` is reached. ``mcp_sse`` registers TWO
+    structures under one key (this slot and its ``_sse_queues()`` session
+    router record); a backstop that only popped this dict left the other half
+    pinned for the process lifetime, each orphan holding an
+    ``asyncio.Queue(maxsize=256)``, and — because the slot half self-healed —
+    the admission cap never throttled the repetition."""
+    return slot_table(app, "mcp_get_streams")
+
+
+# RT-002 (round 5): the layer-3 backstop is `common.admission.prune_finished`
+# (C-024), shared with routes/a2a.py. Aliased to keep this module's ~6 call
+# sites and their surrounding commentary readable.
+_prune_get_streams = prune_finished
 
 
 def _sse_queues(app: Any) -> dict[str, "tuple[asyncio.Queue[str], str]"]:
@@ -434,22 +597,42 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
         logger.warning("mcp tool timeout tool=%s timeout=%s", name, timeout)
         return {"content": [{"type": "text", "text": text}], "isError": True}
     except ToolInputValidationError as exc:
-        # RT-004: raised ONLY by ToolEntry.invoke/invoke_gen's narrow
-        # model_validate try — never by the tool body — mirroring
-        # agent/loop.py's matching branch. A bare ValidationError (raised
-        # while the tool body builds its ContentModel return value) now
-        # falls to the generic Exception branch below instead of being
-        # mistaken for an input-shape defect. safe_validation_message keeps
-        # only loc + type (schema-declared field names and Pydantic type
-        # codes), never exc's raw msg/input (SI-2).
-        text = safe_validation_message(
-            exc.tool_name, exc.validation_error, exc.input_model
-        )
+        # RT-004/GH-135: mirror agent/loop.py's ToolInputValidationError branch
+        # — safe_validation_message keeps only loc + type (schema-declared
+        # field names and Pydantic type codes), never exc's raw msg/input
+        # (SI-2), so the model gets a correctable diagnostic instead of the
+        # opaque generic fallback below. GH-135: this discriminator is raised
+        # ONLY by the input-model coercion step, never by the tool body, so a
+        # body-raised ValidationError falls through to that generic fallback
+        # instead of being misreported as caller input here.
+        text = safe_validation_message(name, exc.validation_error, entry.decl.input_model)
         logger.warning("mcp tool input validation failed tool=%s", name)
         return {"content": [{"type": "text", "text": text}], "isError": True}
-    except Exception:
+    except Exception as exc:
         # Message stays generic — nothing caller-supplied is echoed.
-        logger.exception("mcp tool unexpected error tool=%s", name)
+        # SI-2/RT-001: a body-raised ValidationError (GH-135's discriminator
+        # only catches the input-model coercion step above) has a __str__
+        # that embeds the raw rejected value (`input_value=...`) — same for
+        # any other exception whose message interpolates caller/tool-derived
+        # data. `logger.exception`/`exc_info=True` would format that message
+        # straight into the log, so we never log exc's message or its
+        # formatted traceback text. RT-010: dropping the traceback ENTIRELY
+        # over-corrected — a genuine bug (AttributeError, KeyError, TypeError)
+        # in a tool body became undiagnosable (bare class name, no file/line).
+        # frame_locations() (common/redact.py) carries no interpolated values
+        # (FrameSummary.filename/lineno only — never `.line`, which echoes
+        # source text that could itself contain a caller-derived literal), so
+        # logging it satisfies SI-2 (suppresses the message) without
+        # sacrificing diagnosability. RT-004: the same helper backs
+        # routes/admin.py's try-tool and every agent/loop.py dispatch site so
+        # the cross-surface parity this comment claims is actually true.
+        frames = frame_locations(exc)
+        logger.error(
+            "mcp tool unexpected error tool=%s error_type=%s frames=%s",
+            name,
+            type(exc).__name__,
+            frames,
+        )
         # SI-2: never reflect user-supplied / tool-derived names in error text;
         # the tool name is already recorded in the structured log above.
         return {
@@ -666,7 +849,7 @@ async def mcp_post(
 
 @router.get("", response_model=None)
 async def mcp_get(
-    request: Request, _identity: Identity = Depends(require_identity)
+    request: Request, identity: Identity = Depends(require_identity)
 ) -> StreamingResponse | JSONResponse:
     """Server→client SSE channel. We send no server-initiated messages
     (``listChanged: false``) so the stream is idle heartbeats — but it MUST
@@ -687,19 +870,82 @@ async def mcp_get(
             headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
         )
 
+    # GH-143: cap concurrent open heartbeat streams — global cap first (bounds
+    # total process load, shared with mcp_sse below), then per-identity cap
+    # (one caller can't consume every other tenant's share) — BEFORE the
+    # StreamingResponse is created. See _MAX_GET_STREAMS's comment for why
+    # this rejects rather than evicts.
+    streams = _get_streams(request.app)
+    # RT-001: reclaim any slot layers 1/2 in _get_streams()'s docstring missed
+    # — keyed on owning-task liveness, not elapsed time — before checking the
+    # cap against it.
+    await _prune_get_streams(streams)
+    if len(streams) >= _MAX_GET_STREAMS:
+        return JSONResponse(
+            status_code=429,
+            content={"error": "too many concurrent MCP GET streams"},
+            headers={
+                "Retry-After": "5",
+                _PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0],
+            },
+        )
+    owner = _identity_key(identity)
+    owner_count = count_for_owner(streams, owner)
+    if owner_count >= _max_streams_per_identity(request.app):
+        return JSONResponse(
+            status_code=429,
+            content={"error": "too many concurrent MCP GET streams for this identity"},
+            headers={
+                "Retry-After": "5",
+                _PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0],
+            },
+        )
+    stream_id = uuid.uuid4().hex
+    # RT-001: the ASGI request task itself is the liveness fact _prune_get_streams
+    # keys on — it stays not-done for the entire response cycle, StreamingResponse
+    # body and background task included, so a still-open stream is never mistaken
+    # for a stale one no matter how long it has held its connection.
+    owning_task = asyncio.current_task()
+    assert owning_task is not None
+
+    async def release() -> None:
+        # The COMPLETE teardown for this slot — this route registers nothing
+        # else, so it is a single pop. Idempotent: all three release layers
+        # (heartbeats()'s finally, the BackgroundTask, _prune_get_streams)
+        # call this same callable.
+        #
+        # RT-001: MUST be `async def`, not `def` — Starlette's BackgroundTask
+        # dispatches a plain `def` via run_in_threadpool (an AnyIO worker
+        # thread), which would mutate `streams` (event-loop-owned state the
+        # loop concurrently iterates in `_prune_get_streams` and the
+        # per-identity `owner_count` scan above) off-loop, racing that
+        # iteration and able to raise "dict mutated during iteration".
+        # `async def` makes Starlette await it in-loop instead.
+        streams.pop(stream_id, None)
+
+    streams[stream_id] = StreamSlot(owner=owner, owning_task=owning_task, release=release)
+
     # Last-Event-ID not implemented: server emits no server-initiated messages (listChanged=False), so nothing to resume.
     async def heartbeats() -> AsyncIterator[bytes]:
-        # Padding comment forces proxy buffers to flush the first chunk so the
-        # client marks the channel open immediately.
-        yield b": " + b"x" * 256 + b"\n\n"
-        while True:
-            if await request.is_disconnected():
-                return
-            await asyncio.sleep(_HEARTBEAT_SECONDS)
-            yield HEARTBEAT
+        try:
+            # Padding comment forces proxy buffers to flush the first chunk so
+            # the client marks the channel open immediately.
+            yield b": " + b"x" * 256 + b"\n\n"
+            while True:
+                if await request.is_disconnected():
+                    return
+                await asyncio.sleep(_HEARTBEAT_SECONDS)
+                yield HEARTBEAT
+        finally:
+            # Fast path — fires on any disconnect/cancellation once the
+            # generator body has actually started running.
+            await release()
 
     return StreamingResponse(
-        heartbeats(), media_type="text/event-stream", headers=dict(SSE_HEADERS)
+        heartbeats(),
+        media_type="text/event-stream",
+        headers=dict(SSE_HEADERS),
+        background=BackgroundTask(release),
     )
 
 
@@ -746,21 +992,66 @@ async def mcp_delete(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/sse")
+@router.get("/sse", response_model=None)
 async def mcp_sse(
     request: Request, identity: Identity = Depends(require_identity)
-) -> StreamingResponse:
+) -> StreamingResponse | JSONResponse:
     """Legacy HTTP+SSE pair: announce the session-bound messages endpoint as
-    the first event; JSON-RPC responses ride this channel as message events."""
+    the first event; JSON-RPC responses ride this channel as message events.
+
+    RT-001 (GH-143 follow-up): this is an authenticated, indefinitely-held
+    text/event-stream identical in kind to mcp_get's — it must be admitted
+    under the SAME global + per-identity budget (_get_streams(), see its
+    docstring), checked BEFORE the StreamingResponse is created, and rejected
+    (never evicted) once at capacity. See _MAX_GET_STREAMS's comment for the
+    reject-over-evict rationale, including why evict-oldest here specifically
+    was also a cross-tenant DoS on other callers' live session routes.
+    """
     guard_origin(request)
+
+    streams = _get_streams(request.app)
+    await _prune_get_streams(streams)
+    if len(streams) >= _MAX_GET_STREAMS:
+        return JSONResponse(
+            status_code=429,
+            content={"error": "too many concurrent MCP GET streams"},
+            headers={"Retry-After": "5"},
+        )
+    owner = _identity_key(identity)
+    owner_count = count_for_owner(streams, owner)
+    if owner_count >= _max_streams_per_identity(request.app):
+        return JSONResponse(
+            status_code=429,
+            content={"error": "too many concurrent MCP GET streams for this identity"},
+            headers={"Retry-After": "5"},
+        )
+
     session_id = uuid.uuid4().hex
+    owning_task = asyncio.current_task()
+    assert owning_task is not None
+
     queues = _sse_queues(request.app)
-    # RT-003: evict the oldest entry when the cap is reached so the dict stays
-    # bounded even when clients hold connections open indefinitely.
-    while len(queues) >= _MAX_SSE_SESSIONS:
-        queues.pop(next(iter(queues)), None)
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
-    queues[session_id] = (queue, _identity_key(identity))  # bound to the caller
+
+    async def release() -> None:
+        # RT-001: the COMPLETE teardown for this slot — this route registers
+        # TWO structures under `session_id`, so both are dropped here. All
+        # three release layers (stream()'s finally, the BackgroundTask, and
+        # _prune_get_streams) call this same callable, so the backstop can
+        # never reclaim less than the fast paths do. Idempotent.
+        #
+        # RT-001: MUST be `async def` — see mcp_get's `release` for why a
+        # plain `def` here races the loop's own iteration of `streams` off
+        # a threadpool worker thread (Starlette's BackgroundTask dispatch).
+        streams.pop(session_id, None)
+        queues.pop(session_id, None)
+
+    # Registered together under one key and released together — that pairing
+    # is the invariant set(_sse_queues()) ⊆ set(_get_streams()), which is what
+    # bounds _sse_queues() by _MAX_GET_STREAMS. No await separates these two
+    # statements, so no other task can observe a half-registered session.
+    streams[session_id] = StreamSlot(owner=owner, owning_task=owning_task, release=release)
+    queues[session_id] = (queue, owner)  # bound to the caller
 
     async def stream() -> AsyncIterator[bytes]:
         try:
@@ -777,10 +1068,13 @@ async def mcp_sse(
                     continue
                 yield f"event: message\ndata: {payload}\n\n".encode()
         finally:
-            queues.pop(session_id, None)
+            await release()
 
     return StreamingResponse(
-        stream(), media_type="text/event-stream", headers=dict(SSE_HEADERS)
+        stream(),
+        media_type="text/event-stream",
+        headers=dict(SSE_HEADERS),
+        background=BackgroundTask(release),
     )
 
 

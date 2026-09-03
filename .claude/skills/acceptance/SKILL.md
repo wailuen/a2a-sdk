@@ -185,12 +185,28 @@ carrying a `kind` field (no `method`/`params` wrapper). Extract:
 - 3–4: off-topic; task errored but recovered
 - 1–2: task status `failed`, timeout, or no useful output
 
-**Multi-turn A2A:** For turns 2–N (up to `maxTurns`), send the follow-up
-message in the same task context by including the `taskId` from the prior
-response (and a fresh `messageId`):
-```json
-{ "message": { "role": "user", "messageId": "<new-uuid4-hex>", "taskId": "<task-id>", "parts": [ ... ] } }
-```
+**Multi-turn A2A:** For turns 2–N (up to `maxTurns`), the correct field to
+include depends on the state of the prior task:
+
+- If the prior task ended in `input-required` OR `auth-required` state (non-terminal
+  interrupt states per A2A spec §interrupt, task is still live and waiting), send
+  `taskId` to continue that specific task:
+  ```json
+  { "message": { "role": "user", "messageId": "<new-uuid4-hex>", "taskId": "<task-id>", "parts": [ ... ] } }
+  ```
+- Otherwise (prior task ended `completed`, `failed`, or any other terminal state),
+  send `contextId` (captured from the turn-1 SSE stream) with **no `taskId`**,
+  so the server creates a new task within the same conversation context instead of
+  re-addressing a terminal task (which would return 501 / -32004):
+  ```json
+  { "message": { "role": "user", "messageId": "<new-uuid4-hex>", "contextId": "<context-id>", "parts": [ ... ] } }
+  ```
+
+The harness Python script captures `contextId` from `kind:"task"` and
+`kind:"status-update"` SSE events on turn 1, persists it to
+`/tmp/acc-{RUN_KEY}-a2a-ctx.txt`, and persists the last observed `state` to
+`/tmp/acc-{RUN_KEY}-a2a-state.txt`. On turns 2+, it reads both files to
+determine which field to send.
 
 ### AG-UI transport (per scenario, parallel)
 
@@ -239,17 +255,29 @@ and an incremented `runId`.
 // lives at .claude/skills/acceptance/SKILL.md and acceptance-api.js is seeded to
 // .claude/workflows/acceptance-api.js — use that path instead:
 //   scriptPath: `${require('child_process').execSync('git rev-parse --show-toplevel').toString().trim()}/.claude/workflows/acceptance-api.js`
+
+// Secret externalisation (GH-89 / SI-2): the workflow sandbox has no CommonJS
+// require(), so the key file must be written HERE (in the skill caller context)
+// before Workflow() is invoked.  Pass only the file path; never pass the raw key.
+const _runId  = require('crypto').randomUUID()
+const _keyFile = `/tmp/acc-key-${_runId}.txt`
+require('fs').writeFileSync(_keyFile, <admin_key>, { mode: 0o600 })
+
 Workflow({
-  scriptPath: `${require('child_process').execSync('git rev-parse --show-toplevel').toString().trim()}/.claude/workflows/acceptance-api.js`,
+  scriptPath: `${require('child_process').execSync('git rev-parse --show-toplevel').toString().trim()}/harness/workflows/acceptance-api.js`,
   args: {
     scenarios: <parsed scenarios array>,
     baseUrl: <base_url>,
-    adminKey: <admin_key>,
+    keyFile: _keyFile,   // path to chmod-600 temp file containing the admin key
     agentContext: {name, description, tools: [{name, emits, description}]},
     onlyIds: <[] for full run, or list of IDs for --rerun-failing>,
-    transports: ["a2a", "agui"]   // or ["a2a"] / ["agui"] with --transport flag
+    transports: ["a2a", "agui"],  // or ["a2a"] / ["agui"] with --transport flag
+    runId: _runId,
   }
 })
+
+// Clean up the temp key file after the workflow returns.
+try { require('fs').unlinkSync(_keyFile) } catch (_e) { /* already gone — ignore */ }
 ```
 
 The workflow fans out all scenarios × transports in parallel. Each scenario

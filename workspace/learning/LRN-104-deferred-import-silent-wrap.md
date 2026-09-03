@@ -69,7 +69,7 @@ async def converse(self, messages):
 Grep for deferred imports inside `except Exception` blocks in all model-client files:
 
 ```bash
-grep -n "import " agent_sdk/agent/bedrock.py agent_sdk/agent/openai_client.py
+grep -n "import " agent_sdk/agent/*.py | grep -v "^Binary"
 ```
 
 Then confirm each surrounding `try/except` has an explicit `except ModuleNotFoundError: raise`

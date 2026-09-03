@@ -304,7 +304,7 @@ Four-advisor /agent-stack-check static audit. All Critical/High findings fixed a
 
 | Protocol | Sev | Finding | File:line | Decision |
 |---|---|---|---|---|
-| MCP | MED | A Tier-1 tool that declares `emits` (so `tools/list` advertises `outputSchema`) but returns/yields `None` folds to `isError: false` with empty `text` and **no** `structuredContent` — a deviation from MCP 2025-06-18 §4's "advertised `outputSchema` MUST return conforming `structuredContent`". | `routes/mcp.py`'s `_handle_tools_call()` `if artifact is None:` branch (skips SC-C1 coercion; the `structuredContent` guard requires `isinstance(artifact, BaseModel)`); DESIGN.md §5.5 | **KEEP — signed off.** §5.6 requires a Tier-1 tool to reach the same success/failure verdict on every surface. `loop.py`'s `_fold_result_content(None)` folds the identical void result to a **success** `toolResult` on A2A/AG-UI; making MCP `isError: true` here would make the same void call succeed over A2A/AG-UI yet fail over MCP. The deviation is scoped strictly to the emits-declared void case (a no-`emits` `None` advertises no `outputSchema`, so it is not a §4 deviation at all). Tested by `tests/test_rt002_mcp_empty_result.py` (4 cases, all green). |
+| MCP | MED | A Tier-1 tool that declares `emits` (so `tools/list` advertises `outputSchema`) but returns/yields `None` folds to `isError: false` with empty `text` and **no** `structuredContent` — a deviation from MCP 2025-06-18 §4's "advertised `outputSchema` MUST return conforming `structuredContent`". | `routes/mcp.py`'s `_handle_tools_call()` `if artifact is None:` branch (skips SC-C1 coercion; the `structuredContent` guard requires `isinstance(artifact, BaseModel)`); DESIGN.md §5.5 | **KEEP — signed off.** §5.6 requires a Tier-1 tool to reach the same success/failure verdict on every surface. `loop.py`'s `fold_result_content(None)` folds the identical void result to a **success** `toolResult` on A2A/AG-UI; making MCP `isError: true` here would make the same void call succeed over A2A/AG-UI yet fail over MCP. The deviation is scoped strictly to the emits-declared void case (a no-`emits` `None` advertises no `outputSchema`, so it is not a §4 deviation at all). Tested by `tests/test_rt002_mcp_empty_result.py` (4 cases, all green). |
 
 **mcp-check impact:** none. mcp-check audits the Claude.ai-connector conformance surface — OAuth discovery chain, token flow, CORS, Streamable HTTP transport, `initialize` handshake, `tools/list` shape, and the `tools/call` result **envelope** shape. An `isError: false` result carrying a well-formed `text` content block is a valid `tools/call` result; mcp-check does not drive a live void-returning tool and assert per-tool `outputSchema`↔`structuredContent` runtime conformance, so this ruling does not fail any mcp-check probe.
 
@@ -374,3 +374,116 @@ contract-level decision with a documented rejected alternative (major bump for a
 wire breaks) and an explicitly accepted risk to `~=0.5.x` pinners. DESIGN §4.0 is now the
 standing rule; CHANGELOG breaking-change entries cite it directly rather than re-arguing from
 0.5.40 precedent release-by-release. No code change required.**
+
+## Round 8 — w040 (GH-149 follow-up) `metadata` frozen-contract status (2026-09-02)
+
+`a2ui-advisor` redteam (RT-005) flagged that w040 resolved two same-shaped divergences between
+code and the frozen A2UI Standard Profile v1 doc in opposite directions with no cross-reference
+between them: GH-149 (`FundPerformance.fund_name`) removed the code field to conform to the
+frozen doc; the `metadata` field instead edited the frozen doc itself (deleted
+`TimeSeriesChart.metadata`'s typed `{identifier?, metric?, frequency?, source?}` row, added an
+SDK-wide free-form cross-cutting note, and a "conformance audit MUST NOT flag" directive) to
+conform to the code — self-authorized inside the same wave, using the identical
+missing-versioned-extension-mechanism argument GH-149 used to justify the opposite resolution.
+RT-005's fix instructed either reverting to the typed sub-shape (renaming the free-form field to
+avoid colliding with it) or recording explicit sign-off here, separate from GH-149. This round
+does the latter, per Round 5-7 precedent for a wave decision that touches a frozen contract.
+
+**Fact-check before ruling (this is what makes the two divergences NOT symmetric):**
+`TimeSeriesChart.metadata` has been `dict[str, Any] | None` — free-form, no typed sub-shape — in
+every commit that has ever declared the field, back to its introduction; `git log -p` on
+`agent_sdk/models/content_types.py` shows no revision where it was ever typed. GH-63
+(`CHANGELOG.md` `## [0.5.16]`, 2026-06-18, released ~2.5 months before this wave) extended the
+same free-form `dict[str, Any]` shape to the other 13 `ContentModel` subclasses explicitly
+"matching the existing pattern on `TimeSeriesChart`" — i.e. GH-63 cites `TimeSeriesChart` as the
+*original* free-form exemplar, not a type it widened. No test in `tests/test_content_types.py` or
+elsewhere ever constructed a `TimeSeriesChart` with the typed `{identifier, metric, frequency,
+source}` shape. The frozen table's typed row was therefore stale documentation from the start,
+not an implemented-and-then-widened contract — unlike `fund_name`, where the code field was the
+newer, undocumented addition. Resolving the two divergences in opposite directions was
+individually defensible per-case; what was missing was the explicit, separately-recorded decision
+this entry now provides.
+
+### Owned decision (not deferred): `TimeSeriesChart.metadata` / SDK-wide `metadata` frozen-contract status
+
+| Protocol | Sev | Finding | File:line | Decision |
+|---|---|---|---|---|
+| A2UI | MED (spec-contract self-amendment, no separate record) | Frozen A2UI Standard Profile v1 table for `TimeSeriesChart` carried a `metadata: {identifier?, metric?, frequency?, source?}` row never matched by any shipped code; w040 deleted the row and added a cross-cutting free-form note + "MUST NOT flag" audit directive, self-authorized alongside the opposite-direction GH-149 fix. | `.claude/agents/a2ui-advisor.md` / `harness/agents/a2ui-advisor.md` / `template/.claude/agents/a2ui-advisor.md` (Field-contract conventions section + `TimeSeriesChart` table); `agent_sdk/models/content_types.py` (`ContentModel.metadata: dict[str, Any] \| None`) | **KEEP the free-form doc correction — PROPOSED, pending user ratification** (not asserted SIGNED OFF; see note below). The typed sub-shape was never real: `TimeSeriesChart.metadata` has been `dict[str, Any]` since its first appearance in history, and GH-63 (v0.5.16, released before this wave) treated `TimeSeriesChart` as the free-form pattern's origin, not its target. Restoring the typed row would require adding new validation that never existed, contradicting GH-63's own stated precedent and breaking no test only because none was ever written against the typed shape. Rejected alternative: restore the typed sub-shape in the frozen table and rename the SDK-wide field to something other than `metadata` — rejected because it would revert/rename an already-released (v0.5.16), tested, 14-type public field to satisfy a doc line that was never true, for a cost RT-005 itself did not weigh against the fact-check above (RT-005 assumed both divergences were the same shape; they are not). The "conformance audit MUST NOT flag `metadata`" directive stands unchanged: there being no fixed sub-shape to check is a fact about the field, not a policy carve-out. |
+
+**Not marked SIGNED OFF, unlike Round 5-7.** Per the standing project rule that a wave's own
+redteam/implementer can propose SDK policy inside the same wave but cannot finalize it alone
+(`memory/feedback-wave-signoff-needs-user-ratification.md`), this entry is **PROPOSED**: the
+fact-check above is offered as the basis for ratifying the w040 doc correction as-is, but a
+maintainer should confirm it (or direct the alternative) before this is treated as settled SDK
+policy. Until ratified, treat the `metadata` cross-cutting note and the "MUST NOT flag" directive
+in the three advisor copies as provisional, same status as the CHANGELOG bullet it accompanies.
+
+**RT-003 test-enforcement fix (2026-09-02):** `tests/test_rt002_a2ui_wire_shape_mirror_parity.py`
+previously hard-asserted the typed row's absence unconditionally, which contradicted this entry's
+own PROPOSED status — reverting the unratified doc change would have broken the suite. The
+assertion is now gated behind `ROUND_8_METADATA_ROW_REMOVAL_RATIFIED` (defaults `False`): while
+unratified, a reverted/stale row warns instead of failing. Flip that flag to `True` in the same
+commit that updates this entry to **SIGNED OFF**, never on its own.
+
+## Round 9 — w040 `TaskStore.context_messages()` admin cross-identity self-ratification (RT-004, 2026-09-02)
+
+A redteam pass on the same w040 wave (RT-004, HIGH) flagged that an earlier pass in this wave had
+promoted `TaskStore.context_messages()`'s admin `api_key` cross-identity override from an
+undocumented, unshipped accident to "the SDK's documented position" — DESIGN.md §5.1 stated as
+fact that an admin identity starting a fresh `message/send`/`:stream` on another identity's
+`contextId` deliberately inherits that identity's transcript into the new task's
+`record.messages`, and from there into the model's prompt; `agent_sdk/tasks/store.py`'s ABC
+docstring said the same; `tests/test_admin_continuation_inherits_cross_identity_transcript.py`
+pinned a victim identity's literal secret text reaching the admin's continuation turn as expected
+behavior. The exposure was materially wider than "operator task inspection": cross-identity data
+crossed into a new identity-owned task, the upstream model provider's context, and that task's own
+stored transcript/artifacts. Per the same standing rule Round 8 cites, a wave's own redteam cannot
+ratify new SDK security policy on its own.
+
+### Disposition: bypass removed, not ratified
+
+| Scope | Sev | Finding | File:line | Decision |
+|---|---|---|---|---|
+| A2A task continuation / cross-identity data exposure | HIGH | `context_messages()`'s admin bypass fed a foreign identity's transcript into the admin's own new task's model-facing `messages`, not a read-only view; a same-wave pass documented this as settled policy with no user sign-off. | `agent_sdk/tasks/memory.py` (`InMemoryTaskStore.context_messages`), `agent_sdk/tasks/store.py` (ABC docstring), `agent_sdk/agent/reuse.py` (`strip_resolved_markers`, now deleted), `DESIGN.md` §5.1 and §8.1 | **REMOVED, not escalated for ratification.** Unlike Round 8's `metadata` case (a genuine two-way design tradeoff worth a maintainer's judgment call), this one has a strictly safer default available with no functional loss: `context_messages()` is now identity-scoped exactly like `context_reusable_messages()` already was — no admin exception. Genuine operator inspection of another identity's task is unaffected and remains available as a read that never seeds a new task's model context (`GET /v1/tasks/{id}`, `TaskStore.get()`'s own, narrower admin override). Rejected alternative: escalate via `AskUserQuestion` and hold the bypass pending an explicit ruling — rejected because the fix option that closes the exposure outright (scope the write path to the calling identity) was already named in the finding itself, costs no capability that was ever actually used (the only call site was the write path), and leaving a described-as-high cross-identity data leak live in the working tree pending a ratification round is worse than defaulting closed. If a future maintainer wants the admin-inspection-via-continuation behavior back, that is the decision to escalate — restoring it, not removing it, is the one that needs `AskUserQuestion` sign-off. |
+
+**Test discipline:** `tests/test_admin_continuation_inherits_cross_identity_transcript.py` (which
+asserted the leak) is replaced by
+`tests/test_admin_continuation_scoped_to_own_identity.py` (asserts no cross-identity inheritance),
+confirmed RED against the pre-fix code before the fix landed, GREEN after. Store-level coverage in
+`tests/test_context_reusable_messages.py` updated to match (`test_context_messages_admin_no_longer_bypasses_the_identity_filter`,
+`test_context_messages_admin_no_longer_inherits_resolved_marker_from_other_identity`).
+
+## Round 10 — w040 a2ui-advisor frozen-contract self-edit (RT-004, 2026-09-03)
+
+A redteam pass (RT-004, HIGH) flagged that Round 8's disposition of the `TimeSeriesChart.metadata`
+question shipped the loosening it was meant to gate. Round 8 recorded the w040 doc edit — deleting
+`TimeSeriesChart`'s typed `metadata: {identifier?, metric?, frequency?, source?}` row from all
+three a2ui-advisor copies and replacing it with a free-form cross-cutting note + a "MUST NOT flag"
+directive — as **PROPOSED, pending maintainer confirmation**, explicitly not SIGNED OFF. But the
+test gate written alongside that entry (`ROUND_8_METADATA_ROW_REMOVAL_RATIFIED`, defaults `False`)
+only warned if the row was *reverted*; it never checked the removal itself, so the unratified
+loosening shipped in the release commit with nothing in the suite to stop it. This is the exact
+inverse of GH-149 in the same wave, which *deleted code* (`FundPerformance.fund_name`) to conform
+to this same frozen table — establishing that the frozen table wins over code, not the reverse.
+Per the same standing rule Round 8 and Round 9 both cite, a wave's own redteam/implementer cannot
+ratify a frozen-contract doc change on its own, and this implementer pass has no `AskUserQuestion`
+channel to actually obtain that ratification.
+
+### Disposition: doc edit reverted, not ratified
+
+| Scope | Sev | Finding | File:line | Decision |
+|---|---|---|---|---|
+| A2UI Standard Profile v1 frozen contract (DESIGN.md stable core) | HIGH | The frozen `TimeSeriesChart.metadata` field-contract row was edited by a wave to match its own code, self-authorized alongside the opposite-direction GH-149 fix, and shipped despite Round 8 marking it PROPOSED — the test gate only protected against reverting the edit, not against the edit itself. | `.claude/agents/a2ui-advisor.md` / `harness/agents/a2ui-advisor.md` / `template/.claude/agents/a2ui-advisor.md` (Field-contract conventions section + `TimeSeriesChart` table); `agent_sdk/models/content_types.py` (module docstring); `CHANGELOG.md` `## [0.8.0]`; `tests/test_rt002_a2ui_wire_shape_mirror_parity.py`, `tests/test_round8_metadata_ratification_gate.py` | **REVERTED, not escalated for ratification.** The typed row is restored in all three advisor copies; the cross-cutting note and "MUST NOT flag" directive are removed. The base-class `metadata: dict[str, Any] \| None` field on `ContentModel` (RT-003/RT-006) is untouched — this reverts only the frozen-table doc edit, not the code. Rejected alternative: flip `ROUND_8_METADATA_ROW_REMOVAL_RATIFIED` to `True` in this same commit — rejected because that is precisely the self-ratification the standing rule forbids; nothing in this pass constitutes a maintainer's sign-off, and Round 8's own fact-check (that the row was stale documentation from inception) is evidence for a future ratification decision, not authority to make it now. The revert costs nothing already in use: no shipped code ever implemented the typed sub-shape either before or after this change, so restoring the row changes no runtime behavior. If a maintainer wants the cross-cutting note instead, that is a Profile v1.1 amendment to ratify explicitly (bump the Profile version per the advisor doc's own "Profile versioning" rule), not a doc line to restore by flipping a flag. |
+
+**Test-gate inversion (this pass):** `_assert_metadata_row_removed_or_warn` (warn-only on revert)
+is replaced by `_assert_metadata_row_present_or_fail` (`tests/test_rt002_a2ui_wire_shape_mirror_parity.py`):
+while `ROUND_8_METADATA_ROW_REMOVAL_RATIFIED` is `False`, an advisor copy missing the frozen row,
+or carrying the cross-cutting override note, now **fails** the suite — inverted from the
+pre-RT-004 gate, which only warned on a revert and let the removal itself ship unchecked.
+`tests/test_round8_metadata_ratification_gate.py` is rewritten to pin the new behavior.
+
+**Tracked separately, not silently re-edited into the frozen table:** the underlying gap Round 8's
+fact-check surfaced (no shipped code has ever implemented `TimeSeriesChart`'s typed `metadata`
+sub-shape; GH-63 already treated `TimeSeriesChart.metadata` as the free-form pattern's origin) is
+recorded as Candidate 17 in `workspace/sdk-candidates.md` for `/sdk-issue-scan` to file as a GitHub
+issue — a maintainer's decision on a Profile v1.1 amendment, not a wave's own doc edit.

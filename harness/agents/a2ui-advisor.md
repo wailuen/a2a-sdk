@@ -218,20 +218,6 @@ Each table: `field · type · required? · notes`. A field with no `?` is **requ
 of `X`. Nested object shapes are given inline or as a sub-table. **Required-key + container-type** is
 what conformance checks (structural only — never value semantics).
 
-**`metadata` is a cross-cutting field, not a per-type one.** Every FROZEN type's Python model also
-carries `metadata: object | None` (free-form, `dict[str, Any]` — no fixed sub-shape) — an SDK-wide
-out-of-band envelope for disclosure annotations (e.g. `{"coverage_note": "Partial: 5 of 20 funds"}`),
-emitted on the wire whenever a caller sets it. It is deliberately **omitted from every field table
-below**, including this one's own type, because it is not part of the Profile v1 contract for any
-single type. A conformance audit MUST NOT flag a type for having or lacking `metadata` — check it
-once, here, not per type.
-
-Owned decision, not silent doc prose: `TimeSeriesChart` previously carried a
-`metadata: {identifier?, metric?, frequency?, source?}` row in this table that no shipped code
-ever implemented (RT-005, w040) — GH-63 (v0.5.16) already treated `TimeSeriesChart.metadata` as
-the free-form pattern's origin, not its target. See `REVIEWS.md` Round 8 for the fact-check and
-the ratification status of this note (**PROPOSED**, pending maintainer confirmation).
-
 ## Where a Profile type's fields live on the wire (normative)
 
 Every Profile component carries its payload under a single **`data`** prop, bound to the surface data
@@ -285,6 +271,7 @@ Line/area/bar series over time.
 | `data` | `[TimeSeriesDataPoint]` | ✓ | the series |
 | `total_count` | number | ✓ | number of points |
 | `summary` | `TimeSeriesSummary` | — | |
+| `metadata` | `{identifier?, metric?, frequency?, source?}` | — | |
 
 `TimeSeriesDataPoint`: `date` (string, ✓) · `value` (number\|null, ✓) · `label` (string, —).
 `TimeSeriesSummary` (all —): `min` · `max` · `first` · `last` · `change_percent` · `average` (numbers).

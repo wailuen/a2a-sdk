@@ -11,7 +11,14 @@ holding the full self-cleaning sequence::
 - the data binding is a direct ``data: {"path": "/root"}`` prop (no props
   wrapper); the component discriminator key is ``component``
 - updateDataModel carries ``path``/``value`` directly (no data wrapper)
-- MarketBriefing's value is its ``to_markdown()`` string (prose exception)
+- MarketBriefing's value is its ``to_markdown()`` string (prose exception) —
+  and, because ``to_markdown()`` is deliberately kept free of the base
+  class's ``metadata`` suffix (unlike ``to_plain_text()``), a MarketBriefing's
+  ``metadata`` disclosure envelope never reaches this surface at all. This is
+  a DOCUMENTED carve-out (RT-008), not a gap: see DESIGN.md §4.3 for the full
+  rationale and ``tests/test_dbg6_market_briefing_metadata_carveout.py`` for
+  the pin. Every other content type's ``metadata`` reaches A2UI via ``wire()``
+  below unchanged.
 
 ``translate()``'s return value is a computed sequence, not a wire delivery
 unit. Delivery callers (``agent/runner.py::build_artifact``,
@@ -156,6 +163,10 @@ def translate(
     try:
         # isinstance() kept as the ternary's own condition (not hoisted to a
         # bool) so mypy narrows payload to MarketBriefing for to_markdown().
+        # RT-008: to_markdown() carries no metadata suffix, so a MarketBriefing's
+        # metadata never reaches this surface — see the module docstring above
+        # and DESIGN.md §4.3. Deliberate, not a gap; do not "fix" by switching
+        # this branch to wire()/to_plain_text() without re-reading both.
         value: Any = (
             payload.to_markdown() if isinstance(payload, MarketBriefing) else payload.wire()
         )

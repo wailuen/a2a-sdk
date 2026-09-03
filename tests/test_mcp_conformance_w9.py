@@ -9,7 +9,8 @@ SC-C6  Auto-derived title from a snake_case function name when title= is omitted
 SC-C7  MarketBriefing MCP outputSchema + structuredContent are a JSON object
        wrapping the markdown ({"markdown": to_markdown()}), never a bare string
        or the field dict (GH-105, MCP 2025-06-18 object-only requirement)
-SC-C8  openWorldHint=False seeded for all tier-1 / read_only tools (GH-52)
+SC-C8  openWorldHint reflects whether a tool is SourceAdapter-backed, not
+       tier/read_only (GH-52, corrected by GH-134)
 RT-004 Agent-card x-sdk.outputSchema mirrors the MCP object schema for a
        MarketBriefing-emitting tool
 """
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import logging
 from typing import Any
 
 import httpx
@@ -27,6 +29,7 @@ from pydantic import BaseModel, Field
 from agent_sdk import BaseAgentSettings
 from agent_sdk.agent.registry import ToolSet
 from agent_sdk.example.agent import make_agent
+from agent_sdk.sources import SourceAdapter
 from agent_sdk.testing import FakeModelClient
 
 
@@ -660,12 +663,23 @@ async def test_rt001_agent_card_flags_market_briefing_wire_divergence(sc_c7_clie
 
 
 # ---------------------------------------------------------------------------
-# SC-C8: GH-52 — openWorldHint=False for all tier-1 and read_only tools
+# SC-C8: GH-52 — openWorldHint seeded by default; corrected by GH-134
 #
 # MCP 2025-06-18: openWorldHint defaults to True when absent, which causes
-# Claude.ai's consent UI to flag pure read-only query tools as world-altering.
-# The SDK must seed openWorldHint=False for tier==1 OR read_only=True.
+# Claude.ai's consent UI to flag pure local tools as world-altering.
+# GH-52 (w016) originally seeded openWorldHint=False for tier==1 OR
+# read_only=True — but tying it to tier overgeneralized the fix: a tier-1
+# tool backed by a SourceAdapter DOES talk to an external system and should
+# be open-world. GH-134 corrects this: the SDK seeds openWorldHint=True when
+# the tool has at least one SourceAdapter-backed (keyword-only) parameter,
+# False otherwise — independent of tier and read_only. read_only's
+# readOnlyHint/destructiveHint seeding is unaffected.
 # ---------------------------------------------------------------------------
+
+
+class _AdapterBackedFakeSource(SourceAdapter):
+    source_name = "sc_c8_fake_source"
+    allowed_hosts = ["example.com"]
 
 
 async def test_sc_c8_echo_open_world_hint_false(client):
@@ -706,22 +720,81 @@ async def test_sc_c8_demo_kpis_open_world_hint_false(client):
     )
 
 
-def test_sc_c8_tier1_without_read_only_gets_open_world_hint_false():
-    """A tier-1 tool registered WITHOUT read_only=True must still get
-    openWorldHint=False because tier==1 implies a non-destructive query tool."""
+def test_sc_c8_tier1_non_adapter_tool_open_world_hint_false():
+    """A tier-1 tool with NO SourceAdapter-backed parameter must get
+    openWorldHint=False — it never talks to an external system, regardless
+    of tier (GH-134: this must no longer depend on tier==1 alone)."""
     extra = ToolSet()
 
     @extra.tool(tier=1)
     async def query_only() -> None:
-        """A tier-1 query tool registered without read_only."""
+        """A tier-1 query tool with no adapter parameters."""
 
     decl = extra.decls[0]
     assert decl.annotations is not None, (
-        "tier-1 tool should have annotations dict seeded (openWorldHint=False)"
+        "tier-1 non-adapter tool should have annotations dict seeded (openWorldHint=False)"
     )
     assert decl.annotations.get("openWorldHint") is False, (
-        f"tier-1 tool without read_only=True must still get openWorldHint=False, "
+        f"tier-1 tool with no SourceAdapter-backed parameter must get "
+        f"openWorldHint=False, got: {decl.annotations}"
+    )
+
+
+def test_sc_c8_tier1_adapter_backed_tool_open_world_hint_true():
+    """A tier-1 tool with a SourceAdapter-backed keyword-only parameter must
+    get openWorldHint=True — it talks to an external system (GH-134). Tier
+    alone must no longer force openWorldHint=False for adapter-backed tools."""
+    extra = ToolSet()
+
+    @extra.tool(tier=1)
+    async def query_upstream(*, source: _AdapterBackedFakeSource) -> None:
+        """A tier-1 tool backed by a SourceAdapter."""
+
+    decl = extra.decls[0]
+    assert decl.annotations is not None
+    assert decl.annotations.get("openWorldHint") is True, (
+        f"tier-1 SourceAdapter-backed tool must get openWorldHint=True (GH-134), "
         f"got: {decl.annotations}"
+    )
+
+
+def test_sc_c8_tier2_adapter_backed_tool_open_world_hint_true():
+    """A tier-2 tool with a SourceAdapter-backed keyword-only parameter must
+    get openWorldHint=True — the same adapter-backed rule applies regardless
+    of tier (GH-134)."""
+    extra = ToolSet()
+
+    @extra.tool(tier=2)
+    async def compose_upstream(*, source: _AdapterBackedFakeSource) -> None:
+        """A tier-2 composite tool backed by a SourceAdapter."""
+
+    decl = extra.decls[0]
+    assert decl.annotations is not None
+    assert decl.annotations.get("openWorldHint") is True, (
+        f"tier-2 SourceAdapter-backed tool must get openWorldHint=True (GH-134), "
+        f"got: {decl.annotations}"
+    )
+
+
+def test_sc_c8_tier2_non_read_only_non_adapter_tool_annotations_seeded():
+    """RT-015: a tier-2, non-``read_only``, non-adapter tool with no explicit
+    ``annotations=`` still gets a populated ``decl.annotations`` dict —
+    ``{"openWorldHint": False}`` — never ``None``. Before GH-134,
+    ``openWorldHint`` was seeded only for ``tier == 1 or read_only``, so this
+    exact shape (tier=2, read_only=False) fell through to ``ann or None`` ==
+    ``None``. GH-134 seeds ``openWorldHint`` unconditionally, so this shape
+    now always carries a dict; pin it explicitly so the shape change is
+    covered by a test, not just the CHANGELOG note."""
+    extra = ToolSet()
+
+    @extra.tool(tier=2)
+    async def compose_only() -> None:
+        """A tier-2 composite tool with no adapter parameters, not read_only."""
+
+    decl = extra.decls[0]
+    assert decl.annotations == {"openWorldHint": False}, (
+        f"tier-2 non-adapter, non-read_only tool must get a seeded "
+        f"{{'openWorldHint': False}} dict, never None, got: {decl.annotations}"
     )
 
 
@@ -739,4 +812,129 @@ def test_sc_c8_explicit_annotations_can_override_open_world_hint():
     assert decl.annotations.get("openWorldHint") is True, (
         f"explicit annotations dict must override seeded openWorldHint=False, "
         f"got: {decl.annotations}"
+    )
+
+
+def test_sc_c8_explicit_open_world_hint_override_wins():
+    """GH-134: `resolved_annotations.update(annotations or {})` runs after the
+    adapter-derived seed, so an explicit annotations= entry must win in BOTH
+    directions — overriding an adapter-backed tool's seeded True down to
+    False, and overriding a non-adapter tool's seeded False up to True."""
+    extra = ToolSet()
+
+    @extra.tool(tier=1, annotations={"openWorldHint": False})
+    async def adapter_backed_but_forced_closed(*, source: _AdapterBackedFakeSource) -> None:
+        """A tier-1 SourceAdapter-backed tool that explicitly forces openWorldHint=False."""
+
+    @extra.tool(tier=1, annotations={"openWorldHint": True})
+    async def non_adapter_but_forced_open() -> None:
+        """A tier-1 non-adapter tool that explicitly forces openWorldHint=True."""
+
+    adapter_decl = next(
+        d for d in extra.decls if d.name == "adapter_backed_but_forced_closed"
+    )
+    non_adapter_decl = next(
+        d for d in extra.decls if d.name == "non_adapter_but_forced_open"
+    )
+
+    assert adapter_decl.annotations is not None
+    assert adapter_decl.annotations["openWorldHint"] is False, (
+        f"explicit annotations={{'openWorldHint': False}} must override the "
+        f"adapter-derived seed of True, got: {adapter_decl.annotations}"
+    )
+
+    assert non_adapter_decl.annotations is not None
+    assert non_adapter_decl.annotations["openWorldHint"] is True, (
+        f"explicit annotations={{'openWorldHint': True}} must override the "
+        f"non-adapter seed of False, got: {non_adapter_decl.annotations}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# RT-008: a tier-2 tool with no SourceAdapter-backed parameter is seeded
+# openWorldHint=False (LRN-043's landed rule — correct and unchanged by this
+# finding). A tier-2 *composite* tool is the shape most likely to reach an
+# external system by a route other than a declared adapter parameter (a
+# nested call into another tool's function, a contrib source that doesn't
+# follow the SourceAdapter contract), so registration logs a WARNING
+# pointing the author at the annotations={"openWorldHint": True} escape
+# hatch — RT-008 does not change the derivation (see docstring in
+# registry.py / LRN-043 for why bool(adapter_params) is a complete
+# derivation under the SDK's DI contract), only closes the discoverability
+# gap for the one case that finding raised.
+# ---------------------------------------------------------------------------
+
+REGISTRY_LOGGER = "agent_sdk.agent.registry"
+
+
+def test_rt008_tier2_non_adapter_tool_warns_open_world_hint(sdk_caplog):
+    tools = ToolSet()
+
+    with sdk_caplog(REGISTRY_LOGGER, logging.WARNING) as records:
+
+        @tools.tool(tier=2)
+        async def compose_only() -> None:
+            """A tier-2 composite tool with no adapter parameters."""
+
+    warnings = [r for r in records if r.levelno == logging.WARNING]
+    assert warnings, (
+        "expected a WARNING for a tier-2 tool with no SourceAdapter-backed "
+        "parameter and no explicit openWorldHint override"
+    )
+    msg = warnings[0].getMessage()
+    assert "compose_only" in msg, f"warning must name the tool; got: {msg!r}"
+    assert "openWorldHint" in msg, f"warning must name the annotation; got: {msg!r}"
+    assert tools.decls[0].annotations == {"openWorldHint": False}
+
+
+def test_rt008_tier2_non_adapter_tool_explicit_override_no_warning(sdk_caplog):
+    tools = ToolSet()
+
+    with sdk_caplog(REGISTRY_LOGGER, logging.WARNING) as records:
+
+        @tools.tool(tier=2, annotations={"openWorldHint": True})
+        async def compose_reaches_out() -> None:
+            """A tier-2 composite tool that explicitly declares open-world reach."""
+
+    warnings = [r for r in records if r.levelno == logging.WARNING]
+    assert not warnings, (
+        f"expected no WARNING when openWorldHint is explicitly overridden; "
+        f"got: {[r.getMessage() for r in warnings]}"
+    )
+    assert tools.decls[0].annotations == {"openWorldHint": True}
+
+
+def test_rt008_tier2_adapter_backed_tool_no_warning(sdk_caplog):
+    tools = ToolSet()
+
+    with sdk_caplog(REGISTRY_LOGGER, logging.WARNING) as records:
+
+        @tools.tool(tier=2)
+        async def compose_upstream(*, source: _AdapterBackedFakeSource) -> None:
+            """A tier-2 composite tool backed by a SourceAdapter."""
+
+    warnings = [r for r in records if r.levelno == logging.WARNING]
+    assert not warnings, (
+        f"expected no WARNING for an adapter-backed tool (openWorldHint=True "
+        f"is correct without an override); got: {[r.getMessage() for r in warnings]}"
+    )
+
+
+def test_rt008_tier1_non_adapter_tool_no_warning(sdk_caplog):
+    """RT-008's warning is scoped to tier-2 (composite) tools only — a tier-1
+    query tool with no adapter parameter is the common, well-covered case
+    GH-134's own test suite (SC-C8) already pins; warning on it would be
+    noise on every plain query tool in the SDK."""
+    tools = ToolSet()
+
+    with sdk_caplog(REGISTRY_LOGGER, logging.WARNING) as records:
+
+        @tools.tool(tier=1)
+        async def query_only() -> None:
+            """A tier-1 query tool with no adapter parameters."""
+
+    warnings = [r for r in records if r.levelno == logging.WARNING]
+    assert not warnings, (
+        f"expected no WARNING for a tier-1 non-adapter tool; got: "
+        f"{[r.getMessage() for r in warnings]}"
     )

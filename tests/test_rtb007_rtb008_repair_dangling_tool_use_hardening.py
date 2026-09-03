@@ -9,11 +9,18 @@ override entry) — across every one of them. A later mutation of that list by
 the caller, or by a store's serializer, silently rewrote every one of those
 transcript entries at once.
 
-RT-B-008: the tail-message read (``messages[-1].get("role")``) had no
-``isinstance(messages[-1], dict)`` guard, unlike the ``pending_tool_results``
-loop just above it (which already checks each block). A non-dict tail entry
-raised ``AttributeError`` — which, per RT-B-002, would have escaped every
-caller of this helper before that fix.
+RT-B-008 (superseded by RT-005): the tail-message read (``messages[-1].get
+("role")``) had no ``isinstance(messages[-1], dict)`` guard, unlike the
+``pending_tool_results`` loop just above it (which already checks each
+block). A non-dict tail entry raised ``AttributeError`` — which, per
+RT-B-002, would have escaped every caller of this helper before that fix.
+The guard's original outcome ("nothing to repair", ``False``/quiet no-op)
+was itself superseded by RT-005 (agent/loop.py's ``close_dangling_tool_use``,
+tests/test_rt005_non_dict_tail_unreadable_gate.py): an unreadable tail is no
+longer distinguishable from a confirmed-clean one, so it now raises
+``DanglingToolUseUnreadable`` instead — caught by
+``repair_dangling_tool_use_safe``, never by this lower-level function, same
+as every other unreadable-tail shape.
 
 Unit-level (agent_sdk.agent.runner + agent_sdk.tasks.memory only — no
 FastAPI app boot), mirroring
@@ -25,6 +32,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
+from agent_sdk.agent.loop import DanglingToolUseUnreadable
 from agent_sdk.agent.runner import repair_dangling_tool_use
 from agent_sdk.models.a2a import Task, TaskState, TaskStatus
 from agent_sdk.tasks.store import TaskRecord
@@ -155,28 +165,26 @@ def test_pending_result_content_list_not_aliased_into_transcript() -> None:
 # ── RT-B-008: a non-dict tail message must not raise ────────────────────────
 
 
-def test_non_dict_tail_message_does_not_raise() -> None:
-    """A durable store deserialising loosely (or a future caller appending
-    something other than a plain dict) must be treated as "nothing to
-    repair", not crash the helper — which, pre-fix, escaped every one of
-    repair_dangling_tool_use's callers via RT-B-002's unguarded sites."""
+def test_non_dict_tail_message_raises_unreadable() -> None:
+    """RT-005 (supersedes this module's original RT-B-008 expectation): a
+    durable store deserialising loosely (or a future caller appending
+    something other than a plain dict) can no longer be confirmed clean, so
+    ``close_dangling_tool_use`` raises ``DanglingToolUseUnreadable`` instead
+    of quietly treating it as "nothing to repair" — this function itself
+    stays unguarded (only ``repair_dangling_tool_use_safe`` catches it), same
+    as it already does for every other unreadable-tail shape (RT-001/RT-004
+    above)."""
     record = _record(["not a dict"])
 
-    repair_dangling_tool_use(record, default_content=[{"text": "cancelled"}])  # must not raise
-
-    assert record.messages == ["not a dict"] or record.messages[-1] != "not a dict" or True
-    # No repair possible on a non-dict tail: the list is left as-is except
-    # for bridge_trailing_user, which itself only acts on a dict tail with
-    # role == "user" — a bare string tail is untouched either way.
-    assert record.messages[-1] == "not a dict"
+    with pytest.raises(DanglingToolUseUnreadable):
+        repair_dangling_tool_use(record, default_content=[{"text": "cancelled"}])
 
 
-def test_non_dict_tail_message_with_object_does_not_raise() -> None:
+def test_non_dict_tail_message_with_object_raises_unreadable() -> None:
     class _NotAMessage:
         pass
 
     record = _record([{"role": "user", "content": [{"text": "go"}]}, _NotAMessage()])
 
-    repair_dangling_tool_use(record, default_content=[{"text": "cancelled"}])  # must not raise
-
-    assert isinstance(record.messages[-1], _NotAMessage)
+    with pytest.raises(DanglingToolUseUnreadable):
+        repair_dangling_tool_use(record, default_content=[{"text": "cancelled"}])

@@ -590,12 +590,17 @@ def repair_dangling_tool_use(
     on a path that runs once per abnormal task exit, so the cost is
     negligible.
 
-    RT-B-008: the tail-message read guards ``isinstance(messages[-1], dict)``
-    the same way the ``pending_tool_results`` loop above already guards each
-    block — a non-dict tail entry (a durable store deserialising loosely, or
-    a future caller appending something other than a plain dict) is treated
-    as "nothing to repair" rather than raising ``AttributeError``, which —
-    per RT-B-002 — would otherwise escape every caller of this helper.
+    RT-B-008 (superseded by RT-005 — see ``agent/loop.py::close_dangling_
+    tool_use``'s matching paragraph and ``tests/test_rt005_non_dict_tail_
+    unreadable_gate.py``): a non-dict tail entry (a durable store
+    deserialising loosely, or a future caller appending something other than
+    a plain dict) originally degraded to "nothing to repair" rather than
+    raising. That let ``repair_dangling_tool_use_safe`` report ``True``
+    (safe to persist) for a transcript whose tail could not even be
+    confirmed clean — the exact fail-open ``set_task_status``'s ``repaired``
+    gate exists to prevent, same class of gap RT-001/RT-004 below closed one
+    level deeper. ``close_dangling_tool_use`` now raises
+    ``DanglingToolUseUnreadable`` for this shape too.
 
     RT-001 (agent/runner.py review) / RT-004 (correction): the guard above
     only reached one level deep — a tail block whose own ``"toolUse"`` value
@@ -607,16 +612,13 @@ def repair_dangling_tool_use(
     silently turned a genuinely dangling, unrepairable ``toolUse`` tail into
     the SAME return value as a confirmed-clean one, letting
     ``repair_dangling_tool_use_safe`` report ``True`` (safe to persist) over
-    a transcript still ending on that unrepaired tail — the fail-open
-    ``set_task_status``'s ``repaired`` gate exists to prevent. This function
-    now lets ``close_dangling_tool_use`` raise ``DanglingToolUseUnreadable``
-    for that one-level-deep case instead of swallowing it (RT-B-008's outer
-    non-dict-tail case is unaffected and still degrades quietly, since it
-    can't even be confirmed to be an assistant turn) — the raise propagates
-    out of this function uncaught, so ``repair_dangling_tool_use_safe``'s
-    existing broad ``except Exception`` reports the correct "not safe to
-    persist" outcome for it, exactly as it already does for any other
-    in-memory repair failure.
+    a transcript still ending on that unrepaired tail. This function lets
+    ``close_dangling_tool_use`` raise ``DanglingToolUseUnreadable`` for both
+    that one-level-deep case AND the outer non-dict-tail case (RT-005)
+    instead of swallowing either — the raise propagates out of this function
+    uncaught, so ``repair_dangling_tool_use_safe``'s existing broad ``except
+    Exception`` reports the correct "not safe to persist" outcome for it,
+    exactly as it already does for any other in-memory repair failure.
     """
     messages = record.messages
     pending: dict[str, tuple[list[dict[str, Any]], str]] = {}

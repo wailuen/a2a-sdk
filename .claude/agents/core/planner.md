@@ -69,7 +69,8 @@ Read in this order:
 - Any todo landing a new `SourceAdapter` must include `allowed_hosts` and
   `health_check()` ACs
 - Any todo landing a new domain content type must include `register_content_type`
-  wiring and `to_plain_text()` implementation
+  wiring and `_body_text()` implementation (NOT `to_plain_text()` — that is concrete
+  on `ContentModel`)
 - `Creates: shared` marks a new reusable component; `/implement` registers it
 
 ## Parallel-group invariant (critical)

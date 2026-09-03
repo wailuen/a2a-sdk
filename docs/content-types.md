@@ -99,18 +99,36 @@ The admin console renders it too, as a dimmed footnote row under the card —
 no per-component renderer work needed.
 
 A card written before this split, which overrides `to_plain_text()` directly,
-keeps working: `ContentModel.__init_subclass__` adopts that override as the
+keeps working **unless it also already declares its own `_body_text`** (see the
+exception below): `ContentModel.__init_subclass__` adopts the override as the
 class's `_body_text()`, so it renders identically and additionally picks up the
 suffix — including a card that subclasses a CONCRETE built-in (e.g. `KpiCard`)
 and extends its rendering with `super().to_plain_text()`, a pattern that was
 fully legal against the pre-split API. That call is safely redirected to the
 parent's own rendering rather than re-entering the subclass's override, so it
-does not recurse. New code should implement `_body_text()` directly. One rule
-for a NEW `_body_text()` override: call `super()._body_text()`, never
-`super().to_plain_text()` — both resolve correctly, but only the outermost
-call appends the metadata suffix, so `super().to_plain_text()` from new code
-adds nothing `super()._body_text()` doesn't already give you, at the cost of
-one extra indirection.
+does not recurse. New code should implement `_body_text()` directly.
+
+From a NEW `_body_text()` override, prefer `super()._body_text()`. Both it and
+`super().to_plain_text()` resolve to the same parent rendering — the SDK
+frames every `_body_text()` implementation, new-style and adopted-legacy
+alike, so a `super().to_plain_text()` call from any level in the chain
+resolves exactly one step up instead of re-entering the same override — but
+only the outermost call appends the metadata suffix, so
+`super().to_plain_text()` adds nothing `super()._body_text()` doesn't already
+give you, at the cost of one extra indirection.
+
+**Exception — migration required:** `_body_text` had no reserved meaning
+before this split, so a pre-split card may already declare a *private helper*
+of that name alongside its `to_plain_text()` override, unrelated to this
+mechanism. Adoption is skipped whenever the subclass declares its own
+`_body_text` — silently leaving the stale `to_plain_text()` override in place
+would shadow the concrete base method and drop the `metadata` suffix, so the
+class raises `TypeError` at import time instead. **Before upgrading, grep your
+`ContentModel` subclasses for `_body_text`.** If a subclass defines both
+`_body_text` and `to_plain_text`, rename the existing `_body_text` member
+(e.g. to `_render_body`) and move the body of `to_plain_text()` into a new
+`_body_text()` override. A subclass declaring only one of the two names needs
+no change.
 
 A tool then uses `emits=ClimateRiskReport` exactly like a Profile type.
 A plain `BaseModel` (not registered) is also accepted for `emits` — it

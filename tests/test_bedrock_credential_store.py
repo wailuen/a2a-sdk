@@ -59,7 +59,8 @@ def test_boto_client_does_not_mutate_os_environ(monkeypatch):
         return real_ScopedEnvTokenProvider(session, environ=environ)
 
     fake_boto3 = MagicMock()
-    fake_boto3.Session.return_value.client.return_value = MagicMock()
+    fake_client = MagicMock()
+    fake_boto3.Session.return_value.client.return_value = fake_client
 
     monkeypatch.setattr(botocore.tokens, "ScopedEnvTokenProvider", capturing_provider)
 
@@ -102,7 +103,8 @@ def test_boto_client_bearer_env_is_minimal_dict(monkeypatch):
         return real_ScopedEnvTokenProvider(session, environ=environ)
 
     fake_boto3 = MagicMock()
-    fake_boto3.Session.return_value.client.return_value = MagicMock()
+    fake_client = MagicMock()
+    fake_boto3.Session.return_value.client.return_value = fake_client
 
     monkeypatch.setattr(botocore.tokens, "ScopedEnvTokenProvider", capturing_provider)
 
@@ -571,6 +573,66 @@ def _isolate_aws_config_files(monkeypatch, tmp_path):
     monkeypatch.delenv("AWS_PROFILE", raising=False)
 
 
+def test_boto_client_bearer_resolves_signature_version_without_real_env_var(
+    monkeypatch, tmp_path
+):
+    """GH-139: _boto_client()'s bearer path must select signature_version='bearer'
+    even when the REAL process os.environ has no AWS_BEARER_TOKEN_BEDROCK set.
+
+    Root cause: botocore's own gate for attempting bearer auth
+    (_should_prefer_bearer_auth in botocore/handlers.py) calls
+    get_token_from_environment(), which reads the REAL os.environ — not the
+    isolated per-client dict the token_provider is scoped to. Without an
+    explicit signature_version='bearer' in the client Config,
+    has_in_code_configuration stays False, the gate falls through, and
+    resolution silently picks SigV4 with no IAM credentials configured
+    (NoCredentialsError at signing time), even though the token_provider is
+    correctly wired.
+
+    This exercises botocore's real choose-signer resolution (no mocking of
+    boto3/botocore) by replicating exactly the request_context
+    BaseClient._make_api_call builds before signing — no network call is made.
+    """
+    _isolate_aws_config_files(monkeypatch, tmp_path)
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+
+    client = BedrockModelClient(
+        region="us-east-1",
+        model_arn="arn:aws:bedrock:us-east-1::foundation-model/test",
+        bearer_token="tok-regression-no-env",
+    )
+
+    boto_client = client._boto_client()
+
+    operation_model = boto_client._service_model.operation_model("Converse")
+    request_context = {
+        "client_region": boto_client.meta.region_name,
+        "client_config": boto_client.meta.config,
+        "has_streaming_input": operation_model.has_streaming_input,
+        "auth_type": operation_model.resolved_auth_type,
+        "unsigned_payload": operation_model.unsigned_payload,
+        "auth_options": boto_client._service_model.metadata.get("auth"),
+    }
+    resolved = boto_client._request_signer._choose_signer(
+        "Converse", "standard", request_context
+    )
+
+    assert resolved == "bearer", (
+        f"expected bearer signature version, got {resolved!r} — with no real "
+        "AWS_BEARER_TOKEN_BEDROCK env var, botocore's environment-based "
+        "bearer-auth gate falls through to SigV4, which has no credentials "
+        "configured and fails with NoCredentialsError at signing time"
+    )
+
+    auth = boto_client._request_signer.get_auth_instance(
+        signing_name="bedrock", region_name="us-east-1", signature_version=resolved
+    )
+    assert auth.auth_token.token == "tok-regression-no-env", (
+        "resolved to bearer but the token_provider did not supply the "
+        "configured bearer token"
+    )
+
+
 def test_boto_client_bearer_pins_signature_version_to_bearer(monkeypatch, tmp_path):
     """AC1 (GH-145): _boto_client()'s bearer branch must pin
     config=Config(signature_version="bearer") on the boto3 client, so signer
@@ -680,3 +742,267 @@ def test_boto_client_bearer_raises_clear_error_when_token_provider_chain_absent(
 
     with pytest.raises(RuntimeError, match="botocore>=1.39"):
         client._boto_client()
+
+
+# ── RT-013: signature_version must actually resolve to 'bearer', not just be requested ──
+
+def test_bearer_signer_is_registered_in_real_botocore_auth_type_maps():
+    """RT-005: pins the registry the guard probes against the REAL installed
+    botocore — not a mock. ``RequestSigner.get_auth_instance()`` looks the
+    signature_version up in ``botocore.auth.AUTH_TYPE_MAPS`` and raises
+    ``UnknownSignatureVersionError`` on a miss, so this membership is exactly
+    what decides whether Config(signature_version='bearer') can sign. If a
+    future botocore renames or drops the bearer signer, THIS test goes red and
+    names the cause, instead of the SDK failing at first model call."""
+    import botocore.auth
+
+    assert "bearer" in botocore.auth.AUTH_TYPE_MAPS
+
+
+def test_bearer_token_resolver_wiring_delivers_signing_name_scoped_token():
+    """RT-010 (LRN-084 recurrence class): AUTH_TYPE_MAPS pins whether botocore
+    can SIGN with signature_version='bearer'; it says nothing about whether the
+    isolated-env token built in _boto_client() ever REACHES that signer.
+
+    The real delivery path (no mocking) is:
+      botocore/client.py ClientCreator.create_client()
+        -> _evaluate_client_specific_token(service_model.signing_name)
+        -> self._auth_token_resolver(signing_name=signing_name)
+      where _auth_token_resolver is wired at Session.create_client() as
+      auth_token_resolver=self.get_auth_token (botocore/session.py)
+        -> Session.get_auth_token(signing_name='bedrock')
+        -> provider.load_token(signing_name='bedrock')
+
+    botocore/tokens.py's ScopedEnvTokenProvider.load_token() returns None
+    whenever `signing_name` is absent from its kwargs. So a botocore build
+    inside the declared boto3>=1.39 floor that keeps ClientCreator/Session
+    but drops or breaks the signing_name hand-off would let the client
+    construct cleanly with auth_token=None and fail only at first call —
+    the exact GH-139 symptom the AUTH_TYPE_MAPS guard was added to prevent,
+    one hop earlier in the chain.
+
+    Verified against the exact floor: `boto3==1.39.0` resolves to
+    `botocore==1.39.0`, and both `auth_token_resolver` and the
+    signing_name-aware `Session.get_auth_token` are already present there —
+    so this probe exists to catch a future botocore regression, not to
+    raise today's floor.
+    """
+    import inspect
+
+    import botocore.client
+    import botocore.session
+    import botocore.tokens
+
+    assert "auth_token_resolver" in inspect.signature(
+        botocore.client.ClientCreator.__init__
+    ).parameters, (
+        "botocore.client.ClientCreator.__init__ dropped auth_token_resolver — "
+        "Session.create_client() can no longer hand Session.get_auth_token to "
+        "the client, breaking bearer-token delivery for every signing_name, "
+        "not just 'bedrock'."
+    )
+
+    session = botocore.session.Session()
+    isolated_env = {"AWS_BEARER_TOKEN_BEDROCK": "tok-rt-010-floor-probe"}
+    token_provider = botocore.tokens.TokenProviderChain(
+        providers=[botocore.tokens.ScopedEnvTokenProvider(session, environ=isolated_env)]
+    )
+    session.register_component("token_provider", token_provider)
+
+    resolved = session.get_auth_token(signing_name="bedrock")
+
+    assert resolved is not None, (
+        "Session.get_auth_token(signing_name='bedrock') returned None — it "
+        "stopped forwarding signing_name to the registered token_provider. "
+        "botocore.tokens.ScopedEnvTokenProvider.load_token() returns None "
+        "whenever signing_name is absent, so _boto_client() would build a "
+        "client with auth_token=None and fail only at first call with an "
+        "unactionable error (GH-139 symptom, re-armed above the "
+        "AUTH_TYPE_MAPS guard)."
+    )
+    assert resolved.token == "tok-rt-010-floor-probe", (
+        f"expected 'tok-rt-010-floor-probe', got {resolved.token!r} — "
+        "Session.get_auth_token resolved a different token than the one "
+        "registered on the isolated env dict."
+    )
+
+
+def test_boto_client_bearer_raises_clear_error_when_bearer_signer_unregistered(
+    monkeypatch,
+):
+    """RT-013 (LRN-084 follow-up), rewritten for RT-005: setting
+    Config(signature_version='bearer') is a request, not a guarantee. If a
+    botocore build past the version floor ignores/renames the bearer-signer
+    machinery, the client would otherwise construct cleanly and fail only at
+    first call with an unactionable error (GH-139 symptom, re-armed).
+
+    The guard must probe something botocore actually consults. The previous
+    revision of this test asserted on a guard that read back
+    ``built_client.meta.config.signature_version`` — the value the SDK had set
+    two lines earlier — and fabricated the impossible state
+    ``fake_client.meta.config.signature_version = "v4"`` on a MagicMock to make
+    it fire. Real botocore echoes ANY string back verbatim (verified: a client
+    built with signature_version='totally-bogus-scheme' reports exactly that)
+    and resolves no signer at construction, so that branch could never fire in
+    production while its mocked test stayed green — LRN-084's own lesson
+    recurring. The guard now probes ``botocore.auth.AUTH_TYPE_MAPS``, and this
+    test removes the key from the real module to trigger it.
+
+    Must raise a distinct, actionable RuntimeError — never the version-floor
+    message, since this failure mode is orthogonal to "botocore too old" and
+    telling an operator already past the floor to upgrade is unactionable
+    (RT-011). The message must never echo the bearer token (SI-2).
+    """
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+
+    import botocore.auth
+
+    patched = dict(botocore.auth.AUTH_TYPE_MAPS)
+    patched.pop("bearer", None)
+    monkeypatch.setattr(botocore.auth, "AUTH_TYPE_MAPS", patched)
+
+    client = BedrockModelClient(
+        region="us-east-1",
+        model_arn="arn:aws:bedrock:us-east-1::foundation-model/test",
+        bearer_token="tok-secret-should-not-leak",
+    )
+
+    with pytest.raises(RuntimeError, match="bearer") as excinfo:
+        client._boto_client()
+
+    message = str(excinfo.value)
+    assert "AUTH_TYPE_MAPS" in message, (
+        "the message must name the registry the operator can inspect"
+    )
+    assert "botocore>=1.39" not in message, (
+        "RT-011: this failure mode is orthogonal to the version-floor guard — "
+        "an operator already on a supported botocore should not be told to "
+        "upgrade to a version they already exceed"
+    )
+    assert "tok-secret-should-not-leak" not in message, (
+        "bearer token must never be interpolated into the exception message (SI-2)"
+    )
+
+
+# ── RT-011: bearer path must not couple to the host's ambient AWS profile ────
+
+def test_boto_client_bearer_never_calls_session_get_credentials(monkeypatch):
+    """RT-011: bearer-path client construction must never walk the ambient
+    AWS credential-provider chain.
+
+    botocore.session.Session.create_client() unconditionally calls
+    self.get_credentials() unless explicit static credentials are passed (or
+    signature_version is UNSIGNED, which bearer auth cannot use), and
+    get_credentials() falls through to
+    CredentialResolver.load_credentials() — which walks the host's ambient
+    AWS profile chain (~/.aws/config, AWS_PROFILE, SSO/login sessions,
+    credential_process...) — whenever Session._credentials is still unset.
+    That chain can raise arbitrary vendor exceptions that have nothing to do
+    with the bearer token — reproduced on a machine with a `login_session`
+    profile and no botocore[crt] installed: MissingDependencyException
+    raised before the bearer signer is ever reached. Bearer auth signs
+    exclusively via the token_provider registered on the session and must be
+    independent of this chain entirely.
+    """
+    import botocore.credentials
+
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+
+    called = []
+    real_load_credentials = botocore.credentials.CredentialResolver.load_credentials
+
+    def _tracking_load_credentials(self):
+        called.append(True)
+        return real_load_credentials(self)
+
+    monkeypatch.setattr(
+        botocore.credentials.CredentialResolver,
+        "load_credentials",
+        _tracking_load_credentials,
+    )
+
+    client = BedrockModelClient(
+        region="us-east-1",
+        model_arn="arn:aws:bedrock:us-east-1::foundation-model/test",
+        bearer_token="tok-rt-011",
+    )
+
+    client._boto_client()
+
+    assert not called, (
+        "CredentialResolver.load_credentials() was called during bearer-path "
+        "client construction — the bearer path is coupled to the host's "
+        "ambient AWS profile chain (RT-011)"
+    )
+
+
+def test_boto_client_bearer_succeeds_when_ambient_profile_would_raise(monkeypatch):
+    """RT-011 repro: even when the host's ambient AWS profile chain would
+    raise (e.g. MissingDependencyException from a `login_session` profile
+    lacking botocore[crt]), bearer-path client construction must succeed —
+    it never consults that chain in the first place.
+    """
+    import botocore.credentials
+    import botocore.exceptions
+
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+
+    def _raising_load_credentials(self):
+        raise botocore.exceptions.MissingDependencyException(
+            msg=(
+                "Using the login credential provider requires an additional "
+                'dependency. You will need to pip install "botocore[crt]" '
+                "before proceeding."
+            )
+        )
+
+    monkeypatch.setattr(
+        botocore.credentials.CredentialResolver,
+        "load_credentials",
+        _raising_load_credentials,
+    )
+
+    client = BedrockModelClient(
+        region="us-east-1",
+        model_arn="arn:aws:bedrock:us-east-1::foundation-model/test",
+        bearer_token="tok-rt-011-repro",
+    )
+
+    boto_client = client._boto_client()
+
+    assert boto_client.meta.config.signature_version == "bearer"
+
+
+def test_boto_client_bearer_wraps_construction_failure_actionably(monkeypatch):
+    """RT-011 defense-in-depth: if bearer-path client construction fails for
+    any other, unforeseen reason, the caller must see a clear, actionable
+    RuntimeError naming the ambient-profile coupling as the likely cause —
+    never a raw boto3/botocore exception, and never the bearer token (SI-2).
+    """
+    import boto3
+
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+
+    def _boom(self, *args, **kwargs):
+        raise RuntimeError("boom: tok-should-not-leak-secret")
+
+    monkeypatch.setattr(boto3.Session, "client", _boom)
+
+    client = BedrockModelClient(
+        region="us-east-1",
+        model_arn="arn:aws:bedrock:us-east-1::foundation-model/test",
+        bearer_token="tok-should-not-leak-secret",
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        client._boto_client()
+
+    message = str(excinfo.value)
+    assert "tok-should-not-leak-secret" not in message, (
+        "bearer token must never be interpolated into the exception message (SI-2)"
+    )
+    assert "ambient" in message.lower() or "profile" in message.lower(), (
+        "the wrapped error must name the ambient-profile coupling as the "
+        "likely cause (RT-011)"
+    )

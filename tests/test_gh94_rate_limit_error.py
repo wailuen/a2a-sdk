@@ -77,7 +77,10 @@ def _patch_client(monkeypatch, client: OpenAIModelClient, exc: Exception) -> Non
 @pytest.mark.asyncio
 async def test_rate_limit_raises_rate_limited_category(monkeypatch):
     """RateLimitError maps to ErrorCategory.RATE_LIMITED."""
-    import openai
+    openai = pytest.importorskip(
+        "openai", reason="openai is an optional extra ([project.optional-dependencies] openai); "
+        "the documented dev install does not include it"
+    )
 
     exc = openai.RateLimitError(
         "rate limit", response=httpx.Response(429, request=_FAKE_REQUEST), body=None
@@ -96,7 +99,10 @@ async def test_rate_limit_raises_rate_limited_category(monkeypatch):
 @pytest.mark.asyncio
 async def test_rate_limit_not_upstream(monkeypatch):
     """RateLimitError must NOT map to ErrorCategory.UPSTREAM."""
-    import openai
+    openai = pytest.importorskip(
+        "openai", reason="openai is an optional extra ([project.optional-dependencies] openai); "
+        "the documented dev install does not include it"
+    )
 
     exc = openai.RateLimitError(
         "rate limit", response=httpx.Response(429, request=_FAKE_REQUEST), body=None
@@ -113,7 +119,10 @@ async def test_rate_limit_not_upstream(monkeypatch):
 @pytest.mark.asyncio
 async def test_fatal_error_still_upstream(monkeypatch):
     """Non-RateLimitError exceptions still produce ErrorCategory.UPSTREAM."""
-    import openai
+    openai = pytest.importorskip(
+        "openai", reason="openai is an optional extra ([project.optional-dependencies] openai); "
+        "the documented dev install does not include it"
+    )
 
     exc = openai.APIConnectionError(request=_FAKE_REQUEST)
     client = _make_client()
@@ -128,7 +137,10 @@ async def test_fatal_error_still_upstream(monkeypatch):
 @pytest.mark.asyncio
 async def test_retry_after_extracted(monkeypatch):
     """Retry-After header value is extracted into AgentError.detail."""
-    import openai
+    openai = pytest.importorskip(
+        "openai", reason="openai is an optional extra ([project.optional-dependencies] openai); "
+        "the documented dev install does not include it"
+    )
 
     resp = httpx.Response(429, headers={"retry-after": "30"}, request=_FAKE_REQUEST)
     exc = openai.RateLimitError("rate limit", response=resp, body=None)
@@ -146,7 +158,10 @@ async def test_retry_after_extracted(monkeypatch):
 @pytest.mark.asyncio
 async def test_retry_after_absent_gives_no_detail(monkeypatch):
     """When no Retry-After header, detail does not contain retry_after."""
-    import openai
+    openai = pytest.importorskip(
+        "openai", reason="openai is an optional extra ([project.optional-dependencies] openai); "
+        "the documented dev install does not include it"
+    )
 
     resp = httpx.Response(429, request=_FAKE_REQUEST)
     exc = openai.RateLimitError("rate limit", response=resp, body=None)

@@ -168,7 +168,7 @@ def _field_summary(cls: type[ContentModel]) -> str:
         if len(summary) > 250:
             summary = summary[:247] + "..."
         return f"{{{summary}}}"
-    except (AttributeError, TypeError):
+    except Exception:
         logger.warning(
             "a2ui catalog: field summary generation failed for %s; using "
             "fallback summary",

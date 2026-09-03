@@ -136,19 +136,20 @@ async def test_send_terminal_taskid_returns_unsupported(client, fake_model):
     assert r.json()["error"]["code"] == -32004
 
 
-async def test_stream_terminal_taskid_returns_not_found(client, fake_model):
-    """message/stream with taskId pointing to a completed task → -32001 TaskNotFound."""
+async def test_stream_terminal_taskid_returns_unsupported(client, fake_model):
+    """message/stream with taskId pointing to a completed task → -32004
+    (UnsupportedOperation), matching message/send's behavior for the same
+    input (GH-144). The task exists — it is merely terminal — so -32001
+    (TaskNotFound) would misrepresent the failure; no SSE stream is opened."""
     completed = await _complete_task(client, fake_model)
     task_id = completed["id"]
 
-    async with client.stream(
-        "POST", "/v1/message:stream", json=send_body("turn 2", task_id=task_id)
-    ) as r:
-        body = await r.aread()
-    data = body  # JSONResponse, not SSE
-    import json
-    err = json.loads(body)
-    assert err["error"]["code"] == -32001
+    r = await client.post(
+        "/v1/message:stream", json=send_body("turn 2", task_id=task_id)
+    )
+    assert r.status_code == 501, r.text
+    assert not r.headers["content-type"].startswith("text/event-stream")
+    assert r.json()["error"]["code"] == -32004
 
 
 async def test_interrupted_taskid_routes_to_resume(client, fake_model):
@@ -168,6 +169,30 @@ async def test_interrupted_taskid_routes_to_resume(client, fake_model):
 
 
 # ── identity isolation ────────────────────────────────────────────────────────
+
+
+async def test_stream_terminal_taskid_foreign_identity_returns_not_found(client, fake_model):
+    """message/stream with taskId pointing to ANOTHER identity's terminal task
+    → -32001 TaskNotFound/404 (identity-scoped store.get() sees no such task
+    for this caller), never -32004 UnsupportedOperation/501 (RT-002/GH-144).
+    The terminal-state check at a2a.py:335 must stay strictly downstream of
+    the identity-scoped lookup at a2a.py:332 — a foreign identity's terminal
+    task must not leak "this task exists" via a differentiated error code."""
+    completed = await _complete_task(client, fake_model)
+    task_id = completed["id"]
+
+    _, other_token = client.app.state.auth.api_keys.mint("other-user-rt002", admin=False)
+
+    r = await client.post(
+        "/v1/message:stream",
+        json=send_body("turn 2", task_id=task_id),
+        headers={"Authorization": f"Bearer {other_token}"},
+    )
+    assert r.status_code == 404, r.text
+    assert not r.headers["content-type"].startswith("text/event-stream")
+    body = r.json()
+    assert body["error"]["code"] == -32001
+    assert body["error"]["code"] != -32004
 
 
 async def test_context_continuation_isolated_per_identity(client, fake_model):

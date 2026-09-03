@@ -46,13 +46,18 @@ value through ``agent_sdk.common.redact.sanitize_text`` (control-char strip +
 per-field length cap, SI-2) and bounds the assembled suffix to
 ``_METADATA_SUFFIX_MAX_LEN`` characters overall.
 
-The a2ui-advisor's frozen tables (``.claude/agents/a2ui-advisor.md``,
+RT-004 (REVIEWS.md Round 10): a same-wave edit to the a2ui-advisor's frozen
+field-contract tables (``.claude/agents/a2ui-advisor.md``,
 ``harness/agents/a2ui-advisor.md``, ``template/.claude/agents/a2ui-advisor.md``)
-have been updated to match (RT-006): the ``TimeSeriesChart`` per-type
-``metadata`` row is gone from all three copies, and the "Field-contract
-conventions" section carries the same note in each (worded there as
-"``metadata`` is a cross-cutting field, not a per-type one" — not a verbatim
-copy of this docstring's own wording above, but the same claim).
+that dropped ``TimeSeriesChart``'s per-type typed ``metadata`` row to match
+this base-class hoist was reverted pending maintainer ratification — a
+frozen A2UI Standard Profile v1 field contract (DESIGN.md stable core) may
+not be edited inside a wave to conform to its own code, the same rule
+GH-149 applied in the opposite direction (code changed to conform to the
+frozen table). The row therefore still appears in all three advisor copies,
+describing a typed sub-shape this base-class field has never implemented;
+that gap is tracked in ``workspace/sdk-candidates.md`` for a maintainer to
+resolve as an explicit Profile v1.1 decision, not a silent doc edit.
 
 The three advisor copies still diverge on the unrelated ``DataPart`` wire-
 format section (GH-128 follow-on) — tracked as
@@ -65,7 +70,12 @@ Do NOT override ``to_plain_text()``: it is concrete on the base class and is
 what appends the ``metadata`` suffix. A card written against the older API
 that overrides ``to_plain_text()`` still works — ``ContentModel.__init_subclass__``
 adopts that override as the class's ``_body_text()`` — but new code should
-implement ``_body_text()`` directly.
+implement ``_body_text()`` directly. Exception (RT-005, migration required):
+a pre-split card that ALSO already declares its own ``_body_text`` (e.g. an
+unrelated private helper of that name — a legal name before this release)
+fails at import time instead of being silently adopted; see
+``__init_subclass__`` below and CHANGELOG.md's RT-005 entry for the required
+rename.
 """
 
 from __future__ import annotations
@@ -74,6 +84,7 @@ import abc
 import contextvars
 import functools
 import math
+import weakref
 from typing import Annotated, Any, ClassVar, Literal, Union
 
 from pydantic import (
@@ -87,7 +98,27 @@ from pydantic import (
     model_validator,
 )
 
-from ..common.redact import sanitize_text
+from ..common.redact import safe_block_text, safe_cell_text, sanitize_text
+
+
+def _sanitize_cell(value: str) -> str:
+    """Thin alias for :func:`agent_sdk.common.redact.safe_cell_text` (GH-130,
+    RT-002/RT-009 C-007 reconciliation). The delimiter-safety helper was
+    promoted out of this module into ``common/redact.py`` so third-party
+    ``ContentModel`` subclasses can import the SAME implementation instead of
+    hand-rebuilding the separator alphabet per card module — do not
+    reimplement it here; a second copy is the exact drift this promotion
+    exists to prevent."""
+    return safe_cell_text(value)
+
+
+def _sanitize_block(value: str) -> str:
+    """Thin alias for :func:`agent_sdk.common.redact.safe_block_text` — the
+    counterpart to :func:`_sanitize_cell` for a field whose declared contract
+    is a MULTI-LINE MARKDOWN DOCUMENT (``MarketBriefing.prose``), where a
+    newline is the payload's own structure, not a delimiter."""
+    return safe_block_text(value)
+
 
 CATALOG_ID = "urn:a2ui-profile:standard:v1"
 A2UI_VERSION = "v0.9.1"
@@ -113,22 +144,33 @@ _METADATA_SUFFIX_MAX_LEN = 4096
 
 _ASSERT_FINITE_MAX_DEPTH = 100
 
-# RT-003 (round 2): re-entrancy plumbing for adopted legacy to_plain_text()
-# overrides -- see ContentModel.__init_subclass__ and .to_plain_text below.
-# Keyed by the adopted class (not by instance) because the resolution target
-# -- "the next ancestor's _body_text after this class in the MRO" -- is fixed
-# at class-definition time and identical for every instance of that class.
-_NEXT_BODY_TEXT: dict[type, Any] = {}
-# Stack of (adopted_class, instance) currently executing an adopted override,
-# most-recent last. ContextVar rather than a plain module global so concurrent
-# asyncio tasks never observe each other's frames.
-_ADOPTED_OVERRIDE_STACK: contextvars.ContextVar[tuple[tuple[type, Any], ...]] = (
-    contextvars.ContextVar("_ADOPTED_OVERRIDE_STACK", default=())
+# RT-003 (round 2): re-entrancy plumbing for a ``super().to_plain_text()``
+# call made from inside a card's own rendering -- see
+# ContentModel.__init_subclass__ and .to_plain_text below. Keyed by the
+# declaring class (not by instance) because the resolution target -- "the next
+# ancestor's _body_text after this class in the MRO" -- is fixed at
+# class-definition time and identical for every instance of that class.
+# DBG-7: a WeakKeyDictionary, not a plain dict. Keyed by class and written
+# once per subclass in __init_subclass__, a strong-keyed dict pins EVERY
+# ContentModel subclass ever defined for the life of the process — including
+# ones built dynamically by a card factory or created per-test — so neither the
+# class nor anything it closes over is ever collectable. Weak keys make an
+# entry vanish with its class; nothing outlives the class it describes, and a
+# live class always still holds its own entry.
+_NEXT_BODY_TEXT: "weakref.WeakKeyDictionary[type, Any]" = weakref.WeakKeyDictionary()
+# Stack of (declaring_class, instance) whose _body_text is currently
+# executing, most-recent last. ContextVar rather than a plain module global so
+# concurrent asyncio tasks never observe each other's frames.
+_BODY_TEXT_STACK: contextvars.ContextVar[tuple[tuple[type, Any], ...]] = (
+    contextvars.ContextVar("_BODY_TEXT_STACK", default=())
 )
+# Pre-split name, kept as an alias: the stack held adopted-legacy frames only
+# until DBG-5 generalised it to every _body_text implementation.
+_ADOPTED_OVERRIDE_STACK = _BODY_TEXT_STACK
 
 
 def _next_body_text_impl(cls: type) -> Any:
-    """The ``_body_text`` implementation ``cls``'s adopted override must reach
+    """The ``_body_text`` implementation ``cls``'s own rendering must reach
     when it calls ``super().to_plain_text()`` -- the first ancestor (walking
     the MRO past ``cls`` itself) that declares ``_body_text`` in its OWN
     ``__dict__``. ``ContentModel`` always qualifies (its abstract stub is
@@ -138,6 +180,42 @@ def _next_body_text_impl(cls: type) -> Any:
         if impl is not None:
             return impl
     raise AssertionError(f"{cls.__name__}: no ancestor _body_text (unreachable)")
+
+
+def _framed_body_text(impl: Any, owner: type) -> Any:
+    """Wrap one ``_body_text`` implementation so the class that DECLARED it is
+    on ``_BODY_TEXT_STACK`` for the duration of the call.
+
+    That frame is the only thing that tells ``ContentModel.to_plain_text``
+    where in the MRO a re-entrant ``super().to_plain_text()`` call came from —
+    ``super()`` itself carries no such information across the concrete
+    wrapper. Every implementation in the chain announces itself, so a
+    ``super().to_plain_text()`` from any level resolves exactly one step up
+    (``_NEXT_BODY_TEXT[owner]``, itself a wrapped implementation if that
+    ancestor declared one) instead of re-dispatching through
+    ``type(self)._body_text`` and landing back on the same function.
+
+    DBG-5: applied to a NEW-style ``_body_text()`` override as well as to an
+    adopted legacy ``to_plain_text()`` one. Wrapping only the adopted half
+    made the guard asymmetric — a new override calling
+    ``super().to_plain_text()`` pushed no frame, so the re-entrancy check
+    never fired and the call recursed until ``RecursionError``, failing every
+    artifact emission for that card type (``runner.py``'s dual-part
+    ``TextPart``, ``routes/mcp.py``'s ``tools/call`` text) as an internal
+    error — while the migration docs and the ``__init_subclass__`` TypeError
+    below steered authors straight into that shape.
+    """
+
+    @functools.wraps(impl)
+    def _framed(self: Any, *, _impl: Any = impl, _cls: type = owner) -> str:
+        frame = (_cls, self)
+        token = _BODY_TEXT_STACK.set(_BODY_TEXT_STACK.get() + (frame,))
+        try:
+            return _impl(self)  # type: ignore[no-any-return]
+        finally:
+            _BODY_TEXT_STACK.reset(token)
+
+    return _framed
 
 
 def _assert_finite(value: Any, _depth: int = 0) -> None:
@@ -189,7 +267,15 @@ class _Wire(BaseModel):
 class ContentModel(_Wire, abc.ABC):
     """Base for renderable card payloads. ``wire()`` is the surface data
     model value; ``to_plain_text()`` is the mandatory text fallback sent to
-    clients without A2UI capability (and used in tool-result folding).
+    clients without A2UI capability — the A2A dual-part artifact's
+    ``TextPart`` (``agent/runner.py::build_artifact``) and the MCP
+    ``tools/call`` text block (``routes/mcp.py::_tool_text``), its only two
+    consumers. RT-005 (debug round 5): NOT tool-result folding, which this
+    line used to claim — ``agent/loop.py::fold_result_content`` folds a
+    ``BaseModel`` through ``model_dump(mode="json", ...)`` and never calls
+    ``to_plain_text()``. That matters now that ``to_plain_text()`` appends
+    caller-supplied ``metadata``: the suffix reaches those two client-facing
+    surfaces, never the model's own tool-result content.
 
     Subclasses implement ``_body_text()`` — the card's own rendering — NOT
     ``to_plain_text()``. ``to_plain_text()`` is concrete here and is defined
@@ -242,7 +328,8 @@ class ContentModel(_Wire, abc.ABC):
         return v
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
-        """Adopt a legacy ``to_plain_text()`` override as ``_body_text()``.
+        """Frame every ``_body_text()`` implementation; adopt a legacy
+        ``to_plain_text()`` override as one.
 
         Back-compat for domain cards written against the pre-split API, where
         ``to_plain_text()`` was the concrete (or, for a direct ``ContentModel``
@@ -254,17 +341,27 @@ class ContentModel(_Wire, abc.ABC):
         base implementation, so the card renders identically PLUS the suffix.
 
         The original function stays reachable as ``cls._body_text`` (it is
-        rebound, not discarded), wrapped so that a ``super().to_plain_text()``
-        call from inside it (legal, common code against the previous API —
-        e.g. a card subclassing a CONCRETE built-in that extends its
-        rendering) resolves to the next ancestor's ``_body_text()`` directly
-        instead of re-dispatching through ``type(self)._body_text()``, which
-        would land right back on this same override and recurse. See
-        ``to_plain_text()`` for the other half of this mechanism. A NEW
-        override should still call ``super()._body_text()`` directly, never
-        ``super().to_plain_text()`` — the latter keeps working for adopted
-        legacy code but never appends a second metadata suffix, only the
-        outermost call does.
+        rebound, not discarded), wrapped by ``_framed_body_text`` so that a
+        ``super().to_plain_text()`` call from inside it (legal, common code
+        against the previous API — e.g. a card subclassing a CONCRETE
+        built-in that extends its rendering) resolves to the next ancestor's
+        ``_body_text()`` directly instead of re-dispatching through
+        ``type(self)._body_text()``, which would land right back on this same
+        override and recurse. See ``to_plain_text()`` for the other half of
+        this mechanism.
+
+        DBG-5 (debug round 5): a NEW-style ``_body_text()`` override gets the
+        SAME wrapper. Only the adopted-legacy half used to be framed, so the
+        re-entrancy guard fired for exactly the shape this SDK asks authors to
+        stop writing and never for the shape it asks them to write instead: a
+        new ``_body_text()`` calling ``super().to_plain_text()`` recursed to
+        ``RecursionError``, taking down every artifact emission for that card
+        type, while ``docs/content-types.md`` and the TypeError below both
+        pointed authors at that call. Framing every implementation makes the
+        chain uniform — ``super()._body_text()`` (still the recommended call)
+        and ``super().to_plain_text()`` now resolve to the same ancestor
+        rendering, the latter simply without a second metadata suffix, since
+        only the outermost call appends one.
 
         RT-005: a class declaring BOTH ``_body_text()`` and ``to_plain_text()``
         is not "new code" or "adopted legacy code" — it is a stale override
@@ -280,32 +377,31 @@ class ContentModel(_Wire, abc.ABC):
         super().__init_subclass__(**kwargs)
         own = cls.__dict__
         override = own.get("to_plain_text")
-        if override is None:
-            return
-        if getattr(override, "__isabstractmethod__", False):
-            return
-        if "_body_text" in own:
+        if not callable(override) or getattr(override, "__isabstractmethod__", False):
+            override = None
+        body = own.get("_body_text")
+        if not callable(body) or getattr(body, "__isabstractmethod__", False):
+            body = None
+        if override is not None and body is not None:
             raise TypeError(
                 f"{cls.__name__} declares both _body_text() and to_plain_text() — "
                 "to_plain_text() is concrete on ContentModel and appends the "
                 "metadata suffix; delete this stale to_plain_text() override "
-                "and let _body_text() alone define the card's rendering."
+                "and let _body_text() alone define the card's rendering. "
+                "If _body_text() here is a PRIVATE helper predating this SDK "
+                "version, that name is now the rendering hook reserved on "
+                "ContentModel: rename the helper (e.g. _render_body()) and "
+                "move the body of to_plain_text() into _body_text(). Note that "
+                "a super().to_plain_text() call inside that body keeps working "
+                "and resolves to the parent's rendering, without a second "
+                "metadata suffix."
             )
+        if override is None and body is None:
+            return
         _NEXT_BODY_TEXT[cls] = _next_body_text_impl(cls)
-
-        @functools.wraps(override)
-        def _adopted_body_text(
-            self: ContentModel, *, _override: Any = override, _cls: type = cls
-        ) -> str:
-            frame = (_cls, self)
-            token = _ADOPTED_OVERRIDE_STACK.set(_ADOPTED_OVERRIDE_STACK.get() + (frame,))
-            try:
-                return _override(self)
-            finally:
-                _ADOPTED_OVERRIDE_STACK.reset(token)
-
-        setattr(cls, "_body_text", _adopted_body_text)
-        setattr(cls, "to_plain_text", ContentModel.to_plain_text)
+        setattr(cls, "_body_text", _framed_body_text(override or body, cls))
+        if override is not None:
+            setattr(cls, "to_plain_text", ContentModel.to_plain_text)
 
     def _metadata_suffix(self) -> str:
         if not self.metadata:
@@ -320,19 +416,25 @@ class ContentModel(_Wire, abc.ABC):
     def to_plain_text(self) -> str:
         """The mandatory text fallback. Concrete — override ``_body_text()``.
 
-        RT-003 (round 2): re-entrancy check first. A legacy override adopted
-        by ``__init_subclass__`` runs inside ``_adopted_body_text``, which
-        pushes ``(cls, self)`` onto ``_ADOPTED_OVERRIDE_STACK`` for the
-        duration of that call. If that override itself calls
-        ``super().to_plain_text()`` (or ``self.to_plain_text()``), we land
-        back here — but as a RE-ENTRANT call for the SAME instance, not a
-        fresh top-level one. In that case resolve straight to the next
-        ancestor's ``_body_text()`` (``_NEXT_BODY_TEXT[cls]``), bypassing
-        ``self._body_text()`` — which would dispatch on ``type(self)`` and
-        land right back on the same adopted override — and skip the metadata
-        suffix, which the outermost call already appends exactly once.
+        RT-003 (round 2), generalised by DBG-5 (round 5): re-entrancy check
+        first. EVERY ``_body_text()`` implementation — a new-style override
+        and an adopted legacy ``to_plain_text()`` alike — runs inside
+        ``_framed_body_text``, which pushes ``(declaring_cls, self)`` onto
+        ``_BODY_TEXT_STACK`` for the duration of that call. If that
+        implementation itself calls ``super().to_plain_text()`` (or
+        ``self.to_plain_text()``), we land back here — but as a RE-ENTRANT
+        call for the SAME instance, not a fresh top-level one. In that case
+        resolve straight to the next ancestor's ``_body_text()``
+        (``_NEXT_BODY_TEXT[cls]``), bypassing ``self._body_text()`` — which
+        would dispatch on ``type(self)`` and land right back on the same
+        implementation — and skip the metadata suffix, which the outermost
+        call already appends exactly once.
+
+        The frame carries the instance, not just the class, so a card whose
+        rendering calls ``to_plain_text()`` on a DIFFERENT card is an ordinary
+        top-level call and still gets that card's own suffix.
         """
-        stack = _ADOPTED_OVERRIDE_STACK.get()
+        stack = _BODY_TEXT_STACK.get()
         if stack and stack[-1][1] is self:
             resuming_cls, _ = stack[-1]
             return _NEXT_BODY_TEXT[resuming_cls](self)
@@ -340,8 +442,32 @@ class ContentModel(_Wire, abc.ABC):
 
     @abc.abstractmethod
     def _body_text(self) -> str:
-        """The card's own text rendering, WITHOUT the metadata suffix."""
-        ...
+        """The card's own text rendering, WITHOUT the metadata suffix.
+
+        DBG-7: the body is ``return ""``, not ``...``. This stub is abstract
+        but it is NOT unreachable — it is the base case of the rendering chain,
+        and a DIRECT ``ContentModel`` subclass reaches it by both documented
+        routes:
+
+        * ``super()._body_text()`` — the call this SDK recommends (see
+          ``docs/content-types.md``) — resolves here through ordinary MRO
+          lookup.
+        * ``super().to_plain_text()`` — the documented-legal legacy call —
+          resolves here too, via ``_NEXT_BODY_TEXT[cls]``, which
+          ``_next_body_text_impl`` fills with this very function whenever
+          ``cls``'s only ancestor declaring ``_body_text`` is ``ContentModel``.
+
+        With a ``...`` body both routes returned ``None`` out of a method
+        declared ``-> str``, so a direct subclass extending its ancestors'
+        rendering raised ``TypeError`` on the concatenation, and one returning
+        the call verbatim produced ``TextPart(text=None)`` and a
+        ``ValidationError`` from ``build_artifact``. ``@abc.abstractmethod``
+        still forces every concrete subclass to implement it; the return value
+        only ever matters for the ``super()`` chain, and ``ContentModel``
+        contributes no rendering of its own, so the empty string is the honest
+        answer and keeps both documented calls working as written.
+        """
+        return ""
 
 
 # ── shared fragments ──
@@ -887,8 +1013,18 @@ class FundPerformance(ContentModel):
         # RT-004: provenance suffix, mirroring the admin console card's
         # subtitle (console/static/a2ui.js::renderFundPerformance, "source
         # <pbId>") rather than a bare identifier.
+        # RT-006 (debug round 5): routed through sanitize_text on the same
+        # ground _metadata_suffix() is — pb_id is a tool-supplied upstream
+        # identifier reaching the identical two client-facing surfaces (the
+        # mandatory A2A TextPart and the MCP tools/call text), so C-007's
+        # control-char strip + length cap applies here too. The frozen
+        # per-type string fields elsewhere in this module are NOT sanitized;
+        # the rule is scoped to values that arrive from a tool or caller.
         if self.pb_id:
-            bits.append(f"source {self.pb_id}")
+            safe_pb_id = sanitize_text(
+                self.pb_id, max_len=_METADATA_SUFFIX_FIELD_MAX_LEN
+            )
+            bits.append(f"source {safe_pb_id}")
         return (" | ".join(bits) or "fund performance (no data)")
 
 

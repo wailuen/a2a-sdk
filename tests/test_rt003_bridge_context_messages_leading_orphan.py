@@ -76,11 +76,15 @@ def test_bridge_context_messages_drops_a_leading_assistant_message() -> None:
     assert bridged[0]["content"] == [{"text": "hi"}]
 
 
-def test_bridge_context_messages_head_all_orphaned_returns_empty() -> None:
-    """No genuine user-authored turn boundary anywhere in the transcript —
-    the whole thing is stripped, matching ``_turn_boundary_slice``'s own
-    "empty when no boundary exists" contract rather than handing the model a
-    still-broken head."""
+def test_bridge_context_messages_head_all_orphaned_is_emptied() -> None:
+    """DBG-5 (debug round 5): no message in the transcript can legally head a
+    conversation, so every one is dropped. Round 4 left this shape untouched
+    on ``_turn_boundary_slice``'s "never rewrite a transcript it didn't need
+    to shrink" rule — but that is a CAP rule whose untouched case always
+    already has a legal head, and borrowing it here disabled the head repair
+    in precisely the case the head is broken. Converse rejects a leading
+    ``toolResult`` orphan, so the request fails wholesale rather than losing
+    one turn of prior context."""
     all_orphaned = [
         {
             "role": "user",
@@ -178,6 +182,64 @@ async def test_create_task_record_drops_a_leading_assistant_head(client, fake_mo
     assert fake_model.calls
     sent = fake_model.calls[0]["messages"]
     assert sent[0]["role"] == "user"
+
+
+async def test_create_task_record_head_is_converse_legal_with_no_boundary_anywhere(
+    client, fake_model
+):
+    """DBG-5, the harm chain round 4's guard reopened: a store window holding
+    only a complete ``[assistant(toolUse), user(toolResult)]`` round has no
+    genuine user turn anywhere, so nothing was trimmed and an ASSISTANT
+    message headed the conversation sent to Converse — which requires a
+    conversation to start on ``user`` and rejects the request outright."""
+    from agent_sdk.testing import reply
+
+    ctx = uuid.uuid4().hex
+    store = client.app.state.task_store
+    store.context_messages = lambda context_id, identity=None: [
+        {
+            "role": "assistant",
+            "content": [{"toolUse": {"toolUseId": "call-1", "name": "f", "input": {}}}],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "toolResult": {
+                        "toolUseId": "call-1",
+                        "content": [{"text": "ok"}],
+                        "status": "success",
+                    }
+                }
+            ],
+        },
+    ]
+
+    fake_model.script(reply("second reply"))
+    r = await client.post(
+        "/v1/message:send",
+        json={
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": "turn two"}],
+                "messageId": uuid.uuid4().hex,
+                "contextId": ctx,
+            }
+        },
+    )
+    assert r.status_code == 200, r.text
+    await wait_for_state(client, r.json()["id"])
+
+    record = store.get(r.json()["id"])
+    assert record is not None
+    assert record.messages[0]["role"] == "user", record.messages
+
+    assert fake_model.calls, "converse must have been called"
+    sent = fake_model.calls[0]["messages"]
+    assert sent[0]["role"] == "user", sent
+    assert not any(
+        isinstance(b, dict) and "toolResult" in b for b in sent[0].get("content", [])
+    ), sent
 
 
 def test_store_override_head_orphan_via_reference_store() -> None:

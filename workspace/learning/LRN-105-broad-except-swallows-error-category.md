@@ -21,10 +21,6 @@ intentional and map to the most specific `ErrorCategory` available.
 
 ## Check
 
-```bash
-grep -n "except Exception" agent_sdk/agent/bedrock.py agent_sdk/agent/openai_client.py
-```
-
-For every hit, verify that no more-specific `ErrorCategory` applies to any
-exception the library below can raise at that call site. If one does, an
-explicit clause must precede it.
+`grep -n "except Exception" agent_sdk/agent/*.py` — for every hit, verify
+that no more-specific `ErrorCategory` applies to any exception the library below
+can raise at that call site. If one does, an explicit clause must precede it.

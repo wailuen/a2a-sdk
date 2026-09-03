@@ -81,10 +81,13 @@ If no FROZEN type fits, create a domain card in `src/content.py` (see
 (snake_case), `component` (PascalCase wire name), and `catalog_id` — your **own**
 `urn:<domain>:<area>:v1`, never the Profile catalog id (reusing the Profile id for a
 non-Profile component is a false conformance claim, and a renderer that validates
-against the Profile catalog will reject the card). Implement `to_plain_text()` (the
-REQUIRED A2A text fallback — the only thing a non-supporting client sees; the SDK
-auto-assembles the dual-part artifact `TextPart(to_plain_text)` + `DataPart(payload)`,
-so you implement only the method, not the wrapping), and call
+against the Profile catalog will reject the card). Implement `_body_text()` (the
+hook behind `to_plain_text()`, the REQUIRED A2A text fallback — the only thing a
+non-supporting client sees; the SDK auto-assembles the dual-part artifact
+`TextPart(to_plain_text)` + `DataPart(payload)`, so you implement only the method,
+not the wrapping). Do NOT override `to_plain_text()` itself: it is concrete on
+`ContentModel` (`_body_text() + _metadata_suffix()`) and is what appends the SDK-wide
+`metadata` disclosure envelope to the text fallback. Then call
 `register_content_type(<Card>)`. Import the module in `main.py` so registration runs at
 import. Choose a `component` name that does **not** collide with any Standard Profile
 component name — `register_content_type` enforces global component-name uniqueness

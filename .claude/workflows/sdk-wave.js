@@ -144,6 +144,26 @@ const CONCURRENCY_GUARD_SCHEMA = {
   },
 }
 
+// RT-001 (w039/origin divergence): w039 landed and archived on a local `main` that was,
+// unnoticed, simultaneously 5 commits ahead AND 14 commits behind `origin/main` — v0.6.0
+// and v0.7.0 were already tagged upstream and unmerged into this history, and every one of
+// w039's own scope files had also changed upstream in the gap. A wave "landed" on a branch
+// that cannot be shipped without a later merge is not landed. See this schema's guard
+// below, checked once right after Parse, alongside the concurrency guard.
+const REMOTE_SYNC_SCHEMA = {
+  type: 'object',
+  required: ['behindCount'],
+  additionalProperties: false,
+  properties: {
+    behindCount: {
+      type: 'integer',
+      description: 'Output of `git rev-list --count main..origin/main` after `git fetch ' +
+        'origin main --quiet` (0 if origin/main is unreachable — no remote, no network — ' +
+        'or already an ancestor of main)',
+    },
+  },
+}
+
 const RT_SCHEMA = {
   type: 'object',
   required: ['findingsCount', 'findings'],
@@ -428,6 +448,31 @@ if (concurrency && concurrency.otherActiveWaves.length > 0 && concurrency.dirtyP
     waveId: wave.waveId,
     otherActiveWaves: concurrency.otherActiveWaves,
     dirtyPathCount: concurrency.dirtyPathCount,
+  }
+}
+
+// RT-001: a wave that lands on a branch already behind its remote is not landed — it is
+// staged on a lineage that needs a merge nobody has done yet, and every file the wave
+// touches may already differ upstream. Fetch failure (no `origin` remote, no network)
+// degrades to behindCount 0 rather than blocking every wave in an offline/remoteless repo.
+const remoteSync = await agent(
+  'Run `git fetch origin main --quiet` at the repo root (ignore failure — no configured ' +
+  '`origin` remote or no network access both mean this check does not apply). Then run ' +
+  '`git rev-list --count main..origin/main` and return the printed integer as behindCount ' +
+  '(0 if that command fails for any reason, e.g. no such remote or no such branch).',
+  { schema: REMOTE_SYNC_SCHEMA, label: 'remote-sync-guard', phase: 'Parse' }
+)
+
+if (remoteSync && remoteSync.behindCount > 0) {
+  log('ERROR: wave ' + wave.waveId + ' cannot start — local main is ' +
+      remoteSync.behindCount + ' commit(s) behind origin/main. Fetch and merge or rebase ' +
+      'onto origin/main first, run the full suite + mypy on the merged tree, and ' +
+      're-verify this wave\'s acceptance criteria against the post-merge code before ' +
+      'Implement — work landed on a diverged branch is not landed.')
+  return {
+    error: 'behind-origin',
+    waveId: wave.waveId,
+    behindCount: remoteSync.behindCount,
   }
 }
 

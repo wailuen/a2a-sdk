@@ -90,12 +90,24 @@ If there are no actionable issues after filtering, report the summary and stop.
 
 ### Phase 3 — Build the wave file
 
-4. Determine the next wave number:
+4. Determine the next wave number. The local `workspace/todos/` tree alone is
+   not authoritative — a branch that diverged from `main` (own commits ahead,
+   unmerged commits behind) can carry its own archived wave with the SAME
+   number for UNRELATED work (confirmed collision: local `w039` and
+   `origin/main`'s `w039` resolve different GitHub issues entirely). Scan every
+   fetched ref, not just the local directory listing:
    ```bash
-   ls workspace/todos/active/ workspace/todos/completed/ \
-     | grep -oE 'w[0-9]+' | sort | tail -1
+   git fetch origin --quiet 2>/dev/null
+   { ls workspace/todos/active/ workspace/todos/completed/ workspace/todos/archive/ \
+       workspace/todos/deferred/ 2>/dev/null | grep -oE 'w[0-9]+';
+     git log --all -E --grep='archive w[0-9]+' --format=%s 2>/dev/null \
+       | grep -oE 'w[0-9]+'; } \
+     | sed 's/^w//' | sort -n | tail -1
    ```
-   Increment to get `w<NNN>`.
+   Increment the resulting number (zero-padded to at least 3 digits, matching
+   existing convention) to get `w<NNN>`. If this run's own wave file will be
+   named the same as one already found on another ref, bump again — the goal
+   is a number unused anywhere in `git log --all`, not just locally.
 
 5. Write `workspace/todos/active/w<NNN>-gh-issues.md`:
 

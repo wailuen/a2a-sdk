@@ -38,6 +38,9 @@ class AuthRuntime:
     trusted_proxies: list[str]
     prm_url: str       # path-suffixed /.well-known/oauth-protected-resource/mcp (for /mcp routes)
     bare_prm_url: str  # bare /.well-known/oauth-protected-resource (for /v1/, /ag-ui/ routes)
+    # GH-136: when True, an already-consented DCR client re-authorizes without
+    # the admin-key consent page (settings.oauth_one_time_consent).
+    oauth_one_time_consent: bool = False
     identity_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(100))
     unauth_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(30))
 

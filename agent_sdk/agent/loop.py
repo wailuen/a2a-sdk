@@ -23,13 +23,24 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Awaitable, Callable, Sequence, Union, get_args, get_origin
+from typing import (
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Sequence,
+    TypeGuard,
+    Union,
+    get_args,
+    get_origin,
+)
 
 logger = logging.getLogger(__name__)
 
 from pydantic import BaseModel, ValidationError
 from pydantic_core import to_jsonable_python
 
+from ..common.redact import frame_locations
 from ..common.redact import sanitize_text
 from ..models.errors import AgentError
 from .deferred import DeferredEvent, DeferredResult
@@ -68,6 +79,50 @@ DEFAULT_MAX_OUTPUT_TOKENS = 8192
 # (`_CONTROL_CHAR_MAP` + `_sanitize_model_name`); it was deleted when C-007
 # landed so the two cannot drift apart on the control-char set or the cap.
 # sanitize_text's default max_len is 64 — the cap the old copy hard-coded.
+
+
+# RT-007 (debug round 6): ONE definition of "this message's ``content`` is a
+# sequence of content blocks", shared by all four of this module's tail/content
+# helpers (``close_dangling_tool_use``, ``is_user_turn_boundary``,
+# ``bridge_context_messages``, ``append_assistant_turn``).
+#
+# They disagreed before this existed. ``close_dangling_tool_use`` accepted
+# ``(list, tuple)``; the other three tested ``isinstance(content, list)`` alone,
+# so a tuple — the ordinary shape a durable ``TaskStore`` subclass produces when
+# it round-trips a transcript through a serializer that emits immutable
+# sequences — fell down each one's SCALAR branch. The results were not
+# cosmetic: ``bridge_context_messages`` stringified a tuple of ``toolResult``
+# blocks into ``{"text": "({'toolResult': ...},)"}``, turning structured tool
+# output into user prose the model reads back as if the user had typed a Python
+# repr; ``append_assistant_turn`` did the same to a tuple assistant tail,
+# breaking its own docstring promise to preserve "whatever real content that
+# tail carried"; and ``is_user_turn_boundary`` read a tuple-content
+# ``toolResult`` orphan as "not a list, therefore no toolResult, therefore a
+# legal conversation head", admitting exactly the head shape
+# ``bridge_context_messages`` trims for.
+#
+# A tuple is a sequence of content blocks in every sense that matters here, so
+# it is normalised to a list rather than wrapped as text. ``str``/``bytes`` are
+# excluded deliberately: they are iterable but are scalar TEXT, and are the one
+# shape the wrap branch genuinely exists for.
+CONTENT_SEQUENCE_TYPES = (list, tuple)
+
+
+def is_content_sequence(content: Any) -> TypeGuard[list[Any] | tuple[Any, ...]]:
+    """Is ``content`` a sequence of Converse content blocks (as opposed to
+    scalar text, or nothing at all)? See ``CONTENT_SEQUENCE_TYPES`` above.
+
+    DBG-7: annotated ``TypeGuard``, not ``bool``. Every call site below reads
+    ``content`` straight out of a ``dict.get()`` — i.e. ``Any | None`` — and
+    then iterates or unpacks it on the strength of this check. When this
+    centralising helper replaced the inline ``isinstance`` calls it also
+    replaced the NARROWING those calls carried, so the four call sites started
+    failing type checking (``union-attr`` on the iteration, ``misc`` on the
+    star-unpack) even though the runtime behaviour was unchanged. A predicate
+    extracted purely so several call sites can share one isinstance test has to
+    carry that test's narrowing with it, or it is not a drop-in replacement.
+    """
+    return isinstance(content, CONTENT_SEQUENCE_TYPES)
 
 
 class DanglingToolUseUnreadable(Exception):
@@ -406,11 +461,46 @@ def close_dangling_tool_use(
     (ordinary text) is unambiguous and still silently skipped — only a block
     that IS shaped like an attempted ``toolUse`` but can't be read is
     unreadable.
+
+    RT-006 (debug round 4, correction to the RT-004 paragraph above): "not a
+    list" is NOT the same question as "could be carrying a ``toolUse`` claim
+    I can't read", and conflating the two made this the only one of this
+    module's three tail-shape helpers to call a plain-text assistant tail
+    unreadable. ``is_user_turn_boundary`` below already reads a non-list
+    ``content`` as text ("no ``toolResult`` block, therefore a boundary"),
+    and ``append_assistant_turn`` below already preserves one by wrapping it
+    into a single ``{"text": ...}`` block — both because a ``str`` (or a
+    missing/empty value) provably cannot contain a ``toolUse`` block at all.
+    Raising on that shape was a FALSE unreadable: it propagated through
+    ``repair_dangling_tool_use_safe`` into ``set_task_status(...,
+    repaired=False)``, which skips BOTH ``persist_messages`` and
+    ``persist_status``, so a durable store never observed the terminal
+    transition of a task whose transcript was never dangling — permanently,
+    and for e.g. any AG-UI ``_fold_history`` transcript ending on a
+    client-resubmitted assistant text turn. A ``str``/``bytes`` or falsy
+    ``content`` is therefore "nothing to repair" (``False``) now, agreeing
+    with the other two helpers. Every OTHER non-list shape — a bare ``dict``
+    such as ``{"toolUse": {...}}`` from a store deserialising loosely, or any
+    other object — still raises: those CAN be an attempted ``toolUse`` claim,
+    and calling one text would be the fail-open this gate exists to prevent.
     """
-    if not (messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "assistant"):
+    if not messages:
         return False
-    last_content = messages[-1].get("content")
-    if not isinstance(last_content, list):
+    tail = messages[-1]
+    if not isinstance(tail, dict):
+        # RT-005: a non-empty tail that isn't even a dict can't be confirmed
+        # clean — it might be an unreadably-serialised assistant toolUse
+        # turn — so this degrades to "nothing to repair" no longer; see the
+        # RT-B-008/RT-004 docstring paragraphs above for the two narrower
+        # shapes (falsy/non-list content) that still correctly return False.
+        raise DanglingToolUseUnreadable("tail message is not a dict")
+    if tail.get("role") != "assistant":
+        return False
+    last_content = tail.get("content")
+    if isinstance(last_content, (str, bytes)) or not last_content:
+        # Provably carries no toolUse block: plain text, or nothing at all.
+        return False
+    if not is_content_sequence(last_content):
         raise DanglingToolUseUnreadable("assistant tail message content is not a list")
     tool_use_ids: list[str] = []
     for block in last_content:
@@ -439,19 +529,37 @@ def close_dangling_tool_use(
     return True
 
 
-def _is_user_turn_boundary(msg: Any) -> bool:
-    """Same predicate ``tasks/memory.py::_turn_boundary_slice`` applies when
-    a cap introduces a new head, and the same shape
-    ``routes/ag_ui.py::_fold_history``'s leading-prefix strip enforces for
-    the AG-UI carrier: a genuine user-authored turn is a ``role == "user"``
-    message carrying no ``toolResult`` block — only a continuation of an
-    in-flight tool round does. Guarded the same way ``close_dangling_tool_use``
-    guards a loosely deserialised store record: a non-dict message or
-    non-list ``content`` never raises here, it just fails the predicate."""
+def is_user_turn_boundary(msg: Any) -> bool:
+    """Is ``msg`` a genuine user-authored turn — the only message shape that
+    may legally HEAD a Bedrock Converse conversation?
+
+    True for a ``role == "user"`` message carrying no ``toolResult`` block;
+    only a continuation of an in-flight tool round carries one. Guarded the
+    same way ``close_dangling_tool_use`` guards a loosely deserialised store
+    record: a non-dict message or non-list ``content`` never raises here, it
+    just fails the predicate.
+
+    RT-004 (debug round 5): ONE implementation, C-017-registered, for both
+    halves of a single invariant — the WRITE/read-repair side here
+    (``bridge_context_messages``'s head trim) and the READ/cap side
+    (``tasks/memory.py::_turn_boundary_slice``, which imports this name for
+    the new head a cap introduces). It also matches the shape
+    ``routes/ag_ui.py::_fold_history``'s leading-prefix strip enforces for the
+    AG-UI carrier. It existed as two byte-equivalent private copies, one per
+    module, each docstring naming the other instead of importing it — the same
+    duplication ``close_dangling_tool_use`` was extracted to end. Two copies
+    are exactly what lets a change to the boundary rule desync a capped
+    window's head from the read-side head repair.
+    """
     if not (isinstance(msg, dict) and msg.get("role") == "user"):
         return False
     content = msg.get("content")
-    if not isinstance(content, list):
+    # RT-007 (debug round 6): a TUPLE of content blocks is scanned for a
+    # toolResult exactly like a list. Testing `isinstance(content, list)` alone
+    # made a tuple-content toolResult orphan answer True here — "not a list,
+    # therefore carries no toolResult, therefore a legal head" — which is the
+    # one shape this predicate exists to reject. See CONTENT_SEQUENCE_TYPES.
+    if not is_content_sequence(content):
         return True
     return not any(isinstance(block, dict) and "toolResult" in block for block in content)
 
@@ -499,7 +607,7 @@ def bridge_context_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str
     side enforced it), or a leading ``assistant`` message (the shape
     ``routes/ag_ui.py::_fold_history`` already strips for the AG-UI carrier
     but which had no A2A equivalent). Drop leading messages via
-    ``_is_user_turn_boundary`` above — the same predicate
+    ``is_user_turn_boundary`` above — the same predicate
     ``tasks/memory.py::_turn_boundary_slice`` uses for a capped window's new
     head — FIRST, before either tail re-assertion: a store's window can be
     both truncated AND end on a dangling tail in the same broken record, and
@@ -512,22 +620,40 @@ def bridge_context_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str
     Returns a NEW list (never mutates ``messages`` in place — a ``Sequence``
     may be immutable, e.g. a tuple returned by a durable subclass) with all
     three re-assertions already applied, ready to extend into a fresh
-    ``record.messages``. Only appends to its own copy, so the caller's
-    element dicts are never touched either. Can return an empty list — same
-    contract as ``_turn_boundary_slice``'s "no genuine boundary in the
-    window" case — when nothing in ``messages`` is ever a genuine
-    user-authored turn; the caller already treats that as "no usable prior
-    context".
+    ``record.messages``. Every element is DEEP-COPIED (see the RT-006/RT-008
+    paragraph below), so the caller's element dicts are never touched either.
+    Can return an empty list — when ``messages`` is empty to begin with, when
+    every message is dropped by the content-coercion step below for carrying
+    no content at all, or when NO message in it can legally head a
+    conversation (DBG-5 below).
 
-    RT-007: the head-trim loop above logs, matching
-    ``_turn_boundary_slice``'s own two-tier signal for the identical
-    outcome (a cap-introduced head with no boundary in its window) rather
-    than dropping silently. A partial trim — some leading orphan(s) removed,
-    a genuine boundary still found — logs one WARNING; trimming the list
-    down to nothing logs a second, distinct WARNING (wording matching
-    ``_turn_boundary_slice``'s own "dropping the entire prior transcript"
-    line) so an operator sees the same signal regardless of which side
-    (this read-side head trim, or the store's own cap) dropped the context.
+    DBG-5 (debug round 5, correcting round 4's RT-007): the head trim is
+    UNCONDITIONAL — it pops until the head is Converse-legal, even if that
+    empties the list. Round 4 guarded the pop loop behind "only if a genuine
+    boundary exists somewhere to trim toward", borrowing
+    ``_turn_boundary_slice``'s "capping must never rewrite a transcript it
+    didn't need to shrink" rule. That rule does not transfer: it is a CAP
+    rule, and the case it protects (``len(messages) <= cap``) always has a
+    legal head already — the task's own seed user turn from
+    ``_create_task_record``. This function is a REPAIR rule, and its
+    no-boundary-anywhere case is by definition the one where the head is
+    broken, so the guard disabled the repair in exactly the situation it
+    exists for: ``[user(toolResult orphan), assistant(...)]`` kept an orphan
+    at index 0, and ``[assistant(toolUse), user(toolResult)]`` kept an
+    assistant message as the head. Both are folded verbatim into the new
+    task's ``record.messages`` by ``routes/a2a.py::_create_task_record`` and
+    handed to Bedrock's Converse API, which rejects a conversation that does
+    not start on ``user`` and a ``toolResult`` with no matching ``toolUse``
+    — failing the whole request rather than losing one prior turn.
+
+    Emptying is therefore the correct outcome for a transcript with no legal
+    head anywhere, not a contract violation: it is the same outcome
+    ``_turn_boundary_slice`` itself chooses (with its own WARNING) when no
+    boundary exists anywhere in a transcript it DID have to rewrite, and a
+    continuation with no prior context is valid — ``_create_task_record``
+    appends the fresh user turn immediately after. Both outcomes are logged:
+    a partial trim keeps round 4's "resuming from the first turn boundary"
+    WARNING, and a full drop gets its own distinct one back.
 
     RT-004: ``close_dangling_tool_use`` can now raise
     ``DanglingToolUseUnreadable`` for a tail that is confirmed to be a
@@ -542,10 +668,86 @@ def bridge_context_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str
     "no synthetic toolResult can be built without a readable toolUseId"
     reasoning ``close_dangling_tool_use`` itself uses, just with nothing
     left to replay it into — then bridge the remainder as usual.
+
+    RT-006/RT-008 (debug round 4): this function is the READ-side normaliser
+    for a store-supplied transcript, so it now DEEP-COPIES each message and
+    coerces a non-list ``content`` into a single ``{"text": ...}`` block
+    before any of the three re-assertions run. Both halves are load-bearing:
+
+    * Coercion, because ``close_dangling_tool_use`` above no longer rejects a
+      plain-text assistant tail (its RT-006 paragraph), so without this a raw
+      ``content: "hello"`` string would survive the fold into
+      ``record.messages`` and reach ``bedrock.py``'s Converse call, which
+      passes ``messages`` through verbatim and requires a list of content
+      blocks. ``append_assistant_turn`` below already applies exactly this
+      coercion for the tail it merges into; doing it here covers every
+      message, including the non-list ``user`` content that
+      ``is_user_turn_boundary`` deliberately admits as a boundary.
+    * Deep copy, because the docstring above promises "the caller's element
+      dicts are never touched either" while ``list(messages)`` shared them —
+      latent while this function only ever appended, but a live corruption of
+      the PRIOR task's stored transcript the moment it rewrites a ``content``
+      in place, as the coercion above does.
+
+    A message left with NO content by that coercion (``None``, ``""``, ``[]``,
+    or the key missing outright — a corrupt stored entry) is dropped rather
+    than folded in as an empty block list, which Converse rejects just as
+    firmly as the raw string. Dropping one can never orphan a
+    ``toolUse``/``toolResult`` pairing, since an empty content carries
+    neither.
     """
-    bridged = list(messages)
+    bridged: list[dict[str, Any]] = []
+    dropped_non_dict = 0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            # RT-006 (debug round 6): DROP, never pass through. Every other
+            # helper in this module is guarded against a non-dict message
+            # (close_dangling_tool_use, is_user_turn_boundary,
+            # append_assistant_turn, bridge_trailing_user — all RT-B-008),
+            # and each of those guards makes the entry *fail its predicate*
+            # rather than making it safe. This function is the one place whose
+            # stated job is to make whatever a TaskStore override hands back
+            # safe to fold into a brand-new task, and it was the only one
+            # letting the shape through: a non-dict survived here, the head
+            # trim below only removes it while it is LEADING, and
+            # routes/a2a.py::_create_task_record folds the remainder straight
+            # into a fresh record.messages, which bedrock.py passes verbatim to
+            # Converse — which rejects a message that is not an object.
+            #
+            # Dropping is the same call the empty-content branch below already
+            # makes, on the same reasoning: a non-dict entry can carry neither
+            # a toolUse nor a toolResult, so removing one can never orphan a
+            # pairing.
+            dropped_non_dict += 1
+            continue
+        entry = copy.deepcopy(msg)
+        content = entry.get("content")
+        if not is_content_sequence(content):
+            if isinstance(content, bytes):
+                content = content.decode("utf-8", "replace")
+            if not content:
+                continue
+            entry["content"] = [{"text": content if isinstance(content, str) else str(content)}]
+        elif not content:
+            continue
+        else:
+            # RT-007 (debug round 6): normalise a tuple of content blocks to a
+            # list instead of stringifying it. Downstream mutates content in
+            # place (close_dangling_tool_use appends, append_assistant_turn
+            # extends), so the sequence must be a real list by the time it is
+            # folded into record.messages.
+            entry["content"] = list(content)
+        bridged.append(entry)
+    if dropped_non_dict:
+        logger.warning(
+            "context continuation: dropped %d non-dict message(s) from a "
+            "stored transcript — a Converse message must be an object, and a "
+            "non-dict entry can carry neither a toolUse nor a toolResult, so "
+            "dropping one cannot orphan a tool-call pairing.",
+            dropped_non_dict,
+        )
     dropped_from_head = 0
-    while bridged and not _is_user_turn_boundary(bridged[0]):
+    while bridged and not is_user_turn_boundary(bridged[0]):
         bridged.pop(0)
         dropped_from_head += 1
     if dropped_from_head and bridged:
@@ -556,22 +758,43 @@ def bridge_context_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str
             "instead of the transcript's original head.",
             dropped_from_head, len(messages),
         )
-    elif dropped_from_head and not bridged:
+    elif dropped_from_head:
         logger.warning(
-            "context continuation: dropping the entire prior transcript — "
-            "no turn boundary found anywhere in %d messages; contextId "
-            "continuation loses all prior context for this thread.",
+            "context continuation: dropping the entire prior transcript — no "
+            "message in %d can legally head a conversation (every leading "
+            "message is an assistant turn or a toolResult continuation), and "
+            "Bedrock's Converse API rejects both as a head; the new task "
+            "starts from its own user turn with no prior context.",
             len(messages),
         )
-    try:
-        close_dangling_tool_use(bridged, default_content=[{"text": _STALE_TOOL_RESULT_TEXT}])
-    except DanglingToolUseUnreadable:
-        logger.warning(
-            "bridge_context_messages: dropping an unreadable dangling toolUse "
-            "tail from a stored transcript — cannot correlate a toolResult "
-            "without a readable toolUseId"
-        )
-        bridged.pop()
+    # DBG-7: RETRY the close after each drop, don't drop once and move on.
+    # ``close_dangling_tool_use`` inspects the tail ONLY. Dropping an
+    # unreadable tail therefore does not resolve the transcript — it EXPOSES a
+    # new tail that the single pass already walked past and never examined. A
+    # stored transcript shaped ``[user(text), assistant(toolUse t1),
+    # assistant(malformed toolUse)]`` (two adjacent assistant turns, which
+    # nothing on this read path collapses) left t1 dangling and unclosed: the
+    # one pop removed the unreadable turn, ``bridge_trailing_user`` saw an
+    # assistant tail and did nothing, and ``routes/a2a.py::_create_task_record``
+    # folded a transcript still ending on an unmatched ``toolUse`` into the new
+    # task's ``record.messages``, which Bedrock's Converse API rejects — the
+    # exact outcome this whole function exists to prevent, reached through its
+    # own recovery branch.
+    #
+    # Bounded by the transcript length: every iteration pops exactly one
+    # message, so this terminates on an empty list at worst (a legitimate
+    # outcome here already — see the DBG-5 paragraph above).
+    while True:
+        try:
+            close_dangling_tool_use(bridged, default_content=[{"text": _STALE_TOOL_RESULT_TEXT}])
+            break
+        except DanglingToolUseUnreadable:
+            logger.warning(
+                "bridge_context_messages: dropping an unreadable dangling toolUse "
+                "tail from a stored transcript — cannot correlate a toolResult "
+                "without a readable toolUseId"
+            )
+            bridged.pop()
     bridge_trailing_user(bridged)
     return bridged
 
@@ -616,6 +839,14 @@ def append_assistant_turn(messages: list[dict[str, Any]], content: list[dict[str
         tail_content = messages[-1].get("content")
         if isinstance(tail_content, list):
             tail_content.extend(content)
+        elif is_content_sequence(tail_content):
+            # RT-007 (debug round 6): a TUPLE tail is a sequence of content
+            # blocks, so it is rebound as a list + the new blocks — not
+            # stringified into {"text": "({'text': 'prior'},)"} by the branch
+            # below, which contradicted this function's own promise to preserve
+            # "whatever real content that tail carried". Rebinding rather than
+            # extending in place because a tuple cannot be extended.
+            messages[-1]["content"] = [*tail_content, *content]
         elif tail_content:
             preserved = tail_content if isinstance(tail_content, str) else str(tail_content)
             messages[-1]["content"] = [{"text": preserved}, *content]
@@ -1184,7 +1415,7 @@ async def run_loop(
                     # IS actually an input-shape defect, unlike a bare
                     # ValidationError (falls to the generic branch below).
                     ok, error = False, safe_validation_message(
-                        exc.tool_name, exc.validation_error, exc.input_model
+                        exc.tool_name, exc.validation_error, entry.decl.input_model
                     )
                 except Exception as exc:
                     # RT-001 (amended LRN-044 Check): the class name is an
@@ -1195,9 +1426,9 @@ async def run_loop(
                     # continuation (matches bedrock.py's RT-006 / runner.py's
                     # RT-002 precedent). SI-2: never str(exc), which can carry
                     # credentials or user payloads.
-                    logger.warning(
-                        "tool call failed tool=%s error_type=%s",
-                        tc.name, type(exc).__name__,
+                    logger.error(
+                        "tool call failed tool=%s error_type=%s frames=%s",
+                        tc.name, type(exc).__name__, frame_locations(exc),
                     )
                     ok, error = False, f"tool '{tc.name}' failed"
             else:
@@ -1235,7 +1466,7 @@ async def run_loop(
                     # (SI-2). loc walked against input_model so user dict
                     # keys / extra field names are redacted, not echoed.
                     ok, error = False, safe_validation_message(
-                        exc.tool_name, exc.validation_error, exc.input_model
+                        exc.tool_name, exc.validation_error, entry.decl.input_model
                     )
                 except Exception as exc:
                     # RT-001 (amended LRN-044 Check): the class name is an
@@ -1246,9 +1477,9 @@ async def run_loop(
                     # continuation (matches bedrock.py's RT-006 / runner.py's
                     # RT-002 precedent). SI-2: never str(exc), which can carry
                     # credentials or user payloads.
-                    logger.warning(
-                        "tool call failed tool=%s error_type=%s",
-                        tc.name, type(exc).__name__,
+                    logger.error(
+                        "tool call failed tool=%s error_type=%s frames=%s",
+                        tc.name, type(exc).__name__, frame_locations(exc),
                     )
                     ok, error = False, f"tool '{tc.name}' failed"
 
@@ -1306,9 +1537,9 @@ async def run_loop(
                             # matches bedrock.py's RT-006 / runner.py's RT-002
                             # precedent). Never str(exc) either, which can
                             # carry credentials or user payloads.
-                            logger.warning(
-                                "tool call failed after resume tool=%s error_type=%s",
-                                tc.name, type(exc).__name__,
+                            logger.error(
+                                "tool call failed after resume tool=%s error_type=%s frames=%s",
+                                tc.name, type(exc).__name__, frame_locations(exc),
                             )
                             ok, error = False, f"tool '{tc.name}' failed after resume"
                     else:
