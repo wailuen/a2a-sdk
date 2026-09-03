@@ -190,6 +190,158 @@ def test_d1_standard_profile_type_wire_not_double_validated():
 
 
 # ---------------------------------------------------------------------------
+# RT-004: SI-2 — _validate_a2ui_wire must never interpolate exception text or
+# payload reprs into the ValueError it raises. On the A2A path that error is
+# swallowed into a fixed wire message, but AG-UI's stream handler logs the
+# full exception (routes/ag_ui.py logger.exception), so any payload content
+# embedded in the message text would reach the process log.
+#
+# The actual reachable call site for a wire()-raises domain card is
+# translator.py::translate()'s own (previously unguarded) payload.wire()
+# call, not _validate_a2ui_wire's redundant re-check: build_artifact() and
+# ag_ui.py's map() both call translate() BEFORE split_a2ui_delivery_validated
+# (which is what invokes _validate_a2ui_wire), so a raise from wire() was
+# already propagating — as the raw, unwrapped exception, str(exc) intact —
+# out of translate() before _validate_a2ui_wire's own try/except ever ran.
+# Fixed in both places; see agent_sdk/a2ui/translator.py::translate().
+# ---------------------------------------------------------------------------
+
+_SENSITIVE_SUBSTRING = "sk-live-secret-token-should-never-leak-4f9c2b"
+
+
+class _WireRaisesDomainCard(_DomainBase):
+    """Domain card whose wire() raises, with sensitive content in the
+    exception's own message (standing in for upstream/tool payload content
+    that ended up embedded in the exception by the domain card author)."""
+
+    data_type: ClassVar[str] = "_test_wire_raises_d1"
+    component: ClassVar[str] = "_TestWireRaisesD1"
+
+    def wire(self) -> dict[str, Any]:  # type: ignore[override]
+        raise RuntimeError(f"upstream payload dump: {_SENSITIVE_SUBSTRING}")
+
+
+class _WireNonDictDomainCard(_DomainBase):
+    """Domain card whose wire() returns a truthy non-dict value carrying
+    sensitive payload content — reaches the ``not isinstance(..., dict)``
+    branch rather than the ``not wire_val`` (falsy) branch."""
+
+    data_type: ClassVar[str] = "_test_wire_nondict_d1"
+    component: ClassVar[str] = "_TestWireNonDictD1"
+
+    def wire(self) -> dict[str, Any]:  # type: ignore[override]
+        return [_SENSITIVE_SUBSTRING]  # type: ignore[return-value]
+
+
+@pytest.fixture(autouse=False)
+def _register_rt004_si2_cards():
+    register_content_type(_WireRaisesDomainCard)
+    register_content_type(_WireNonDictDomainCard)
+    yield
+    _REGISTRY.pop("_test_wire_raises_d1", None)
+    _REGISTRY.pop("_test_wire_nondict_d1", None)
+
+
+def test_rt004_wire_exception_message_omits_exception_text():
+    """SI-2: a wire() raise must surface only the exception's type name, never
+    str(exc) — which may carry upstream/tool payload content."""
+    card = _WireRaisesDomainCard()
+
+    with pytest.raises(ValueError) as exc_info:
+        _validate_a2ui_wire(card, [{"version": "1.0"}])
+
+    msg = str(exc_info.value)
+    assert _SENSITIVE_SUBSTRING not in msg
+    assert "RuntimeError" in msg
+
+
+def test_rt004_wire_nondict_message_omits_payload_repr():
+    """SI-2: a wire() returning a non-dict must surface only the returned
+    value's type name, never its repr."""
+    card = _WireNonDictDomainCard()
+
+    with pytest.raises(ValueError) as exc_info:
+        _validate_a2ui_wire(card, [{"version": "1.0"}])
+
+    msg = str(exc_info.value)
+    assert _SENSITIVE_SUBSTRING not in msg
+    assert "list" in msg
+
+
+def test_rt004_build_artifact_wire_exception_omits_payload(_register_rt004_si2_cards):
+    """End-to-end via build_artifact: the raised ValueError must not leak the
+    domain card's wire() exception text into what a transport might log."""
+    card = _WireRaisesDomainCard()
+    event = _make_event(card)
+
+    with pytest.raises(ValueError) as exc_info:
+        build_artifact(event, _CAPS_DOMAIN_ON)
+
+    assert _SENSITIVE_SUBSTRING not in str(exc_info.value)
+
+
+def test_rt004_build_artifact_wire_nondict_omits_payload(_register_rt004_si2_cards):
+    """End-to-end via build_artifact: the raised ValueError must not leak the
+    domain card's non-dict wire() return value into what a transport might
+    log."""
+    card = _WireNonDictDomainCard()
+    event = _make_event(card)
+
+    with pytest.raises(ValueError) as exc_info:
+        build_artifact(event, _CAPS_DOMAIN_ON)
+
+    assert _SENSITIVE_SUBSTRING not in str(exc_info.value)
+
+
+def test_rt004_translate_wire_exception_omits_payload(_register_rt004_si2_cards):
+    """translate() itself (not just _validate_a2ui_wire) must guard the
+    wire()/to_markdown() call — this is the call site build_artifact and
+    ag_ui.py's map() actually reach first."""
+    from agent_sdk.a2ui.translator import translate
+
+    card = _WireRaisesDomainCard()
+
+    with pytest.raises(ValueError) as exc_info:
+        translate(card, capabilities=_CAPS_DOMAIN_ON)
+
+    msg = str(exc_info.value)
+    assert _SENSITIVE_SUBSTRING not in msg
+    assert "RuntimeError" in msg
+
+
+def test_rt004_wire_exception_does_not_leak_via_logger_exception(_register_rt004_si2_cards):
+    """SI-2, end to end: simulate exactly what AG-UI's stream handler does
+    (``logger.exception(...)`` on the caught exception) and assert the
+    sensitive substring is absent from the FULL formatted log record —
+    traceback included. A ``raise ValueError(...) from exc`` would pass the
+    narrower message-only assertions above yet still leak here, because
+    logger.exception() walks the chained __cause__ and reprints exc's own
+    message; only `from None` closes that."""
+    import io
+    import logging
+
+    card = _WireRaisesDomainCard()
+    event = _make_event(card)
+
+    logger = logging.getLogger("test_rt004_logger_leak")
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    logger.addHandler(handler)
+    logger.propagate = False
+    try:
+        try:
+            build_artifact(event, _CAPS_DOMAIN_ON)
+        except Exception:
+            logger.exception("ag-ui stream failed")
+    finally:
+        logger.removeHandler(handler)
+
+    logged = stream.getvalue()
+    assert logged, "build_artifact did not raise — assertion below would be vacuous"
+    assert _SENSITIVE_SUBSTRING not in logged
+
+
+# ---------------------------------------------------------------------------
 # SC-D2: allowed_components filtering
 # ---------------------------------------------------------------------------
 

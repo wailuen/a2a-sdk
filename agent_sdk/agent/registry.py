@@ -29,6 +29,15 @@ from pydantic import BaseModel, ValidationError
 from ..models.errors import AgentError, ErrorCategory
 from ..sources import SourceAdapter
 from .deferred import DeferredResult
+from .reuse import (
+    RAW_PREFIX,
+    REF_PREFIX,
+    Reusable,
+    reuse_field_types_for_model,
+    reuse_fields_for_model,
+    reuse_raw_override_for_model,
+    reuse_strict_for_model,
+)
 
 if TYPE_CHECKING:
     from .loop import LoopPolicies
@@ -73,6 +82,155 @@ class ToolInputValidationError(Exception):
 _MAX_DEFERRED_RESOLUTIONS = 2
 
 
+# ── GH-148 / RT-B-004: reuse-token schema widening ──
+
+# JSON Schema keywords that ANNOTATE a property rather than constrain its
+# value. When a non-string ReuseKind field's schema is widened below, these
+# stay at the top level of the rewritten property (so `title`/`description`
+# keep describing the field as a whole) while every constraining keyword
+# moves into the original branch of the `anyOf`.
+_SCHEMA_ANNOTATION_KEYS = frozenset(
+    {"title", "description", "default", "examples", "deprecated", "readOnly", "writeOnly", "$comment"}
+)
+
+# RT-004: JSON Schema keywords that narrow a STRING's value space rather than
+# merely annotate it. A `{"type": "string", ...}` (or bare `const`, which
+# needs no sibling `type`) schema carrying any of these must be treated the
+# same as `enum` below — excluding the reuse token — since the model cannot
+# emit `$ref:<kind>`/`$raw:<value>` on a field whose schema also demands it
+# match a `pattern`, an exact `format`, a fixed `const`, or a length bound
+# the token is not guaranteed to satisfy.
+_STRING_VALUE_CONSTRAINT_KEYS = frozenset(
+    {"pattern", "const", "format", "minLength", "maxLength"}
+)
+
+# The widened string branch. Deliberately the bare sentinel prefix rather
+# than `^\$ref:`: a field whose operator opted into `allow_raw_override`
+# must be able to carry the `$raw:<value>` token too, and RT-002 forbids
+# naming that token anywhere the model can read it — including in a schema
+# pattern. Any other `$`-prefixed string is treated as an ordinary raw value
+# by resolve_reuse_fields and runs through the normal mismatch check, exactly
+# as it would on a str-typed field (where every string is representable
+# already).
+_REUSE_TOKEN_PATTERN = r"^\$"
+
+
+def _resolve_schema_ref(ref: str, defs: dict[str, Any]) -> dict[str, Any] | None:
+    """Resolve a local ``#/$defs/<Name>`` ref against ``defs`` (RT-006).
+
+    Returns ``None`` for a ref shape pydantic's own ``model_json_schema()``
+    never produces (so it cannot be misresolved into the wrong entry) or a
+    name absent from ``defs``, so the caller can fall back to "unprovable"
+    rather than guess.
+    """
+    prefix = "#/$defs/"
+    if not ref.startswith(prefix):
+        return None
+    resolved = defs.get(ref[len(prefix) :])
+    return resolved if isinstance(resolved, dict) else None
+
+
+def _schema_permits_string(schema: dict[str, Any], defs: dict[str, Any] | None = None) -> bool:
+    """True when ``schema`` already allows the literal ``$ref:<kind>``/
+    ``$raw:<value>`` reuse token — an arbitrary JSON string.
+
+    RT-B-004: the reuse token is a STRING sentinel, so on a field whose
+    advertised schema excludes strings (``Annotated[int, ReuseKind(...)]``
+    renders as ``{"type": "integer"}``) a provider that constrains tool
+    arguments to the declared schema — Bedrock Converse and every other
+    schema-enforcing provider — will not let the model emit the token at
+    all, making the whole mechanism unreachable there.
+
+    RT-006: a ``$ref`` into the schema's own ``$defs`` — an Enum-typed
+    ``ReuseKind`` field renders as ``{"$ref": "#/$defs/MyEnum"}`` — and an
+    ``allOf`` composition are now RESOLVED (against ``defs``, the caller's
+    top-level ``schema.get("$defs")``) before deciding, rather than assumed
+    to permit a string. An earlier revision returned ``True`` ("no widening
+    needed") for both shapes unconditionally, which silently no-opped the
+    widening on exactly the ReuseKind field shape most likely to need it: a
+    ``ReuseKind`` field typed as an ``Enum`` (accepted by
+    ``reuse_fields_for_model`` — it is neither a container nor a
+    ``BaseModel``) would advertise only its enum members, with no way for a
+    schema-enforcing provider to emit the token, and the annotation shipped
+    as a silent no-op.
+
+    Also treats ANY schema carrying an ``enum`` key — resolved or inline
+    (``Literal[...]`` renders inline as ``{"enum": [...], "type": "string"}``
+    with no ``$ref``) — as excluding the token, even when every member is
+    itself a string: an enum restricts values to its fixed member list, and
+    the reuse token is never one of them, so the naive ``type == "string"``
+    check alone is not enough to prove the token is representable.
+
+    RT-004: the same reasoning extends to any of ``_STRING_VALUE_CONSTRAINT_
+    KEYS`` (``pattern``, ``const``, ``format``, ``minLength``, ``maxLength``)
+    on an otherwise ``type: "string"`` schema — a single-value ``Literal``
+    (``const``, no ``type`` key required), a regex-validated id
+    (``pattern``), a UUID field (``format``), or a length-bounded field
+    (``minLength``/``maxLength``) all narrow the value space in a way that
+    does not provably admit the sentinel. An earlier revision returned
+    ``True`` for all of these — the exact shapes a canonical ``entity_id``
+    field is likely to take — leaving the hint a silent no-op on a
+    schema-enforcing provider exactly like the unresolved-``enum``/``$ref``
+    gap RT-006 closed for non-string scalars.
+
+    Returns ``True`` (i.e. "no widening needed") only for what this function
+    can positively resolve to a plain, unconstrained string-permitting
+    shape; an unresolvable ``$ref`` (a name absent from ``defs``, or
+    ``defs`` itself not supplied) is left as "unprovable" — ``True`` — since
+    this function cannot tell excludes-string from could-not-check, and
+    widening based on a guess risks corrupting a schema shape it doesn't
+    understand.
+    """
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        resolved = _resolve_schema_ref(ref, defs) if defs else None
+        if resolved is not None:
+            return _schema_permits_string(resolved, defs)
+        return True
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list) and all_of:
+        # A value must satisfy every branch of an allOf simultaneously, so
+        # the composition permits the token only when every branch does.
+        return all(isinstance(b, dict) and _schema_permits_string(b, defs) for b in all_of)
+    if "enum" in schema:
+        return False
+    if _STRING_VALUE_CONSTRAINT_KEYS.intersection(schema):
+        return False
+    declared = schema.get("type")
+    if declared == "string":
+        return True
+    if isinstance(declared, list):
+        return "string" in declared
+    branches = schema.get("anyOf") or schema.get("oneOf")
+    if isinstance(branches, list) and branches:
+        return any(isinstance(b, dict) and _schema_permits_string(b, defs) for b in branches)
+    # A concrete non-string `type` with no union branch is the one shape that
+    # provably excludes a string; everything else stays untouched.
+    return not isinstance(declared, str)
+
+
+def _widen_for_reuse_token(prop: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite a non-string property so the ``$ref:<kind>`` token is
+    representable: ``{"anyOf": [<original constraints>, {"type": "string",
+    ...}]}``, with annotation keywords kept at the top level (RT-B-004).
+
+    Returns a new dict — the caller replaces the entry in ``properties``
+    rather than mutating the schema pydantic handed back.
+    """
+    constraints = {k: v for k, v in prop.items() if k not in _SCHEMA_ANNOTATION_KEYS}
+    widened = {k: v for k, v in prop.items() if k in _SCHEMA_ANNOTATION_KEYS}
+    token_branch = {"type": "string", "pattern": _REUSE_TOKEN_PATTERN}
+    existing = constraints.get("anyOf")
+    if list(constraints) == ["anyOf"] and isinstance(existing, list):
+        # Already a union (``int | None`` renders as an ``anyOf`` pair) —
+        # append rather than nest, so the emitted schema stays a single flat
+        # union a strict provider will accept.
+        widened["anyOf"] = [*existing, token_branch]
+    else:
+        widened["anyOf"] = [constraints, token_branch]
+    return widened
+
+
 async def resolve_deferred_result(
     result: Any,
     *,
@@ -115,9 +273,29 @@ async def resolve_deferred_result(
     ``runner._run_deferred_background``. Any future tool-dispatch surface
     that awaits a ``DeferredResult`` must call this rather than
     re-deriving ``_MAX_DEFERRED_RESOLUTIONS`` (RT-001).
+
+    RT-010: a ``Reusable`` wrapping a still-pending ``DeferredResult`` — the
+    nesting ORDER left unhandled by GH-148's original support for the
+    opposite order (a ``DeferredResult`` resolving TO a ``Reusable``, which
+    each caller unwraps itself, below, so its ``__resolved__`` marker can be
+    folded where a transcript exists) — is peeled here too, at every depth
+    of the chain, not just the outermost ``result``. Without this, the
+    ``while`` condition below never observes the nested ``DeferredResult``
+    and the chain returns a raw, unawaited handle wrapped in ``Reusable``,
+    which both callers' post-loop ``isinstance(result, Reusable)`` unwrap
+    then hands back verbatim under a false success. The peeled wrapper's
+    ``kind``/``label`` describe a value that does not exist yet, so they are
+    discarded — unlike a ``Reusable`` wrapping an already-resolved terminal
+    value, which is deliberately left untouched here for the caller to
+    unwrap (and, on the runner surface, fold a marker for).
     """
     resolutions = 0
-    while isinstance(result, DeferredResult):
+    while True:
+        if isinstance(result, Reusable) and isinstance(result.value, DeferredResult):
+            result = result.value
+            continue
+        if not isinstance(result, DeferredResult):
+            return result
         if resolutions >= _MAX_DEFERRED_RESOLUTIONS:
             close = getattr(result.handle, "close", None)
             if callable(close):
@@ -132,7 +310,6 @@ async def resolve_deferred_result(
             )
         resolutions += 1
         result = await asyncio.wait_for(result.handle, timeout=handle_timeout())
-    return result
 
 
 @dataclass(slots=True)
@@ -176,6 +353,29 @@ class ToolDecl:
     # invocation path and the background deferred-job awaiter in the runner.
     # None → use the tier default from LoopPolicies.tool_timeouts.
     tool_timeout_override: float | None = None
+    # GH-148: wire field name (RT-019: the field's alias when one is
+    # declared, else the python attribute name — see reuse.py's
+    # _wire_field_name) -> ReuseKind kind for every input_model field
+    # annotated Annotated[<type>, ReuseKind("<kind>")]. Empty for a tool
+    # with no such fields — the loop's fast path for an unaffected tool.
+    reuse_fields: dict[str, str] = field(default_factory=dict)
+    # RT-008: wire field name -> ReuseKind.strict for the same fields. Absent
+    # entries (and an empty dict for a tool with no reuse fields) mean
+    # strict=True — resolve_reuse_fields' default when a field isn't in the
+    # map at all.
+    reuse_strict: dict[str, bool] = field(default_factory=dict)
+    # RT-002: wire field name -> ReuseKind.allow_raw_override for the same
+    # fields. Absent entries (and an empty dict) mean False — the opposite
+    # default from reuse_strict, since $raw: bypassing the mismatch check is
+    # an operator opt-in per field, never a caller-discoverable default.
+    reuse_raw_override: dict[str, bool] = field(default_factory=dict)
+    # RT-020: wire field name -> declared (Optional-stripped) scalar type for
+    # the same fields. resolve_reuse_fields coerces a raw argument through
+    # this type before the match check, so a value pydantic's own later
+    # model_validate would accept as identical (e.g. the string "5831"
+    # against an int field already resolved to 5831) is not rejected here as
+    # a type mismatch before the tool is ever reached.
+    reuse_field_types: dict[str, type] = field(default_factory=dict)
 
 
 class ToolSet:
@@ -312,6 +512,10 @@ class ToolSet:
                     is_generator=_is_generator,
                     long_running=long_running,
                     tool_timeout_override=tool_timeout_override,
+                    reuse_fields=reuse_fields_for_model(input_model),
+                    reuse_strict=reuse_strict_for_model(input_model),
+                    reuse_raw_override=reuse_raw_override_for_model(input_model),
+                    reuse_field_types=reuse_field_types_for_model(input_model),
                 )
             )
             return fn
@@ -343,12 +547,77 @@ class ToolEntry:
     def annotations(self) -> dict[str, Any] | None:
         return self.decl.annotations
 
-    def input_schema(self) -> dict[str, Any]:
+    def input_schema(self, *, include_reuse_hint: bool = False) -> dict[str, Any]:
+        """JSON Schema for this tool's input.
+
+        RT-005: ``include_reuse_hint`` must stay ``False`` on every surface
+        except ``loop.py`` — the ``$ref:<kind>`` substitution/validation gate
+        (agent/reuse.py) is loop-only (GH-148). MCP ``tools/call``
+        (routes/mcp.py) — and the admin try-tool endpoint and the
+        commitments executor, the other two ``ToolEntry.invoke_any`` callers
+        — REJECT a ``$ref:``/``$raw:`` token on a ``ReuseKind`` field outright
+        rather than resolving it (RT-A-009; see ``invoke_any``'s GH-148
+        docstring paragraph and test_gh148_reuse_kind_substitution.py's
+        ``test_mcp_tools_call_ref_token_rejected_no_conversation_transcript``);
+        the agent card's ``x-sdk.inputSchema`` (routes/agent_card.py) is
+        advisory metadata only — no dispatch path reads it. Advertising the
+        hint on either surface would promise an affordance neither honours.
+
+        RT-B-004: when the hint IS included, a ``ReuseKind`` field whose
+        advertised type excludes strings (``Annotated[int, ReuseKind(...)]``
+        renders as ``{"type": "integer"}``) is widened to ``{"anyOf":
+        [<original>, {"type": "string", ...}]}`` so the ``$ref:<kind>``
+        token — itself a string sentinel — is actually representable. Without
+        that, Bedrock Converse and every other provider that constrains tool
+        arguments to the declared schema silently make the mechanism
+        unusable on any non-string field while ``reuse_fields_for_model``
+        accepts the annotation without complaint. A plain string-typed field
+        is untouched: the token is already representable and the schema is
+        byte-identical to before. RT-004: a string-typed field whose own
+        value space is narrowed by ``pattern``/``const``/``format``/
+        ``minLength``/``maxLength`` (a regex-validated or UUID-formatted id,
+        for instance) is widened the same way — its own constraint does not
+        provably admit the sentinel either. Only the ``include_reuse_hint
+        =True`` rendering is widened — the tool's own ``input_model``
+        validation is unchanged, and by the time ``ToolEntry.invoke`` runs
+        ``model_validate``, ``resolve_reuse_fields`` has already replaced the
+        token with the resolved value of the field's real type.
+        """
         if self.decl.input_model is None:
             return {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
         schema = self.decl.input_model.model_json_schema()
         schema.setdefault("additionalProperties", False)
         schema.setdefault("required", [])
+        if include_reuse_hint and self.decl.reuse_fields:
+            properties = schema.get("properties")
+            if isinstance(properties, dict):
+                # RT-019: reuse_fields is keyed by wire name (the field's
+                # alias when declared), the same key model_json_schema()
+                # uses for `properties` — so this lookup matches an aliased
+                # field too, not just an unaliased one.
+                for wire_name, kind in self.decl.reuse_fields.items():
+                    prop = properties.get(wire_name)
+                    if not isinstance(prop, dict):
+                        continue
+                    # RT-B-004: the hint below is a model-facing affordance
+                    # whose token is a STRING. On a field whose advertised
+                    # type excludes strings (Annotated[int, ReuseKind(...)]),
+                    # a schema-enforcing provider cannot emit that token, so
+                    # a description-only hint promises an affordance the
+                    # model has no way to use. Widen the advertised type to
+                    # accept the token before describing it — never advertise
+                    # in prose what the schema forbids.
+                    if not _schema_permits_string(prop, schema.get("$defs")):
+                        prop = _widen_for_reuse_token(prop)
+                        properties[wire_name] = prop
+                    hint = (
+                        f"Accepts a raw value, or the token $ref:{kind} "
+                        f"(or $ref:{kind}:<label> to disambiguate multiple "
+                        "resolutions) referencing a value a previous tool "
+                        "call in this conversation resolved."
+                    )
+                    existing = prop.get("description")
+                    prop["description"] = f"{existing} {hint}" if existing else hint
         return schema
 
     def output_schema(self) -> dict[str, Any] | None:
@@ -549,7 +818,78 @@ class ToolEntry:
         surface while timing out identically on MCP/A2A for the same tool
         contract — intentional, since the commitments path has no per-call
         deadline to shrink in the first place, not a parity regression.
+
+        RT-002 (follow-up, GH-148 cross-surface parity): a tool may return
+        ``Reusable`` (GH-148 — a cross-turn-citable result) instead of, or
+        nested inside, a resolved ``DeferredResult``. Two OTHER call sites —
+        not this method — also unwrap ``Reusable`` and fold its
+        ``__resolved__`` marker into a ``messages`` transcript, because both
+        have one to fold into: ``agent/loop.py``'s synchronous ``run_loop``
+        branch (which additionally grows ``resolved_index`` in place, so a
+        LATER tool call in that SAME ``run_loop`` invocation can already
+        reference the value via ``$ref:<kind>``) and ``agent/runner.py``'s
+        ``_run_deferred_background`` (RT-001: the background awaiter for a
+        ``long_running`` tool's ``DeferredEvent`` — it folds the identical
+        marker into ``record.messages``, but has no live ``resolved_index``
+        to grow since ``run_loop`` already exited at the handoff; a LATER
+        contextId continuation's fresh ``run_loop`` call rebuilds the index
+        from that folded marker via ``scan_resolved`` instead). The three
+        callers of THIS method (MCP ``tools/call``, the admin try-tool
+        endpoint, the commitments executor) have no such transcript, so they
+        cannot participate in the ``$ref:<kind>`` substitution/validation
+        gate — a ``Reusable``-returning tool called from one of them
+        therefore never grows the resolved index and never accepts a
+        ``$ref:<kind>`` token on that same call, by design (the gate is
+        conversation-scoped, i.e. loop.py/runner.py only). What they MUST NOT
+        do is leak the wrapper itself: without unwrapping here,
+        ``artifact.wire()``/``_tool_text``/``_safe_result`` would each
+        serialize the raw ``Reusable`` dataclass (or fail an ``emits``
+        coercion against it) instead of its ``.value``, diverging from the
+        identical call over A2A/AG-UI in violation of §5.6. So this unwraps
+        ``Reusable`` to ``.value`` — same semantics as a plain ``return`` —
+        after any ``DeferredResult`` chain is resolved, since a deferred
+        handle may itself resolve to a ``Reusable``.
+
+        RT-A-009: "never accepts a ``$ref:<kind>`` token" above is enforced
+        as an outright REJECTION, not silent passthrough. Before invoking the
+        tool body, every ``decl.reuse_fields`` field (i.e. every
+        ``ReuseKind``-annotated field, regardless of its own ``strict``/
+        ``allow_raw_override`` flags — those only govern the loop.py path)
+        whose supplied argument is a string starting with ``REF_PREFIX``
+        (``$ref:``) or ``RAW_PREFIX`` (``$raw:``) raises
+        ``AgentError(ErrorCategory.VALIDATION, ...)``, which every caller of
+        this method already maps to its existing failure shape — ``isError:
+        true`` (mcp.py), ``ok: false`` (admin.py), or ``mark_failed``
+        (the commitments executor) — rather than a JSON-RPC/HTTP-level
+        error. Landed after GH-148 shipped: neither token means anything
+        without a ``messages`` transcript to resolve it against, so handing
+        it to the tool body as an ordinary string — e.g. a lookup for an
+        entity literally named ``"$ref:entity_id"`` — is a silent,
+        wrong-but-successful result, strictly worse than failing outright.
+        Previously this method let it through unchanged (pinned, before this
+        fix, by test_gh148_reuse_kind_substitution.py's
+        ``test_mcp_tools_call_ref_token_passes_through_no_conversation_transcript``,
+        since renamed to
+        ``test_mcp_tools_call_ref_token_rejected_no_conversation_transcript``
+        to match) — an MCP client (or any caller of these three surfaces)
+        that read the token syntax off the CHANGELOG or the loop-side
+        ``input_schema(include_reuse_hint=True)`` description got a
+        wrong-but-successful result instead of a diagnosable error.
         """
+        if self.decl.reuse_fields:
+            for field_name in self.decl.reuse_fields:
+                raw = arguments.get(field_name)
+                if isinstance(raw, str) and (
+                    raw.startswith(REF_PREFIX) or raw.startswith(RAW_PREFIX)
+                ):
+                    raise AgentError(
+                        ErrorCategory.VALIDATION,
+                        f"tool {self.decl.name!r} field {field_name!r} does "
+                        "not support $ref:/$raw: reuse tokens on this call "
+                        "surface — supply the raw value directly",
+                        source=self.decl.name,
+                    )
+
         deadline = time.monotonic() + timeout if timeout is not None else None
 
         if not self.decl.is_generator:
@@ -579,9 +919,12 @@ class ToolEntry:
 
             return resolve_tool_timeout(self.decl.name, self, policies or LoopPolicies())
 
-        return await resolve_deferred_result(
+        result = await resolve_deferred_result(
             result, tool_name=self.decl.name, handle_timeout=_handle_timeout
         )
+        if isinstance(result, Reusable):
+            result = result.value
+        return result
 
 
 class ToolRegistry:

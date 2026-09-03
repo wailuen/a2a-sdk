@@ -3,7 +3,7 @@ must not let a post-publish failure trigger a SECOND terminal frame.
 
 Before the fix, the try around the deferred SUCCESS path wrapped not only
 build_artifact()/.wire()/the artifacts append, but also the terminal
-_set_status(COMPLETED), the final DoneEvent(ok=True) publish, AND
+set_task_status(COMPLETED), the final DoneEvent(ok=True) publish, AND
 store.close_streams(). If close_streams() raised AFTER the artifact, the
 ok=True ToolResultEvent, and the ok=True DoneEvent were already published
 (e.g. a persistent TaskStore doing a durable write in close_streams that
@@ -14,7 +14,7 @@ That is a double-terminal-frame protocol violation and a FAILED task
 retaining an artifact that was, in fact, delivered.
 
 Fix: the success-path try now covers only build_artifact()/.wire()/the
-artifacts append. _set_status(COMPLETED) and the terminal publishes/
+artifacts append. set_task_status(COMPLETED) and the terminal publishes/
 close_streams run afterward, unguarded — a failure there propagates as an
 ordinary background-task exception instead of re-entering the FAILED path.
 

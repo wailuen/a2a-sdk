@@ -22,7 +22,7 @@ import logging
 import re
 import time
 import uuid
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Sequence
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response, StreamingResponse
@@ -393,7 +393,10 @@ class _RunMapper:
                 str(event.error) if event.error is not None else "run failed"
             )
 
-        return []  # UsageEvent and anything future: no AG-UI frame
+        # UsageEvent, AuditEvent (RT-009: internal audit records must never
+        # reach the console as a chat/CUSTOM frame) and anything future: no
+        # AG-UI frame.
+        return []
 
 
 # ── route ──
@@ -408,7 +411,13 @@ def _capabilities(body: dict[str, Any]) -> A2uiCapabilities:
     return A2uiCapabilities.gated(True, forwarded["a2uiClientCapabilities"])
 
 
-def _start_worker(request: Request, record: TaskRecord, capabilities: A2uiCapabilities) -> None:
+def _start_worker(
+    request: Request,
+    record: TaskRecord,
+    capabilities: A2uiCapabilities,
+    *,
+    extra_resolved_messages: Sequence[dict[str, Any]] | None = None,
+) -> None:
     state = request.app.state
     # Bind per-call forwarded credentials BEFORE create_task so the worker
     # snapshots them via contextvars (mirrors the A2A route pattern).
@@ -424,6 +433,7 @@ def _start_worker(request: Request, record: TaskRecord, capabilities: A2uiCapabi
             system=state.system_prompt,
             capabilities=capabilities,
             policies=state.loop_policies,
+            extra_resolved_messages=extra_resolved_messages,
         )
     )
 
@@ -505,7 +515,27 @@ async def ag_ui_run(
                 record = store.create(task, identity)
                 record.messages.extend(folded)
                 sub = store.subscribe(task.id)
-                _start_worker(request, record, mapper.capabilities)
+                # RT-001: context_reusable_messages() scans EVERY terminal
+                # task in this thread, not only the most recent one —
+                # AG-UI's TaskRecord.messages never inherits a prior run's
+                # messages the way A2A's does (record.messages stays scoped
+                # to this run's own folded text, §5.3 design), so a
+                # __resolved__ marker folded in run N would otherwise stop
+                # being visible the moment any later, unrelated run N+1
+                # becomes the newest terminal task — decaying after exactly
+                # one intervening run instead of surviving for the
+                # conversation's life. RT-009: never honours an admin
+                # api_key's cross-identity override, same as
+                # context_messages() (RT-004) — this side channel produces
+                # no frame and no user-visible history, so admin
+                # task-inspection privilege must not leak another identity's
+                # resolved values in. Only used to seed run_loop's
+                # resolved_index (GH-148); never appended to record.messages
+                # or shown to the model.
+                prior = store.context_reusable_messages(thread_id, identity)
+                _start_worker(
+                    request, record, mapper.capabilities, extra_resolved_messages=prior
+                )
 
             while not mapper.terminal_sent:
                 try:

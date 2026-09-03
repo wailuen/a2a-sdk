@@ -153,9 +153,27 @@ def translate(
         return None
 
     sid = surface_id or f"surface-{uuid.uuid4().hex}"
-    value: Any = (
-        payload.to_markdown() if isinstance(payload, MarketBriefing) else payload.wire()
-    )
+    try:
+        # isinstance() kept as the ternary's own condition (not hoisted to a
+        # bool) so mypy narrows payload to MarketBriefing for to_markdown().
+        value: Any = (
+            payload.to_markdown() if isinstance(payload, MarketBriefing) else payload.wire()
+        )
+    except Exception as exc:
+        # SI-2 (RT-004): this is the actual reachable call site for a
+        # domain card's wire()/to_markdown() exception — it runs BEFORE
+        # runner.py's split_a2ui_delivery_validated ever gets a chance to
+        # re-check wire(), so an unguarded raise here previously escaped
+        # both transports unwrapped, with str(exc) intact. Report only the
+        # exception's type, never str(exc), and suppress chaining
+        # (`from None`, not `from exc`) — a transport that logs this via
+        # logger.exception() (AG-UI's stream handler) walks the full
+        # __cause__ chain and would reprint exc's own message otherwise.
+        method = "to_markdown" if isinstance(payload, MarketBriefing) else "wire"
+        raise ValueError(
+            f"{cls.__name__!r} ({payload.data_type!r}): {method}() raised "
+            f"{type(exc).__name__}"
+        ) from None
     create_surface_params: dict[str, Any] = {
         "surfaceId": sid,
         "catalogId": cls.catalog_id,

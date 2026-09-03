@@ -20,7 +20,7 @@ schema; tool failures are ``isError: true`` results, NEVER JSON-RPC errors).
 A Tier-1 tool that returns/yields no terminal value (``None``) is NOT a
 failure — regardless of whether it declares ``emits``, it folds to
 ``isError: false`` with an empty text block and no ``structuredContent``,
-matching agent/loop.py's ``_fold_result_content(None)`` fold on the A2A/AG-UI
+matching agent/loop.py's ``fold_result_content(None)`` fold on the A2A/AG-UI
 surfaces exactly (§5.6 parity rule extends to result verdicts, not just tool
 visibility) (RT-001/RT-002).
 ``notifications/*`` → 202 empty, never answered. Per spec §10 the client
@@ -353,7 +353,7 @@ def _tool_text(artifact: Any) -> str:
     """Serialized text block — ALWAYS present in a tools/call result.
 
     RT-001: ``None`` folds to the empty string, mirroring agent/loop.py's
-    ``_fold_result_content(None) -> {"text": ""}`` — a void Tier-1 tool must
+    ``fold_result_content(None) -> {"text": ""}`` — a void Tier-1 tool must
     report the same success/failure verdict on every surface (§5.6 parity
     rule), never the literal string ``"None"``.
     """
@@ -463,7 +463,7 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
     # coroutine tool may simply `return None` — symmetric cases, and this holds
     # REGARDLESS of whether the tool declares `emits`. loop.py's run_loop folds
     # this identical None result into a SUCCESS toolResult
-    # (_fold_result_content(None) -> {"text": ""}, status "success") on the
+    # (fold_result_content(None) -> {"text": ""}, status "success") on the
     # A2A/AG-UI surfaces. §5.6 requires Tier-1 tools to behave identically
     # across surfaces, so MCP must not diverge into isError: true here — that
     # would make the same void tool call succeed over A2A/AG-UI yet fail over

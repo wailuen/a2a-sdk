@@ -495,7 +495,8 @@ def test_ns_bedrock_imported_in_app():
     import ast
     from pathlib import Path
 
-    src = Path("/Users/wailuen/Development/a2a-sdk/agent_sdk/app.py").read_text()
+    app_path = Path(__file__).resolve().parents[1] / "agent_sdk" / "app.py"
+    src = app_path.read_text()
     tree = ast.parse(src)
     imports = []
     for node in ast.walk(tree):
@@ -543,6 +544,120 @@ def test_boto_client_bearer_raises_clear_error_on_old_botocore(monkeypatch):
 
     with pytest.raises(RuntimeError, match="botocore>=1.39"):
         client._boto_client()
+
+
+# ── GH-145: signature_version must be pinned in code, not env-var-sniffed ────
+#
+# botocore's choose-signer handler chain (_set_auth_scheme_preference_signer /
+# _should_prefer_bearer_auth in botocore.handlers) decides bearer-vs-sigv4 by
+# calling get_token_from_environment(signing_name), which reads the REAL
+# process os.environ directly — it never consults the registered
+# token_provider component. _boto_client() deliberately never writes the
+# bearer token to the real env (SI-6), so that check always sees no token and
+# falls back to sigv4, which then fails with NoCredentialsError in a
+# bearer-only deployment. These tests exercise the REAL boto3/botocore stack
+# (not the fake_boto3 MagicMock used elsewhere in this file) because the bug
+# lives in botocore's own signer-selection logic, not in anything this SDK's
+# mocks would catch.
+
+
+def _isolate_aws_config_files(monkeypatch, tmp_path):
+    """Prevent the real boto3/botocore stack from reading this machine's own
+    ~/.aws/config (e.g. a profile using `aws login` / login_session, which
+    requires the optional `botocore[crt]` extra and would otherwise blow up
+    client construction with an unrelated MissingDependencyException)."""
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-such-config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-such-credentials"))
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+
+
+def test_boto_client_bearer_pins_signature_version_to_bearer(monkeypatch, tmp_path):
+    """AC1 (GH-145): _boto_client()'s bearer branch must pin
+    config=Config(signature_version="bearer") on the boto3 client, so signer
+    selection no longer depends on botocore reading the real env var.
+
+    RT-009: pinning the config field alone is not sufficient proof — a client
+    built with signature_version="bearer" but no token_provider registered on
+    the session also reports this config value, yet its request signer holds
+    no auth token and every real converse() call raises NoAuthTokenError. The
+    assertion below reaches past meta.config into the request signer's
+    resolved token to prove the isolated provider (bedrock.py's
+    register_component("token_provider", ...) call) actually wired up.
+
+    SI-6: this asserts identity against ``client._bearer_token`` (the same
+    object the isolated env dict was seeded with — see bedrock.py's
+    ``isolated_env = {"AWS_BEARER_TOKEN_BEDROCK": self._bearer_token}``),
+    never the literal token value, so the credential text itself is never
+    printed or compared in the test.
+    """
+    _isolate_aws_config_files(monkeypatch, tmp_path)
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+
+    client = BedrockModelClient(
+        region="us-east-1",
+        model_arn="arn:aws:bedrock:us-east-1::foundation-model/test",
+        bearer_token="tok-from-store",
+    )
+
+    boto_client = client._boto_client()
+
+    assert boto_client.meta.config.signature_version == "bearer"
+    resolved_token = boto_client._request_signer._auth_token
+    assert resolved_token is not None, (
+        "request signer resolved no auth token — token_provider was not "
+        "registered on the botocore session"
+    )
+    assert resolved_token.token is client._bearer_token, (
+        "resolved token is not the same object the credential store handed "
+        "to the client — token_provider is not reading the isolated env dict"
+    )
+
+
+def test_boto_client_bearer_resolves_without_real_env_var(monkeypatch, tmp_path):
+    """AC2 (GH-145): simulates the Linux case — the real process env has no
+    AWS_BEARER_TOKEN_BEDROCK at all (unlike a macOS box where it might be
+    ambiently present, itself a quiet SI-6 leak). _boto_client() must still
+    resolve to bearer auth rather than silently falling through to sigv4
+    (which would then fail with NoCredentialsError since no real IAM
+    credentials exist in a bearer-only deployment).
+
+    RT-009: signature_version == "bearer" alone only proves the Config kwarg
+    was echoed back — a session with no token_provider registered reports the
+    same config value while resolving no token at all. Building the real
+    botocore.auth.BearerAuth instance for this signer proves auth would
+    actually work on the wire, using the isolated per-client token (never the
+    real env var, which this test has confirmed is absent).
+
+    SI-6: this asserts identity against ``client._bearer_token``, never the
+    literal token value — see the sibling test above for why identity (not
+    equality against a hardcoded string) is the correct proof here.
+    """
+    import botocore.auth
+
+    _isolate_aws_config_files(monkeypatch, tmp_path)
+    monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+    assert "AWS_BEARER_TOKEN_BEDROCK" not in os.environ
+
+    client = BedrockModelClient(
+        region="us-east-1",
+        model_arn="arn:aws:bedrock:us-east-1::foundation-model/test",
+        bearer_token="tok-from-store",
+    )
+
+    boto_client = client._boto_client()
+
+    assert boto_client.meta.config.signature_version == "bearer"
+    assert boto_client.meta.config.signature_version != "v4"
+
+    auth_instance = boto_client._request_signer.get_auth_instance(
+        signing_name="bedrock", region_name="us-east-1", signature_version="bearer"
+    )
+    assert isinstance(auth_instance, botocore.auth.BearerAuth)
+    assert auth_instance.auth_token is not None
+    assert auth_instance.auth_token.token is client._bearer_token, (
+        "resolved auth token is not the same object the credential store "
+        "handed to the client — bearer auth is not using the isolated token"
+    )
 
 
 def test_boto_client_bearer_raises_clear_error_when_token_provider_chain_absent(monkeypatch):

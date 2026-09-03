@@ -17,11 +17,21 @@ try/except and re-raise ``ToolInputValidationError`` (registry.py) — the loop
 labels ONLY that as "input invalid"; a bare ``ValidationError`` (raised by
 tool body code, or by a ``resume_handler``) now falls through to the generic
 "tool '<name>' failed" branch, same as any other unclaimed exception.
+
+RT-001 (amended LRN-044 Check, this wave): the generic branch's exception
+class name is an operator-facing diagnostic — logged, never interpolated into
+the WIRE-facing error (SI-2: ``str(exc)`` could also leak input, but the class
+name alone is withheld too, since it can distinguish upstream failure modes
+to an untrusted caller). See test_rt003_exception_class_enrichment.py for the
+dedicated coverage of that log-vs-wire split; this module only needs to
+confirm the wire text carries neither the "input invalid" mislabel NOR the raw
+class name.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, AsyncGenerator
 
 import httpx
@@ -126,44 +136,58 @@ def _first_result(events: list[Any]) -> ToolResultEvent:
 # ── coroutine tool: body-level ValidationError ──────────────────────────────
 
 
-async def test_coroutine_body_validation_error_is_not_labeled_input_invalid():
+async def test_coroutine_body_validation_error_is_not_labeled_input_invalid(caplog):
     model = FakeModelClient([tool_call("body_validation_tool", {"x": 1})])
-    result = _first_result(await _collect(model, "body_validation_tool", {"x": 1}))
+    with caplog.at_level(logging.WARNING, logger="agent_sdk.agent.loop"):
+        result = _first_result(await _collect(model, "body_validation_tool", {"x": 1}))
     assert not result.ok
     assert "input invalid" not in result.error, (
         f"body-level ValidationError mislabeled as input error: {result.error!r}"
     )
+    # RT-001: the wire message is the fixed literal — never the exception's
+    # class name (matches bedrock.py's RT-006 / runner.py's RT-002 precedent).
     assert result.error == "tool 'body_validation_tool' failed", result.error
+    assert any(
+        "ValidationError" in r.message for r in caplog.records
+    ), f"expected the exception class name in the log — got {[r.message for r in caplog.records]!r}"
 
 
 # ── async-generator tool: body-level ValidationError ────────────────────────
 
 
-async def test_generator_body_validation_error_is_not_labeled_input_invalid():
+async def test_generator_body_validation_error_is_not_labeled_input_invalid(caplog):
     model = FakeModelClient([tool_call("body_validation_gen_tool", {"x": 1})])
-    result = _first_result(await _collect(model, "body_validation_gen_tool", {"x": 1}))
+    with caplog.at_level(logging.WARNING, logger="agent_sdk.agent.loop"):
+        result = _first_result(await _collect(model, "body_validation_gen_tool", {"x": 1}))
     assert not result.ok
     assert "input invalid" not in result.error, (
         f"body-level ValidationError mislabeled as input error: {result.error!r}"
     )
     assert result.error == "tool 'body_validation_gen_tool' failed", result.error
+    assert any(
+        "ValidationError" in r.message for r in caplog.records
+    ), f"expected the exception class name in the log — got {[r.message for r in caplog.records]!r}"
 
 
 # ── resume_handler: ValidationError after an interrupt ──────────────────────
 
 
-async def test_resume_handler_validation_error_is_not_labeled_input_invalid():
+async def test_resume_handler_validation_error_is_not_labeled_input_invalid(caplog):
     model = FakeModelClient([tool_call("interrupt_then_bad_resume_tool", {"x": 1})])
-    result = _first_result(
-        await _collect(model, "interrupt_then_bad_resume_tool", {"x": 1})
-    )
+    with caplog.at_level(logging.WARNING, logger="agent_sdk.agent.loop"):
+        result = _first_result(
+            await _collect(model, "interrupt_then_bad_resume_tool", {"x": 1})
+        )
     assert not result.ok
     assert "input invalid" not in result.error, (
         f"resume_handler ValidationError mislabeled as input error: {result.error!r}"
     )
-    assert result.error == "tool 'interrupt_then_bad_resume_tool' failed after resume", (
-        result.error
-    )
+    assert result.error == (
+        "tool 'interrupt_then_bad_resume_tool' failed after resume"
+    ), result.error
+    assert any(
+        "ValidationError" in r.message for r in caplog.records
+    ), f"expected the exception class name in the log — got {[r.message for r in caplog.records]!r}"
 
 
 # ── regression: genuine input errors keep the "input invalid" label ────────

@@ -30,8 +30,9 @@ claimed by domain cards either — no field contract exists for them.
 
 Field contracts are frozen wire shapes; construct with the typed fragments
 (`MetricItem`, `TimeSeriesDataPoint`, …) and the SDK guarantees the A2UI
-mapping. Every type implements `to_plain_text()` — the mandatory fallback
-for clients without A2UI capability.
+mapping. Every type implements `_body_text()` — the hook behind
+`to_plain_text()`, the mandatory fallback for clients without A2UI
+capability.
 
 ## What `emits=` produces
 
@@ -60,7 +61,9 @@ class ClimateRiskReport(ContentModel):
     headline: str
     score: float
 
-    def to_plain_text(self) -> str:
+    # Implement _body_text(), NOT to_plain_text(). to_plain_text() is concrete
+    # on ContentModel and is what appends the `metadata` suffix (below).
+    def _body_text(self) -> str:
         return f"{self.headline} (risk score {self.score})"
 ```
 
@@ -69,6 +72,45 @@ class ClimateRiskReport(ContentModel):
 and rejects new types claiming the standard catalog. The agent card
 advertises every catalog id in the A2UI extension `params.catalogIds`, so
 clients know which catalogs they must render.
+
+### The `metadata` envelope — you get it for free
+
+`ContentModel` declares one SDK-wide field, `metadata: dict[str, Any] | None`
+(GH-63): an out-of-band disclosure envelope such as
+`metadata={"coverage_note": "Partial: 5 of 20 funds"}`, distinct from the
+frozen per-type fields. Because it is declared once on the base class, every
+rule about it is enforced once on the base class too — your card gets all
+three without writing any code, and cannot silently skip one:
+
+- `wire()` emits it when set.
+- `to_plain_text()` appends it as a trailing `key=value` suffix. **This is why
+  you implement `_body_text()` and not `to_plain_text()`** — before this
+  split, `metadata` reached `wire()` but no card, built-in or domain, ever
+  appended it to its text fallback. Rather than make every card append the
+  suffix by hand at its own call site (and risk one silently skipping it, so
+  a disclosure annotation reaches the A2UI card but vanishes from the text
+  fallback no-capability clients see), the base class now renders it once
+  for all of them.
+- Non-finite floats (`inf`/`nan`) anywhere inside it are rejected at
+  construction, so the DataPart's JSON `null` and the text fallback's `inf`
+  can never disagree.
+
+The admin console renders it too, as a dimmed footnote row under the card —
+no per-component renderer work needed.
+
+A card written before this split, which overrides `to_plain_text()` directly,
+keeps working: `ContentModel.__init_subclass__` adopts that override as the
+class's `_body_text()`, so it renders identically and additionally picks up the
+suffix — including a card that subclasses a CONCRETE built-in (e.g. `KpiCard`)
+and extends its rendering with `super().to_plain_text()`, a pattern that was
+fully legal against the pre-split API. That call is safely redirected to the
+parent's own rendering rather than re-entering the subclass's override, so it
+does not recurse. New code should implement `_body_text()` directly. One rule
+for a NEW `_body_text()` override: call `super()._body_text()`, never
+`super().to_plain_text()` — both resolve correctly, but only the outermost
+call appends the metadata suffix, so `super().to_plain_text()` from new code
+adds nothing `super()._body_text()` doesn't already give you, at the cost of
+one extra indirection.
 
 A tool then uses `emits=ClimateRiskReport` exactly like a Profile type.
 A plain `BaseModel` (not registered) is also accepted for `emits` — it

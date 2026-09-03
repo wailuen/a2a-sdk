@@ -28,27 +28,48 @@ Example: `/sdk-release 1.3.0`
    strictly higher. On failure: "Current version is `<current>`; `<requested>`
    is not a valid bump." Stop.
 
-2. **Require a clean `/sdk-test`.** Run `/sdk-test` in full (all three legs).
+2. **Ancestry guard — refuse to bump or tag on a stale or foreign-numbered
+   branch.** A version bump is a claim about ancestry, not just a number.
+   ```bash
+   git fetch origin
+   git rev-list --count HEAD..origin/main
+   git tag --list 'v*' --merged HEAD
+   ```
+   - If `HEAD..origin/main` is non-zero, stop: "Branch is `<N>` commits behind
+     `origin/main`. Reconcile (rebase or merge) before releasing — a bump from
+     here would silently omit everything origin already shipped." Never bump
+     `pyproject.toml` to work around this.
+   - Find the highest SemVer tag reachable from `HEAD` (`--merged HEAD`) as well
+     as the highest tag that exists anywhere in the remote (`git tag --list 'v*'`
+     without `--merged`, taken from `origin` after the fetch). If the requested
+     version is not strictly greater than *both*, stop: "`<requested>` does not
+     exceed `<highest-tag>`, which already exists in this repository's tag
+     history. This branch's history does not contain that release — do not
+     reuse or leapfrog its number." A branch that has never merged a tag's
+     lineage may not claim any version above it, even if that tag is absent
+     from `HEAD`'s own ancestry.
+
+3. **Require a clean `/sdk-test`.** Run `/sdk-test` in full (all three legs).
    If any leg is RED, stop with: "Release blocked: `/sdk-test` failed. Fix before
    tagging."
 
-3. Check the git working tree is clean:
+4. Check the git working tree is clean:
    ```bash
    git status --short
    ```
    If there are uncommitted changes, stop: "Uncommitted changes present. Commit or
    stash before releasing."
 
-4. Capture the current branch name:
+5. Capture the current branch name:
    ```bash
    git rev-parse --abbrev-ref HEAD
    ```
    Warn if not `main` or `release/*`, but do not stop — the user may be releasing
-   from a named branch intentionally. This branch name is used in step 12's push.
+   from a named branch intentionally. This branch name is used in step 13's push.
 
 ### Phase 1 — Version bump
 
-5. Read `pyproject.toml` to identify the build backend from `[build-system] requires`:
+6. Read `pyproject.toml` to identify the build backend from `[build-system] requires`:
    - `hatchling`, `setuptools`, `flit` → canonical version is in `[project] version`.
    - `poetry` → canonical version is in `[tool.poetry] version`.
    Update only the canonical field. Verify with:
@@ -59,7 +80,7 @@ Example: `/sdk-release 1.3.0`
 
 ### Phase 2 — Changelog
 
-6. Generate the changelog entry. Collect all commits since the last tag:
+7. Generate the changelog entry. Collect all commits since the last tag:
    ```bash
    git describe --tags --abbrev=0 2>/dev/null || echo "FIRST_RELEASE"
    ```
@@ -99,31 +120,31 @@ Example: `/sdk-release 1.3.0`
 
 ### Phase 3 — Commit + tag + push
 
-7. After `/sdk-test` completes (step 2), re-run `git status --short` to confirm
+8. After `/sdk-test` completes (step 3), re-run `git status --short` to confirm
    the test run left no uncommitted artifacts. If it did, ensure they are covered
    by `.gitignore` — otherwise `git add` below will not pick them up, but the user
    should be aware.
 
-8. Stage the two files:
+9. Stage the two files:
    ```bash
    git add pyproject.toml CHANGELOG.md
    ```
 
-9. Commit:
-   ```bash
-   git commit -m "chore: release v<semver>"
-   ```
+10. Commit:
+    ```bash
+    git commit -m "chore: release v<semver>"
+    ```
 
-10. Tag:
+11. Tag:
     ```bash
     git tag -a "v<semver>" -m "Release v<semver>"
     ```
 
-11. **Confirm before pushing:**
+12. **Confirm before pushing:**
     "About to push commit + tag `v<semver>` from branch `<branch>` to origin. Proceed?"
     Wait for user confirmation. Never force-push.
 
-12. On confirmation, push the current branch (not hardcoded `main`):
+13. On confirmation, push the current branch (not hardcoded `main`):
     ```bash
     git push origin HEAD --follow-tags
     ```
@@ -153,9 +174,12 @@ Next:
 - **Never skip `/sdk-test`.** The test gate is the only thing standing between
   a broken SDK and pinned agents that can't upgrade.
 - **Never force-push main or a tag.**
-- If the user cancels at step 11, the commit and tag exist locally but are not
+- **Never write a version into `pyproject.toml` to work around the step 2
+  ancestry guard.** A version bump is a claim about ancestry, not just a
+  number — reconcile the branch instead.
+- If the user cancels at step 12, the commit and tag exist locally but are not
   pushed. They can push manually or run `/sdk-release` again with the same
-  version (step 5 will fail gracefully — bump check catches the already-matching
+  version (step 1 will fail gracefully — bump check catches the already-matching
   version and offers to push the existing tag).
 - **Patch releases** (MAJOR.MINOR.PATCH with no change to FR count) are expected
   to have zero BREAKING commits in the changelog. If BREAKING commits exist for a

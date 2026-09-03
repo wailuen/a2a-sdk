@@ -171,14 +171,35 @@ def _extract_check_grep_paths(path: Path) -> list[tuple[str, str]]:
                     # Skip flags, shell redirects, and quoted pattern strings
                     if token.startswith(("-", "'", '"', "2>", ">")):
                         continue
-                    # Must look like a repo path: only word chars, dots, slashes, hyphens
-                    if not re.fullmatch(r"[\w./\-]+", token):
+                    # Must look like a repo path: word chars, dots, slashes,
+                    # hyphens, or a shell glob star (RT-007: globs must still
+                    # be validated, not silently skipped).
+                    if not re.fullmatch(r"[\w./\-*]+", token):
                         continue
                     if "/" in token or _SOURCE_EXT.search(token):
                         # Strip trailing slashes for directory paths
                         results.append((lrn_id, token.rstrip("/")))
                         break
     return results
+
+
+def _grep_path_is_dead(grep_path: str) -> bool:
+    """True if `grep_path` cannot resolve against REPO_ROOT.
+
+    Handles shell globs (`agent_sdk/model_clients/*.py`): a glob with no
+    matching files still makes grep exit non-zero with no output, so a Check
+    clause pointed at a glob over a nonexistent directory passes vacuously
+    just like a dead plain path (RT-007 / LRN-079).
+    """
+    if "*" not in grep_path:
+        return not (REPO_ROOT / grep_path).exists()
+    dir_parts: list[str] = []
+    for part in grep_path.split("/"):
+        if "*" in part:
+            break
+        dir_parts.append(part)
+    base_dir = REPO_ROOT.joinpath(*dir_parts) if dir_parts else REPO_ROOT
+    return not base_dir.is_dir()
 
 
 def test_lrn_check_grep_paths_exist() -> None:
@@ -190,10 +211,31 @@ def test_lrn_check_grep_paths_exist() -> None:
     dead: list[str] = []
     for lrn_file in sorted(LEARNING_DIR.glob("LRN-*.md")):
         for lrn_id, grep_path in _extract_check_grep_paths(lrn_file):
-            resolved = REPO_ROOT / grep_path
-            if not resolved.exists():
+            if _grep_path_is_dead(grep_path):
                 dead.append(f"{lrn_id}: grep path does not exist: {grep_path}")
     assert not dead, (
         "LRN Check clauses reference nonexistent paths (fail-open guards):\n"
         + "\n".join(dead)
     )
+
+
+def test_grep_path_is_dead_detects_glob_over_missing_directory() -> None:
+    """RT-007: a glob token (`dir/*.py`) must be checked like any other path.
+
+    Before this fix, `_extract_check_grep_paths`'s fullmatch regex rejected
+    any token containing `*`, so a Check clause glob over a moved/renamed
+    directory (agent_sdk/model_clients/*.py, which does not exist) was
+    silently skipped rather than flagged dead — the guard itself was fail-open.
+    """
+    assert _grep_path_is_dead("agent_sdk/model_clients/*.py")
+    assert not _grep_path_is_dead("agent_sdk/agent/*.py")
+
+
+def test_extract_check_grep_paths_captures_glob_tokens(tmp_path: Path) -> None:
+    lrn_file = tmp_path / "LRN-999-example.md"
+    lrn_file.write_text(
+        "---\nid: LRN-999\n---\n\n## Check\n\n"
+        '```bash\ngrep -n "except Exception" agent_sdk/model_clients/*.py\n```\n'
+    )
+    results = _extract_check_grep_paths(lrn_file)
+    assert results == [("LRN-999", "agent_sdk/model_clients/*.py")]

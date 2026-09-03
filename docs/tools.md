@@ -94,6 +94,189 @@ budget *across resumes*, and a task-local result cache (an identical
 `(tool, args)` call is served from cache, not re-invoked). Tune via
 `BaseAgentSettings` or `LoopPolicies`.
 
+## Reusable values (cross-turn references)
+
+A tool can mark a return value as citable in later turns, instead of
+relying on the model to retype it from memory (retyping is where a model
+most often substitutes a different, wrong-but-plausible id):
+
+```python
+from agent_sdk import Reusable
+
+@tools.tool(tier=1)
+async def resolve_entity(inp: LookupInput) -> str:
+    entity_id = await source.lookup(inp.name)
+    return Reusable(value=entity_id, kind="entity_id", label=inp.name)
+```
+
+The loop unwraps `Reusable` before the model sees the result — the model
+receives `.value`, exactly as if the tool had returned it directly — and
+records the resolution so a later tool call can reference it by token
+instead of retyping it: the literal `$ref:<kind>`, or `$ref:<kind>:<label>`
+to disambiguate multiple resolutions of the same kind.
+
+An input field opts in to the substitution/validation contract via
+`Annotated[<type>, ReuseKind("<kind>")]` on the tool's `input_model`:
+
+```python
+from typing import Annotated
+from agent_sdk import ReuseKind
+
+class TransferInput(BaseModel):
+    entity_id: Annotated[str, ReuseKind("entity_id")]
+```
+
+Before invoking such a tool, the loop:
+
+- substitutes a `$ref:<kind>`/`$ref:<kind>:<label>` token with the
+  matching resolved value;
+- rejects the call with a generic tool error when a raw value is supplied
+  that does NOT match any prior resolution of that kind, and at least one
+  resolution of that kind exists — this is the check that catches the
+  model substituting a wrong id instead of the one it actually resolved;
+- rejects the call as ambiguous — a bare `$ref:<kind>`, or ANY raw value
+  including one that happens to equal a resolved value — once MORE than
+  one resolution of that kind is on record: membership in the union of
+  resolved values is not proof a value is the one meant for THIS call.
+  The rejection names the kind's own on-record **labels** (display names,
+  never a resolved value) so `$ref:<kind>:<label>` — the disambiguation
+  move it recommends — is actually constructible from the rejection text
+  alone, on every transport;
+- passes a raw value through unchanged when no resolution of that kind
+  exists yet, or the raw value matches one that does.
+
+**`strict` and `allow_raw_override`** — `ReuseKind(kind, strict=True,
+allow_raw_override=False)`:
+
+- `strict=False` turns off the mismatch rejection for that field entirely
+  (`$ref` still resolves; a raw value is simply never checked against
+  prior resolutions). Use it on a field where the correctness risk of a
+  silently-wrong substitution doesn't justify blocking every genuinely new
+  value the model or user supplies directly.
+- `allow_raw_override=True` lets a call pass `$raw:<value>` to bypass the
+  mismatch check for that one call — the escape hatch for a genuinely new,
+  legitimate value (without it, a rejected call has no way to succeed
+  except retrying the resolver tool). The rejection error never mentions
+  this token, by design: it exists to stop a model that hallucinated a
+  wrong id, not to be discoverable by that same model. Treat it as a
+  deliberate per-field operator opt-in, not a capability every `ReuseKind`
+  field gets by default.
+
+**Bounded recovery for a stuck raw value (opt-in, RT-002)** — a field left
+at every default (`strict=True`, `allow_raw_override=False`) has no
+in-band way out when the model keeps retrying the exact same
+wrong-but-plausible raw value: without opting in, it is rejected forever,
+and the model can only keep calling the resolver tool until `max_turns`.
+`LoopPolicies.reuse_forced_passthrough_limit` **defaults to `0` —
+reject-forever** — because this gate exists to catch GH-148's silent
+wrong-id substitution, and a correctness gate must never default to
+fail-open. Set it to a positive integer to opt IN to the liveness
+fallback: after that many consecutive rejections of the *identical* value
+on that field, the next call passes it through unchanged instead of
+rejecting again, and the loop emits an
+`AuditEvent(code="reuse_forced_passthrough")` so the bypass is auditable,
+not silent. The budget is scoped to the exact `(tool, field, raw value)`
+triple — a sequence of *different* hallucinated ids on the same field is
+still rejected forever regardless of this setting; only a genuinely stuck
+retry of one identical value recovers once opted in.
+
+**Restrictions:** `ReuseKind` supports a top-level scalar field only —
+`str`, `int`, or `<scalar> | None`. A container field
+(`Annotated[list[str], ReuseKind(...)]`) or `ReuseKind` on a field of a
+nested model raises `TypeError` at `@tools.tool` registration time rather
+than shipping a silent no-op.
+
+On a **non-string** scalar (`int`, `float`, `bool`, or those `| None`) the
+tool schema the loop advertises to the model widens that property to
+`{"anyOf": [<your type>, {"type": "string", ...}]}`, because `$ref:<kind>`
+is itself a string token and a provider that constrains tool arguments to
+the declared schema (Bedrock Converse among them) would otherwise never
+let the model emit it. Your `input_model` is untouched: the token is
+replaced with the resolved value of the real type before the tool's own
+validation runs, so the tool body still receives an `int` where it
+declared one. Every other surface (MCP `tools/list`, the agent card, the
+admin console) advertises your schema unwidened.
+
+**Transport carriage:** the mechanism rides the conversation's `messages`
+transcript, and cross-turn reuse works on **both A2A and AG-UI**, by two
+different routes. A2A's `record.messages` is seeded directly from
+`TaskStore.context_messages(context_id)` — the prior task's Converse-format
+messages, replayed verbatim — so a `__resolved__` marker folded in turn N
+is still part of the model-visible transcript in turn N+1. AG-UI's
+`_fold_history` (`agent_sdk/routes/ag_ui.py`) collapses a resent tool-result
+block down to plain text, so it can't carry a marker back into `messages`
+the same way; instead the route calls
+`TaskStore.context_reusable_messages(thread_id, identity)` (`thread_id` and
+`context_id` are the same value for an AG-UI task) and passes the result
+into `run_task_worker`/`run_loop` as `extra_resolved_messages` — scanned
+only to seed the resolved-value index, never appended to `messages` and
+never shown to the model, so AG-UI's smaller, text-only transcript is
+unchanged. A resolve-then-reference sequence always worked within a single
+run/request (the loop's turns inside one request); both transports now also
+carry the resolution to the next request on the same context/thread.
+
+**Why `context_reusable_messages()`, not `context_messages()`, on AG-UI
+(RT-001):** each new AG-UI `TaskRecord.messages` starts fresh from that
+run's own folded text only — it never inherits the prior task's `messages`
+the way A2A's does. Seeding from `context_messages()` (the single most
+recent terminal task) would decay after exactly one intervening, unrelated
+run: as soon as a run with no marker of its own becomes the newest terminal
+task, the next run's seed goes empty and `$ref:<kind>` stops resolving —
+silently reopening the wrong-but-real-id substitution GH-148 exists to
+catch. `context_reusable_messages()` scans EVERY terminal task in the
+thread instead, so a marker survives for the life of the conversation.
+RT-010: that scan is bounded — only the newest `MAX_REUSABLE_TASKS`
+terminal tasks are scanned per call, and each contributes only its
+`__resolved__` marker content, never its full messages, since `scan_resolved`
+(the sole reader of the result) never looks at anything else.
+
+**Admin privilege must not leak another identity's resolved values into a
+caller's tool arguments — on EITHER transport (RT-004, extending RT-009):**
+neither `context_reusable_messages()` nor `context_messages()` honours an
+admin api_key identity's cross-identity override — both apply the identity
+filter even to an admin caller, so neither transport's carrier ever
+contains another identity's marker or transcript. `context_messages()`
+previously special-cased admin api_key identities (framed as "operator task
+inspection") to return a foreign identity's transcript into the admin's own
+new task; that bypass fed straight into the model's context on the exact
+same request path a same-identity caller uses to continue their own
+thread, not a read-only view, so it was the same covert side channel this
+paragraph already closed for AG-UI's carrier — it is now removed rather
+than mitigated. A same-identity result (including an admin's own prior
+task) is unaffected. Genuine operator inspection of another identity's
+task remains available, safely, as a read that never seeds a new task's
+model context: `GET /v1/tasks/{id}`.
+
+**`TaskStore.context_messages()`/`context_reusable_messages()` caveat:**
+these calls are the sole carriers of a prior task's `__resolved__` markers
+across a request boundary on A2A and AG-UI respectively. Neither is
+abstract on the base `TaskStore` (`agent_sdk/tasks/store.py`) — both return
+`[]` by default — so an external durable `TaskStore` that does not override
+the one its transport(s) use will not error or warn: it silently starts
+every continued A2A task, and every continued AG-UI thread, with an empty
+resolved-value index. The mismatch check then silently stops applying: a
+raw value passes through unvalidated, while an explicit `$ref:<kind>` token
+still fails loudly, since the empty index has no entry to resolve it
+against. A single task/run with no continuation is unaffected, since
+`run_loop` reads and writes the same in-memory `messages` list (or
+`resolved_index`) throughout that one request.
+
+MCP `tools/call`, the admin try-tool endpoint, and the commitments
+executor have no conversation transcript to resolve a token against, so
+`invoke_any` (the shared dispatch helper behind all three) rejects a
+`$ref:`/`$raw:` token on a `ReuseKind` field outright with a generic tool
+error — it does NOT hand the literal string to the tool body. Callers on
+those three surfaces must supply a raw value. (The agent card's
+`x-sdk.inputSchema` is advisory metadata only, not a dispatch path — it
+never sees a token to act on either way.)
+
+`Reusable`, `ReuseKind`, and `DeferredResult` are all top-level `agent_sdk`
+exports — import them as
+`from agent_sdk import Reusable, ReuseKind, DeferredResult`
+(`tests/test_public_api_exports.py` pins this; DESIGN.md §4.0 lists all
+three as stable-core, strict-SemVer). Their submodule paths,
+`agent_sdk.agent.reuse` and `agent_sdk.agent.deferred`, remain valid too.
+
 ## Skills
 
 Markdown files under `skills_dir` with frontmatter:

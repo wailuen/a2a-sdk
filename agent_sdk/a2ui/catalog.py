@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
+import logging
+
 from ..models.a2a import AgentExtension
 from ..models.content_types import (
     A2UI_EXTENSION_URI,
@@ -10,8 +13,51 @@ from ..models.content_types import (
     registered_content_types,
 )
 
+logger = logging.getLogger(__name__)
+
 # Field types that need no description suffix (common scalars)
 _SCALAR_NAMES = {"str", "int", "float", "bool"}
+
+try:  # Python 3.14+ (PEP 649)
+    from annotationlib import Format
+
+    _ANNOTATION_FORWARDREF: object | None = Format.FORWARDREF
+except ImportError:  # Python 3.12 / 3.13 — inspect.get_annotations has no format=
+    _ANNOTATION_FORWARDREF = None
+
+
+def _own_annotation_names(klass: type) -> frozenset[str]:
+    """Names *klass itself* annotates — never an inherited annotation.
+
+    RT-001: do NOT read ``vars(klass)["__annotations__"]`` here. Under PEP 649
+    (Python 3.14+) a class body's annotations are compiled into a lazy
+    ``__annotate__`` function and ``__annotations__`` is absent from the class
+    ``__dict__`` until something forces it, so the raw ``vars()`` read returns
+    ``{}`` for every class defined in a module without ``from __future__ import
+    annotations`` — silently making any "did this class declare it?" test always
+    False on 3.14 while still working on 3.12/3.13. ``inspect.get_annotations``
+    is non-inheriting AND PEP-649-aware, so it answers the same question across
+    the whole declared ``requires-python = ">=3.12"`` range.
+
+    ``FORWARDREF`` (3.14+) is requested because only the annotation NAMES are
+    needed: it yields unresolvable forward references as placeholder objects
+    instead of raising ``NameError``, so a domain card annotated with a
+    not-yet-defined type never degrades this summary.
+    """
+    try:
+        if _ANNOTATION_FORWARDREF is not None:
+            return frozenset(
+                inspect.get_annotations(klass, format=_ANNOTATION_FORWARDREF)  # type: ignore[call-overload]
+            )
+        return frozenset(inspect.get_annotations(klass))
+    except (NameError, TypeError, AttributeError):
+        # Last-resort: an exotic __annotate__ that raises under every format.
+        logger.warning(
+            "a2ui catalog: inspect.get_annotations failed for %s; falling "
+            "back to raw __annotations__ (field summary may be incomplete)",
+            getattr(klass, "__qualname__", klass),
+        )
+        return frozenset(vars(klass).get("__annotations__", {}))
 
 
 def _annotation_str(ann: object, required: bool) -> tuple[str, bool]:
@@ -78,6 +124,36 @@ def _field_summary(cls: type[ContentModel]) -> str:
         for name, info in cls.model_fields.items():
             if name.startswith("_"):
                 continue
+            # RT-003/RT-005: `metadata` lives on `ContentModel` itself (the
+            # SDK-wide GH-63 out-of-band disclosure envelope) and is
+            # deliberately absent from every per-type frozen field table —
+            # see that class's docstring and the content_types.py module
+            # docstring. Because base-class fields come first in pydantic's
+            # `model_fields`, leaving it in would put a cross-cutting,
+            # non-domain field ahead of a type's real required fields in
+            # this budget-truncated (250 char) teaching string for every
+            # single registered content type, and would teach the model a
+            # field its own catalog explicitly does not want it prompted
+            # with per-type. The skip is keyed on WHO DECLARED the field,
+            # not its name: a base-class field the subclass did not itself
+            # declare is skipped (covers `metadata` today and any future
+            # `ContentModel` field automatically), but a domain card that
+            # deliberately redeclares `metadata` with its own semantics
+            # keeps it in its own summary.
+            # RT-008: "declared" must walk the full MRO, not just `cls`'s own
+            # annotations — a two-level (or deeper) subclass of a card that
+            # redeclares `metadata` inherits that domain declaration and must
+            # keep it in its summary even without redeclaring it again.
+            # RT-001: the per-class read goes through _own_annotation_names(),
+            # NOT `vars(klass)["__annotations__"]` — see that helper's
+            # docstring for why the raw read is silently always-empty on 3.14.
+            declared_here = any(
+                name in _own_annotation_names(klass)
+                for klass in cls.__mro__
+                if klass is not ContentModel and issubclass(klass, ContentModel)
+            )
+            if not declared_here and name in ContentModel.model_fields:
+                continue
             required = info.is_required()
             ann = info.annotation
             if ann is None:
@@ -92,7 +168,12 @@ def _field_summary(cls: type[ContentModel]) -> str:
         if len(summary) > 250:
             summary = summary[:247] + "..."
         return f"{{{summary}}}"
-    except Exception:
+    except (AttributeError, TypeError):
+        logger.warning(
+            "a2ui catalog: field summary generation failed for %s; using "
+            "fallback summary",
+            getattr(cls, "__qualname__", cls),
+        )
         return "{...}"
 
 
@@ -112,8 +193,12 @@ _FEW_SHOT_EXAMPLES: dict[str, str] = {
     ),
     # FundPerformance uses camelCase aliases on the wire (snake_case Python fields
     # must NOT appear in serialised output — always call wire() / by_alias=True).
+    # RT-004: this example deliberately omits pbId — it is the upstream
+    # source-system id (provenance the model has no legitimate way to know)
+    # and must never be fabricated; see the pbId note appended to the
+    # FundPerformance line in get_system_prompt_section().
     "FundPerformance": (
-        '{"component":"FundPerformance","fundName":"Acme Fund III",'
+        '{"component":"FundPerformance",'
         '"irr":0.182,"tvpi":1.74,"dpi":0.95,"rvpi":0.79,'
         '"netIrr":0.164,"grossIrr":0.211,"moic":1.74,'
         '"asOfDate":"2025-12-31","nav":{"amount":320000000,"currency":"USD"},'
@@ -136,7 +221,7 @@ _COMPACT_SCHEMAS: dict[str, str] = {
     # date_range uses first/last keys (NOT start/end — frozen divergence from WaterfallChart)
     "MultiCategoryChart": '{"title":str,"periods":[{period:str,categories:{name:{value:float,count?:int}},period_total?:float}],"summary":{"by_category":{name:{value,count?}},"grand_total?":float,"period_count":int},"date_range":{"first":str,"last":str},"subtitle?":str,"unit_label?":str,"currency?":str,"entity_name?":str,"item_count?":int}',
     # FundPerformance is the sole camelCase-wire type — ALL field names use camelCase aliases
-    "FundPerformance": '{"fundName?":str,"pbId?":str,"irr?":float,"tvpi?":float,"dpi?":float,"rvpi?":float,"netIrr?":float,"grossIrr?":float,"moic?":float,"quartile?":int,"asOfDate?":str,"asOfQuarter?":int,"asOfYear?":int,"nav?":{"amount?":float,"currency?":str},"calledDownPct?":float,"dryPowder?":{"amount?":float,"currency?":str},"dryPowderPct?":float,"distributed?":{"amount?":float,"currency?":str},"remainingValue?":{"amount?":float,"currency?":str},"distributedPlusRemaining?":{"amount?":float,"currency?":str}}',
+    "FundPerformance": '{"pbId?":str,"irr?":float,"tvpi?":float,"dpi?":float,"rvpi?":float,"netIrr?":float,"grossIrr?":float,"moic?":float,"quartile?":int,"asOfDate?":str,"asOfQuarter?":int,"asOfYear?":int,"nav?":{"amount?":float,"currency?":str},"calledDownPct?":float,"dryPowder?":{"amount?":float,"currency?":str},"dryPowderPct?":float,"distributed?":{"amount?":float,"currency?":str},"remainingValue?":{"amount?":float,"currency?":str},"distributedPlusRemaining?":{"amount?":float,"currency?":str}}',
     # EmailMessage sub-shape: {id,conversation_id?,subject,preview,from:{name,email},to_recipients:[{name,email}],received_at,is_read,has_attachments,importance,flag_status?,web_link}
     "EmailList": '{"messages":[{id:str,subject:str,preview:str,from:{name,email},to_recipients:[{name,email}],received_at:str,is_read:bool,has_attachments:bool,importance:"low|normal|high",flag_status?:"notFlagged|flagged|complete",web_link:str}],"total_count":int,"has_more":bool,"folder?":str,"query?":str}',
     # CalendarEvent sub-shape: {id,subject,start,end,is_all_day,is_cancelled,is_recurring,organizer:{name,email},attendees_count,importance,show_as,location?,...}
@@ -187,6 +272,11 @@ def get_system_prompt_section(allowed_components: list[str] | None = None) -> st
             schema += (
                 " [prose — return MarketBriefing(title=..., as_of=..., prose='...markdown...')"
                 " — rendered as plain markdown, not a structured card]"
+            )
+        if cls.component == "FundPerformance":
+            schema += (
+                " [pbId is an upstream source-system id — emit it only when a"
+                " tool result supplied one; never invent a value]"
             )
         lines.append(f"- {cls.component}{tier}: {schema}")
 

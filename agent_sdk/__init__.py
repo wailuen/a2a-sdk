@@ -14,9 +14,11 @@ except PackageNotFoundError:  # running from source tree without pip install
     __version__ = "0.0.0+dev"
 
 from .agent.artifacts import ArtifactLoader
+from .agent.deferred import DeferredResult
 from .agent.loop import LoopPolicies, ToolInterrupt
 from .agent.model_client import ModelClient, ModelResponse, ModelToolCall
 from .agent.registry import ToolSet
+from .agent.reuse import ReuseKind, Reusable
 from .app import Agent
 from .config import BaseAgentSettings
 from .credentials.fields import CredentialField
@@ -30,12 +32,15 @@ __all__ = [
     "ArtifactLoader",
     "BaseAgentSettings",
     "CredentialField",
+    "DeferredResult",
     "NS_MODEL",
     "ErrorCategory",
     "LoopPolicies",
     "ModelClient",
     "ModelResponse",
     "ModelToolCall",
+    "Reusable",
+    "ReuseKind",
     "SourceAdapter",
     "ToolInterrupt",
     "ToolSet",

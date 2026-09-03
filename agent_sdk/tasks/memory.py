@@ -3,19 +3,144 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections import OrderedDict
 from typing import Any, Callable, Sequence
 
+from ..agent.reuse import extract_resolved_markers
 from ..auth.identity import Identity
 from ..models.a2a import Task
 from ..models.errors import AgentError, ErrorCategory
 from .store import StreamTerminated, Subscription, TaskRecord, TaskStore
 
-__all__ = ["InMemoryTaskStore", "StreamTerminated"]
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "InMemoryTaskStore",
+    "StreamTerminated",
+    "MAX_REUSABLE_TASKS",
+    "MAX_CONTEXT_MESSAGES",
+]
+
+# RT-010: caps the number of terminal tasks context_reusable_messages()
+# scans per call, newest first — without this, a long-lived thread makes
+# every fresh (non-resume) request on it re-walk and re-allocate the
+# transcript of every prior run in the thread, unbounded. Mirrors
+# routes/ag_ui.py's MAX_HISTORY_MESSAGES precedent for the same class of
+# unbounded-history problem on a different carrier.
+MAX_REUSABLE_TASKS = 50
+
+# RT-007: caps how many messages context_messages() carries from the most
+# recent terminal task into a fresh contextId continuation. Both sibling
+# carriers already bound themselves — MAX_REUSABLE_TASKS above (task count)
+# and routes/ag_ui.py's MAX_HISTORY_MESSAGES (message count) — but this,
+# the PRIMARY A2A carrier, stayed uncapped: it grows linearly with total
+# turns for the life of a thread, and the model prompt built from it grows
+# with it, eventually failing upstream on context length rather than
+# exiting cleanly through LoopPolicies.token_budget (which counts tokens
+# already spent, not prompt size). Trailing-N only, never a raw head/tail
+# split of the transcript — see _turn_boundary_slice below.
+MAX_CONTEXT_MESSAGES = 50
+
+
+def _is_turn_boundary(msg: Any) -> bool:
+    """A genuine user-authored turn start — ``role == "user"`` with no
+    ``toolResult`` block in its content. Never a ``toolResult`` continuation
+    message, which Bedrock's Converse API rejects as a slice HEAD (see
+    ``_turn_boundary_slice``)."""
+    if not (isinstance(msg, dict) and msg.get("role") == "user"):
+        return False
+    content = msg.get("content")
+    if isinstance(content, list) and any(
+        isinstance(block, dict) and "toolResult" in block for block in content
+    ):
+        return False
+    return True
+
+
+def _turn_boundary_slice(
+    messages: list[dict[str, Any]], cap: int
+) -> list[dict[str, Any]]:
+    """``messages`` unchanged when it already fits in ``cap`` — capping must
+    never rewrite a transcript it didn't need to shrink, including one with
+    no genuine turn boundary in it at all (e.g. an out-of-loop repair-only
+    tail with no organic user turn, GH-150). Otherwise, the trailing ``cap``
+    messages, advanced forward to the next genuine turn boundary
+    (``_is_turn_boundary``).
+
+    A raw ``messages[-cap:]`` slice can land mid-tool-round: on a
+    ``toolResult`` continuation message whose matching ``toolUse`` fell
+    outside the window, or on an assistant turn whose ``toolUse`` block has
+    no answering ``toolResult`` in the window at all. Bedrock's Converse API
+    rejects both shapes outright (the same invariant
+    ``agent.loop.close_dangling_tool_use``/``bridge_context_messages`` guard
+    at the transcript's tail — this guards the new HEAD a cap introduces).
+    Every genuine turn in a transcript built through the normal request path
+    starts with exactly such a plain-text user message
+    (``_create_task_record``'s seed turn, every ``run_loop`` turn boundary)
+    — never a toolResult-only one — so scanning forward for one, once
+    truncation has actually happened, is safe.
+
+    RT-002: a single task's own transcript is bounded by that task's own
+    ``max_turns`` (``2 * max_turns + 2`` messages for a run that never
+    finishes — GH-... regression at ``max_turns=25``), which can exceed
+    ``cap`` with no turn boundary anywhere in the trailing window: the ONLY
+    plain user turn is the seed message at index 0, outside it. Returning
+    ``[]`` there would silently disable contextId continuation for that
+    thread entirely, not just truncate it. So when the trailing window has
+    no boundary, the search widens BACKWARD past ``cap`` for the nearest
+    earlier one, logging a WARNING — this cannot reopen the unbounded-growth
+    risk ``cap`` guards against (RT-007), because that risk is a long-lived
+    THREAD accumulating cost across many completed tasks, while this widens
+    within one already-finite task's own message list. Returns an empty
+    list, also logged, only when no turn boundary exists anywhere in
+    ``messages`` — the caller already treats that as "no usable prior
+    context" for a fresh continuation."""
+    if len(messages) <= cap:
+        return list(messages)
+    tail_start = len(messages) - cap
+    for i in range(tail_start, len(messages)):
+        if _is_turn_boundary(messages[i]):
+            return messages[i:]
+    for i in range(tail_start - 1, -1, -1):
+        if _is_turn_boundary(messages[i]):
+            logger.warning(
+                "context continuation: no turn boundary within the trailing "
+                "%d-message cap (transcript has %d messages) — falling back "
+                "to a %d-message slice from the nearest earlier turn "
+                "boundary instead of dropping prior context. Raise "
+                "MAX_CONTEXT_MESSAGES (or lower max_turns) if this recurs.",
+                cap, len(messages), len(messages) - i,
+            )
+            return messages[i:]
+    logger.warning(
+        "context continuation: dropping the entire prior transcript — no "
+        "turn boundary found anywhere in %d messages (cap=%d); contextId "
+        "continuation loses all prior context for this thread.",
+        len(messages), cap,
+    )
+    return []
 
 
 class InMemoryTaskStore(TaskStore):
+    MAX_REUSABLE_TASKS: int = MAX_REUSABLE_TASKS
+    """RT-006 (debug round 4): the cap ``context_reusable_messages`` applies,
+    exposed as a CLASS attribute so ``TaskStore.context_reusable_messages``'s
+    docstring can cite it as the in-memory store's cap and be right — it
+    named ``InMemoryTaskStore.MAX_REUSABLE_TASKS`` while the value existed
+    only as the module-level constant above, closed over directly by the
+    method, so an implementer following that pointer got an ``AttributeError``
+    or silently believed they had overridden a cap they had not. Read through
+    ``self`` below, so a subclass can now genuinely change it. The module
+    constant remains the default and stays exported for direct import."""
+
+    MAX_CONTEXT_MESSAGES: int = MAX_CONTEXT_MESSAGES
+    """RT-007: same pattern as ``MAX_REUSABLE_TASKS`` above — the cap
+    ``context_messages`` applies, exposed as a class attribute (read through
+    ``self`` in the method below) so a subclass can genuinely override it,
+    not just shadow a module constant the method ignores."""
+
     def __init__(
         self,
         *,
@@ -144,22 +269,71 @@ class InMemoryTaskStore(TaskStore):
     def context_messages(
         self, context_id: str, identity: Identity | None = None
     ) -> Sequence[dict[str, Any]]:
-        """Return messages from the most recent terminal task in this context."""
+        """Return messages from the most recent terminal task in this
+        context, identity-scoped exactly like ``context_reusable_messages()``
+        below — no admin api_key bypass (RT-004): this seeds a NEW task's
+        model-facing ``record.messages`` (``routes/a2a.py::_create_task_record``),
+        not a read-only inspection view, so cross-identity transcript data
+        must never enter a caller's own task through it. Genuine operator
+        inspection of another identity's task already exists, safely, as a
+        read: ``GET /v1/tasks/{id}`` (this store's ``get()`` admin override,
+        §5.1) — which never seeds a new task's model context.
+
+        RT-007: bounded to the newest ``MAX_CONTEXT_MESSAGES`` messages —
+        without this, a long-lived thread makes every fresh (non-resume)
+        request re-carry the transcript of every prior turn, unbounded, into
+        the new task's ``record.messages`` and the model prompt built from
+        it. Truncation lands on a genuine turn boundary
+        (``_turn_boundary_slice``), never mid-tool-round — and never on
+        nothing at all (RT-002): a single terminal task whose own transcript
+        has no turn boundary inside the trailing cap window (e.g. it hit
+        ``max_turns`` without ever finishing) still gets a usable, logged
+        fallback slice rather than losing all prior context silently."""
         from ..models.a2a import TERMINAL_STATES
         candidates = [
             r for r in self._records.values()
             if r.task.context_id == context_id
             and r.task.status.state in TERMINAL_STATES
-            and (
-                identity is None
-                or (identity.kind == "api_key" and identity.admin)
-                or r.identity == identity.binding
-            )
+            and (identity is None or r.identity == identity.binding)
         ]
         if not candidates:
             return []
         latest = max(candidates, key=lambda r: r.created_at)
-        return list(latest.messages)
+        # RT-007: read through ``self`` so a subclass override genuinely
+        # changes the cap (mirrors MAX_REUSABLE_TASKS, RT-006).
+        return _turn_boundary_slice(list(latest.messages), self.MAX_CONTEXT_MESSAGES)
+
+    def context_reusable_messages(
+        self, context_id: str, identity: Identity | None = None
+    ) -> Sequence[dict[str, Any]]:
+        """The ``__resolved__`` marker content of the newest
+        ``MAX_REUSABLE_TASKS`` terminal tasks in ``context_id``, oldest
+        first (RT-001) — never the admin cross-identity override (RT-009);
+        see the base-class docstring (tasks/store.py).
+
+        RT-010: bounded on two axes so a long-lived thread cannot make
+        every fresh request re-walk and re-allocate its entire history —
+        only the newest ``MAX_REUSABLE_TASKS`` terminal tasks are scanned
+        at all, and each contributes only its marker content
+        (``extract_resolved_markers``, RT-010), never its full messages:
+        ``scan_resolved`` (the sole consumer of this method's return value)
+        reads nothing else out of it."""
+        from ..models.a2a import TERMINAL_STATES
+        candidates = [
+            r for r in self._records.values()
+            if r.task.context_id == context_id
+            and r.task.status.state in TERMINAL_STATES
+            and (identity is None or r.identity == identity.binding)
+        ]
+        candidates.sort(key=lambda r: r.created_at, reverse=True)
+        # RT-006: read through ``self`` so the documented class attribute is
+        # the real knob — a subclass setting it actually changes the cap.
+        candidates = candidates[: self.MAX_REUSABLE_TASKS]
+        candidates.reverse()
+        combined: list[dict[str, Any]] = []
+        for r in candidates:
+            combined.extend(extract_resolved_markers(r.messages))
+        return combined
 
     # ── listing ──
 

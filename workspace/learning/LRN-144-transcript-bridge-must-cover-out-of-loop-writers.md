@@ -1,0 +1,24 @@
+---
+id: LRN-144
+title: Transcript role-alternation invariant not enforced outside run_loop's own exit points
+category: protocol
+severity: high
+source: redteam
+date: 2026-09-02
+---
+
+## What happened
+GH-147 AC3 (no two consecutive same-role messages, including across continuation) fails for deferred tasks. `run_loop` returns at the `DeferredEvent` handoff without calling `_bridge_trailing_user`, then `runner.py`'s `repair_dangling_tool_use` appends a `user` toolResult, leaving the stored transcript ending on `user`; continuation appends another `user` turn, producing roles `['user','assistant','user','user']` — the shape Bedrock's Converse API rejects. The same gap applies to GH-150's `tasks_cancel` repair.
+
+## Root cause
+The role-alternation bridge (`_bridge_trailing_user`) is called only at `run_loop`'s own exit points; both out-of-loop transcript writers (deferred success/failure repair in runner.py, cancel repair in routes/a2a.py) append directly to `record.messages` without it.
+
+## Check
+The landed design centralises the bridge inside `repair_dangling_tool_use` rather than calling it from each writer directly, so the check must assert centralisation + coverage, not per-file bridge calls. RT-B-202 (2026-09-02) split this into two enumerated concerns after `_create_task_record` (routes/a2a.py) needed a legitimate second consumer of the bridge, for a transcript READ rather than a WRITE:
+- **Out-of-loop repair writers** — the concern this LRN originally covered: `grep -n "bridge_trailing_user" agent_sdk/agent/runner.py` must show exactly one call site, inside `repair_dangling_tool_use`.
+- **`_create_task_record`'s pre-append re-assertion** — a distinct concern (RT-002/RT-B-202): the transcript `TaskStore.context_messages()` returns is read, not written, by a loop exit, so it needs the same never-ends-on-`user` guarantee re-asserted on the way in. This does NOT call `bridge_trailing_user` directly — it routes through `agent_sdk/agent/loop.py::bridge_context_messages`, a thin wrapper (`list(messages)` + `bridge_trailing_user`) scoped to this one consumption site. `grep -n "bridge_trailing_user" agent_sdk/routes/a2a.py` must therefore still show zero matches; `grep -n "bridge_context_messages" agent_sdk/routes/a2a.py` must show exactly one call site, inside `_create_task_record`, and `grep -n "bridge_trailing_user" agent_sdk/agent/loop.py` must show `bridge_context_messages`'s own definition as its only caller of the bridge outside `run_loop`'s own exits.
+- `grep -n "repair_dangling_tool_use" agent_sdk/routes/a2a.py agent_sdk/agent/runner.py` must cover every out-of-loop writer of `record.messages`: `tasks_cancel` (routes/a2a.py), `_fail` and the deferred-success path, and both of `run_task_worker`'s terminal `except AgentError`/`except Exception` handlers (agent/runner.py) — five call sites, each reaching `repair_dangling_tool_use` either directly or via the `repair_dangling_tool_use_safe` guard (public, no leading underscore — `agent_sdk/agent/runner.py:633`).
+- `tests/test_rt004_deferred_transcript_parity.py::test_deferred_success_transcript_replayable_on_next_context_turn` must assert full alternation (`_assert_alternates`) after mirroring `routes/a2a.py`'s continuation-turn append — already landed; a bare `replayed[-1]["role"] != "assistant"` check is the wrong invariant (see the test's own RT-004 comment) and must not be reintroduced.
+
+## Prevention
+When planning a transcript invariant enforced by a loop-internal helper, enumerate every out-of-loop writer to `record.messages` (deferred awaiter, cancel repair, any future repair path) as a required call site — a helper scoped to one function's exit is not scoped to the invariant. When a Check clause pins an exact call-site count or a "zero matches in file X" grep, a later legitimate exception (e.g. a READ-side consumer needing the same invariant a WRITE-side helper enforces) must either fit inside a new thin wrapper that keeps the original grep at its pinned count (as here), or amend the Check in the same change that lands the exception — an unamended Check silently converts into a permanently-failing audit and a licence for the drift it was written to stop.

@@ -56,3 +56,12 @@ class DeferredEvent(LoopEvent):
     tool_call_id: str
     emits: type | None  # ToolDecl.emits — used to decide ArtifactEvent wrapping
     timeout_seconds: float  # effective timeout for the background await
+    # RT-002 (GH-148 cross-surface parity): set when the tool returned
+    # ``Reusable(value=DeferredResult(...))`` — loop.py unwraps the Reusable
+    # BEFORE its DeferredResult check (never after, or the wrapper hides the
+    # handle) and threads kind/label here so the runner's background awaiter
+    # can still fold the __resolved__ marker once the handle resolves, even
+    # though run_loop already exited at this handoff with no live
+    # resolved_index to grow.
+    reuse_kind: str | None = None
+    reuse_label: str | None = None

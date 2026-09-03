@@ -29,22 +29,44 @@ _INVALID_PARAMS = -32602
 _INTERNAL_ERROR = -32603
 
 
-def a2a_error(code: int, message: str, data: Any = None) -> JSONResponse:
-    """A2A spec error (the seven -3200x codes or JSON-RPC standard codes)."""
+def a2a_error(
+    code: int,
+    message: str,
+    data: Any = None,
+    *,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
+    """A2A spec error (the seven -3200x codes or JSON-RPC standard codes).
+
+    ``headers`` (RT-B-005/RT-005): a caller on the ``/v1/*`` surface may pass
+    an already-computed ``X-A2A-Extensions`` echo so it survives on an error
+    response too — this JSONResponse is returned directly, bypassing
+    FastAPI's normal merge of the injected ``Response`` object's headers.
+    Pass it ONLY once the caller has established, for THIS response, what was
+    genuinely activated — never a header pre-computed before the request's
+    own branch (parse/config failure vs. a resolved success path) was known;
+    routes/a2a.py's module docstring and ``_echo_extensions`` document why.
+    Most error paths (a parse failure, an unresolvable resume, ...) activated
+    nothing and correctly pass no headers at all.
+    """
     _client_error_codes = (_PARSE_ERROR, _INVALID_PARAMS)
     status = A2A_HTTP_STATUS.get(code, 400 if code in _client_error_codes else 500)
     body: dict[str, Any] = {"code": code, "message": message}
     if data is not None:
         body["data"] = data
-    return JSONResponse(status_code=status, content={"error": body})
+    return JSONResponse(status_code=status, content={"error": body}, headers=headers)
 
 
-def a2a_parse_error(message: str = "parse error") -> JSONResponse:
-    return a2a_error(_PARSE_ERROR, message)
+def a2a_parse_error(
+    message: str = "parse error", *, headers: dict[str, str] | None = None
+) -> JSONResponse:
+    return a2a_error(_PARSE_ERROR, message, headers=headers)
 
 
-def a2a_invalid_params(message: str = "invalid params") -> JSONResponse:
-    return a2a_error(_INVALID_PARAMS, message)
+def a2a_invalid_params(
+    message: str = "invalid params", *, headers: dict[str, str] | None = None
+) -> JSONResponse:
+    return a2a_error(_INVALID_PARAMS, message, headers=headers)
 
 
 def from_agent_error(err: AgentError) -> JSONResponse:

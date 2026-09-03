@@ -8,7 +8,7 @@ second-precision ``Z``-suffixed form (e.g. ``2026-...Z``) inside GH-110's
 Origin-hardening todo — a stable-core wire behavior change (DESIGN.md §4.0)
 with no CHANGELOG entry, no tracked todo, and no conformance test. Reverted;
 this test pins the pre-existing wire format so any future consolidation of
-``_now_iso``/``_now`` onto ``iso_utc`` must do so under its own tracked
+``runner.py``'s ``_now()`` onto ``iso_utc`` must do so under its own tracked
 todo + CHANGELOG + test update, not silently.
 """
 

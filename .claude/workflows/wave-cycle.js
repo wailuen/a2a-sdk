@@ -117,6 +117,30 @@ const WAVE_SCHEMA = {
   },
 }
 
+// RT-002 (w039 archival hygiene): two waves run concurrently against the same
+// working tree with no isolation between them produce an uncommitted blob no
+// single wave's history can be reviewed, reverted, or released independently
+// of the other — the exact failure this schema's guard exists to catch before
+// a SECOND wave's Implement phase starts stacking more uncommitted work on top.
+const CONCURRENCY_GUARD_SCHEMA = {
+  type: 'object',
+  required: ['otherActiveWaves', 'dirtyPathCount'],
+  additionalProperties: false,
+  properties: {
+    otherActiveWaves: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Basenames of other wave files (w[NNN]-*.md, excluding CHECKPOINT-*.md) ' +
+        'in workspace/todos/active/ besides this run\'s own wave file',
+    },
+    dirtyPathCount: {
+      type: 'integer',
+      description: 'Number of lines from `git status --porcelain` at repo root (modified + ' +
+        'staged + untracked paths, 0 if the working tree is clean)',
+    },
+  },
+}
+
 const RT_SCHEMA = {
   type: 'object',
   required: ['findingsCount', 'findings'],
@@ -394,6 +418,40 @@ if (wave.allScope.length === 0) {
   log('ERROR: wave ' + wave.waveId + ' has no Creates: AND no Modifies: paths — aborting ' +
       '(truly empty scope is a harness bug, not a clean wave)')
   return { error: 'empty-scope', waveId: wave.waveId }
+}
+
+// RT-002 (w039 archival hygiene): a second wave starting its Implement phase while an
+// EARLIER wave's file still sits in workspace/todos/active/ AND the working tree is
+// uncommitted stacks that earlier wave's uncommitted work underneath this run's own —
+// by the time either archives, neither can be committed, reviewed, or reverted as an
+// independent unit (the two wave's changes end up interleaved in the same diff with no
+// isolation). This was previously only a comment (WC-RT-005) noting the risk without
+// enforcing it. Checked once, right after Parse, before any file mutation this run
+// might make — a wave RESUMING itself (its own file already in active/) is not blocked,
+// only a genuinely OTHER wave file coexisting with dirty state.
+const concurrency = await agent(
+  'List every wave file directly inside workspace/todos/active/ that matches the ' +
+  'pattern w[0-9]+-*.md, EXCLUDING CHECKPOINT-*.md files and excluding the file at ' +
+  WAVE_FILE + ' itself (this run\'s own wave file — do not report it even if its ' +
+  'basename matches). Return their basenames as otherActiveWaves (empty array if none).\n\n' +
+  'Separately, run `git status --porcelain` at the repo root and return the number of ' +
+  'lines it prints as dirtyPathCount (0 if the working tree is clean).',
+  { schema: CONCURRENCY_GUARD_SCHEMA, label: 'concurrency-guard', phase: 'Parse' }
+)
+
+if (concurrency && concurrency.otherActiveWaves.length > 0 && concurrency.dirtyPathCount > 0) {
+  log('ERROR: wave ' + wave.waveId + ' cannot start — ' +
+      concurrency.otherActiveWaves.join(', ') + ' already sits in workspace/todos/active/ ' +
+      'and the working tree has ' + concurrency.dirtyPathCount + ' uncommitted path(s). ' +
+      'Commit or archive the other wave first (or re-run this wave from a dedicated ' +
+      'worktree) — running two waves against one uncommitted tree produces a diff neither ' +
+      'can be reviewed, reverted, or released independently of the other.')
+  return {
+    error: 'concurrent-wave-uncommitted',
+    waveId: wave.waveId,
+    otherActiveWaves: concurrency.otherActiveWaves,
+    dirtyPathCount: concurrency.dirtyPathCount,
+  }
 }
 
 log('Wave ' + wave.waveId + ': ' + wave.groups.length + ' group(s), ' +

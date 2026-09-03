@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import Response
 from pydantic import BaseModel
 
 from agent_sdk.a2ui.translator import A2uiCapabilities
@@ -208,7 +209,7 @@ async def test_tasks_cancel_closes_streams_when_terminal_publish_raises() -> Non
     request = _FakeRequest(store)
 
     with pytest.raises(RuntimeError):
-        await tasks_cancel(record.task.id, request, identity=_IDENTITY)
+        await tasks_cancel(record.task.id, request, Response(), identity=_IDENTITY)
 
     closed = await _drain_to_close(sub)
     assert closed, (

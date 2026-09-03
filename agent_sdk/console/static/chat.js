@@ -302,6 +302,23 @@ export function render(pane, ctx) {
     transcript.scrollTop = transcript.scrollHeight;
   }
 
+  // RT-005 (DESIGN.md §5.1): a ReuseKind $ref/$raw/forced-passthrough audit
+  // frame — TaskStatusUpdateEvent{metadata: {audit: {code, tool_name,
+  // field_name, kind}}}, never carrying status.message. Rendered as a
+  // distinct, visibly-internal line instead of the generic `status: <state>`
+  // line, which would otherwise just repeat the task's unchanged current
+  // state once per substitution with the audit payload itself never shown
+  // anywhere in the console.
+  function auditLine(audit) {
+    const detail = ["tool_name", "field_name", "kind"]
+      .filter((k) => audit[k] !== undefined && audit[k] !== null)
+      .map((k) => `${k}=${audit[k]}`)
+      .join(" ");
+    const text = `audit: ${audit.code}${detail ? ` (${detail})` : ""}`;
+    transcript.appendChild(el("div", { class: "chat-system dim audit" }, text));
+    transcript.scrollTop = transcript.scrollHeight;
+  }
+
   function attach(node) {
     transcript.appendChild(node);
     transcript.scrollTop = transcript.scrollHeight;
@@ -358,7 +375,12 @@ export function render(pane, ctx) {
         state.contextId = json.contextId || state.contextId;
       } else if (kind === "status-update") {
         const status = json.status || {};
-        systemLine(`status: ${status.state || "?"}`);
+        const audit = json.metadata && json.metadata.audit;
+        if (audit) {
+          auditLine(audit);
+        } else {
+          systemLine(`status: ${status.state || "?"}`);
+        }
         const msg = status.message;
         if (msg && Array.isArray(msg.parts)) {
           for (const part of msg.parts) {

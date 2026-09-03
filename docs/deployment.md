@@ -55,6 +55,72 @@ history), URL form `https://x-access-token:${TOKEN}@...`, with
 - **`Agent(task_store=...)`** — alternative `TaskStore` (the in-memory
   default is the only one shipped today).
 
+### Custom TaskStore durability
+
+`InMemoryTaskStore.get()` returns the live record by reference, so an
+in-place mutation of `task.status` or `messages` *is* the write. A durable
+subclass whose `get()` deserializes a fresh copy per call does not get that
+for free — it must instead override two hooks that are non-abstract and
+default to a no-op on the base `TaskStore`:
+
+- **`persist_messages(record)`** — flushes `record.messages`.
+- **`persist_status(record)`** — flushes `record.task.status`.
+
+**Override both together, never just one.** A store that overrides only
+`persist_messages` never learns a terminal transition (`COMPLETED`,
+`CANCELED`, ...), so the transcript it just flushed is never selected back
+as a continuation candidate. Flush order is fixed: `persist_messages` runs
+first, and `persist_status` fires only if that flush succeeded — so a
+terminal status is never published durably ahead of the transcript it
+depends on.
+
+By default `persist_status` fires only on terminal/interrupt transitions,
+not on every `WORKING` update — a streamed reply can emit many WORKING
+transitions per turn, and flushing all of them would hit durable storage far
+more than durability requires. Set the class attribute
+**`persist_every_status = True`** to restore a flush on every status
+transition (e.g. to drive a live status dashboard).
+
+**The interrupt-state `persist_messages` flush is a mid-turn snapshot, not a
+turn-boundary one.** `persist_messages` also fires on `AUTH_REQUIRED`/
+`INPUT_REQUIRED` (not only terminal states) — but an interrupt is always
+raised from inside the per-tool-call loop, after that turn's assistant
+`toolUse` message is folded into `record.messages` and before its matching
+`toolResult` is. So the transcript this flush captures is **guaranteed** to
+end on a dangling `toolUse` with no matching `toolResult` — not directly
+replayable against a Converse-API-shaped backend. If your durable
+`TaskStore` subclass reconstructs a task from this snapshot after a process
+restart, repair that dangling tail yourself (append a synthetic `toolResult`
+per outstanding `toolUseId`) before handing the transcript to a model —
+mirror `agent_sdk.agent.runner.repair_dangling_tool_use`, which the SDK
+itself calls on every other mid-turn exit path (cancel, a `long_running`
+tool's deferred handoff, a mid-turn exception) but not on this one, since
+the interrupted call is still logically in flight, not abandoned.
+
+See the `TaskStore` docstrings in `agent_sdk/tasks/store.py` for the full
+rationale.
+
+### `AGENT_SDK_MAX_TURNS` vs. context continuation's message cap
+
+`InMemoryTaskStore.MAX_CONTEXT_MESSAGES` (default 50) bounds how much of the
+most recent terminal task's transcript `context_messages()` carries into a
+fresh `message/send` on the same `contextId` (A2A §3 continuation). This cap
+is independent of, but not unrelated to, **`AGENT_SDK_MAX_TURNS`**
+(default 20, `LoopPolicies.max_turns`): a task that runs every turn to
+completion without ever producing a final reply folds `2 * max_turns + 2`
+messages, with its only plain user-authored turn boundary at the very first
+(seed) message.
+
+Raise `AGENT_SDK_MAX_TURNS` past roughly 24 and that per-task message count
+exceeds the default `MAX_CONTEXT_MESSAGES`, so the cap's trailing window can
+land with no turn boundary in it at all. The store falls back to the nearest
+earlier boundary rather than dropping the whole prior transcript, and logs a
+`WARNING` (`agent_sdk.tasks.memory`) each time it does. Seeing that warning
+routinely means your `MAX_CONTEXT_MESSAGES` (or a durable subclass's
+override of it) is undersized for your `max_turns` — raise it, or lower
+`max_turns`, to keep continuation replay at its nominal size instead of
+relying on the fallback every time.
+
 ## Azure Container Apps + multi-replica
 
 ### Overview

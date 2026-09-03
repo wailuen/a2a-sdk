@@ -194,13 +194,100 @@ function paintSurface(entry, fallbackText, notes) {
     return fallbackNode(fallbackText, `unknown component: ${String(root.component)}`);
   }
   try {
-    const node = renderer(value === undefined ? {} : value);
+    const resolved = value === undefined ? {} : value;
+    const node = renderer(resolved);
     node.classList.add("a2ui-surface");
+    appendMetadataFootnote(node, resolved);
     return node;
   } catch (err) {
     notes.push(`renderer ${root.component} failed: ${err.message || err}`);
     return fallbackNode(fallbackText, `renderer error for ${String(root.component)}`);
   }
+}
+
+/**
+ * Render the SDK-wide `metadata` envelope once, for every STRUCTURED
+ * component type (13 of the 14 — see the MarketBriefing note below).
+ *
+ * RT-004: `metadata` is declared on `ContentModel` itself, so no per-component
+ * renderer owns it — and none of the 14 read it, which made the console blind
+ * to the whole GH-63 disclosure envelope. That is not a cosmetic gap: with
+ * `FundPerformance.fundName` removed (GH-149), the CHANGELOG's own migration
+ * callout names `metadata={"fund": "Fund III"}` as a supported way to carry
+ * fund identity, and the console is the renderer `/acceptance --ux` inspects.
+ * Without this, an agent that follows that instruction sees N cards all titled
+ * the fixed string "Fund performance" with nothing to tell them apart.
+ *
+ * Applied at the single dispatch point rather than inside `card()`, which
+ * receives only (title, subtitle, children) and never the data — one call site
+ * covers 13 of the 14 renderers plus every future domain card, mirroring
+ * `ContentModel.to_plain_text()` appending `_metadata_suffix()` once on the
+ * base class for the text fallback.
+ *
+ * RT-006: MarketBriefing is a genuine exception, not a bug to fix here.
+ * translator.py's `translate()` binds MarketBriefing's A2UI surface value to
+ * `payload.to_markdown()` — a bare markdown STRING — instead of `payload.wire()`,
+ * and `to_markdown()` is documented (content_types.py) to deliberately stay
+ * "clean" of the metadata suffix, unlike `to_plain_text()`. So the console's
+ * data model for a MarketBriefing surface never contains a `metadata` key —
+ * there is nothing here to read, in JS or otherwise, without changing that
+ * locked wire contract. The disclosure envelope still reaches callers through
+ * `to_plain_text()` (the A2A TextPart and the MCP `tools/call` text) — it is
+ * only this on-canvas footnote that a prose card cannot carry.
+ */
+function appendMetadataFootnote(node, data) {
+  // See the MarketBriefing note above: its bound value is a bare markdown
+  // string, never an object, so it never reaches past this guard.
+  if (!data || typeof data !== "object" || Array.isArray(data)) return;
+  const meta = data.metadata;
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return;
+  const entries = Object.entries(meta);
+  if (!entries.length) return;
+
+  // RT-008: metadata is caller-/tool-supplied (RT-A06), so it must carry the
+  // SAME bounds as content_types.py's _metadata_suffix() -- per-field
+  // control-char strip + 256-char cap (_METADATA_SUFFIX_FIELD_MAX_LEN), and a
+  // 4096-char cap on the assembled footnote as a whole
+  // (_METADATA_SUFFIX_MAX_LEN) -- otherwise a metadata dict with thousands of
+  // keys or embedded C0/C1 control chars renders unbounded in the console.
+  //
+  // RT-006: byte-matches Python's sanitize_text (agent_sdk/common/redact.py,
+  // C-007) -- `s[:max_len].translate(...)` -- which slices to max_len FIRST
+  // and never appends an ellipsis. Stripping before truncating (as this used
+  // to) can let a control char collapse into a space that then survives past
+  // where sanitize_text would have already cut the string, and the trailing
+  // "…" pushed the rendered field to 257 chars against Python's hard 256 cap.
+  const FIELD_MAX_LEN = 256;
+  const SUFFIX_MAX_LEN = 4096;
+  const sanitize = (s) => s.slice(0, FIELD_MAX_LEN).replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
+
+  const row = el("div", { class: "dim a2ui-meta" });
+  let budget = SUFFIX_MAX_LEN;
+  for (const [k, v] of entries) {
+    if (budget <= 0) break;
+    // Untrusted-output invariant: metadata is caller-/tool-supplied, so every
+    // key and value lands as a text node (el() uses createTextNode), never
+    // markup. Objects are JSON-stringified rather than rendered as [object
+    // Object]; a cyclic value degrades to the placeholder instead of throwing
+    // out of the renderer (which paintSurface would turn into a fallback node,
+    // losing the whole card over a footnote).
+    let text;
+    if (v === null || v === undefined) {
+      text = "—";
+    } else if (typeof v === "object") {
+      try {
+        text = JSON.stringify(v);
+      } catch (err) {
+        text = "(unserializable)";
+      }
+    } else {
+      text = String(v);
+    }
+    const rendered = `${sanitize(String(k))}: ${sanitize(text)}`;
+    row.appendChild(el("span", { class: "a2ui-meta-item" }, rendered.slice(0, budget)));
+    budget -= rendered.length;
+  }
+  node.appendChild(row);
 }
 
 function fallbackNode(fallbackText, reason) {
@@ -585,7 +672,9 @@ function renderFundPerformance(data) {
     ["Dry powder", money(data.dryPowder)],
     ["Distributed", money(data.distributed)],
     ["Remaining value", money(data.remainingValue)],
+    ["Distributed + remaining", money(data.distributedPlusRemaining)],
     ["Called down", pct(data.calledDownPct)],
+    ["Dry powder %", pct(data.dryPowderPct)],
   ].filter(([, v]) => v !== null && v !== undefined);
   const grid = el(
     "div",
@@ -594,7 +683,13 @@ function renderFundPerformance(data) {
       el("div", { class: "a2ui-kpi" }, el("div", { class: "a2ui-kpi-value mono" }, value), el("div", { class: "a2ui-kpi-label" }, label))
     )
   );
-  return card(data.fundName || "Fund performance", data.asOfDate ? `as of ${data.asOfDate}` : null, grid);
+  const periodBits = [data.asOfQuarter ? `Q${data.asOfQuarter}` : null, data.asOfYear ? String(data.asOfYear) : null].filter(Boolean);
+  const subBits = [
+    periodBits.length ? periodBits.join(" ") : null,
+    data.asOfDate ? `as of ${data.asOfDate}` : null,
+    data.pbId ? `source ${data.pbId}` : null,
+  ].filter(Boolean);
+  return card("Fund performance", subBits.join(" · ") || null, grid);
 }
 
 function renderEmailList(data) {

@@ -13,11 +13,13 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
 from agent_sdk.a2ui.translator import A2uiCapabilities, split_a2ui_delivery, translate
 from agent_sdk.models.content_types import (
+    ContentModel,
     KpiCard,
     KpiTrend,
     MetricItem,
@@ -1199,3 +1201,314 @@ def test_market_briefing_translate_value_is_string_not_dict():
     # Explicit negative: the raw wire dict would have keys like 'title', 'as_of',
     # 'prose', 'sections' — none of those should appear as top-level JSON keys.
     assert not isinstance(value, dict), "value must never be a dict"
+
+
+# ── RT-008: catalog string drift guard ──────────────────────────────────────
+#
+# _FEW_SHOT_EXAMPLES and _COMPACT_SCHEMAS (agent_sdk/a2ui/catalog.py) are
+# hand-maintained JSON string literals teaching the LLM each component's wire
+# shape. Nothing previously bound them to the actual registered ContentModel
+# field contracts — GH-149's fundName lived in both catalog strings and the
+# model, outside the frozen profile, and was only caught by a human reading
+# the advisor doc. These tests close that gap: a field added, renamed, or
+# removed on a registered model without updating the matching catalog string
+# now fails CI instead of silently teaching the LLM a wrong wire shape.
+
+
+def _declared_wire_keys(cls: type) -> set[str]:
+    """Field names AND aliases accepted as valid top-level wire keys for
+    *cls* — populate_by_name=True means either spelling is legitimate input,
+    and wire() emits the alias when one is declared."""
+    keys: set[str] = set()
+    for name, info in cls.model_fields.items():
+        keys.add(name)
+        if info.alias:
+            keys.add(info.alias)
+    return keys
+
+
+def test_few_shot_examples_keys_match_registered_model_fields():
+    """RT-008: every key in each _FEW_SHOT_EXAMPLES JSON literal (besides the
+    'component' discriminator) must be a declared field name or alias on that
+    component's registered ContentModel — catches a catalog string that
+    still teaches a renamed, removed, or typo'd field (the GH-149 drift
+    class: fundName lived in both the catalog strings and the model, outside
+    the frozen profile, caught only by a human reading the advisor doc)."""
+    from agent_sdk.a2ui.catalog import _FEW_SHOT_EXAMPLES
+    from agent_sdk.models.content_types import registered_content_types
+
+    by_component = {cls.component: cls for cls in registered_content_types().values()}
+
+    for component, example in _FEW_SHOT_EXAMPLES.items():
+        cls = by_component.get(component)
+        assert cls is not None, (
+            f"_FEW_SHOT_EXAMPLES has an entry for {component!r} but no "
+            f"ContentModel is registered under that component name"
+        )
+        payload = json.loads(example)
+        assert payload.get("component") == component, (
+            f"_FEW_SHOT_EXAMPLES[{component!r}] example's 'component' field "
+            f"must equal {component!r}; got {payload.get('component')!r}"
+        )
+        declared = _declared_wire_keys(cls)
+        for key in payload:
+            if key == "component":
+                continue
+            assert key in declared, (
+                f"_FEW_SHOT_EXAMPLES[{component!r}] teaches key {key!r} which "
+                f"is not a declared field or alias on {cls.__name__} "
+                f"(declared: {sorted(declared)}) — catalog string has drifted "
+                f"from the model (GH-149 drift class)"
+            )
+
+
+def test_compact_schemas_cover_every_registered_component():
+    """RT-008: every registered component must have a _COMPACT_SCHEMAS entry
+    — a newly registered type with no compact schema silently falls back to
+    the verbose _field_summary() rendering in the LLM system prompt, which is
+    a real (if soft) drift the catalog string set should track deliberately,
+    not by omission."""
+    from agent_sdk.a2ui.catalog import _COMPACT_SCHEMAS
+    from agent_sdk.models.content_types import registered_content_types
+
+    for cls in registered_content_types().values():
+        assert cls.component in _COMPACT_SCHEMAS, (
+            f"{cls.component!r} ({cls.__name__}) is registered but has no "
+            f"_COMPACT_SCHEMAS entry in agent_sdk/a2ui/catalog.py"
+        )
+
+
+def _compact_schema_top_level_keys(schema: str) -> set[str]:
+    """Extract the top-level ``"key":`` names from a _COMPACT_SCHEMAS value,
+    stripping the trailing '?' optional marker and skipping over nested
+    object/array/string bodies without descending into them.
+
+    Returns an empty set for a non-object schema string (the MarketBriefing
+    prose-exception entry, which is prose guidance, not a wire shape)."""
+    if not schema.startswith("{"):
+        return set()
+    keys: set[str] = set()
+    i = 1
+    n = len(schema)
+    while i < n:
+        c = schema[i]
+        if c == "}":
+            break
+        if c == '"':
+            close = schema.index('"', i + 1)
+            keys.add(schema[i + 1 : close].rstrip("?"))
+            i = close + 1
+            assert schema[i] == ":", f"malformed compact schema (expected ':'): {schema!r}"
+            i += 1
+            depth = 0
+            while i < n:
+                vc = schema[i]
+                if vc == '"':
+                    i = schema.index('"', i + 1) + 1
+                    continue
+                if vc in "{[":
+                    depth += 1
+                elif vc in "}]":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                elif vc == "," and depth == 0:
+                    i += 1
+                    break
+                i += 1
+            continue
+        i += 1
+    return keys
+
+
+def test_compact_schemas_keys_match_registered_model_fields():
+    """RT-007: every top-level key taught by a _COMPACT_SCHEMAS string must be
+    a declared field name or alias on that component's registered
+    ContentModel. _COMPACT_SCHEMAS is the larger surface — every registered
+    component gets one, versus the handful covered by _FEW_SHOT_EXAMPLES — so
+    without this, a stale/renamed/removed field in a compact schema string
+    still teaches the LLM a wrong wire shape with no CI signal (the GH-149
+    drift class: fundName lived in catalog.py:139 until a human read the
+    advisor doc)."""
+    from agent_sdk.a2ui.catalog import _COMPACT_SCHEMAS
+    from agent_sdk.models.content_types import registered_content_types
+
+    by_component = {cls.component: cls for cls in registered_content_types().values()}
+
+    for component, schema in _COMPACT_SCHEMAS.items():
+        cls = by_component.get(component)
+        assert cls is not None, (
+            f"_COMPACT_SCHEMAS has an entry for {component!r} but no "
+            f"ContentModel is registered under that component name"
+        )
+        declared = _declared_wire_keys(cls)
+        for key in _compact_schema_top_level_keys(schema):
+            assert key in declared, (
+                f"_COMPACT_SCHEMAS[{component!r}] teaches key {key!r} which "
+                f"is not a declared field or alias on {cls.__name__} "
+                f"(declared: {sorted(declared)}) — catalog string has drifted "
+                f"from the model (GH-149 drift class)"
+            )
+
+
+# ── RT-004 (catalog.py fix): FundPerformance few-shot must not fabricate pbId ─
+#
+# GH-149's AC said only "drop fundName" from _FEW_SHOT_EXAMPLES["FundPerformance"],
+# but the example was also given a "pbId":"pb-acme-3" literal that was never in
+# the original. pbId is the upstream source-system id — provenance the LLM has
+# no legitimate way to know, it can only echo a value a tool result actually
+# supplied. Leading the sole few-shot example for this type with a fabricable
+# identifier teaches the model to invent one, and that invented value is then
+# displayed to the end user as real provenance on two surfaces (the console
+# card subtitle and FundPerformance.to_plain_text(), both "source <pbId>") —
+# the inverse of RT-010's own finding that pbId must never be surfaced as a
+# display name.
+
+
+def test_few_shot_examples_fund_performance_omits_pbid():
+    """The FundPerformance few-shot example must demonstrate only metrics the
+    model can legitimately produce (irr/tvpi/dpi/rvpi/netIrr/grossIrr/moic/
+    asOfDate/nav/asOfQuarter/asOfYear) — never a fabricated pbId value."""
+    from agent_sdk.a2ui.catalog import _FEW_SHOT_EXAMPLES
+
+    payload = json.loads(_FEW_SHOT_EXAMPLES["FundPerformance"])
+    assert "pbId" not in payload, (
+        "_FEW_SHOT_EXAMPLES['FundPerformance'] must not teach a fabricated "
+        f"pbId literal; got payload={payload!r}"
+    )
+
+
+def test_system_prompt_warns_against_inventing_pbid():
+    """The FundPerformance line in the LLM system prompt must tell the model
+    pbId is upstream provenance to be emitted only when a tool result
+    supplied one, never invented — so the compact schema's bare
+    '"pbId?":str' shape does not itself invite fabrication now that the
+    few-shot example no longer demonstrates one."""
+    from agent_sdk.a2ui.catalog import get_system_prompt_section
+
+    section = get_system_prompt_section()
+    fp_line = next(
+        line for line in section.splitlines() if line.startswith("- FundPerformance")
+    )
+    assert "pbId" in fp_line and "invent" in fp_line.lower(), (
+        f"FundPerformance schema line must warn against inventing pbId; got: {fp_line!r}"
+    )
+
+
+# ── RT-005 (catalog.py fix): _field_summary must not name-match "metadata" ───
+#
+# _field_summary's skip matched the literal string "metadata" rather than "is
+# a field inherited from ContentModel". A domain card that deliberately
+# redeclares its OWN metadata field with different (possibly required)
+# semantics was silently omitted from the LLM teaching string — the exact
+# class of teaching-surface gap LRN-117 was written for, since _field_summary
+# is the fallback for every registered type with no _COMPACT_SCHEMAS entry.
+
+
+class _NoOwnMetadataCard(ContentModel):
+    data_type: ClassVar[str] = "test_no_own_metadata_card"
+    component: ClassVar[str] = "TestNoOwnMetadataCard"
+
+    title: str
+
+    def to_plain_text(self) -> str:  # pragma: no cover - trivial fallback
+        return self.title
+
+
+class _OwnMetadataCard(ContentModel):
+    data_type: ClassVar[str] = "test_own_metadata_card"
+    component: ClassVar[str] = "TestOwnMetadataCard"
+
+    title: str
+    metadata: str  # deliberately redeclared, required, different type than the base
+
+    def to_plain_text(self) -> str:  # pragma: no cover - trivial fallback
+        return self.title
+
+
+def test_field_summary_excludes_inherited_contentmodel_metadata():
+    """A card that does NOT redeclare metadata itself keeps the base-class
+    out-of-band field out of the teaching string (RT-003's original intent)."""
+    from agent_sdk.a2ui.catalog import _field_summary
+
+    summary = _field_summary(_NoOwnMetadataCard)
+    assert "metadata" not in summary, (
+        f"inherited ContentModel.metadata must not appear in the summary; got {summary!r}"
+    )
+    assert "title" in summary
+
+
+def test_field_summary_includes_own_declared_metadata_field():
+    """A card that redeclares metadata as its OWN required domain field must
+    have it appear in the teaching string — the name-match skip previously
+    dropped it regardless of who declared it."""
+    from agent_sdk.a2ui.catalog import _field_summary
+
+    summary = _field_summary(_OwnMetadataCard)
+    assert "metadata" in summary, (
+        f"own-declared metadata field must appear in the summary; got {summary!r}"
+    )
+    assert "title" in summary
+
+
+# ── RT-008 (catalog.py fix): declared-here check must walk the MRO ───────────
+#
+# The skip keyed on `name not in cls.__annotations__`, which only looks at
+# the class's OWN annotations, not any inherited from a domain-declaring
+# parent. A two-level subclass of `_OwnMetadataCard` that does not itself
+# redeclare `metadata` still owns a domain-declared (not ContentModel-declared)
+# `metadata` field via inheritance, and it must not vanish from the summary.
+
+
+class _OwnMetadataGrandchildCard(_OwnMetadataCard):
+    data_type: ClassVar[str] = "test_own_metadata_grandchild_card"
+    component: ClassVar[str] = "TestOwnMetadataGrandchildCard"
+
+    def to_plain_text(self) -> str:  # pragma: no cover - trivial fallback
+        return self.title
+
+
+def test_field_summary_includes_domain_metadata_two_levels_deep():
+    """A subclass of a card that redeclares metadata, which does not itself
+    redeclare it again, must still surface the domain-declared field — the
+    MRO walk must not stop at the immediate class's own __annotations__."""
+    from agent_sdk.a2ui.catalog import _field_summary
+
+    summary = _field_summary(_OwnMetadataGrandchildCard)
+    assert "metadata" in summary, (
+        f"domain-declared metadata (inherited two levels) must appear in the "
+        f"summary; got {summary!r}"
+    )
+    assert "title" in summary
+
+
+# ── RT-001 (catalog.py fix): declared-here check must not silently go blind
+# on Python 3.14 (PEP 649) ────────────────────────────────────────────────
+#
+# The RT-008 test above and its sibling both pass on every interpreter only
+# because THIS module carries `from __future__ import annotations`, which
+# forces eager stringified annotations at class-creation time regardless of
+# Python version — masking the exact gap RT-001 found. A raw
+# `vars(klass).get("__annotations__", {})` read returns `{}` on 3.14 for any
+# class whose OWN module lacks that future import, so `declared_here` was
+# always False there and a domain card's own redeclared `metadata` field was
+# silently dropped. The card under test here is defined in a helper module
+# that deliberately omits the future import, so this regression cannot be
+# masked the way the RT-008 tests above are.
+
+
+def test_field_summary_includes_own_declared_metadata_field_without_future_annotations():
+    """Same contract as test_field_summary_includes_own_declared_metadata_field,
+    but the card is declared in a module with no `from __future__ import
+    annotations` — the shape that was silently broken on Python 3.14."""
+    from agent_sdk.a2ui.catalog import _field_summary
+    from tests._rt001_catalog_no_future_annotations_card import (
+        OwnMetadataCardNoFutureAnnotations,
+    )
+
+    summary = _field_summary(OwnMetadataCardNoFutureAnnotations)
+    assert "metadata" in summary, (
+        f"own-declared metadata field must appear in the summary even when "
+        f"its module has no `from __future__ import annotations`; got {summary!r}"
+    )
+    assert "title" in summary

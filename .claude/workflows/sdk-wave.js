@@ -118,6 +118,32 @@ const WAVE_SCHEMA = {
   },
 }
 
+// RT-002 (w039 archival hygiene): w039 and w040 ran concurrently against this exact
+// repo with no isolation between them — both wave files sat in workspace/todos/active/
+// at once with 106+ modified/added paths uncommitted, interleaving w040's GH-148
+// mechanism into the SAME files (agent/loop.py, agent/runner.py, tasks/store.py,
+// routes/a2a.py) w039's own todos were mid-editing, leaving neither wave's diff
+// reviewable, revertible, or releasable independently of the other. See this schema's
+// guard below, checked once right after Parse.
+const CONCURRENCY_GUARD_SCHEMA = {
+  type: 'object',
+  required: ['otherActiveWaves', 'dirtyPathCount'],
+  additionalProperties: false,
+  properties: {
+    otherActiveWaves: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Basenames of other wave files (w[NNN]-*.md, excluding CHECKPOINT-*.md) ' +
+        'in workspace/todos/active/ besides this run\'s own wave file',
+    },
+    dirtyPathCount: {
+      type: 'integer',
+      description: 'Number of lines from `git status --porcelain` at repo root (modified + ' +
+        'staged + untracked paths, 0 if the working tree is clean)',
+    },
+  },
+}
+
 const RT_SCHEMA = {
   type: 'object',
   required: ['findingsCount', 'findings'],
@@ -375,6 +401,34 @@ if (wave.allScope.length === 0) {
   log('ERROR: wave ' + wave.waveId + ' has no Creates: AND no Modifies: paths — aborting ' +
       '(truly empty scope is a harness bug, not a clean wave)')
   return { error: 'empty-scope', waveId: wave.waveId }
+}
+
+// RT-002: refuse to stack a second wave's Implement phase on top of an earlier wave's
+// still-uncommitted work — a wave RESUMING itself (its own file already in active/) is
+// not blocked, only a genuinely OTHER wave file coexisting with dirty state.
+const concurrency = await agent(
+  'List every wave file directly inside workspace/todos/active/ that matches the ' +
+  'pattern w[0-9]+-*.md, EXCLUDING CHECKPOINT-*.md files and excluding the file at ' +
+  WAVE_FILE + ' itself (this run\'s own wave file — do not report it even if its ' +
+  'basename matches). Return their basenames as otherActiveWaves (empty array if none).\n\n' +
+  'Separately, run `git status --porcelain` at the repo root and return the number of ' +
+  'lines it prints as dirtyPathCount (0 if the working tree is clean).',
+  { schema: CONCURRENCY_GUARD_SCHEMA, label: 'concurrency-guard', phase: 'Parse' }
+)
+
+if (concurrency && concurrency.otherActiveWaves.length > 0 && concurrency.dirtyPathCount > 0) {
+  log('ERROR: wave ' + wave.waveId + ' cannot start — ' +
+      concurrency.otherActiveWaves.join(', ') + ' already sits in workspace/todos/active/ ' +
+      'and the working tree has ' + concurrency.dirtyPathCount + ' uncommitted path(s). ' +
+      'Commit or archive the other wave first (or re-run this wave from a dedicated ' +
+      'worktree) — running two waves against one uncommitted tree produces a diff neither ' +
+      'can be reviewed, reverted, or released independently of the other.')
+  return {
+    error: 'concurrent-wave-uncommitted',
+    waveId: wave.waveId,
+    otherActiveWaves: concurrency.otherActiveWaves,
+    dirtyPathCount: concurrency.dirtyPathCount,
+  }
 }
 
 log('Wave ' + wave.waveId + ': ' + wave.groups.length + ' group(s), ' +

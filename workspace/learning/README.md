@@ -18,7 +18,7 @@ Entries ordered by LRN number.
 | LRN-012 | wave-cycle.js A2UI audit prompt misstated Standard Profile type counts as Core 7 + Extended 11 instead of Core 6 + Extended 8 | [LRN-012](LRN-012-harness-workflows-wave-cycle-js.md) |
 | LRN-013 | AC "integration note" wording targets the Integration section, not step bodies | [LRN-013](LRN-013-harness-skills-upgrade-SKILL-md.md) |
 | LRN-014 | `pytest -q tests/` bypasses `addopts` ignore exclusions — always use bare `pytest -q` | [LRN-014](LRN-014-pytest-explicit-path-bypasses-addopts.md) |
-| LRN-015 | MCP tools/call — coercion failure must return isError:True, never except:pass | [LRN-015](LRN-015-mcp-coercion-failure-must-return-iserror.md) |
+| LRN-015 | MCP tools/call — emits coercion failure must return isError:True, never except:pass | [LRN-015](LRN-015-mcp-coercion-failure-must-return-iserror.md) |
 | LRN-016 | SSRF IP-block logic must live in agent_sdk/common/http.py — never duplicated | [LRN-016](LRN-016-ssrf-single-predicate-common-http.md) |
 | LRN-017 | wave-cycle.js — schema-gated gate agents required at redteam and proto-fix checkpoints | [LRN-017](LRN-017-wave-cycle-gate-agents-at-checkpoints.md) |
 | LRN-018 | MCP route bypasses per-type wire dispatch, emitting raw field dict instead of markdown string | [LRN-018](LRN-018-mcp-wire-type-dispatch-bypass.md) |
@@ -71,7 +71,7 @@ Entries ordered by LRN number.
 | LRN-065 | Runtime and template workflow copies diverge silently | [LRN-065](LRN-065-workflow-runtime-template-drift.md) |
 | LRN-066 | Learning narrative must match landed code at codify time | [LRN-066](LRN-066-learning-narrative-code-drift.md) |
 | LRN-067 | Wave state split-brain — plan.md and todo file disagree on critical item status | [LRN-067](LRN-067-wave-state-split-brain.md) |
-| LRN-068 | Phase redteam scores ACs against unimplemented wave targets (empty diff false-pass) | [LRN-068](LRN-068-phase-redteam-empty-diff-false-pass.md) |
+| LRN-068 | Phase redteam scores ACs against unimplemented wave targets | [LRN-068](LRN-068-phase-redteam-empty-diff-false-pass.md) |
 | LRN-069 | uv sync without --extra dev breaks pytest steps | [LRN-069](LRN-069-uv-sync-missing-dev-extra-before-pytest.md) |
 | LRN-070 | uv sync without --extra dev omits test deps and breaks pytest | [LRN-070](LRN-070-uv-sync-missing-extra-dev-drops-pytest.md) |
 | LRN-071 | template/ is a peer repo — wave todos must commit+push to wailuen/a2a-agent-template, not to a2a-sdk | [LRN-071](LRN-071-template-is-peer-repo-not-submodule.md) |
@@ -104,7 +104,7 @@ Entries ordered by LRN number.
 | LRN-098 | Scheduler-as-lifespan-extra pattern — import agent_sdk.scheduler does not exist | [LRN-098](LRN-098-scheduler-as-lifespan-extra-pattern.md) |
 | LRN-099 | A2A REST action suffix can differ from the JSON-RPC method name | [LRN-099](LRN-099-a2a-rest-suffix-differs-from-method-name.md) |
 | LRN-100 | Budget-exhausted deferred marker must be relocated once findings are resolved | [LRN-100](LRN-100-budget-exhausted-deferred-must-be-relocated.md) |
-| LRN-101 | Agent card description field must never fall back to empty string — use display_name sentinel instead | [LRN-101](LRN-101-agent-card-description-empty-string-fallback.md) |
+| LRN-101 | Agent card description must never fall back to empty string | [LRN-101](LRN-101-agent-card-description-empty-string-fallback.md) |
 | LRN-102 | TOOL_PROGRESS CUSTOM event emitted in ag_ui.py but absent from CUSTOM_EVENTS tuple, card schema, DESIGN.md §5.3 table, and console router — parity guard silent because both sides missing | [LRN-102](LRN-102-tool-progress-custom-event-parity-gap.md) |
 | LRN-103 | A2A multi-turn continuation must use contextId, not taskId, for completed tasks | [LRN-103](LRN-103-a2a-multiturn-contextid-continuation.md) |
 | LRN-104 | Deferred imports in model clients must not be silently caught by bare except Exception | [LRN-104](LRN-104-deferred-import-silent-wrap.md) |
@@ -118,7 +118,7 @@ Entries ordered by LRN number.
 | LRN-112 | Monotonic clock value fed to datetime.fromtimestamp() as if it were epoch time | [LRN-112](LRN-112-monotonic-clock-epoch-confusion.md) |
 | LRN-113 | New abstractmethod on public ABC breaks external subclasses | [LRN-113](LRN-113-public-abc-new-abstractmethod.md) |
 | LRN-114 | Non-total content extraction crashes AG-UI SSE stream without terminal frame | [LRN-114](LRN-114-non-total-sse-validation-crash.md) |
-| LRN-115 | AG-UI _capabilities() fail-closed tier="none" default is intentional — do not align to spec tier="core" | [LRN-115](LRN-115-agui-capabilities-fail-closed-tier-none-default.md) |
+| LRN-115 | AG-UI _capabilities() fail-closed tier="none" default is intentional — do not "align" it to spec's tier="core" | [LRN-115](LRN-115-agui-capabilities-fail-closed-tier-none-default.md) |
 | LRN-116 | MCP tools/call bypasses generator tool dispatch, breaking long-running Tier-1 tools | [LRN-116](LRN-116-mcp-tools-call-bypasses-generator-dispatch.md) |
 | LRN-117 | Allowlist must cover LLM system-prompt teaching surface | [LRN-117](LRN-117-allowlist-must-cover-llm-teaching-surface.md) |
 | LRN-118 | DESIGN.md MCP version-header rule stale after transport split | [LRN-118](LRN-118-protocol-doc-behavior-drift.md) |
@@ -137,7 +137,21 @@ Entries ordered by LRN number.
 | LRN-131 | Cross-runner gate logic diverges when a fix lands in only one runner | [LRN-131](LRN-131-cross-runner-gate-logic-divergence.md) |
 | LRN-132 | Protocol surface classification must follow code sharing, not directory naming | [LRN-132](LRN-132-protocol-surface-classification-by-blast-radius.md) |
 | LRN-133 | Reversing a decision must supersede its learning's Check in the same wave | [LRN-133](LRN-133-learning-check-reversal-reconciliation.md) |
-| LRN-134 | A2UI-over-A2A DataPart "messages" wrapper key satisfies A2A v0.3.0 but contradicts A2UI v0.9.1's own literal binding | [LRN-134](LRN-134-a2ui-a2a-datapart-messages-key-not-spec-mandated.md) |
-| LRN-135 | Portable a2ui-advisor oracle rewritten to teach this SDK's private `data.messages` deviation as the canonical A2UI-over-A2A rule, burying the spec's bare-array binding | [LRN-135](LRN-135-portable-oracle-encodes-deviation.md) |
+| LRN-134 | A2UI-over-A2A DataPart "messages" wrapper key satisfies A2A v0.3.0 but contradicts A2UI v0.9.1's own literal binding — citation + known interop caveat | [LRN-134](LRN-134-a2ui-a2a-datapart-messages-key-not-spec-mandated.md) |
+| LRN-135 | Portable spec oracle rewritten to teach SDK-private deviation as canonical rule | [LRN-135](LRN-135-portable-oracle-encodes-deviation.md) |
 | LRN-136 | Phase Redteam duplicates Unit Redteam on single-group waves — skip when groups.length === 1 | [LRN-136](LRN-136-phase-redteam-single-group-duplicate-pass.md) |
 | LRN-137 | Unit Redteam reviewed groups one at a time despite planner-guaranteed disjoint scope — run concurrently with a gate mutex | [LRN-137](LRN-137-unit-redteam-groups-run-concurrently.md) |
+| LRN-138 | reuse_fields_for_model crashes on get_type_hints for locally-scoped pydantic models | [LRN-138](LRN-138-local-scope-get-type-hints-crash.md) |
+| LRN-139 | Deferred tool handoff leaves dangling toolUse with no matching toolResult | [LRN-139](LRN-139-deferred-handoff-dangling-tooluse.md) |
+| LRN-140 | Resolved-marker block skips JSON normalization, poisons message history | [LRN-140](LRN-140-unnormalized-marker-value-poisons-messages.md) |
+| LRN-141 | Deferred background awaiter leaks raw Reusable wrapper onto the wire | [LRN-141](LRN-141-wrapper-unwrap-missing-dispatch-surface.md) |
+| LRN-142 | Reuse-mismatch error text names its own bypass token to the model | [LRN-142](LRN-142-validation-error-must-not-name-bypass.md) |
+| LRN-143 | Optional ReuseKind field permanently rejects explicit None as a raw mismatch | [LRN-143](LRN-143-optional-field-none-treated-as-raw-value.md) |
+| LRN-144 | Transcript role-alternation invariant not enforced outside run_loop's own exit points | [LRN-144](LRN-144-transcript-bridge-must-cover-out-of-loop-writers.md) |
+| LRN-145 | Shared input_schema advertises loop-only $ref: affordance to MCP and agent-card surfaces | [LRN-145](LRN-145-shared-schema-advertises-unimplemented-affordance.md) |
+| LRN-146 | Reuse gate keys on Python field name, not wire alias | [LRN-146](LRN-146-field-alias-key-mismatch-fail-open.md) |
+| LRN-147 | Terminal exception handlers skip dangling tool_use repair | [LRN-147](LRN-147-dangling-tool-use-terminal-handler.md) |
+| LRN-148 | Non-user-facing status frame re-serializes stale status.message | [LRN-148](LRN-148-stale-status-message-reserialized.md) |
+| LRN-149 | Cross-turn reuse index needs transport history fold with tool results | [LRN-149](LRN-149-transport-fold-drops-tool-results.md) |
+| LRN-150 | Cross-turn index seeded from newest-terminal-task-only decays after one hop | [LRN-150](LRN-150-cross-turn-index-single-hop-decay.md) |
+| LRN-151 | Early return above a bounded-recovery counter exempts that rejection path from the guarantee | [LRN-151](LRN-151-early-return-bypasses-bounded-recovery-counter.md) |

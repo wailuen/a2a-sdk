@@ -12,14 +12,67 @@ Reserved names (TradeActivity, CompanyInfo, DealList, InvestorProfile) have
 no field contract in v1: no model exists and ``register_content_type``
 refuses the component names.
 
+``metadata`` is an SDK-wide field, not a per-type Profile field
+----------------------------------------------------------------
+``ContentModel`` declares ``metadata: dict[str, Any] | None = None`` once,
+on the base class (RT-006) — every subclass inherits it rather than
+redeclaring it. It is an SDK-WIDE out-of-band envelope (GH-63) for disclosure
+annotations such as ``metadata={"coverage_note": "Partial: 5 of 20 funds"}`` —
+NOT a per-type Profile v1 field.
+
+Because the field is declared once on the base class, every rule about it is
+enforced once on the base class too (RT-003/RT-006, round 4) — none of the
+three below is a per-subclass obligation, so a domain card gets all three for
+free and cannot silently opt out of them:
+
+1. ``wire()`` emits it when set.
+2. ``to_plain_text()`` appends it as a trailing ``key=value`` suffix. That
+   method is CONCRETE on ``ContentModel`` (``self._body_text() +
+   self._metadata_suffix()``); subclasses implement ``_body_text()``. Before
+   this release, ``metadata`` reached ``wire()`` but no type — built-in or
+   domain — ever appended it to its text fallback; this release starts
+   emitting it for all of them, in one place on the base class, rather than
+   as a convention each subclass would otherwise have to implement by hand.
+   ``to_markdown()`` still never carries the suffix — ``MarketBriefing``'s
+   prose exception keeps ``to_markdown()`` clean and picks the suffix up
+   through the same base-class ``to_plain_text()`` as every other card.
+3. A ``field_validator`` rejects non-finite floats anywhere in it
+   (``_assert_finite``), so ``wire()``'s JSON ``null`` and the text
+   fallback's ``inf`` can never disagree about the same value.
+
+Since ``metadata`` is caller-/tool-supplied and reaches the mandatory A2A/MCP
+text fallback (RT-A06), ``_metadata_suffix()`` routes each rendered key and
+value through ``agent_sdk.common.redact.sanitize_text`` (control-char strip +
+per-field length cap, SI-2) and bounds the assembled suffix to
+``_METADATA_SUFFIX_MAX_LEN`` characters overall.
+
+The a2ui-advisor's frozen tables (``.claude/agents/a2ui-advisor.md``,
+``harness/agents/a2ui-advisor.md``, ``template/.claude/agents/a2ui-advisor.md``)
+have been updated to match (RT-006): the ``TimeSeriesChart`` per-type
+``metadata`` row is gone from all three copies, and the "Field-contract
+conventions" section carries the same note in each (worded there as
+"``metadata`` is a cross-cutting field, not a per-type one" — not a verbatim
+copy of this docstring's own wording above, but the same claim).
+
+The three advisor copies still diverge on the unrelated ``DataPart`` wire-
+format section (GH-128 follow-on) — tracked as
+https://github.com/wailuen/a2a-sdk/issues/151, not this docstring.
+
 Domain extension: agents register their own card types with
 ``register_content_type`` — subclass ``ContentModel``, declare ``data_type``
-/ ``component``, implement ``to_plain_text()``.
+/ ``component``, implement ``_body_text()`` (the card's own text rendering).
+Do NOT override ``to_plain_text()``: it is concrete on the base class and is
+what appends the ``metadata`` suffix. A card written against the older API
+that overrides ``to_plain_text()`` still works — ``ContentModel.__init_subclass__``
+adopts that override as the class's ``_body_text()`` — but new code should
+implement ``_body_text()`` directly.
 """
 
 from __future__ import annotations
 
 import abc
+import contextvars
+import functools
 import math
 from typing import Annotated, Any, ClassVar, Literal, Union
 
@@ -34,6 +87,8 @@ from pydantic import (
     model_validator,
 )
 
+from ..common.redact import sanitize_text
+
 CATALOG_ID = "urn:a2ui-profile:standard:v1"
 A2UI_VERSION = "v0.9.1"
 A2UI_EXTENSION_URI = "https://a2ui.org/a2a-extension/a2ui/v0.9.1"
@@ -43,8 +98,46 @@ RESERVED_COMPONENTS = ("TradeActivity", "CompanyInfo", "DealList", "InvestorProf
 
 _ARROWS = {"up": "▲", "down": "▼", "flat": "→"}
 
+# RT-A06: metadata is a caller-supplied dict[str, Any] (GH-63 disclosure
+# annotations) that reaches to_plain_text() — the mandatory text fallback on
+# the A2A TextPart (agent/runner.py) and MCP tools/call text (routes/mcp.py)
+# — via _metadata_suffix() below. Each key/value goes through the SAME shared
+# helper as every other untrusted string reaching the wire from this SDK —
+# common.redact.sanitize_text, component C-007, also called by agent/loop.py
+# for model-supplied skill/tool names — and the rendered suffix as a whole is
+# capped so an unbounded metadata dict cannot inflate the text fallback
+# without limit.
+_METADATA_SUFFIX_FIELD_MAX_LEN = 256
+_METADATA_SUFFIX_MAX_LEN = 4096
+
 
 _ASSERT_FINITE_MAX_DEPTH = 100
+
+# RT-003 (round 2): re-entrancy plumbing for adopted legacy to_plain_text()
+# overrides -- see ContentModel.__init_subclass__ and .to_plain_text below.
+# Keyed by the adopted class (not by instance) because the resolution target
+# -- "the next ancestor's _body_text after this class in the MRO" -- is fixed
+# at class-definition time and identical for every instance of that class.
+_NEXT_BODY_TEXT: dict[type, Any] = {}
+# Stack of (adopted_class, instance) currently executing an adopted override,
+# most-recent last. ContextVar rather than a plain module global so concurrent
+# asyncio tasks never observe each other's frames.
+_ADOPTED_OVERRIDE_STACK: contextvars.ContextVar[tuple[tuple[type, Any], ...]] = (
+    contextvars.ContextVar("_ADOPTED_OVERRIDE_STACK", default=())
+)
+
+
+def _next_body_text_impl(cls: type) -> Any:
+    """The ``_body_text`` implementation ``cls``'s adopted override must reach
+    when it calls ``super().to_plain_text()`` -- the first ancestor (walking
+    the MRO past ``cls`` itself) that declares ``_body_text`` in its OWN
+    ``__dict__``. ``ContentModel`` always qualifies (its abstract stub is
+    declared there), so this never fails to find one."""
+    for base in cls.__mro__[1:]:
+        impl = base.__dict__.get("_body_text")
+        if impl is not None:
+            return impl
+    raise AssertionError(f"{cls.__name__}: no ancestor _body_text (unreachable)")
 
 
 def _assert_finite(value: Any, _depth: int = 0) -> None:
@@ -54,11 +147,18 @@ def _assert_finite(value: Any, _depth: int = 0) -> None:
     render ``"inf"``/``"nan"`` literally — allowing them through would silently
     split a dual-part artifact into two different values.
 
-    Scope (GH-95, MarketBriefing family only — see that issue's AC): callers
-    are the field validators on ``BriefingKpiItem.value``/``.delta`` and
-    ``ChartSection.data``/``TableSection.data``. It is not a general SDK-wide
-    guard; other ``_Wire``/``ContentModel`` fields intentionally accept
-    non-finite floats unless a future issue scopes them in explicitly.
+    Scope (GH-95, MarketBriefing family — see that issue's AC): the field
+    validators on ``BriefingKpiItem.value``/``.delta`` and
+    ``ChartSection.data``/``TableSection.data``. Plus ONE cross-cutting caller
+    added when ``metadata`` was hoisted onto ``ContentModel`` (RT-006, round 4):
+    ``ContentModel._metadata_finite``. ``metadata`` earns it on GH-95's own
+    stated criterion — it is the only free-form dict on every card that reaches
+    BOTH ``wire()`` and the text fallback, so it is exactly the divergence this
+    guard exists for. Still not a general SDK-wide guard: other
+    ``_Wire``/``ContentModel`` fields (``MetricItem.value``, ``BarItem.value``,
+    ``WaterfallSegment.value``, ``ComparisonTable.rows``, ``FundPerformance``'s
+    numerics) intentionally accept non-finite floats unless a future issue
+    scopes them in explicitly.
 
     ``_depth`` bounds worst-case recursion (RT-003): a cyclic or pathologically
     deep dict/list/tuple/BaseModel structure surfaces as a clean ValueError
@@ -89,7 +189,28 @@ class _Wire(BaseModel):
 class ContentModel(_Wire, abc.ABC):
     """Base for renderable card payloads. ``wire()`` is the surface data
     model value; ``to_plain_text()`` is the mandatory text fallback sent to
-    clients without A2UI capability (and used in tool-result folding)."""
+    clients without A2UI capability (and used in tool-result folding).
+
+    Subclasses implement ``_body_text()`` — the card's own rendering — NOT
+    ``to_plain_text()``. ``to_plain_text()`` is concrete here and is defined
+    as ``self._body_text() + self._metadata_suffix()``.
+
+    RT-003: that split is the enforcement mechanism for the ``metadata``
+    contract. ``metadata`` lives on THIS class (RT-006); before this release
+    every ``ContentModel`` — the 14 built-ins and every domain card alike —
+    emitted it in ``wire()`` but never in ``to_plain_text()``, since nothing
+    in this module called ``_metadata_suffix()`` from a subclass's text
+    rendering. Making each subclass append the suffix by hand, at its own
+    call site, would invite exactly the silent drift a base-class field
+    cannot survive as a per-subclass obligation: one card, built-in or
+    (especially) a domain type registered through ``register_content_type``,
+    forgets the call, and its disclosure annotation reaches the A2UI
+    ``wire()`` card but vanishes from the text fallback the
+    no-A2UI-capability clients see. This release makes ``to_plain_text()``
+    concrete instead, so the base class renders the suffix once, for every
+    subclass that will ever exist, rather than asking each one to remember
+    to.
+    """
 
     data_type: ClassVar[str]
     component: ClassVar[str]
@@ -97,9 +218,130 @@ class ContentModel(_Wire, abc.ABC):
     # Domain cards override with their own catalog id; surfaces never mix
     # catalogs (§5.4). The standard catalog is closed to new types.
     catalog_id: ClassVar[str] = CATALOG_ID
+    # GH-63 escape hatch (RT-006): declared once here so every subclass —
+    # including future domain cards — inherits it instead of redeclaring it.
+    metadata: dict[str, Any] | None = None
+
+    @field_validator("metadata")
+    @classmethod
+    def _metadata_finite(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        """RT-006: reject inf/-inf/nan anywhere in ``metadata``.
+
+        ``metadata`` is the only free-form ``dict[str, Any]`` present on EVERY
+        card, and it is the one field that reaches both halves of a dual-part
+        artifact. Unguarded, ``metadata={"x": float("inf")}`` serialises to
+        ``{"x": None}`` in ``wire()`` (pydantic's ``ser_json_inf_nan`` null
+        default) while ``_metadata_suffix()`` renders ``x=inf`` into the text
+        fallback — the DataPart and the mandatory TextPart then disagree about
+        the same value. That is the identical split ``_assert_finite`` already
+        guards on ``ChartSection.data`` / ``TableSection.data`` /
+        ``BriefingKpiItem.value``; hoisting ``metadata`` to the base class made
+        it universal, so the guard is hoisted with it.
+        """
+        _assert_finite(v)
+        return v
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Adopt a legacy ``to_plain_text()`` override as ``_body_text()``.
+
+        Back-compat for domain cards written against the pre-split API, where
+        ``to_plain_text()`` was the concrete (or, for a direct ``ContentModel``
+        subclass, abstract) method to implement. Such an override would
+        otherwise shadow the concrete base method and lose the metadata
+        suffix — silently reintroducing the RT-003 bug for exactly the
+        extension path this exists to fix. Instead the override becomes the
+        class's ``_body_text()`` and ``to_plain_text()`` is rebound to the
+        base implementation, so the card renders identically PLUS the suffix.
+
+        The original function stays reachable as ``cls._body_text`` (it is
+        rebound, not discarded), wrapped so that a ``super().to_plain_text()``
+        call from inside it (legal, common code against the previous API —
+        e.g. a card subclassing a CONCRETE built-in that extends its
+        rendering) resolves to the next ancestor's ``_body_text()`` directly
+        instead of re-dispatching through ``type(self)._body_text()``, which
+        would land right back on this same override and recurse. See
+        ``to_plain_text()`` for the other half of this mechanism. A NEW
+        override should still call ``super()._body_text()`` directly, never
+        ``super().to_plain_text()`` — the latter keeps working for adopted
+        legacy code but never appends a second metadata suffix, only the
+        outermost call does.
+
+        RT-005: a class declaring BOTH ``_body_text()`` and ``to_plain_text()``
+        is not "new code" or "adopted legacy code" — it is a stale override
+        left behind on a card mid-migration to the current API. Adoption must
+        skip such a class (its own ``_body_text()`` is authoritative, not the
+        adopted-override machinery), but silently returning here would leave
+        the class's own ``to_plain_text()`` in place, shadowing the concrete
+        base method and dropping the metadata suffix — exactly the drift
+        this whole mechanism exists to make impossible. Raise instead, so the
+        author deletes the dead override at class-definition time rather than
+        discovering the drift at render time.
+        """
+        super().__init_subclass__(**kwargs)
+        own = cls.__dict__
+        override = own.get("to_plain_text")
+        if override is None:
+            return
+        if getattr(override, "__isabstractmethod__", False):
+            return
+        if "_body_text" in own:
+            raise TypeError(
+                f"{cls.__name__} declares both _body_text() and to_plain_text() — "
+                "to_plain_text() is concrete on ContentModel and appends the "
+                "metadata suffix; delete this stale to_plain_text() override "
+                "and let _body_text() alone define the card's rendering."
+            )
+        _NEXT_BODY_TEXT[cls] = _next_body_text_impl(cls)
+
+        @functools.wraps(override)
+        def _adopted_body_text(
+            self: ContentModel, *, _override: Any = override, _cls: type = cls
+        ) -> str:
+            frame = (_cls, self)
+            token = _ADOPTED_OVERRIDE_STACK.set(_ADOPTED_OVERRIDE_STACK.get() + (frame,))
+            try:
+                return _override(self)
+            finally:
+                _ADOPTED_OVERRIDE_STACK.reset(token)
+
+        setattr(cls, "_body_text", _adopted_body_text)
+        setattr(cls, "to_plain_text", ContentModel.to_plain_text)
+
+    def _metadata_suffix(self) -> str:
+        if not self.metadata:
+            return ""
+        parts = [
+            f"\n{sanitize_text(str(k), max_len=_METADATA_SUFFIX_FIELD_MAX_LEN)}"
+            f"={sanitize_text(str(v), max_len=_METADATA_SUFFIX_FIELD_MAX_LEN)}"
+            for k, v in self.metadata.items()
+        ]
+        return "".join(parts)[:_METADATA_SUFFIX_MAX_LEN]
+
+    def to_plain_text(self) -> str:
+        """The mandatory text fallback. Concrete — override ``_body_text()``.
+
+        RT-003 (round 2): re-entrancy check first. A legacy override adopted
+        by ``__init_subclass__`` runs inside ``_adopted_body_text``, which
+        pushes ``(cls, self)`` onto ``_ADOPTED_OVERRIDE_STACK`` for the
+        duration of that call. If that override itself calls
+        ``super().to_plain_text()`` (or ``self.to_plain_text()``), we land
+        back here — but as a RE-ENTRANT call for the SAME instance, not a
+        fresh top-level one. In that case resolve straight to the next
+        ancestor's ``_body_text()`` (``_NEXT_BODY_TEXT[cls]``), bypassing
+        ``self._body_text()`` — which would dispatch on ``type(self)`` and
+        land right back on the same adopted override — and skip the metadata
+        suffix, which the outermost call already appends exactly once.
+        """
+        stack = _ADOPTED_OVERRIDE_STACK.get()
+        if stack and stack[-1][1] is self:
+            resuming_cls, _ = stack[-1]
+            return _NEXT_BODY_TEXT[resuming_cls](self)
+        return self._body_text() + self._metadata_suffix()
 
     @abc.abstractmethod
-    def to_plain_text(self) -> str: ...
+    def _body_text(self) -> str:
+        """The card's own text rendering, WITHOUT the metadata suffix."""
+        ...
 
 
 # ── shared fragments ──
@@ -195,9 +437,8 @@ class KpiCard(ContentModel):
 
     metrics: list[MetricItem] = Field(min_length=1)
     title: str | None = None
-    metadata: dict[str, Any] | None = None
 
-    def to_plain_text(self) -> str:
+    def _body_text(self) -> str:
         lines = [self.title] if self.title else []
         for m in self.metrics:
             unit = f" {m.unit}" if m.unit else ""
@@ -266,7 +507,6 @@ class TimeSeriesChart(ContentModel):
     data: list[TimeSeriesDataPoint]
     total_count: int = 0  # set by model_validator below
     summary: TimeSeriesSummary | None = None
-    metadata: dict[str, Any] | None = None
     # series is NOT on the wire: Profile v1 time_series has no top-level series
     # field. Store it for Python-side multi-series grouping only.
     series: list[SeriesMeta] | None = Field(default=None, exclude=True)
@@ -280,7 +520,7 @@ class TimeSeriesChart(ContentModel):
             values["total_count"] = len(data) if isinstance(data, list) else 0
         return values
 
-    def to_plain_text(self) -> str:
+    def _body_text(self) -> str:
         lines = [self.title]
         if self.data:
             first, last = self.data[0], self.data[-1]
@@ -310,9 +550,8 @@ class ComparisonTable(ContentModel):
     rows: list[dict[str, Any]]
     sort_by: str | None = None
     sort_order: Literal["asc", "desc"] | None = None
-    metadata: dict[str, Any] | None = None
 
-    def to_plain_text(self) -> str:
+    def _body_text(self) -> str:
         header = " | ".join(c.label for c in self.columns)
         lines = [self.title, header, "-" * len(header)] if self.title else [header, "-" * len(header)]
         for row in self.rows:
@@ -333,9 +572,8 @@ class BarChart(ContentModel):
     title: str | None = None
     x_key: str | None = None
     y_key: str | None = None
-    metadata: dict[str, Any] | None = None
 
-    def to_plain_text(self) -> str:
+    def _body_text(self) -> str:
         lines = [self.title] if self.title else []
         lines += [f"  {b.category}: {b.value:g}" for b in self.bars]
         return "\n".join(lines)
@@ -357,7 +595,6 @@ class EntityList(ContentModel):
     has_more: bool | None = None
     title: str | None = None
     showing: int | None = None
-    metadata: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def _fill_total_count(self) -> "EntityList":
@@ -365,7 +602,7 @@ class EntityList(ContentModel):
             self.total_count = len(self.items)
         return self
 
-    def to_plain_text(self) -> str:
+    def _body_text(self) -> str:
         lines = [self.title or f"{self.entity_type} list"]
         lines.append(f"  showing {self.showing or len(self.items)} of {self.total_count}")
         for item in self.items:
@@ -440,7 +677,6 @@ class MarketBriefing(ContentModel):
     as_of: str
     prose: str = ""
     sections: list[BriefingSection] = Field(default_factory=list)
-    metadata: dict[str, Any] | None = None
 
     def to_markdown(self) -> str:
         lines = [f"{self.title} ({self.as_of})"]
@@ -465,7 +701,7 @@ class MarketBriefing(ContentModel):
                 lines.append(f"  TABLE: {section.data.get('title', '')}")
         return "\n".join(lines)
 
-    def to_plain_text(self) -> str:
+    def _body_text(self) -> str:
         return self.to_markdown()
 
 
@@ -492,9 +728,8 @@ class WaterfallChart(ContentModel):
     entity_name: str | None = None
     as_of_date: str | None = None
     date_range: DateRange | None = None  # start/end — frozen; not first/last
-    metadata: dict[str, Any] | None = None
 
-    def to_plain_text(self) -> str:
+    def _body_text(self) -> str:
         lines = [self.title]
         lines += [
             f"  {s.label}: {s.value:+g} → {s.cumulative:g} ({s.type})"
@@ -543,9 +778,8 @@ class MultiCategoryChart(ContentModel):
     entity_name: str | None = None
     item_count: int | None = None
     chart_config: MultiCategoryChartConfig | None = None
-    metadata: dict[str, Any] | None = None
 
-    def to_plain_text(self) -> str:
+    def _body_text(self) -> str:
         lines = [self.title]
         for p in self.periods:
             cats = ", ".join(f"{k}={v.value:g}" for k, v in p.categories.items())
@@ -567,7 +801,6 @@ class FundPerformance(ContentModel):
     component: ClassVar[str] = "FundPerformance"
     extended: ClassVar[bool] = True
 
-    fund_name: str | None = Field(default=None, alias="fundName")
     pb_id: str | None = Field(default=None, alias="pbId")
     as_of_date: str | None = Field(default=None, alias="asOfDate")
     irr: float | None = None
@@ -589,25 +822,74 @@ class FundPerformance(ContentModel):
     distributed_plus_remaining: Money | None = Field(
         default=None, alias="distributedPlusRemaining"
     )
-    metadata: dict[str, Any] | None = None
 
-    def to_plain_text(self) -> str:
+    def _body_text(self) -> str:
+        # RT-004 (GH-149 follow-up): keep pace with every field the wire
+        # (`wire()`) can carry — a text-only client (DESIGN.md §5.1/§5.4
+        # dual-part TextPart) sees ONLY this string, so a field present on
+        # the card but absent here silently vanishes for that client even
+        # though the A2UI-capable client renders it.
         bits: list[str] = []
-        if self.fund_name:
-            bits.append(self.fund_name)
         if self.irr is not None:
             bits.append(f"IRR={self.irr:.1%}")
+        if self.net_irr is not None:
+            bits.append(f"Net IRR={self.net_irr:.1%}")
+        if self.gross_irr is not None:
+            bits.append(f"Gross IRR={self.gross_irr:.1%}")
         if self.tvpi is not None:
             bits.append(f"TVPI={self.tvpi:.2f}x")
         if self.dpi is not None:
             bits.append(f"DPI={self.dpi:.2f}x")
+        if self.rvpi is not None:
+            bits.append(f"RVPI={self.rvpi:.2f}x")
         if self.moic is not None:
             bits.append(f"MOIC={self.moic:.2f}x")
+        if self.quartile is not None:
+            bits.append(f"Quartile=Q{self.quartile}")
         if self.nav and self.nav.amount is not None:
             bits.append(f"NAV={self.nav.amount:,.0f} {self.nav.currency or 'USD'}")
+        if self.dry_powder and self.dry_powder.amount is not None:
+            bits.append(
+                f"Dry powder={self.dry_powder.amount:,.0f} "
+                f"{self.dry_powder.currency or 'USD'}"
+            )
+        if self.dry_powder_pct is not None:
+            bits.append(f"Dry powder pct={self.dry_powder_pct:.1%}")
+        if self.distributed and self.distributed.amount is not None:
+            bits.append(
+                f"Distributed={self.distributed.amount:,.0f} "
+                f"{self.distributed.currency or 'USD'}"
+            )
+        if self.remaining_value and self.remaining_value.amount is not None:
+            bits.append(
+                f"Remaining value={self.remaining_value.amount:,.0f} "
+                f"{self.remaining_value.currency or 'USD'}"
+            )
+        if (
+            self.distributed_plus_remaining
+            and self.distributed_plus_remaining.amount is not None
+        ):
+            bits.append(
+                f"Distributed+remaining={self.distributed_plus_remaining.amount:,.0f} "
+                f"{self.distributed_plus_remaining.currency or 'USD'}"
+            )
+        if self.called_down_pct is not None:
+            bits.append(f"Called down={self.called_down_pct:.1%}")
+        period_bits = []
+        if self.as_of_quarter is not None:
+            period_bits.append(f"Q{self.as_of_quarter}")
+        if self.as_of_year is not None:
+            period_bits.append(str(self.as_of_year))
+        if period_bits:
+            bits.append(" ".join(period_bits))
         if self.as_of_date:
             bits.append(f"as of {self.as_of_date}")
-        return " | ".join(bits) or "fund performance (no data)"
+        # RT-004: provenance suffix, mirroring the admin console card's
+        # subtitle (console/static/a2ui.js::renderFundPerformance, "source
+        # <pbId>") rather than a bare identifier.
+        if self.pb_id:
+            bits.append(f"source {self.pb_id}")
+        return (" | ".join(bits) or "fund performance (no data)")
 
 
 class EmailMessage(_Wire):
@@ -635,9 +917,8 @@ class EmailList(ContentModel):
     has_more: bool
     folder: str | None = None
     query: str | None = None
-    metadata: dict[str, Any] | None = None
 
-    def to_plain_text(self) -> str:
+    def _body_text(self) -> str:
         lines = [f"{self.total_count} message(s)"]
         for m in self.messages:
             unread = "[unread] " if not m.is_read else ""
@@ -682,9 +963,8 @@ class CalendarEvents(ContentModel):
     date_range: DateRange  # start/end — frozen
     total_count: int
     has_more: bool
-    metadata: dict[str, Any] | None = None
 
-    def to_plain_text(self) -> str:
+    def _body_text(self) -> str:
         lines = [f"{self.total_count} event(s) {self.date_range.start} – {self.date_range.end}"]
         for e in self.events:
             loc = ""
@@ -742,9 +1022,8 @@ class UserProfile(ContentModel):
     presence: UserPresence | None = None
     photo_url: str | None = None
     out_of_office: OutOfOfficeSettings | None = None
-    metadata: dict[str, Any] | None = None
 
-    def to_plain_text(self) -> str:
+    def _body_text(self) -> str:
         lines = [f"{self.display_name} <{self.email}>"]
         if self.job_title:
             lines.append(f"  {self.job_title}" + (f", {self.department}" if self.department else ""))
@@ -773,9 +1052,8 @@ class UserList(ContentModel):
     total_count: int
     has_more: bool
     query: str | None = None
-    metadata: dict[str, Any] | None = None
 
-    def to_plain_text(self) -> str:
+    def _body_text(self) -> str:
         lines = [f"{self.total_count} user(s)"]
         for u in self.users:
             title = f" — {u.job_title}" if u.job_title else ""
@@ -803,7 +1081,6 @@ class DocumentList(ContentModel):
     documents: list[DocumentItem]
     total_count: int | None = None
     has_more: bool | None = None
-    metadata: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def _fill_total_count(self) -> "DocumentList":
@@ -811,7 +1088,7 @@ class DocumentList(ContentModel):
             self.total_count = len(self.documents)
         return self
 
-    def to_plain_text(self) -> str:
+    def _body_text(self) -> str:
         lines = [f"{self.total_count} document(s)"]
         for d in self.documents:
             type_suffix = f" ({d.type})" if d.type else ""

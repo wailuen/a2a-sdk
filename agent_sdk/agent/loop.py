@@ -17,21 +17,25 @@ wire mapping. Policies enforced here, not in routes:
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Awaitable, Callable, Union, get_args, get_origin
+from typing import Any, AsyncIterator, Awaitable, Callable, Sequence, Union, get_args, get_origin
 
 logger = logging.getLogger(__name__)
 
 from pydantic import BaseModel, ValidationError
+from pydantic_core import to_jsonable_python
 
+from ..common.redact import sanitize_text
 from ..models.errors import AgentError
 from .deferred import DeferredEvent, DeferredResult
 from .events import (
     ArtifactEvent,
+    AuditEvent,
     DoneEvent,
     InterruptEvent,
     LoopEvent,
@@ -44,6 +48,13 @@ from .events import (
 )
 from .model_client import ModelClient
 from .registry import ToolEntry, ToolInputValidationError, ToolRegistry, ToolTerminalResult
+from .reuse import (
+    RESOLVED_MARKER_KEY,
+    Reusable,
+    index_entry_key,
+    resolve_reuse_fields,
+    scan_resolved,
+)
 from .skills import SkillsRegistry
 from ..sources import SourceAdapter
 
@@ -51,18 +62,33 @@ TIER_TIMEOUTS = {1: 130.0, 2: 180.0}
 LOAD_SKILL_TOOL = "load_skill"
 DEFAULT_MAX_OUTPUT_TOKENS = 8192
 
-# SI-2: map every Unicode control char to a space — C0 (0x00-0x1F), DEL
-# (0x7F) and C1 (0x80-0x9F). C1 is not optional: NEL (0x85) is treated as a
-# line break by many log/terminal consumers and CSI (0x9B) is a single-byte
-# ANSI escape introducer equivalent to ESC '[', so leaving 0x7F/C1 through
-# would defeat the very log/terminal-injection guard this helper exists for.
-_CONTROL_CHAR_MAP = dict.fromkeys([*range(0x20), 0x7F, *range(0x80, 0xA0)], " ")
+# SI-2 control-char stripping + length cap for model-supplied names lives in
+# ONE place: agent_sdk.common.redact.sanitize_text (component C-007). This
+# module previously carried a byte-identical private copy
+# (`_CONTROL_CHAR_MAP` + `_sanitize_model_name`); it was deleted when C-007
+# landed so the two cannot drift apart on the control-char set or the cap.
+# sanitize_text's default max_len is 64 — the cap the old copy hard-coded.
 
 
-def _sanitize_model_name(s: str) -> str:
-    """Strip control chars and cap length before a model-supplied name hits
-    the wire or a log line (SI-2: model output is untrusted)."""
-    return s[:64].translate(_CONTROL_CHAR_MAP)
+class DanglingToolUseUnreadable(Exception):
+    """RT-004 (``agent/runner.py`` review): raised by ``close_dangling_tool_use``
+    when ``messages[-1]`` is unambiguously an assistant turn whose dangling
+    ``toolUse`` shape cannot be reliably parsed into a ``toolUseId`` to
+    repair against — a non-list ``content``, a ``toolUse``-keyed block whose
+    value is not a dict, or one missing ``toolUseId``.
+
+    This is deliberately NOT the same outcome as ``close_dangling_tool_use``
+    returning ``False``. ``False`` means the tail is CONFIRMED clean — not an
+    assistant/``toolUse`` turn at all, or an assistant turn whose blocks carry
+    no ``toolUse`` key whatsoever — and is safe to treat as a no-op. This
+    exception means the tail's shape says a dangling tool call is (or may be)
+    present but this function could not close it out. A caller that catches
+    ``Exception`` broadly and reports "not safe to persist" (``agent/runner.py``
+    ``repair_dangling_tool_use_safe``) handles this correctly already; a
+    caller that let a prior "hardening" fix silently return ``False`` here
+    instead turned that fail-closed persist gate into a fail-open one — the
+    exact regression this type exists to prevent from recurring.
+    """
 
 
 class ToolInterrupt(Exception):
@@ -101,6 +127,22 @@ class LoopPolicies:
     # Populated automatically from ToolDecl.tool_timeout_override at invocation
     # time; callers may also pass explicit overrides for testing.
     per_tool_timeouts: dict[str, float] = field(default_factory=dict)
+    # RT-C-001/RT-002: ReuseKind bounded-recovery budget (agent/reuse.py's
+    # MAX_CONSECUTIVE_REUSE_REJECTIONS is a suggested starting value an
+    # operator may opt into, not an enforced ceiling — nothing clamps this
+    # field to it) — the number of consecutive rejections of the
+    # exact SAME raw value on the same (tool, field) before
+    # resolve_reuse_fields grants a forced passthrough instead of rejecting
+    # again. RT-002: defaults to 0 — reject-forever — because the GH-148
+    # gate this budget lives inside of is a correctness gate (DESIGN.md
+    # §8.1 states its guarantee as "the exact GH-148 substitution bug, now
+    # caught instead of silently executed"); a correctness gate must never
+    # default to fail-open. An operator who needs the liveness fallback
+    # (a stuck retry loop on one identical wrong value would otherwise run
+    # until max_turns) opts IN by setting this to a positive value — the
+    # SAME opt-in shape as ReuseKind's own `strict`/`allow_raw_override`
+    # flags — never the other way around.
+    reuse_forced_passthrough_limit: int = 0
 
 
 def resolve_tool_timeout(name: str, entry: ToolEntry, policies: LoopPolicies) -> float:
@@ -150,16 +192,437 @@ class Deadline:
         return self.consumed() > self._seconds
 
 
-def _fold_result_content(result: Any) -> dict[str, Any]:
-    """toolResult content block for the Converse API."""
-    from pydantic import BaseModel
+def fold_result_content(result: Any) -> dict[str, Any]:
+    """toolResult content block for the Converse API.
 
+    Shared with ``agent/runner.py``'s deferred (GH-87) background awaiter
+    (RT-004) so a deferred tool's terminal ``toolResult`` message is folded
+    from the exact same content-shaping rule as every synchronous tool call.
+
+    RT-001 (GH-148 follow-up, control-plane isolation): strips a top-level
+    ``__resolved__`` key from a dict result or a BaseModel dump before
+    folding. ``__resolved__`` is the SDK's OWN reuse-marker namespace
+    (``reuse.RESOLVED_MARKER_KEY``, consumed by ``scan_resolved``) — the
+    genuine marker is always appended as a SEPARATE content block, built
+    directly (``{"json": {RESOLVED_MARKER_KEY: resolved_marker}}`` below and
+    in ``runner.py``'s deferred awaiter), never through this function.
+    Without the strip, a tool that relays upstream JSON verbatim (the normal
+    shape for a tool wrapping an API response) could return a dict carrying
+    its own ``__resolved__`` key — folded here as ordinary tool output —
+    which ``scan_resolved`` could not distinguish from a real marker,
+    letting attacker/upstream data forge a resolution and steer which value
+    a later ``$ref:<kind>``/raw-value call substitutes. A tool has no
+    legitimate reason to name a top-level field ``__resolved__``, so this
+    drops the key rather than renaming it.
+    """
     if isinstance(result, BaseModel):
         dump = result.model_dump(mode="json", by_alias=True, exclude_none=True)
-        return {"json": dump}
-    if isinstance(result, (dict, list)):
-        return {"json": {"result": result} if isinstance(result, list) else result}
+        # RT-A-04: model_dump() is not guaranteed to return a dict — a
+        # RootModel or a custom @model_serializer can legitimately dump to a
+        # list or a scalar. Only a dict dump can carry a forged
+        # RESOLVED_MARKER_KEY (SI-2 threat this strip guards against), so
+        # only pop from one; a non-dict dump is wrapped exactly like the
+        # plain-list branch below (a JSON array is a legal Converse
+        # toolResult `json` document) instead of crashing on `.pop`.
+        if isinstance(dump, dict):
+            dump.pop(RESOLVED_MARKER_KEY, None)
+            return {"json": dump}
+        return {"json": {"result": dump}}
+    if isinstance(result, list):
+        return {"json": {"result": result}}
+    if isinstance(result, dict):
+        if RESOLVED_MARKER_KEY in result:
+            result = {k: v for k, v in result.items() if k != RESOLVED_MARKER_KEY}
+        return {"json": result}
     return {"text": "" if result is None else str(result)}
+
+
+def jsonable_reuse_value(value: Any) -> Any:
+    """JSON-safe form of a ``Reusable.value`` for the ``__resolved__`` marker
+    folded into ``messages`` (RT-005 / RT-002). ``Reusable.value`` is typed
+    ``Any`` — a tool may wrap anything in it, not just a ``BaseModel``
+    (``ToolDecl.emits`` matching is checked against the unwrapped value): a
+    ``UUID``, ``datetime``, ``Decimal``, ``Enum``, a dataclass, or any other
+    domain object. A ``BaseModel``-only guard leaves every one of those to be
+    planted raw into the marker and crash ``json.dumps`` on the very next
+    model call — the exact failure this function exists to prevent — so this
+    applies the same *total* JSON-safe rule ``fold_result_content`` applies
+    to a tool's raw result, via pydantic's own jsonable-python conversion
+    (natively normalizes ``BaseModel``, dataclasses, ``UUID``, ``datetime``,
+    ``Decimal``, ``Enum``, etc., matching ``fold_result_content``'s
+    ``by_alias``/``exclude_none`` BaseModel dump), with any remaining
+    genuinely unknown type stringified rather than raising.
+
+    Shared with ``agent/runner.py``'s deferred (GH-87) background awaiter
+    (RT-001, cross-surface parity with this synchronous branch) so a
+    ``Reusable`` resolved via a ``DeferredResult`` handle folds the identical
+    JSON-safe ``__resolved__`` marker value."""
+    return to_jsonable_python(value, exclude_none=True, fallback=str)
+
+
+# GH-147 AC3: fixed, SDK-authored — never derived from model/tool output
+# (SI-2). Folded in as a synthetic assistant turn only to keep the stored
+# transcript alternating; replayed back to the model as ordinary context on
+# contextId continuation, never surfaced to the end user (record.messages is
+# separate from task.history / the A2A status message).
+_TRAILING_USER_BRIDGE_TEXT = "(no response)"
+
+
+def bridge_trailing_user(messages: list[dict[str, Any]], text: str | None = None) -> None:
+    """RT-001 (GH-147 AC3): ``record.messages`` must never end on a ``user``
+    message at any run_loop exit. contextId continuation replays the most
+    recent terminal task's messages verbatim and then appends a new ``user``
+    turn (routes/a2a.py::_create_task_record) — two consecutive ``user``
+    messages is rejected outright by Bedrock's Converse API. FAILED is a
+    terminal state too, so every ok=False exit is just as reachable via
+    continuation as the happy-path completion.
+
+    RT-008: ``text`` defaults to ``_TRAILING_USER_BRIDGE_TEXT`` ("(no
+    response)"), correct for every exit where the model genuinely produced
+    nothing. A caller whose bridged turn followed something that DID
+    succeed (e.g. a deferred GH-87 tool completing in the background) must
+    pass its own fixed, SDK-authored string instead — never derived from
+    model/tool output (SI-2) — so the replayed transcript doesn't claim the
+    model produced no response when it actually did.
+
+    A trailing ``user`` message here is always the toolResult fold from a
+    completed tool round (``messages.append({"role": "user", ...})`` below)
+    or the very first turn's inbound user message — never mid-round, since
+    every exit point this guards runs at a turn boundary. Call before every
+    ``DoneEvent``/``return`` out of ``run_loop`` (deadline, token budget,
+    max-turns, an upstream ``AgentError``) and on the no-tool-call branch
+    when there is no text to fold instead.
+
+    RT-004 (GH-147 AC3, out-of-loop callers): ``run_loop`` itself only
+    guards its OWN exit points — a ``DeferredEvent`` handoff (GH-87) returns
+    without reaching any of them, and ``record.messages`` is then repaired
+    later by code that never re-enters ``run_loop`` at all. Exported
+    (mirroring ``fold_result_content``'s identical RT-004 promotion) so
+    ``runner.py``'s ``repair_dangling_tool_use`` — the one shared helper
+    every out-of-loop writer of ``record.messages`` calls (its own COMPLETED
+    and FAILED paths in ``_run_deferred_background``; ``routes/a2a.py``'s
+    ``tasks_cancel``; and ``run_task_worker``'s own terminal
+    ``except AgentError`` / ``except Exception`` handlers, RT-A-002 — those
+    two were NOT covered until RT-A-002, despite this paragraph's prior
+    "every ... caller" claim: they set the task FAILED and published the
+    terminal frame without calling ``repair_dangling_tool_use`` at all,
+    reachable mid-turn via e.g. ``store.mark_interrupted``'s §5.2 cap raising
+    ``AgentError``, or ``build_artifact`` raising from inside the
+    per-tool-call loop) — can call this bridge itself immediately after
+    appending its synthetic ``toolResult``, covering every current and
+    future caller from one place instead of requiring each to remember its
+    own follow-up call.
+
+    RT-B-008 (``agent/runner.py::repair_dangling_tool_use``): guards the tail
+    read with ``isinstance(messages[-1], dict)`` — this function is called
+    unconditionally by that helper (after its own, identically-guarded tail
+    check), so a non-dict tail entry reaching THIS read would otherwise still
+    raise ``AttributeError`` here even once the caller's own read is guarded.
+    """
+    if messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "user":
+        messages.append(
+            {"role": "assistant", "content": [{"text": text or _TRAILING_USER_BRIDGE_TEXT}]}
+        )
+
+
+# RT-004 (debug round 4): fixed, SDK-authored (SI-2). Reported on the
+# DoneEvent when ``run_loop`` stops because another owner already committed
+# the task terminal. ``run_task_worker``'s own terminal guard drops this
+# event before it can reach a stream, so it exists to keep run_loop's
+# "always terminates with a DoneEvent" contract, not to be shown to a user.
+_SEALED_TRANSCRIPT_ERROR = "task was already terminated by another owner"
+
+
+# RT-003 (debug round 4): fixed, SDK-authored — never derived from model or
+# tool output (SI-2). Closes a dangling assistant ``toolUse`` tail found on a
+# transcript read back OUT of a ``TaskStore``, where the real result is
+# unknowable by definition: whatever produced it is gone.
+_STALE_TOOL_RESULT_TEXT = (
+    "tool call result unavailable: the prior task ended before a result was recorded"
+)
+
+
+def close_dangling_tool_use(
+    messages: list[dict[str, Any]],
+    *,
+    default_content: list[dict[str, Any]],
+    default_status: str = "error",
+    resolved: dict[str, tuple[list[dict[str, Any]], str]] | None = None,
+) -> bool:
+    """C-018's fold rule, as ONE shared implementation: if ``messages`` ends on
+    an assistant turn carrying ``toolUse`` blocks with no matching
+    ``toolResult``, append the synthetic ``user``/``toolResult`` turn that
+    closes it. Returns whether it appended anything.
+
+    Bedrock's Converse API rejects a transcript whose assistant ``toolUse``
+    has no answering ``toolResult`` outright, so this shape must never reach a
+    model — and it is produced on every mid-turn exit (``run_loop`` folds the
+    assistant ``toolUse`` message BEFORE running the turn's per-tool-call
+    loop, and appends the matching ``toolResult`` only once every call in the
+    turn has finished).
+
+    RT-003 (debug round 4): extracted from
+    ``agent/runner.py::repair_dangling_tool_use`` so the WRITE side (that
+    function, closing the tail it is about to persist) and the READ side
+    (``bridge_context_messages`` below, re-asserting the invariant on a
+    transcript a ``TaskStore`` subclass handed back) share one rule instead of
+    keeping two copies that can drift. Lives here rather than in ``runner.py``
+    because ``runner.py`` already imports from this module and the reverse
+    would be circular.
+
+    ``resolved`` maps a ``toolUseId`` to the ``(content, status)`` actually
+    known for it — the write side passes this turn's completed sibling results
+    (``record.pending_tool_results``) merged under any explicit caller
+    overrides. Any id not in it falls back to ``default_content`` /
+    ``default_status``. The read side has no such knowledge and passes nothing.
+
+    Each block DEEP-copies its content (RT-B-007/RT-B-206): several dangling
+    ids in one turn can otherwise share the same list object AND the same
+    inner dicts, so one later mutation by the caller or a store's serializer
+    would silently rewrite every entry at once.
+
+    RT-B-008: a non-dict tail entry — reachable from a durable store
+    deserialising loosely — degrades to "nothing to repair" (``False``)
+    rather than raising, since a non-dict tail can't even be confirmed to be
+    an assistant turn, let alone a dangling one.
+
+    RT-004 (correction to an intermediate RT-001 "hardening" that regressed
+    this): ONE level deeper — the tail message IS confirmed to be an
+    assistant dict — a non-list ``content``, or a block carrying a
+    ``"toolUse"`` key whose value is not a dict or is missing
+    ``"toolUseId"``, is NOT treated the same as "nothing to repair" anymore.
+    That prior degrade-to-``False`` made this function indistinguishable
+    from a genuinely clean tail to every caller, which let
+    ``repair_dangling_tool_use_safe`` report a still-dangling, unrepaired
+    transcript as safe to persist — the exact fail-open its own gate exists
+    to prevent (see ``DanglingToolUseUnreadable``'s docstring). Each such
+    case now raises ``DanglingToolUseUnreadable`` instead: the WRITE side
+    (``repair_dangling_tool_use``) lets it propagate up to
+    ``repair_dangling_tool_use_safe``'s existing broad ``except Exception``,
+    which already reports "not safe to persist" for any in-memory repair
+    failure; the READ side (``bridge_context_messages`` below) catches it
+    and drops the unreadable tail rather than crashing the caller building a
+    fresh task record. A content block with no ``"toolUse"`` key at all
+    (ordinary text) is unambiguous and still silently skipped — only a block
+    that IS shaped like an attempted ``toolUse`` but can't be read is
+    unreadable.
+    """
+    if not (messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "assistant"):
+        return False
+    last_content = messages[-1].get("content")
+    if not isinstance(last_content, list):
+        raise DanglingToolUseUnreadable("assistant tail message content is not a list")
+    tool_use_ids: list[str] = []
+    for block in last_content:
+        if not (isinstance(block, dict) and "toolUse" in block):
+            continue
+        tool_use = block["toolUse"]
+        if not (isinstance(tool_use, dict) and "toolUseId" in tool_use):
+            raise DanglingToolUseUnreadable("assistant tail message has a malformed toolUse block")
+        tool_use_ids.append(tool_use["toolUseId"])
+    if not tool_use_ids:
+        return False
+    resolved = resolved or {}
+    result_blocks: list[dict[str, Any]] = []
+    for tool_use_id in tool_use_ids:
+        content, status = resolved.get(tool_use_id, (default_content, default_status))
+        result_blocks.append(
+            {
+                "toolResult": {
+                    "toolUseId": tool_use_id,
+                    "content": copy.deepcopy(content),
+                    "status": status,
+                }
+            }
+        )
+    messages.append({"role": "user", "content": result_blocks})
+    return True
+
+
+def _is_user_turn_boundary(msg: Any) -> bool:
+    """Same predicate ``tasks/memory.py::_turn_boundary_slice`` applies when
+    a cap introduces a new head, and the same shape
+    ``routes/ag_ui.py::_fold_history``'s leading-prefix strip enforces for
+    the AG-UI carrier: a genuine user-authored turn is a ``role == "user"``
+    message carrying no ``toolResult`` block — only a continuation of an
+    in-flight tool round does. Guarded the same way ``close_dangling_tool_use``
+    guards a loosely deserialised store record: a non-dict message or
+    non-list ``content`` never raises here, it just fails the predicate."""
+    if not (isinstance(msg, dict) and msg.get("role") == "user"):
+        return False
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return True
+    return not any(isinstance(block, dict) and "toolResult" in block for block in content)
+
+
+def bridge_context_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``TaskStore.context_messages()`` consumption helper (LRN-144/RT-B-202).
+
+    ``context_messages()`` is a non-abstract, overridable ``TaskStore`` ABC
+    method (C-005, tasks/store.py) — its whole reason to exist is external
+    durable subclasses. Every ``run_loop`` writer bridges its own exit
+    (``bridge_trailing_user``, above) so ``record.messages`` never ends on
+    ``user``, but a store override — an AzureTableTaskStore-shaped store, or
+    any record persisted before GH-147's writer-side guards existed — can
+    return a transcript that already ends on ``user``. ``routes/a2a.py``'s
+    ``_create_task_record`` is the one consumption site of that data and
+    must re-assert the invariant on read rather than trust the writers that
+    produced it — but must never call ``bridge_trailing_user`` itself:
+    LRN-144's Check requires that bridge to have exactly one call site,
+    inside ``agent/runner.py::repair_dangling_tool_use``. Route the
+    re-assertion through here instead, so routes/a2a.py stays at zero direct
+    ``bridge_trailing_user`` calls.
+
+    RT-003 (debug round 4, corrected): re-asserts THREE transcript invariants
+    a store override can break — the docstring previously claimed "BOTH",
+    but only ever enumerated the tail ones. Ending on ``user`` was only part
+    of it: ``TaskStore.persist_messages``'s own docstring (RT-B-205,
+    tasks/store.py) documents that the SDK deliberately flushes a transcript
+    "GUARANTEED to end on a dangling assistant ``toolUse`` with no matching
+    ``toolResult``" into durable storage on every ``INTERRUPT_STATES``
+    transition, and an in-memory repair that failed
+    (``repair_dangling_tool_use_safe`` returning False) leaves a TERMINAL
+    record in the same shape. A durable subclass whose own
+    resume-after-restart path later marks such a task terminal, or one that
+    overrode ``context_messages`` without the repair, hands
+    ``_create_task_record`` exactly the shape this route already decided it
+    cannot trust — and it would be folded straight into the new task's
+    ``record.messages`` and sent to Bedrock's Converse API, which rejects it
+    outright.
+
+    A third, HEAD-shaped break survives both of those tail re-assertions
+    untouched: a leading ``user``/``toolResult`` orphan whose matching
+    ``toolUse`` was truncated away by the store's own windowing (exactly the
+    shape ``TaskStore.context_messages()``'s own docstring, RT-007, makes a
+    concrete store responsible for never producing — nothing on this read
+    side enforced it), or a leading ``assistant`` message (the shape
+    ``routes/ag_ui.py::_fold_history`` already strips for the AG-UI carrier
+    but which had no A2A equivalent). Drop leading messages via
+    ``_is_user_turn_boundary`` above — the same predicate
+    ``tasks/memory.py::_turn_boundary_slice`` uses for a capped window's new
+    head — FIRST, before either tail re-assertion: a store's window can be
+    both truncated AND end on a dangling tail in the same broken record, and
+    trimming the head first means the tail check below always sees this
+    transcript's genuine trailing shape, never a truncated-head artifact of
+    it. Then close the dangling tail (``close_dangling_tool_use`` above,
+    C-018's one shared fold rule — not a second inline copy), then bridge, in
+    exactly the order ``repair_dangling_tool_use`` uses.
+
+    Returns a NEW list (never mutates ``messages`` in place — a ``Sequence``
+    may be immutable, e.g. a tuple returned by a durable subclass) with all
+    three re-assertions already applied, ready to extend into a fresh
+    ``record.messages``. Only appends to its own copy, so the caller's
+    element dicts are never touched either. Can return an empty list — same
+    contract as ``_turn_boundary_slice``'s "no genuine boundary in the
+    window" case — when nothing in ``messages`` is ever a genuine
+    user-authored turn; the caller already treats that as "no usable prior
+    context".
+
+    RT-007: the head-trim loop above logs, matching
+    ``_turn_boundary_slice``'s own two-tier signal for the identical
+    outcome (a cap-introduced head with no boundary in its window) rather
+    than dropping silently. A partial trim — some leading orphan(s) removed,
+    a genuine boundary still found — logs one WARNING; trimming the list
+    down to nothing logs a second, distinct WARNING (wording matching
+    ``_turn_boundary_slice``'s own "dropping the entire prior transcript"
+    line) so an operator sees the same signal regardless of which side
+    (this read-side head trim, or the store's own cap) dropped the context.
+
+    RT-004: ``close_dangling_tool_use`` can now raise
+    ``DanglingToolUseUnreadable`` for a tail that is confirmed to be a
+    dangling ``toolUse`` turn but cannot be parsed into a repairable
+    ``toolUseId``. The WRITE side (``repair_dangling_tool_use``) wants that
+    raise — it is what lets ``repair_dangling_tool_use_safe`` gate the
+    durable flush. This READ side has no such gate to fall back on: this
+    function's whole job is to make whatever a ``TaskStore`` override hands
+    back safe to fold into a brand-new task, so it must never crash
+    ``_create_task_record`` over a corrupted stored transcript. Catch it
+    here and drop the unreadable tail message outright — the same
+    "no synthetic toolResult can be built without a readable toolUseId"
+    reasoning ``close_dangling_tool_use`` itself uses, just with nothing
+    left to replay it into — then bridge the remainder as usual.
+    """
+    bridged = list(messages)
+    dropped_from_head = 0
+    while bridged and not _is_user_turn_boundary(bridged[0]):
+        bridged.pop(0)
+        dropped_from_head += 1
+    if dropped_from_head and bridged:
+        logger.warning(
+            "context continuation: dropped %d leading message(s) with no "
+            "genuine turn boundary from a stored transcript (transcript has "
+            "%d messages) — resuming from the first turn boundary found "
+            "instead of the transcript's original head.",
+            dropped_from_head, len(messages),
+        )
+    elif dropped_from_head and not bridged:
+        logger.warning(
+            "context continuation: dropping the entire prior transcript — "
+            "no turn boundary found anywhere in %d messages; contextId "
+            "continuation loses all prior context for this thread.",
+            len(messages),
+        )
+    try:
+        close_dangling_tool_use(bridged, default_content=[{"text": _STALE_TOOL_RESULT_TEXT}])
+    except DanglingToolUseUnreadable:
+        logger.warning(
+            "bridge_context_messages: dropping an unreadable dangling toolUse "
+            "tail from a stored transcript — cannot correlate a toolResult "
+            "without a readable toolUseId"
+        )
+        bridged.pop()
+    bridge_trailing_user(bridged)
+    return bridged
+
+
+def append_assistant_turn(messages: list[dict[str, Any]], content: list[dict[str, Any]]) -> None:
+    """RT-001 (GH-147 AC3 mirror image): fold a new assistant turn into
+    ``messages`` without ever producing two adjacent assistant entries.
+
+    ``bridge_trailing_user`` only guards the trailing-``user`` half of the
+    "no two consecutive same-role messages" invariant — it assumes the tail
+    is 'user' right before ``run_loop``'s two ``messages.append({"role":
+    "assistant", ...})`` sites (the no-tool-call text fold and the toolUse
+    fold), which holds for every transcript ``run_loop`` builds itself but
+    NOT for one a caller supplies pre-seeded: AG-UI's
+    ``routes/ag_ui.py::_fold_history`` only strips a LEADING assistant
+    prefix, never a trailing one, so a client that resubmits history already
+    ending on 'assistant' (a legitimate regenerate/continue request, or a
+    malformed one) reaches ``run_loop`` with an assistant tail already in
+    place. Appending onto that tail via the plain ``messages.append(...)``
+    this function replaces would land two consecutive assistant messages,
+    which Bedrock's Converse API rejects outright on the very next turn's
+    ``model.converse()`` call.
+
+    When the tail is already an assistant message, this MERGES the new
+    content blocks into it instead — preserving whatever real content that
+    tail carried (the prior reply, for the legitimate continue case) rather
+    than discarding it or masking the break with a synthetic bridge turn.
+    Otherwise behaves exactly like the append it replaces.
+
+    RT-008: a caller-supplied tail's ``content`` is not guaranteed to be a
+    list — the same non-list shape ``close_dangling_tool_use`` treats as
+    unreadable-and-raise (``DanglingToolUseUnreadable``) can reach here too,
+    e.g. a truthy scalar/string value. This function has no raise to fall
+    back on (``run_loop`` calls it unconditionally at every turn boundary),
+    so a non-list, non-empty tail is instead WRAPPED into a single text
+    block and kept ahead of the new content — honouring the "preserving
+    whatever real content that tail carried" promise above rather than the
+    silent overwrite this replaced. A falsy tail (``None``/``""``/missing)
+    has nothing to preserve and is just replaced with ``content`` directly.
+    """
+    if messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "assistant":
+        tail_content = messages[-1].get("content")
+        if isinstance(tail_content, list):
+            tail_content.extend(content)
+        elif tail_content:
+            preserved = tail_content if isinstance(tail_content, str) else str(tail_content)
+            messages[-1]["content"] = [{"text": preserved}, *content]
+        else:
+            messages[-1]["content"] = content
+        return
+    messages.append({"role": "assistant", "content": content})
 
 
 # Fixed human strings keyed by Pydantic error ``type`` code. SI-2: we never
@@ -311,17 +774,104 @@ async def run_loop(
     wait_resume: Callable[[str], Awaitable[Any]] | None = None,
     spent_tokens: int = 0,
     clock: Callable[[], float] = time.monotonic,
+    extra_resolved_messages: Sequence[dict[str, Any]] | None = None,
+    pending_results: list[dict[str, Any]] | None = None,
+    sealed: Callable[[], bool] | None = None,
 ) -> AsyncIterator[Any]:
     """Run the agentic loop over ``messages`` (Converse format, mutated in
     place so the caller retains history). Yields typed loop events and always
-    terminates with a DoneEvent."""
+    terminates with a DoneEvent.
+
+    ``extra_resolved_messages`` (RT-A-004) — additional Converse-format
+    messages scanned ONLY to seed the initial ``resolved_index`` (GH-148);
+    never appended to ``messages`` and never shown to the model. A transport
+    whose own request/response shape does not replay tool-result blocks back
+    into ``messages`` (AG-UI's client-resent transcript is folded through
+    ``routes/ag_ui.py::_fold_history``, which strips them) passes its own
+    out-of-band carrier here instead — ``routes/ag_ui.py`` passes
+    ``TaskStore.context_reusable_messages(thread_id)`` (RT-001: every
+    terminal task in the thread, not just the most recent one — an AG-UI
+    ``TaskRecord.messages`` never inherits a prior run's ``messages``, so a
+    single-most-recent seed would decay after exactly one intervening,
+    unrelated run) — so a value resolved in an earlier request still
+    substitutes on this one, without growing the prompt the model actually
+    sees.
+
+    ``pending_results`` (RT-B-001) — a caller-owned list that receives this
+    turn's ``toolResult`` blocks as each tool call completes, mutated in
+    place exactly like ``messages``. It exists because a turn's results are
+    committed to ``messages`` only after EVERY call in that turn finishes:
+    the assistant ``toolUse`` message is folded in first, so any mid-turn
+    exit (a ``DeferredEvent`` handoff, a cancellation, or a raise that
+    unwinds this generator's frame) would otherwise destroy the results of
+    the calls that DID complete, leaving the out-of-loop repairer
+    (``runner.py::repair_dangling_tool_use``) no choice but to synthesise a
+    blanket error result for a tool that actually succeeded — and whose real
+    result already reached the client as a ``ToolResultEvent``. Passing the
+    task's ``record.pending_tool_results`` here makes that state reachable
+    from every repair site (the deferred background awaiter, the worker's
+    terminal handlers, ``tasks_cancel``) instead of dying with the frame.
+    Cleared at the start of every turn and again once the turn commits
+    normally, so after a normal turn boundary it is empty and after a
+    mid-turn exit it holds exactly the completed calls of the turn that was
+    interrupted. Omitting it keeps the previous behaviour (turn-local list).
+
+    ``sealed`` (RT-004, debug round 4) — a predicate the caller supplies that
+    answers "has some other owner already committed this task's terminal
+    transition?". ``messages`` is the caller's live list, and an out-of-loop
+    terminal owner (``routes/a2a.py``'s ``tasks_cancel``, or
+    ``runner.py``'s deferred background awaiter) repairs and commits it
+    with no await in between — but THIS generator keeps a reference to the
+    same list and, if its own ``asyncio.CancelledError`` never lands, goes on
+    to append the turn's ``toolResult`` message on top of the synthetic one
+    the canceller already appended. That produces a duplicate ``toolUseId``
+    plus an orphan ``user``/``toolResult`` with no immediately-preceding
+    assistant ``toolUse``, on a CANCELED (terminal, hence replayable) task
+    that ``context_messages()`` selects for the next ``contextId``
+    continuation — GH-150's exact failure mode, reintroduced. Two escape
+    paths make the missing ``CancelledError`` reachable and are named in
+    ``run_task_worker``'s own comments: tool code catching ``BaseException``,
+    and ``asyncio.wait_for``'s cancel-vs-timeout race on 3.11+ surfacing a
+    ``TimeoutError`` instead. ``run_task_worker``'s terminal guard cannot
+    close this: it runs in the event CONSUMER above this generator, and these
+    appends happen down here before the next event is ever yielded — so the
+    state itself is sealed, not the consumer loop. Checked at the top of every
+    turn, immediately after ``await model.converse(...)`` returns (RT-006,
+    debug round 4 follow-up — the model call is itself an await window a
+    concurrent owner can seal during), and immediately before the per-turn
+    ``toolResult`` commit; once true, this generator mutates ``messages`` no
+    further and terminates. Omitting it keeps the previous behaviour (never
+    sealed).
+    """
     policies = policies or LoopPolicies()
+    is_sealed: Callable[[], bool] = sealed if sealed is not None else (lambda: False)
     deadline = Deadline(policies.deadline_seconds, clock=clock)
     total_tokens = spent_tokens
     result_cache: dict[tuple[str, str], Any] = {}
+    # GH-148: "resolved this conversation" index, rebuilt fresh from
+    # ``messages`` (plus ``extra_resolved_messages``, RT-A-004) every call,
+    # and grown in place below as this call resolves new Reusable values.
+    # {kind: [(label, value)]}. A2A's TaskRecord.messages is server-persisted
+    # and carries a prior turn's markers directly; AG-UI's client-resent
+    # transcript does not (agent/reuse.py module docstring, RT-001), so its
+    # route seeds ``extra_resolved_messages`` from a side channel instead.
+    scan_source = messages if not extra_resolved_messages else [*extra_resolved_messages, *messages]
+    resolved_index = scan_resolved(scan_source)
+    # RT-A-008/RT-C-001: per-(tool_name, field_name, raw value) consecutive-
+    # rejection count for this run_loop call only — bounds how long a field
+    # on every ReuseKind default (strict=True, allow_raw_override=False) can
+    # reject the same stuck raw value before resolve_reuse_fields grants a
+    # forced passthrough instead of looping the model until max_turns. Keyed
+    # on the raw value itself (not just the field) so a sequence of DIFFERENT
+    # hallucinated values never shares one budget.
+    reuse_reject_counts: dict[tuple[str, str, str], int] = {}
 
     tool_specs = [
-        {"name": e.name, "description": e.description, "input_schema": e.input_schema()}
+        {
+            "name": e.name,
+            "description": e.description,
+            "input_schema": e.input_schema(include_reuse_hint=True),
+        }
         for e in registry.all()
     ]
     if skills is not None and skills.skills:
@@ -339,10 +889,18 @@ async def run_loop(
         )
 
     for turn in range(1, policies.max_turns + 1):
+        # RT-004: another owner already committed this task terminal and
+        # repaired its transcript — stop before folding another assistant
+        # turn onto the list it is now the sole author of. See ``sealed``.
+        if is_sealed():
+            yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR)
+            return
         if deadline.exceeded():
+            bridge_trailing_user(messages)
             yield DoneEvent(ok=False, error="task deadline exceeded")
             return
         if total_tokens > policies.token_budget:
+            bridge_trailing_user(messages)
             yield DoneEvent(ok=False, error="task token budget exceeded")
             return
 
@@ -356,7 +914,24 @@ async def run_loop(
                 max_tokens=policies.max_output_tokens,
             )
         except AgentError as err:
+            bridge_trailing_user(messages)
             yield DoneEvent(ok=False, error=err.message)
+            return
+
+        # RT-006 (debug round 4 follow-up): ``await model.converse(...)``
+        # above is exactly the await window ``sealed``'s docstring warns
+        # about — another owner (``tasks_cancel``, the deferred background
+        # awaiter) can commit this task's terminal transition and repair
+        # ``messages`` while this call is in flight. The seal check at the
+        # top of the turn only catches a seal that landed BEFORE this call;
+        # re-check here, before either ``append_assistant_turn`` site below
+        # (the no-tool-call fold and the toolUse fold) mutates the same list
+        # the canceller already finished repairing — otherwise a NEW
+        # assistant toolUse lands on a CANCELED (terminal, replayable)
+        # transcript with no answering toolResult, GH-150's exact failure
+        # shape.
+        if is_sealed():
+            yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR)
             return
 
         total_tokens += response.input_tokens + response.output_tokens
@@ -368,15 +943,27 @@ async def run_loop(
             if segment.strip():
                 yield TextEvent(text=segment)
 
+        text_content: list[dict[str, Any]] = [
+            {"text": seg} for seg in response.text_segments if seg.strip()
+        ]
+
         if not response.tool_calls:
+            # GH-147: fold the assistant's final plain-text turn so a
+            # completed task's record.messages carries what the model
+            # actually said — otherwise contextId continuation replay never
+            # shows it. RT-001 (AC3): when every segment is empty/whitespace
+            # there is nothing to fold, but messages still ends on the prior
+            # 'user' turn at this point in every iteration — bridge it so
+            # the transcript never ends on 'user' regardless.
+            if text_content:
+                append_assistant_turn(messages, text_content)
+            else:
+                bridge_trailing_user(messages)
             yield DoneEvent(ok=True)
             return
 
         # fold the assistant turn
-        assistant_content: list[dict[str, Any]] = [
-            {"text": seg} for seg in response.text_segments if seg.strip()
-        ]
-        assistant_content += [
+        assistant_content = text_content + [
             {
                 "toolUse": {
                     "toolUseId": tc.tool_call_id,
@@ -386,9 +973,16 @@ async def run_loop(
             }
             for tc in response.tool_calls
         ]
-        messages.append({"role": "assistant", "content": assistant_content})
+        append_assistant_turn(messages, assistant_content)
 
-        result_blocks: list[dict[str, Any]] = []
+        # RT-B-001: alias the caller's list when one was supplied so the
+        # blocks survive a mid-turn exit (see ``pending_results`` above).
+        # Cleared here, at the turn boundary, so it never carries a
+        # previous turn's already-committed results.
+        result_blocks: list[dict[str, Any]] = (
+            [] if pending_results is None else pending_results
+        )
+        result_blocks.clear()
         ok: bool
         result: Any
         error: str | None
@@ -404,7 +998,7 @@ async def run_loop(
                 if ok:
                     result = body
                 else:
-                    result = f"unknown skill {_sanitize_model_name(requested_name)!r}"
+                    result = f"unknown skill {sanitize_text(requested_name)!r}"
                 yield ToolResultEvent(
                     tool_call_id=tc.tool_call_id, tool_name=tc.name, ok=ok,
                     result=None, error=None if ok else result,
@@ -422,7 +1016,7 @@ async def run_loop(
 
             entry = registry.get(tc.name)
             if entry is None:
-                error = f"unknown tool {_sanitize_model_name(tc.name)!r}"
+                error = f"unknown tool {sanitize_text(tc.name)!r}"
                 yield ToolResultEvent(
                     tool_call_id=tc.tool_call_id, tool_name=tc.name, ok=False, error=error
                 )
@@ -437,13 +1031,96 @@ async def run_loop(
                 )
                 continue
 
-            cache_key = (tc.name, json.dumps(tc.arguments, sort_keys=True, default=str))
+            # GH-148: substitute $ref:<kind>/$ref:<kind>:<label> tokens and
+            # reject a raw value that contradicts an already-resolved value
+            # of that kind — before cache_key/invocation so a mismatched
+            # call is never cached and never reaches the tool body. Empty
+            # entry.decl.reuse_fields (the common case) is a no-op: byte-
+            # identical behavior to before this feature existed.
+            effective_arguments = tc.arguments
+            if entry.decl.reuse_fields:
+                effective_arguments, substitutions, reuse_error = resolve_reuse_fields(
+                    tc.name, tc.arguments, entry.decl.reuse_fields, resolved_index,
+                    strict_fields=entry.decl.reuse_strict,
+                    raw_override_fields=entry.decl.reuse_raw_override,
+                    reject_counts=reuse_reject_counts,
+                    field_types=entry.decl.reuse_field_types,
+                    max_consecutive_rejections=policies.reuse_forced_passthrough_limit,
+                )
+                if reuse_error is not None:
+                    yield ToolResultEvent(
+                        tool_call_id=tc.tool_call_id, tool_name=tc.name, ok=False,
+                        error=reuse_error,
+                    )
+                    result_blocks.append(
+                        {
+                            "toolResult": {
+                                "toolUseId": tc.tool_call_id,
+                                "content": [{"text": reuse_error}],
+                                "status": "error",
+                            }
+                        }
+                    )
+                    continue
+                # (a): auditable, not silent — never the resolved value or
+                # label itself (SI-2), only which field/kind was substituted.
+                # AuditEvent, NOT NoteEvent (RT-009): this is internal
+                # plumbing, not a user-facing caveat — routes must never fold
+                # it into agent chat text.
+                for sub in substitutions:
+                    if sub.via_forced_passthrough:
+                        # RT-A-008: MAX_CONSECUTIVE_REUSE_REJECTIONS straight
+                        # mismatches on this (tool, field) already happened —
+                        # an automatic liveness fallback, not an
+                        # operator-authorized bypass, so it warrants more
+                        # visibility than the two branches below.
+                        logger.warning(
+                            "tool %r field %r: forced passthrough after repeated "
+                            "reuse rejections for kind %r (RT-A-008 bounded "
+                            "recovery)",
+                            tc.name, sub.field_name, sub.kind,
+                        )
+                    elif sub.via_raw_override:
+                        logger.info(
+                            "tool %r field %r: $raw override bypassed reuse "
+                            "validation for kind %r",
+                            tc.name, sub.field_name, sub.kind,
+                        )
+                    else:
+                        logger.info(
+                            "tool %r field %r: substituted $ref:%s",
+                            tc.name, sub.field_name, sub.kind,
+                        )
+                    yield AuditEvent(
+                        code=(
+                            "reuse_forced_passthrough" if sub.via_forced_passthrough
+                            else "reuse_raw_override" if sub.via_raw_override
+                            else "reuse_substitution"
+                        ),
+                        detail={
+                            "tool_name": tc.name,
+                            "field_name": sub.field_name,
+                            "kind": sub.kind,
+                        },
+                    )
+
+            cache_key = (
+                tc.name, json.dumps(effective_arguments, sort_keys=True, default=str)
+            )
             # GH-87: resolve effective timeout — per-tool override wins over
             # per-tier default. See resolve_tool_timeout() for priority order.
             timeout = resolve_tool_timeout(tc.name, entry, policies)
 
             ok, result, error = True, None, None
             deferred: DeferredResult | None = None  # GH-87
+            # RT-002 (regression against LRN-120/LRN-122): kind/label captured
+            # when the tool returns Reusable(value=DeferredResult(...)) — the
+            # ORIGINAL wrapper's kind/label, threaded onto DeferredEvent so
+            # the runner can fold the __resolved__ marker once the handle
+            # resolves (this call hands off and exits before the ordinary
+            # Reusable unwrap further below ever runs).
+            deferred_reuse_kind: str | None = None
+            deferred_reuse_label: str | None = None
             interrupted: ToolInterrupt | None = None
             if cache_key in result_cache:
                 result = result_cache[cache_key]
@@ -452,7 +1129,7 @@ async def run_loop(
                 # budget; forward interim ToolProgressEvent items downstream.
                 try:
                     async with asyncio.timeout(timeout):
-                        async for gen_item in entry.invoke_gen(tc.arguments, adapters):
+                        async for gen_item in entry.invoke_gen(effective_arguments, adapters):
                             if isinstance(gen_item, ToolTerminalResult):
                                 result = gen_item.value
                             elif isinstance(gen_item, ToolProgressEvent):
@@ -470,6 +1147,19 @@ async def run_loop(
                                     tc.name,
                                     type(gen_item).__name__,
                                 )
+                    # RT-002/RT-010: a Reusable wrapping a still-pending
+                    # DeferredResult (the unhandled nesting ORDER — GH-148's
+                    # Reusable unwrap normally happens later, at line ~770,
+                    # which is AFTER this check) must be unwrapped here too,
+                    # or the DeferredResult check below never fires and the
+                    # raw handle leaks into messages/ToolResultEvent. The
+                    # wrapper's kind/label describe the value the handle will
+                    # EVENTUALLY resolve to — captured here and threaded onto
+                    # DeferredEvent (below) so the runner's background awaiter
+                    # can still fold the __resolved__ marker once resolved.
+                    if isinstance(result, Reusable) and isinstance(result.value, DeferredResult):
+                        deferred_reuse_kind, deferred_reuse_label = result.kind, result.label
+                        result = result.value
                     # RT-001: detect DeferredResult on the generator's terminal
                     # value too — hand off to runner for background awaiting;
                     # skip cache and normal result path. Mirrors the coroutine
@@ -496,13 +1186,33 @@ async def run_loop(
                     ok, error = False, safe_validation_message(
                         exc.tool_name, exc.validation_error, exc.input_model
                     )
-                except Exception:
+                except Exception as exc:
+                    # RT-001 (amended LRN-044 Check): the class name is an
+                    # operator-facing diagnostic — log it, never interpolate
+                    # it into the WIRE-facing error. ToolResultEvent.error
+                    # reaches the untrusted A2A/AG-UI caller verbatim and is
+                    # replayed into the transcript on every later contextId
+                    # continuation (matches bedrock.py's RT-006 / runner.py's
+                    # RT-002 precedent). SI-2: never str(exc), which can carry
+                    # credentials or user payloads.
+                    logger.warning(
+                        "tool call failed tool=%s error_type=%s",
+                        tc.name, type(exc).__name__,
+                    )
                     ok, error = False, f"tool '{tc.name}' failed"
             else:
                 try:
                     result = await asyncio.wait_for(
-                        entry.invoke(tc.arguments, adapters), timeout=timeout
+                        entry.invoke(effective_arguments, adapters), timeout=timeout
                     )
+                    # RT-002/RT-010: unwrap a Reusable wrapping a still-pending
+                    # DeferredResult BEFORE the deferred check below — see the
+                    # matching comment in the async-generator branch above for
+                    # why this order matters; kind/label are captured, not
+                    # discarded, and threaded onto DeferredEvent below.
+                    if isinstance(result, Reusable) and isinstance(result.value, DeferredResult):
+                        deferred_reuse_kind, deferred_reuse_label = result.kind, result.label
+                        result = result.value
                     # GH-87: detect DeferredResult — hand off to runner for
                     # background awaiting; skip cache and normal result path.
                     if isinstance(result, DeferredResult):
@@ -527,7 +1237,19 @@ async def run_loop(
                     ok, error = False, safe_validation_message(
                         exc.tool_name, exc.validation_error, exc.input_model
                     )
-                except Exception:
+                except Exception as exc:
+                    # RT-001 (amended LRN-044 Check): the class name is an
+                    # operator-facing diagnostic — log it, never interpolate
+                    # it into the WIRE-facing error. ToolResultEvent.error
+                    # reaches the untrusted A2A/AG-UI caller verbatim and is
+                    # replayed into the transcript on every later contextId
+                    # continuation (matches bedrock.py's RT-006 / runner.py's
+                    # RT-002 precedent). SI-2: never str(exc), which can carry
+                    # credentials or user payloads.
+                    logger.warning(
+                        "tool call failed tool=%s error_type=%s",
+                        tc.name, type(exc).__name__,
+                    )
                     ok, error = False, f"tool '{tc.name}' failed"
 
             # GH-87: deferred tool — emit DeferredEvent, do NOT emit DoneEvent
@@ -539,6 +1261,8 @@ async def run_loop(
                     tool_call_id=tc.tool_call_id,
                     emits=entry.decl.emits,
                     timeout_seconds=timeout,
+                    reuse_kind=deferred_reuse_kind,
+                    reuse_label=deferred_reuse_label,
                 )
                 return  # loop exits; runner drives the task to completion
 
@@ -568,7 +1292,7 @@ async def run_loop(
                             ok, error = False, err.message
                         except asyncio.TimeoutError:
                             ok, error = False, f"tool '{tc.name}' timed out after resume"
-                        except Exception:
+                        except Exception as exc:
                             # RT-004: resume_handler never goes through
                             # ToolEntry.invoke's model_validate, so a
                             # ValidationError here can only be a body-level
@@ -576,9 +1300,71 @@ async def run_loop(
                             # mislabeled against entry.decl.input_model (which
                             # describes the tool's ORIGINAL arguments, not
                             # resume_value).
+                            # RT-001 (amended LRN-044 Check): the class name
+                            # is an operator-facing diagnostic — log it, never
+                            # interpolate it into the WIRE-facing error (SI-2,
+                            # matches bedrock.py's RT-006 / runner.py's RT-002
+                            # precedent). Never str(exc) either, which can
+                            # carry credentials or user payloads.
+                            logger.warning(
+                                "tool call failed after resume tool=%s error_type=%s",
+                                tc.name, type(exc).__name__,
+                            )
                             ok, error = False, f"tool '{tc.name}' failed after resume"
                     else:
                         result = {"interrupt": interrupted.reason, "user_response": resume_value}
+
+            # GH-148: unwrap a Reusable return value before the model sees
+            # it (it receives .value, exactly like a plain return) and grow
+            # the resolved index in place so a downstream tool call LATER
+            # in this same run_loop call can already reference it.
+            resolved_marker: dict[str, Any] | None = None
+            if ok and isinstance(result, Reusable):
+                # RT-005: normalize BEFORE folding into resolved_index/the
+                # marker — a raw BaseModel here would plant a live pydantic
+                # object inside messages and crash json.dumps on the next
+                # model call. `result` (below) stays the unwrapped raw
+                # value: the model/emits/ArtifactEvent path needs the real
+                # object, only the messages-bound marker needs it JSON-safe.
+                jsonable_value = jsonable_reuse_value(result.value)
+                marker_entries = resolved_index.setdefault(result.kind, [])
+                # RT-007: type-aware identity (see index_entry_key's
+                # docstring) — plain tuple `==` on (label, value) conflates
+                # 1/True/1.0 across a type boundary, silently collapsing two
+                # distinct resolutions into one index entry.
+                marker_key = index_entry_key(result.label, jsonable_value)
+                same_label_keys = {
+                    index_entry_key(lbl, val)
+                    for lbl, val in marker_entries
+                    if lbl == result.label
+                }
+                if same_label_keys != {marker_key}:
+                    # RT-A-02: last resolution wins for a re-resolved
+                    # (kind, label) pair. The old dedup only skipped a
+                    # byte-identical (label, value) repeat and otherwise
+                    # APPENDED — so re-resolving a label to a genuinely new
+                    # value (a refreshed identifier) left two entries
+                    # sharing one label, permanently dead-locking
+                    # `$ref:<kind>:<label>` for that label: the multi-match
+                    # branch below rejects as ambiguous, and a raw value
+                    # matching the freshest entry hits the ambiguity branch
+                    # too — both reject with the exact disambiguation move
+                    # the caller already made. Dropping every prior entry
+                    # for this label before appending keeps at most one
+                    # entry per label at all times (and self-heals a
+                    # same-label duplicate inherited from scan_resolved's
+                    # rebuild of persisted messages, RT-007), while the
+                    # `!= {marker_key}` guard still skips the mutation
+                    # entirely on a genuine byte-identical repeat so
+                    # ordering is undisturbed in the common case.
+                    marker_entries[:] = [
+                        (lbl, val) for lbl, val in marker_entries if lbl != result.label
+                    ]
+                    marker_entries.append((result.label, jsonable_value))
+                resolved_marker = {
+                    "kind": result.kind, "label": result.label, "value": jsonable_value,
+                }
+                result = result.value
 
             if ok:
                 emits = entry.decl.emits
@@ -591,11 +1377,18 @@ async def run_loop(
                 yield ToolResultEvent(
                     tool_call_id=tc.tool_call_id, tool_name=tc.name, ok=True, result=result
                 )
+                content_blocks: list[dict[str, Any]] = [fold_result_content(result)]
+                if resolved_marker is not None:
+                    # Same tool-result content array already folded into
+                    # messages today — no new TaskRecord field. Visible to
+                    # the model too: this is how it learns a value it just
+                    # got is citable later via $ref:<kind>.
+                    content_blocks.append({"json": {RESOLVED_MARKER_KEY: resolved_marker}})
                 result_blocks.append(
                     {
                         "toolResult": {
                             "toolUseId": tc.tool_call_id,
-                            "content": [_fold_result_content(result)],
+                            "content": content_blocks,
                             "status": "success",
                         }
                     }
@@ -614,6 +1407,25 @@ async def run_loop(
                     }
                 )
 
-        messages.append({"role": "user", "content": result_blocks})
+        # RT-004: the one commit that survives a swallowed cancellation. By
+        # here every tool call in the turn has returned, so a concurrent
+        # tasks_cancel has had its chance to repair and commit — if it did,
+        # this append would land a DUPLICATE toolUseId and an orphan
+        # user/toolResult on top of its synthetic one. Drop the turn instead;
+        # the canceller's repaired transcript is the authoritative one, and
+        # the pending blocks it did not use are discarded with it (they are
+        # runtime-only turn state, never serialised).
+        if is_sealed():
+            result_blocks.clear()
+            yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR)
+            return
+        # RT-B-001: commit a COPY — ``result_blocks`` may be the caller's
+        # ``pending_results`` list, which is cleared below (and at the next
+        # turn boundary); appending it by reference would empty the message
+        # we just folded. The turn is now fully recorded in ``messages``, so
+        # nothing is left pending for a repairer to re-apply.
+        messages.append({"role": "user", "content": list(result_blocks)})
+        result_blocks.clear()
 
+    bridge_trailing_user(messages)
     yield DoneEvent(ok=False, error=f"max turns ({policies.max_turns}) exceeded")

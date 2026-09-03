@@ -25,7 +25,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from .a2ui.translator import A2uiCapabilities
-from .agent.bedrock import BedrockModelClient
+from .agent.bedrock import BedrockModelClient, require_bearer_auth_botocore
 from .agent.loop import LoopPolicies
 from .agent.model_client import ModelClient
 from .agent.registry import ToolRegistry, ToolSet
@@ -381,10 +381,17 @@ class Agent:
                 "or OPENAI_MODEL / AZURE_OPENAI_ENDPOINT for OpenAI "
                 "(then seed the API key once via /admin → Model Backend)."
             )
+        bearer_token = credential_store.get(NS_BEDROCK, "bearer_token")
+        if bearer_token:
+            # LRN-104 Layer 2: fail fast at startup with the upgrade
+            # instruction rather than a generic 502 on the first real
+            # converse() call (RT-004) — mirrors the `import openai` probe
+            # above.
+            require_bearer_auth_botocore()
         return BedrockModelClient(
             region=s.bedrock_region,
             model_arn=s.bedrock_model_arn,
-            bearer_token=credential_store.get(NS_BEDROCK, "bearer_token"),
+            bearer_token=bearer_token,
             aws_access_key_id=credential_store.get(NS_BEDROCK, "aws_access_key_id"),
             aws_secret_access_key=credential_store.get(NS_BEDROCK, "aws_secret_access_key"),
             aws_session_token=credential_store.get(NS_BEDROCK, "aws_session_token"),

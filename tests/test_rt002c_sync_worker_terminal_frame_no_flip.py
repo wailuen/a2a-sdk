@@ -1,7 +1,7 @@
 """Redteam follow-up (RT-002), applied consistently to run_task_worker: the
 SAME broad-try shape that _run_deferred_background's success path had also
 covers run_task_worker's own terminal DoneEvent(ok=True) publish. If that
-publish raises AFTER _set_status(COMPLETED) already committed the state
+publish raises AFTER set_task_status(COMPLETED) already committed the state
 in-memory (e.g. a persistent TaskStore whose publish() does a durable write
 that fails), the outer except handler re-enters the FAILED path and
 publishes a duplicate, ok=False terminal frame — flipping an already-decided

@@ -19,11 +19,20 @@ never-resolving handle, cancels it mid-flight against a ``TaskStore`` whose
 mock/patch — real ``run_task_worker`` + an ``InMemoryTaskStore`` subclass,
 mirroring test_rt002_close_streams_finally_on_publish_failure.py's store-
 failure-injection pattern.
+
+RT-B-201 (redteam, agent/runner.py review): the ``except Exception: pass``
+that swallows this teardown failure used to drop the exception's class name
+entirely — LRN-044's exact "bare except Exception loses the class" shape.
+Fixed to ``except Exception as exc:`` + ``logger.warning(...,
+type(exc).__name__)`` before the ``raise``, so an operator sees WHICH
+teardown error happened during an already-failing cancellation, even though
+none of it reaches the wire.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import pytest
@@ -83,7 +92,7 @@ def _make_record(store: InMemoryTaskStore) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_cancelled_error_survives_failing_teardown_during_cancel() -> None:
+async def test_cancelled_error_survives_failing_teardown_during_cancel(caplog) -> None:
     store = _RaisesOnPublishOnceArmed()
     record = _make_record(store)
 
@@ -110,5 +119,12 @@ async def test_cancelled_error_survives_failing_teardown_during_cancel() -> None
     store.armed = True
     record.bg_task.cancel()
 
-    with pytest.raises(asyncio.CancelledError):
-        await record.bg_task
+    with caplog.at_level(logging.WARNING, logger="agent_sdk.agent.runner"):
+        with pytest.raises(asyncio.CancelledError):
+            await record.bg_task
+
+    # RT-B-201: the teardown failure (RuntimeError from store.publish) must
+    # still be visible to an operator — logged, never swallowed silently.
+    assert any(
+        "RuntimeError" in r.message for r in caplog.records
+    ), f"expected the teardown exception class name in the log — got {[r.message for r in caplog.records]!r}"

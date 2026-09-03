@@ -36,6 +36,24 @@ class NoteEvent(LoopEvent):
 
 
 @dataclass(slots=True)
+class AuditEvent(LoopEvent):
+    """Internal audit record for a policy action the loop took on a tool
+    call before invocation (e.g. GH-148 ``$ref`` substitution) — NEVER
+    user-facing.
+
+    Unlike ``NoteEvent``, routes never fold this into agent chat text:
+    ``runner.py`` logs it and stashes ``detail`` under
+    ``TaskStatusUpdateEvent.metadata["audit"]``, never ``status.message``;
+    the AG-UI route emits no frame for it at all. ``detail`` carries only
+    schema-declared identifiers (tool/field names, kinds) — never a resolved
+    value or label (SI-2).
+    """
+
+    code: str
+    detail: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class ToolProgressEvent(LoopEvent):
     """Interim progress notification yielded by an async-generator tool (GH-88).
 

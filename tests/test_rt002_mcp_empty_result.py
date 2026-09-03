@@ -13,7 +13,7 @@ is skipped (``emits_type is None``) and the fold path ran ``_tool_text(None)``
 RT-002's own fix over-corrected: it flipped the same case to
 ``isError: True`` ("tool produced no result"), but agent/loop.py's
 ``run_loop`` folds this identical None result into a SUCCESS toolResult
-(``_fold_result_content(None) -> {"text": ""}``, status "success") on the
+(``fold_result_content(None) -> {"text": ""}``, status "success") on the
 A2A/AG-UI surfaces — so the same void Tier-1 tool call succeeded over
 A2A/AG-UI yet failed over MCP, breaking surface parity (RT-001).
 
@@ -152,7 +152,7 @@ async def test_mcp_tools_call_empty_generator_is_success(rt002_client) -> None:
 
     assert result.get("isError") is False, (
         "a void Tier-1 tool must report the same verdict as agent/loop.py's "
-        f"_fold_result_content(None) (SUCCESS); got {result}"
+        f"fold_result_content(None) (SUCCESS); got {result}"
     )
     text = result["content"][0]["text"]
     assert text == "", f"None must fold to empty text, not the literal 'None'; got {text!r}"
@@ -164,7 +164,7 @@ async def test_mcp_tools_call_none_coroutine_is_success(rt002_client) -> None:
 
     assert result.get("isError") is False, (
         "a void Tier-1 tool must report the same verdict as agent/loop.py's "
-        f"_fold_result_content(None) (SUCCESS); got {result}"
+        f"fold_result_content(None) (SUCCESS); got {result}"
     )
     text = result["content"][0]["text"]
     assert text == "", f"None must fold to empty text, not the literal 'None'; got {text!r}"
@@ -176,7 +176,7 @@ async def test_mcp_tools_call_none_coroutine_with_emits_is_success(rt002_client)
 
     assert result.get("isError") is False, (
         "a void Tier-1 tool must report SUCCESS regardless of whether it "
-        f"declares emits — matching A2A/AG-UI's _fold_result_content(None); got {result}"
+        f"declares emits — matching A2A/AG-UI's fold_result_content(None); got {result}"
     )
     text = result["content"][0]["text"]
     assert text == "", f"None must fold to empty text, not the literal 'None'; got {text!r}"
@@ -191,7 +191,7 @@ async def test_mcp_tools_call_empty_generator_with_emits_is_success(rt002_client
 
     assert result.get("isError") is False, (
         "a void Tier-1 tool must report SUCCESS regardless of whether it "
-        f"declares emits — matching A2A/AG-UI's _fold_result_content(None); got {result}"
+        f"declares emits — matching A2A/AG-UI's fold_result_content(None); got {result}"
     )
     text = result["content"][0]["text"]
     assert text == "", f"None must fold to empty text, not the literal 'None'; got {text!r}"

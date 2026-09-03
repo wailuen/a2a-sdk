@@ -39,6 +39,7 @@ from agent_sdk.models.content_types import (
     MultiCategoryPeriod,
     NameEmail,
     TableSection,
+    TimeSeriesChart,
     UserList,
     UserProfile,
     UserSummary,
@@ -307,16 +308,179 @@ def test_multi_category_chart_metadata_wire_round_trip():
     assert mc.wire()["metadata"]["coverage_note"] == "estimated"
 
 
+def test_category_value_metadata_wire_round_trip():
+    """RT-A03: CategoryValue is a _Wire sub-shape (MultiCategoryChart's
+    categories/by_category values), not a ContentModel — it cannot inherit
+    metadata from ContentModel's RT-006 hoist and must declare its own field,
+    matching the frozen catalog contract `{value, count?, metadata?}`
+    (agent_sdk/a2ui/catalog.py's MultiCategoryChart compact schema comment)."""
+    cv = CategoryValue(value=1.0, count=2, metadata={"note": "partial"})
+    assert cv.wire()["metadata"] == {"note": "partial"}
+
+
+def test_category_value_metadata_none_excluded_from_wire():
+    assert "metadata" not in CategoryValue(value=1.0).wire()
+
+
 def test_fund_performance_metadata_wire_round_trip():
     fp = FundPerformance(
-        fundName="Alpha Fund III",
+        pbId="pb-alpha-3",
         irr=0.185,
         metadata={"coverage_note": "analyst estimate"},
     )
     w = fp.wire()
     assert w["metadata"] == {"coverage_note": "analyst estimate"}
     # camelCase fields are still serialised correctly alongside metadata
-    assert w["fundName"] == "Alpha Fund III"
+    assert w["pbId"] == "pb-alpha-3"
+
+
+def test_fund_performance_has_no_fund_name_field():
+    """GH-149: fund_name/fundName is not in the frozen Standard Profile v1
+    FundPerformance contract (a2ui-advisor.md) — it must not be a declared
+    field, and constructing with fundName must not resurrect it on the wire."""
+    assert "fund_name" not in FundPerformance.model_fields
+
+    fp = FundPerformance(fundName="Alpha Fund III", irr=0.185)
+
+    assert not hasattr(fp, "fund_name")
+    w = fp.wire()
+    assert "fundName" not in w
+    assert w["irr"] == 0.185
+
+
+def test_fund_performance_to_plain_text_non_empty_without_fund_name():
+    fp = FundPerformance(irr=0.185, tvpi=1.74, dpi=0.95, moic=1.74)
+    text = fp.to_plain_text()
+    assert text != "fund performance (no data)"
+    assert "IRR=18.5%" in text
+    assert "TVPI=1.74x" in text
+
+
+def test_fund_performance_to_plain_text_pb_id_and_net_irr_only_not_no_data():
+    """RT-004 (GH-149 follow-up): a card carrying only pbId + the newer
+    net/gross IRR, RVPI and quartile fields (none of the original
+    irr/tvpi/dpi/moic) must never render 'fund performance (no data)' — the
+    mandatory text fallback (DESIGN.md §5.1/§5.4) must not go blank for a
+    client without A2UI capability just because the card's data lives in
+    fields to_plain_text() didn't originally cover."""
+    fp = FundPerformance(pbId="pb-acme-3", netIrr=0.164, grossIrr=0.211, rvpi=0.79, quartile=1)
+    text = fp.to_plain_text()
+    assert text != "fund performance (no data)"
+    assert "Net IRR=16.4%" in text
+    assert "Gross IRR=21.1%" in text
+    assert "RVPI=0.79x" in text
+    assert "Quartile=Q1" in text
+    # Provenance suffix, mirroring the admin console card's subtitle
+    # (a2ui.js::renderFundPerformance's "source <pbId>").
+    assert "source pb-acme-3" in text
+
+
+def test_fund_performance_to_plain_text_capital_activity_fields_only_not_no_data():
+    """RT-002: a card carrying only the capital-activity fields (none of the
+    original irr/tvpi/dpi/moic/pbId) must never render 'fund performance (no
+    data)'. All four are rendered by the A2UI console card
+    (a2ui.js::renderFundPerformance) — the text fallback must keep pace."""
+    fp = FundPerformance(
+        calledDownPct=0.6,
+        dryPowder={"amount": 1_000_000, "currency": "USD"},
+        distributed={"amount": 5_000, "currency": "USD"},
+        remainingValue={"amount": 7_000, "currency": "USD"},
+    )
+    text = fp.to_plain_text()
+    assert text != "fund performance (no data)"
+    assert "Called down=60.0%" in text
+    assert "Dry powder=1,000,000 USD" in text
+    assert "Distributed=5,000 USD" in text
+    assert "Remaining value=7,000 USD" in text
+
+
+def test_fund_performance_to_plain_text_covers_every_wire_field():
+    """RT-002: every field wire() can carry must be represented in
+    to_plain_text() — a text-only client sees ONLY this string, so a field
+    present on the card but absent here silently vanishes for that client.
+    This card sets every FundPerformance field (metadata excluded — it is
+    the SDK-wide out-of-band envelope, not a per-type Profile v1 field) and
+    checks each one leaves a distinctive trace in the fallback text."""
+    fp = FundPerformance(
+        pbId="pb-acme-3",
+        asOfDate="2026-06-30",
+        irr=0.185,
+        tvpi=1.74,
+        dpi=0.95,
+        rvpi=0.79,
+        netIrr=0.164,
+        grossIrr=0.211,
+        moic=1.74,
+        quartile=1,
+        nav={"amount": 42_000, "currency": "USD"},
+        asOfQuarter=4,
+        asOfYear=2025,
+        calledDownPct=0.6,
+        dryPowder={"amount": 1_000_000, "currency": "USD"},
+        dryPowderPct=0.4,
+        distributed={"amount": 5_000, "currency": "USD"},
+        remainingValue={"amount": 7_000, "currency": "USD"},
+        distributedPlusRemaining={"amount": 12_000, "currency": "USD"},
+    )
+    wire_fields = set(fp.wire()) - {"metadata"}
+    text = fp.to_plain_text()
+
+    assert text != "fund performance (no data)"
+    assert "IRR=18.5%" in text
+    assert "Net IRR=16.4%" in text
+    assert "Gross IRR=21.1%" in text
+    assert "TVPI=1.74x" in text
+    assert "DPI=0.95x" in text
+    assert "RVPI=0.79x" in text
+    assert "MOIC=1.74x" in text
+    assert "Quartile=Q1" in text
+    assert "NAV=42,000 USD" in text
+    assert "Dry powder=1,000,000 USD" in text
+    assert "Dry powder pct=40.0%" in text
+    assert "Distributed=5,000 USD" in text
+    assert "Remaining value=7,000 USD" in text
+    assert "Distributed+remaining=12,000 USD" in text
+    assert "Called down=60.0%" in text
+    assert "Q4 2025" in text
+    assert "as of 2026-06-30" in text
+    assert "source pb-acme-3" in text
+    # Every wire field this card set is checked above — guards against a
+    # future field silently falling behind to_plain_text() again.
+    assert wire_fields == {
+        "pbId",
+        "asOfDate",
+        "irr",
+        "tvpi",
+        "dpi",
+        "rvpi",
+        "netIrr",
+        "grossIrr",
+        "moic",
+        "quartile",
+        "nav",
+        "asOfQuarter",
+        "asOfYear",
+        "calledDownPct",
+        "dryPowder",
+        "dryPowderPct",
+        "distributed",
+        "remainingValue",
+        "distributedPlusRemaining",
+    }
+
+
+def test_fund_performance_to_plain_text_quartile_distinguishable_from_as_of_quarter():
+    """RT-004: quartile (a performance-quartile rank) and as_of_quarter (the
+    as-of period) can carry the same digit -- e.g. quartile=1 and
+    as_of_quarter=1 -- so the quartile bit must be labelled. Otherwise
+    neither a text-only client nor the model reading the folded tool result
+    (DESIGN.md §5.1/§5.4) can tell a top-quartile fund from a Q1 as-of date."""
+    fp = FundPerformance(quartile=1, asOfQuarter=1)
+    text = fp.to_plain_text()
+    bits = text.split(" | ")
+    assert "Quartile=Q1" in bits
+    assert "Q1" in bits
+    assert bits.count("Q1") == 1
 
 
 def test_email_list_metadata_wire_round_trip():
@@ -412,6 +576,155 @@ def test_metadata_survives_wire_with_nested_dict():
     w = card.wire()
     assert w["metadata"]["flags"]["confidence"] == 0.92
     assert w["metadata"]["tags"] == ["analyst", "q2"]
+
+
+# ── RT-003 (RT-004 follow-up): metadata must reach the text fallback too ────
+# GH-63's whole purpose is out-of-band disclosure annotations; the mandatory
+# text fallback (DESIGN.md §5.1/§5.4) is precisely the surface a client with
+# no A2UI capability relies on, so an annotation that only reaches wire()
+# never reaches that client at all.
+
+
+def test_fund_performance_to_plain_text_includes_metadata():
+    fp = FundPerformance(
+        irr=0.18,
+        metadata={"fund": "Fund III", "coverage_note": "Partial: 5 of 20 funds"},
+    )
+    text = fp.to_plain_text()
+    assert "fund=Fund III" in text
+    assert "coverage_note=Partial: 5 of 20 funds" in text
+
+
+def test_kpi_card_to_plain_text_includes_metadata():
+    """Metadata rendering is ContentModel-level, not a FundPerformance
+    one-off — spot-check a second, differently-shaped type."""
+    card = KpiCard(
+        metrics=[MetricItem(label="IRR", value=18.5, unit="%")],
+        metadata={"coverage_note": "preliminary"},
+    )
+    text = card.to_plain_text()
+    assert "coverage_note=preliminary" in text
+
+
+def test_document_list_to_plain_text_includes_metadata():
+    docs = DocumentList(
+        documents=[DocumentItem(id="1", name="Q4 Report")],
+        metadata={"source": "sharepoint"},
+    )
+    text = docs.to_plain_text()
+    assert "source=sharepoint" in text
+
+
+def test_market_briefing_to_plain_text_includes_metadata():
+    """MarketBriefing.to_plain_text() wraps to_markdown() (the prose
+    exception) — metadata must still surface without altering the
+    to_markdown() wire value itself (translator.py uses to_markdown()
+    directly as the A2UI DataPart content)."""
+    mb = MarketBriefing(
+        title="Weekly Markets",
+        as_of="2026-09-02",
+        metadata={"coverage_note": "delayed feed"},
+    )
+    assert "coverage_note=delayed feed" in mb.to_plain_text()
+    assert "coverage_note" not in mb.to_markdown()
+
+
+def test_content_model_plain_text_unaffected_when_metadata_unset():
+    """No stray suffix is added when metadata is absent — a regression guard
+    on the metadata-present cases above."""
+    fp = FundPerformance(irr=0.18)
+    assert fp.to_plain_text() == "IRR=18.0%"
+    docs = DocumentList(documents=[DocumentItem(id="1", name="Q4 Report")])
+    assert docs.to_plain_text() == "1 document(s)\n  Q4 Report"
+
+
+# ── RT-A06: metadata reaching to_plain_text() is sanitized and bounded ──────
+# metadata is a caller-/tool-supplied dict[str, Any] that now reaches the
+# mandatory A2A/MCP text fallback via _metadata_suffix() — it must get the
+# same control-char-strip + length-cap discipline (SI-2) as every other
+# untrusted string reaching the wire from this SDK, not raw interpolation.
+
+
+def test_metadata_control_char_never_reaches_plain_text():
+    card = KpiCard(
+        metrics=[MetricItem(label="IRR", value=18.5)],
+        metadata={"note\x1b[31m": "danger\x07\x9b"},
+    )
+    text = card.to_plain_text()
+    assert "\x1b" not in text
+    assert "\x07" not in text
+    assert "\x9b" not in text
+    assert "note" in text and "danger" in text
+
+
+def test_metadata_suffix_field_is_length_capped():
+    card = KpiCard(
+        metrics=[MetricItem(label="IRR", value=18.5)],
+        metadata={"note": "x" * 1000},
+    )
+    text = card.to_plain_text()
+    suffix = text.split("\n", 1)[1]
+    assert len(suffix) <= 256 + len("note=")
+
+
+def test_metadata_suffix_total_length_is_capped():
+    card = KpiCard(
+        metrics=[MetricItem(label="IRR", value=18.5)],
+        metadata={f"k{i}": "v" * 200 for i in range(50)},
+    )
+    text = card.to_plain_text()
+    suffix = text.split("\n", 1)[1]
+    assert len(suffix) <= 4096
+
+
+# ── RT-006: metadata is declared once on ContentModel, not per subclass ─────
+
+
+def test_metadata_is_declared_once_on_content_model_base():
+    """RT-006: GH-63's escape hatch must live on ContentModel so every
+    subclass — including future domain cards — inherits it automatically,
+    instead of each of the 14 Profile v1 types redeclaring the same field."""
+    assert "metadata" in ContentModel.model_fields
+
+    for cls in (
+        KpiCard,
+        TimeSeriesChart,
+        ComparisonTable,
+        BarChart,
+        EntityList,
+        MarketBriefing,
+        WaterfallChart,
+        MultiCategoryChart,
+        FundPerformance,
+        EmailList,
+        CalendarEvents,
+        UserProfile,
+        UserList,
+        DocumentList,
+    ):
+        assert "metadata" not in cls.__dict__.get("__annotations__", {}), (
+            f"{cls.__name__} redeclares metadata instead of inheriting it "
+            "from ContentModel (RT-006)"
+        )
+
+
+def test_metadata_is_inherited_by_a_fresh_content_model_subclass():
+    """A brand-new domain card that never mentions metadata still gets the
+    escape hatch for free, and it still round-trips through wire()."""
+
+    class _FreshCard(ContentModel):
+        data_type: ClassVar[str] = "test_fresh_card"
+        component: ClassVar[str] = "TestFreshCard"
+        catalog_id: ClassVar[str] = "urn:test-catalog:v1"
+        headline: str
+
+        def to_plain_text(self) -> str:
+            return self.headline
+
+    assert "metadata" in _FreshCard.model_fields
+    card = _FreshCard(headline="hi", metadata={"source": "test"})
+    assert card.wire()["metadata"] == {"source": "test"}
+    assert "metadata" not in _FreshCard(headline="hi").wire()
 
 
 # ── finite-float validation (GH-95) ───────────────────────────────────────
@@ -513,14 +826,45 @@ def test_comparison_table_accepts_non_finite_row_value_outside_scope():
     assert table.rows[0]["v"] == float("inf")
 
 
-def test_kpi_card_accepts_non_finite_metadata_value_outside_scope():
-    """Free-form metadata dicts on non-MarketBriefing types are outside GH-95's
-    AC — only ChartSection.data/TableSection.data are scoped in."""
+# RT-006 (round 4): `metadata` is now scoped IN. This previously asserted the
+# opposite ("free-form metadata dicts are outside GH-95's AC") — but that scope
+# note predates `metadata` being hoisted onto ContentModel itself. GH-95's AC
+# names the fields where wire() and the text fallback would otherwise disagree,
+# and `metadata` is now the one free-form dict on EVERY card that reaches BOTH:
+# wire() emits {"confidence": null} (ser_json_inf_nan) while _metadata_suffix()
+# renders "confidence=nan". The old assertion locked that disagreement in.
+# The sibling `*_outside_scope` tests around it are unchanged and still correct:
+# MetricItem.value, BarItem.value, WaterfallSegment.value, ComparisonTable.rows
+# and FundPerformance.irr are NOT scoped in.
+
+
+def test_kpi_card_rejects_non_finite_metadata_value():
+    """metadata reaches both wire() and to_plain_text(), so a non-finite value
+    must be rejected at construction rather than diverging between them."""
+    with pytest.raises(ValidationError):
+        KpiCard(
+            metrics=[MetricItem(label="price", value=1.0)],
+            metadata={"confidence": float("nan")},
+        )
+
+
+def test_kpi_card_rejects_non_finite_metadata_value_nested():
+    """The guard recurses — a non-finite float nested inside metadata is
+    rejected too, matching ChartSection.data/TableSection.data."""
+    with pytest.raises(ValidationError):
+        KpiCard(
+            metrics=[MetricItem(label="price", value=1.0)],
+            metadata={"bounds": {"upper": float("inf")}},
+        )
+
+
+def test_kpi_card_accepts_finite_metadata_value():
     card = KpiCard(
         metrics=[MetricItem(label="price", value=1.0)],
-        metadata={"confidence": float("nan")},
+        metadata={"confidence": 0.93},
     )
-    assert card.metadata is not None and card.metadata["confidence"] != card.metadata["confidence"]
+    assert card.wire()["metadata"] == {"confidence": 0.93}
+    assert "confidence=0.93" in card.to_plain_text()
 
 
 def test_fund_performance_accepts_non_finite_irr_outside_scope():
