@@ -100,6 +100,15 @@ from pydantic import (
 
 from ..common.redact import safe_block_text, safe_cell_text, sanitize_text
 
+# Punctuation a renderer template may legitimately emit around a sanitized
+# value without it being a structural delimiter — "+"/"%" in a numeric
+# rendering, "." in a version/decimal, "-" as a literal hyphen, "/" as a
+# renderer template, so a future renderer that introduces a genuinely new
+# separator fails the build instead of shipping. Stays here, not in
+# redact.py: it describes THIS module's renderer templates, not the shared
+# alphabet.
+_NON_SEPARATOR_GLYPHS = frozenset("-+%./")
+
 
 def _sanitize_cell(value: str) -> str:
     """Thin alias for :func:`agent_sdk.common.redact.safe_cell_text` (GH-130,
@@ -565,10 +574,10 @@ class KpiCard(ContentModel):
     title: str | None = None
 
     def _body_text(self) -> str:
-        lines = [self.title] if self.title else []
+        lines = [_sanitize_cell(self.title)] if self.title else []
         for m in self.metrics:
-            unit = f" {m.unit}" if m.unit else ""
-            lines.append(f"{m.label}: {m.value}{unit}")
+            unit = f" {_sanitize_cell(m.unit)}" if m.unit else ""
+            lines.append(f"{_sanitize_cell(m.label)}: {_sanitize_cell(str(m.value))}{unit}")
             if isinstance(m.trend, KpiTrend):
                 arrow = _ARROWS[m.trend.direction]
                 bits = [arrow]
@@ -577,7 +586,7 @@ class KpiCard(ContentModel):
                 elif m.trend.delta is not None:
                     bits.append(f"{m.trend.delta:+g}")
                 if m.trend.period:
-                    bits.append(m.trend.period)
+                    bits.append(_sanitize_cell(m.trend.period))
                 lines.append(f"  trend: {' '.join(bits)}")
             elif isinstance(m.trend, str):
                 lines.append(f"  trend: {_ARROWS[m.trend]}")
@@ -647,13 +656,15 @@ class TimeSeriesChart(ContentModel):
         return values
 
     def _body_text(self) -> str:
-        lines = [self.title]
+        lines = [_sanitize_cell(self.title)]
         if self.data:
             first, last = self.data[0], self.data[-1]
             fv = first.value if first.value is not None else "N/A"
             lv = last.value if last.value is not None else "N/A"
+            first_date = _sanitize_cell(first.date)
+            last_date = _sanitize_cell(last.date)
             lines.append(
-                f"  {fv} @ {first.date} → {lv} @ {last.date} "
+                f"  {fv} @ {first_date} → {lv} @ {last_date} "
                 f"({len(self.data)} points)"
             )
         return "\n".join(lines)
@@ -678,10 +689,13 @@ class ComparisonTable(ContentModel):
     sort_order: Literal["asc", "desc"] | None = None
 
     def _body_text(self) -> str:
-        header = " | ".join(c.label for c in self.columns)
-        lines = [self.title, header, "-" * len(header)] if self.title else [header, "-" * len(header)]
+        header = " | ".join(_sanitize_cell(c.label) for c in self.columns)
+        title = _sanitize_cell(self.title) if self.title else None
+        lines = [title, header, "-" * len(header)] if title else [header, "-" * len(header)]
         for row in self.rows:
-            lines.append(" | ".join(str(row.get(c.key, "")) for c in self.columns))
+            lines.append(
+                " | ".join(_sanitize_cell(str(row.get(c.key, ""))) for c in self.columns)
+            )
         return "\n".join(lines)
 
 
@@ -700,8 +714,8 @@ class BarChart(ContentModel):
     y_key: str | None = None
 
     def _body_text(self) -> str:
-        lines = [self.title] if self.title else []
-        lines += [f"  {b.category}: {b.value:g}" for b in self.bars]
+        lines = [_sanitize_cell(self.title)] if self.title else []
+        lines += [f"  {_sanitize_cell(b.category)}: {b.value:g}" for b in self.bars]
         return "\n".join(lines)
 
 
@@ -729,12 +743,13 @@ class EntityList(ContentModel):
         return self
 
     def _body_text(self) -> str:
-        lines = [self.title or f"{self.entity_type} list"]
+        title = _sanitize_cell(self.title) if self.title else _sanitize_cell(f"{self.entity_type} list")
+        lines = [title]
         lines.append(f"  showing {self.showing or len(self.items)} of {self.total_count}")
         for item in self.items:
-            lines.append(f"  - {item.name}")
+            lines.append(f"  - {_sanitize_cell(item.name)}")
             if item.summary:
-                lines.append(f"      {item.summary}")
+                lines.append(f"      {_sanitize_cell(item.summary)}")
         return "\n".join(lines)
 
 
@@ -805,26 +820,30 @@ class MarketBriefing(ContentModel):
     sections: list[BriefingSection] = Field(default_factory=list)
 
     def to_markdown(self) -> str:
-        lines = [f"{self.title} ({self.as_of})"]
+        title = _sanitize_cell(self.title)
+        as_of = _sanitize_cell(self.as_of)
+        lines = [f"{title} ({as_of})"]
         if self.prose:
-            lines.append(self.prose)
+            lines.append(_sanitize_block(self.prose))
         for section in self.sections:
             if isinstance(section, KpiRowSection):
                 for item in section.items:
-                    bits = [f"  KPI {item.title}: {item.value}"]
+                    bits = [f"  KPI {_sanitize_cell(item.title)}: {_sanitize_cell(str(item.value))}"]
                     if item.unit:
-                        bits.append(item.unit)
+                        bits.append(_sanitize_cell(item.unit))
                     if item.trend:
                         bits.append(_ARROWS[item.trend])
                     if item.delta is not None:
                         bits.append(f"{item.delta:+g}")
                     lines.append(" ".join(bits))
             elif isinstance(section, TextSection):
-                lines.append(f"  {section.content}")
+                lines.append(f"  {_sanitize_block(section.content)}")
             elif isinstance(section, ChartSection):
-                lines.append(f"  CHART ({section.chart_type}): {section.data.get('title', '')}")
+                chart_title = _sanitize_cell(str(section.data.get("title", "")))
+                lines.append(f"  CHART ({section.chart_type}): {chart_title}")
             elif isinstance(section, TableSection):
-                lines.append(f"  TABLE: {section.data.get('title', '')}")
+                table_title = _sanitize_cell(str(section.data.get("title", "")))
+                lines.append(f"  TABLE: {table_title}")
         return "\n".join(lines)
 
     def _body_text(self) -> str:
@@ -856,9 +875,9 @@ class WaterfallChart(ContentModel):
     date_range: DateRange | None = None  # start/end — frozen; not first/last
 
     def _body_text(self) -> str:
-        lines = [self.title]
+        lines = [_sanitize_cell(self.title)]
         lines += [
-            f"  {s.label}: {s.value:+g} → {s.cumulative:g} ({s.type})"
+            f"  {_sanitize_cell(s.label)}: {s.value:+g} → {s.cumulative:g} ({s.type})"
             for s in self.segments
         ]
         return "\n".join(lines)
@@ -906,10 +925,12 @@ class MultiCategoryChart(ContentModel):
     chart_config: MultiCategoryChartConfig | None = None
 
     def _body_text(self) -> str:
-        lines = [self.title]
+        lines = [_sanitize_cell(self.title)]
         for p in self.periods:
-            cats = ", ".join(f"{k}={v.value:g}" for k, v in p.categories.items())
-            lines.append(f"  {p.period}: {cats}")
+            cats = ", ".join(
+                f"{_sanitize_cell(k)}={v.value:g}" for k, v in p.categories.items()
+            )
+            lines.append(f"  {_sanitize_cell(p.period)}: {cats}")
         return "\n".join(lines)
 
 
@@ -1009,20 +1030,26 @@ class FundPerformance(ContentModel):
         if period_bits:
             bits.append(" ".join(period_bits))
         if self.as_of_date:
-            bits.append(f"as of {self.as_of_date}")
+            bits.append(f"as of {_sanitize_cell(self.as_of_date)}")
         # RT-004: provenance suffix, mirroring the admin console card's
         # subtitle (console/static/a2ui.js::renderFundPerformance, "source
         # <pbId>") rather than a bare identifier.
-        # RT-006 (debug round 5): routed through sanitize_text on the same
-        # ground _metadata_suffix() is — pb_id is a tool-supplied upstream
-        # identifier reaching the identical two client-facing surfaces (the
-        # mandatory A2A TextPart and the MCP tools/call text), so C-007's
-        # control-char strip + length cap applies here too. The frozen
-        # per-type string fields elsewhere in this module are NOT sanitized;
-        # the rule is scoped to values that arrive from a tool or caller.
+        # RT-006 (debug round 5) / RT-001 (redteam, 2026-09-03): pb_id is a
+        # tool-supplied upstream identifier reaching the identical two
+        # client-facing surfaces (the mandatory A2A TextPart and the MCP
+        # tools/call text) every other bit in this join reaches, so it needs
+        # BOTH guards every other field in this module gets: the 256-char
+        # length cap this field alone carries (matching the metadata-suffix
+        # contract, sanitize_text's max_len), AND the structural-delimiter
+        # neutralisation (_sanitize_cell/GH-130) every value joined on " | "
+        # needs — sanitize_text alone does not strip "|", so an unguarded
+        # pb_id could fabricate a fake bit in this join exactly like the
+        # GH-130 table-row case. Cap first (sanitize_text), THEN strip
+        # separators (_sanitize_cell) — reversing the order would let a
+        # fullwidth substitution's byte growth outrun the cap.
         if self.pb_id:
-            safe_pb_id = sanitize_text(
-                self.pb_id, max_len=_METADATA_SUFFIX_FIELD_MAX_LEN
+            safe_pb_id = _sanitize_cell(
+                sanitize_text(self.pb_id, max_len=_METADATA_SUFFIX_FIELD_MAX_LEN)
             )
             bits.append(f"source {safe_pb_id}")
         return (" | ".join(bits) or "fund performance (no data)")
@@ -1058,9 +1085,12 @@ class EmailList(ContentModel):
         lines = [f"{self.total_count} message(s)"]
         for m in self.messages:
             unread = "[unread] " if not m.is_read else ""
-            lines.append(f"  {unread}{m.received_at} | {m.from_.email} | {m.subject}")
+            received_at = _sanitize_cell(m.received_at)
+            from_email = _sanitize_cell(m.from_.email)
+            subject = _sanitize_cell(m.subject)
+            lines.append(f"  {unread}{received_at} | {from_email} | {subject}")
             if m.preview:
-                lines.append(f"    {m.preview}")
+                lines.append(f"    {_sanitize_cell(m.preview)}")
         return "\n".join(lines)
 
 
@@ -1101,13 +1131,18 @@ class CalendarEvents(ContentModel):
     has_more: bool
 
     def _body_text(self) -> str:
-        lines = [f"{self.total_count} event(s) {self.date_range.start} – {self.date_range.end}"]
+        start = _sanitize_cell(self.date_range.start)
+        end = _sanitize_cell(self.date_range.end)
+        lines = [f"{self.total_count} event(s) {start} – {end}"]
         for e in self.events:
             loc = ""
             if e.location and e.location.display_name:
-                loc = f" @ {e.location.display_name}"
+                loc = f" @ {_sanitize_cell(e.location.display_name)}"
             online = " [online]" if (e.is_online or (e.location and e.location.is_online)) else ""
-            lines.append(f"  {e.start} – {e.end}: {e.subject}{loc}{online}")
+            e_start = _sanitize_cell(e.start)
+            e_end = _sanitize_cell(e.end)
+            subject = _sanitize_cell(e.subject)
+            lines.append(f"  {e_start} – {e_end}: {subject}{loc}{online}")
         return "\n".join(lines)
 
 
@@ -1160,13 +1195,18 @@ class UserProfile(ContentModel):
     out_of_office: OutOfOfficeSettings | None = None
 
     def _body_text(self) -> str:
-        lines = [f"{self.display_name} <{self.email}>"]
+        name = _sanitize_cell(self.display_name)
+        email = _sanitize_cell(self.email)
+        lines = [f"{name} <{email}>"]
         if self.job_title:
-            lines.append(f"  {self.job_title}" + (f", {self.department}" if self.department else ""))
+            dept = f", {_sanitize_cell(self.department)}" if self.department else ""
+            lines.append(f"  {_sanitize_cell(self.job_title)}{dept}")
         if self.presence:
             lines.append(f"  presence: {self.presence.availability}")
         if self.manager:
-            lines.append(f"  manager: {self.manager.display_name} <{self.manager.email}>")
+            manager_name = _sanitize_cell(self.manager.display_name)
+            manager_email = _sanitize_cell(self.manager.email)
+            lines.append(f"  manager: {manager_name} <{manager_email}>")
         return "\n".join(lines)
 
 
@@ -1192,8 +1232,10 @@ class UserList(ContentModel):
     def _body_text(self) -> str:
         lines = [f"{self.total_count} user(s)"]
         for u in self.users:
-            title = f" — {u.job_title}" if u.job_title else ""
-            lines.append(f"  {u.display_name} <{u.email}>{title}")
+            title = f" — {_sanitize_cell(u.job_title)}" if u.job_title else ""
+            name = _sanitize_cell(u.display_name)
+            email = _sanitize_cell(u.email)
+            lines.append(f"  {name} <{email}>{title}")
         return "\n".join(lines)
 
 
@@ -1227,10 +1269,12 @@ class DocumentList(ContentModel):
     def _body_text(self) -> str:
         lines = [f"{self.total_count} document(s)"]
         for d in self.documents:
-            type_suffix = f" ({d.type})" if d.type else ""
+            doc_type = _sanitize_cell(d.type) if d.type else ""
+            type_suffix = f" ({doc_type})" if doc_type else ""
             when = d.last_modified or d.modified
-            date_suffix = f"  {when}" if when else ""
-            lines.append(f"  {d.name}{type_suffix}{date_suffix}")
+            date_suffix = f"  {_sanitize_cell(when)}" if when else ""
+            name = _sanitize_cell(d.name)
+            lines.append(f"  {name}{type_suffix}{date_suffix}")
         return "\n".join(lines)
 
 

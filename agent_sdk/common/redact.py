@@ -149,6 +149,12 @@ _SPACED_SEPARATORS = {
     "→": "⇒",  # RIGHTWARDS ARROW → RIGHTWARDS DOUBLE ARROW
 }
 
+# Union of both, for callers that need the full separator alphabet (the enforcement
+# tests in tests/test_content_types.py).
+_STRUCTURAL_SEPARATORS = frozenset(
+    {chr(cp) for cp in _BARE_SEPARATORS} | set(_SPACED_SEPARATORS)
+)
+
 
 def safe_cell_text(value: str) -> str:
     """Neutralise structural delimiters inside an untrusted string before it

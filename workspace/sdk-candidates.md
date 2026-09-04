@@ -1,105 +1,116 @@
-# SDK issue candidates — w040 (2026-09-02)
+# SDK issue candidates — w039 (2026-09-03)
 
 Run `/sdk-issue-scan` to review and file as GitHub issues on `wailuen/a2a-sdk`.
 
-## Candidate 1: GH-148's cross-turn $ref substitution mechanism is claimed (reuse.py docstring, loop.py, CHANGELOG, regression test) to work identically on A2A and AG-UI, but routes/ag_ui.py's _fold_history only reads type=='text' parts, dropping every toolResult block (and the __resolved__ markers folded inside them) on the client-resent transcript; scan_resolved() is empty at the start of every AG-UI run, so the fix is a silent no-op on the exact transport GH-148's own repro used.
-- Severity: high
-- Component: protocol/ag-ui
-- File: agent_sdk/agent/reuse.py:16-20 (root cause: agent_sdk/routes/ag_ui.py:88-109 _fold_history)
-- Rationale: Core SDK protocol-route behavior (agent_sdk/routes/ag_ui.py history fold) with no agent-domain code involved; the defect and both proposed fix paths (persist server-side per threadId, or round-trip via state/forwardedProps) live in the AG-UI transport handling itself.
+**Reconciliation note (2026-09-04):** 8 candidates from the original 25 described the local/origin
+branch-divergence problem itself (unmerged v0.6.0/v0.7.0, pyproject/CHANGELOG version mismatches,
+a weaker duplicate GH-145 fix, a forked `redact.py`, a stale mypy error) — all resolved by merge
+commit `0dc0517` (origin/main merged into main, now 0 commits behind) plus its uncommitted
+follow-up cleanup. Verified directly against current code/state, not just by removing them:
+`git rev-list --left-right --count main...origin/main` reads `6 0`; `pyproject.toml` and
+`CHANGELOG.md` agree on 0.8.0 with GH-145/147/149/150 entries present; `bedrock.py` has both the
+`AUTH_TYPE_MAPS` probe and `set_credentials` pre-seeding; `redact.py` exports both `sanitize_text`
+and `safe_error_text` as the merge intended; `mypy` is clean and `is_content_sequence` is already
+a `TypeGuard`. Removed and renumbered below; nothing else was changed.
 
-## Candidate 2: Reusable is unwrapped only on loop.py's synchronous dispatch path; ToolEntry.invoke_any (registry.py:481) returns the raw wrapper to every other caller, so MCP tools/call folds the literal dataclass repr onto the wire (and fails ValidationError when the tool declares emits), admin's try-tool leaks the wrapper's internal shape through _safe_result, and contrib/commitments passes an unresolved $ref argument straight into the tool body.
+## Candidate 1: TaskStore's C-005 durable-store contract promises that overriding persist_messages (for messages) and persist_status (for status) together makes a copy-on-get store correct, but persist_messages has exactly one call site in the whole SDK (runner.py:493, inside repair_dangling_tool_use), which never runs on normal task completion. RT-B-008's change now flushes terminal COMPLETED/FAILED status on the happy path via _set_status(store=store) without ever calling persist_messages, so a durable store marks a task terminal before ever receiving its transcript.
 - Severity: high
-- Component: sdk/loop
-- File: agent_sdk/agent/registry.py:481
-- Rationale: Fix is entirely inside registry.py's shared dispatch helper (ToolEntry.invoke_any); the MCP/admin/commitments surfaces are just callers, not where the code changes. Core SDK internals per the rubric.
+- Component: sdk/build
+- File: agent_sdk/tasks/store.py
+- Rationale: Core SDK internals — the abstract TaskStore contract that every durable subclass implements against; not agent-specific code. No routes/console/credentials-specific fit, so bucketed under sdk/build as SDK internal state/persistence layer.
 
-## Candidate 3: reuse_fields_for_model calls typing.get_type_hints(include_extras=True) at @tools.tool decoration time, which resolves string annotations against module globals only; pydantic v2 also resolves against the defining frame's locals, so a tool whose input_model is defined in a local scope raises NameError at registration even though pydantic itself built the model fine — breaking the AC that unaffected tools see byte-identical behavior.
-- Severity: high
-- Component: sdk/loop
-- File: agent_sdk/agent/reuse.py:114
-- Rationale: Pure agent/reuse.py fix (read Annotated metadata from model_fields[...].metadata instead of re-resolving hints). Core SDK internals, no agent-domain code.
-
-## Candidate 4: The GH-87 deferred-handoff path returns out of run_loop after the assistant toolUse message is appended but before the matching toolResult, and _run_deferred_background never appends the missing toolResult to record.messages — leaving a dangling toolUse that Converse-shaped backends (Bedrock) reject on the next contextId turn, contradicting GH-147 AC-3.
-- Severity: high
-- Component: sdk/loop
-- File: agent_sdk/agent/loop.py:595
-- Rationale: Fix lives in agent/runner.py's background awaiter (append the real toolResult on resolve, synthetic error toolResult on failure). Core SDK loop/runner internals.
-
-## Candidate 5: The __resolved__ marker block folds result.value raw into messages instead of going through _fold_result_content like the sibling result block does; since Reusable.value is typed Any and BaseModel returns are explicitly supported, a Reusable wrapping a pydantic model plants a non-JSON-serializable object in messages and poisons the whole conversation on the next json.dumps.
+## Candidate 2: repair_dangling_tool_use(store=...) is unguarded at 3 of its 5 call sites (runner.py:594 in _fail, :1092 in run_task_worker's except AgentError, :1121 in except Exception). Its persist_messages flush can raise, and a raising store there escapes as an unhandled exception in a fire-and-forget asyncio.Task, leaving the task stuck WORKING with streams never sentinel-closed. Only the tasks_cancel path already has this guard.
 - Severity: high
 - Component: sdk/loop
-- File: agent_sdk/agent/loop.py:645-647
-- Rationale: Pure agent/loop.py fix (normalize marker value via _fold_result_content before folding). Core SDK internals.
+- File: agent_sdk/agent/runner.py
+- Rationale: runner.py is the agent task-worker execution machinery — the SDK's turn/task loop, not agent-specific tool code.
 
-## Candidate 6: A deferred (GH-87) tool whose handle resolves to a Reusable leaks the raw dataclass repr into record.messages and onto the A2A/AG-UI wire, and folds no __resolved__ marker, because _run_deferred_background bypasses invoke_any and never unwraps Reusable the way loop.py's synchronous branch does — making GH-148 dead for long-running resolver tools.
+## Candidate 3: repair_dangling_tool_use dereferences block['toolUse']['toolUseId'] with only a shallow isinstance/key-presence guard, so a malformed tail block raises TypeError/KeyError inside repair_dangling_tool_use_safe, which swallows it and returns False — but all five callers then proceed unconditionally to set_task_status, durably committing a terminal status over an unrepaired transcript (recreating the GH-150 dangling-toolUse replay bug).
 - Severity: high
 - Component: sdk/loop
-- File: agent_sdk/agent/runner.py:485
-- Rationale: File is agent_sdk/agent/runner.py — core SDK agent-runner internals, not agent-domain code. Input data tagged this sdkCandidate:false; I'm overriding that per the stated rubric since nothing here is agent-specific tool code, a domain adapter, or a test.
+- File: agent_sdk/agent/runner.py
+- Rationale: Same runner.py task-worker repair machinery — core SDK loop internals.
 
-## Candidate 7: The ReuseKind mismatch rejection error tells the model how to bypass the check itself ("prefix it with $raw: ... to bypass this check"), so a model that hallucinated a wrong id can immediately re-submit it via $raw: and execute it, turning GH-148's only correctness gate into a speed bump and contradicting the todo's AC that the error should only suggest re-resolve or $ref.
+## Candidate 4: _run_deferred_background interpolates the caught exception's class name directly into wire-facing strings (f"deferred job failed ({type(exc).__name__})" at runner.py:821 and f"internal error ({type(exc).__name__})" at :1007), which reach WireError.message, the status Message, and ToolResultEvent.error — leaking upstream provider/auth/quota failure class names to untrusted callers, contradicting the same release's own fix that removed identical enrichment from bedrock.py.
+- Severity: high
+- Component: security
+- File: agent_sdk/agent/runner.py
+- Rationale: Direct violation of the SDK's wire-information-disclosure policy (LRN-044) — an exception-detail leak to untrusted protocol callers is a security classification, not a functional loop bug.
+
+## Candidate 5: Three bare except Exception blocks in runner.py (lines 895, 1056, 1405) drop the caught exception's class entirely with no logger call before mapping it to a fixed wire string — a direct LRN-044 Check-clause violation, since pydantic's ValidationError subclasses ValueError, so validation failures (e.g. inside build_artifact) get reduced to "invalid agent response" with zero operator attribution.
+- Severity: critical
+- Component: security
+- File: agent_sdk/agent/runner.py
+- Rationale: Same LRN-044 wire-vs-log exception-handling security policy as the other exception-enrichment findings, just the missing-log-line direction — security component for consistency.
+
+## Candidate 6: repair_dangling_tool_use_safe collapses two different outcomes (in-memory repair failed vs. in-memory repair succeeded but the durable persist_messages flush failed) into one boolean, and all five callers thread it into set_task_status(repaired=...), which treats repaired=False as 'skip both durable flushes and return' — so a single transient durable-store write failure permanently prevents the terminal status from ever reaching storage, even though set_task_status's own retry logic would otherwise recover it.
 - Severity: high
 - Component: sdk/loop
-- File: agent_sdk/agent/reuse.py:464
-- Rationale: Pure agent/reuse.py fix (drop the $raw: hint from the model-facing error text; make raw-override an explicit per-field operator opt-in). Core SDK internals; overriding the input's sdkCandidate:false per the file-location rubric.
+- File: agent_sdk/agent/runner.py
+- Rationale: Core task-worker/loop repair-and-flush machinery in runner.py.
 
-## Candidate 8: resolve_reuse_fields treats an explicit None argument on an Optional ReuseKind field as a raw value to check against prior resolutions, so once any resolution of that kind exists, the tool becomes permanently uncallable with its optional field omitted-as-null (and $raw: can't recover it, since it yields empty string, not None).
+## Candidate 7: Three broad except Exception handlers in run_loop (loop.py:1027, :1069, :1123) interpolate the caught exception's class name into the wire-facing tool error (f"tool '{tc.name}' failed ({type(exc).__name__})"), which is stringified verbatim into the AG-UI TOOL_CALL_RESULT frame and folded into record.messages for replay — violating the same wave's own amended LRN-044 Check clause, already applied to bedrock.py and runner.py but missed in loop.py.
+- Severity: critical
+- Component: security
+- File: agent_sdk/agent/loop.py
+- Rationale: LRN-044 wire-information-disclosure policy violation — security component, matching the other exception-enrichment findings.
+
+## Candidate 8: Hoisting metadata: dict[str, Any] | None onto ContentModel and splitting to_plain_text() into a concrete base method over a new abstract _body_text() changes wire key order for all 14 FROZEN Profile types, adds a new abstractmethod to a public ABC, and hard-fails class definition for any external subclass with a plain metadata attribute — none of it required by external protocol conformance, yet shipped under a patch version (0.5.45) in violation of DESIGN.md §4.0's rule that a voluntary breaking change to the stable core requires a major bump.
+- Severity: high
+- Component: sdk/build
+- File: agent_sdk/models/content_types.py
+- Rationale: Core ContentModel base-class / release-versioning policy — an SDK internals + release-process issue, not agent-specific code; sdk/build covers both the model internals and the version-bump-policy violation.
+
+## Candidate 9: The to_plain_text()→_body_text() split infinitely recurses for any domain card that subclasses a CONCRETE built-in card and extends its text via super().to_plain_text() — previously-legal code against the old API. __init_subclass__ rebinds the override to _body_text and hands the name back to the base ContentModel.to_plain_text, so super() resolves back into the same override, hitting RecursionError on every request that emits that card's mandatory text fallback.
+- Severity: high
+- Component: sdk/build
+- File: agent_sdk/models/content_types.py
+- Rationale: ContentModel is core SDK internals shared by every content type; the bug is in the base-class template-method mechanism, not any specific agent's domain card.
+
+## Candidate 10: run_task_worker's terminal except AgentError (line 1385) and except Exception (line 1423) handlers carry no already-terminal guard, so an exception escaping run_loop after a concurrent tasks_cancel has committed CANCELED overwrites it with FAILED — durably persisting FAILED over CANCELED and publishing a second terminal frame onto streams the canceller already closed. _run_deferred_background._fail already has this guard; the two worker handlers do not.
 - Severity: high
 - Component: sdk/loop
-- File: agent_sdk/agent/reuse.py:403
-- Rationale: Pure agent/reuse.py fix (skip the raw-value contract entirely when raw is None). Core SDK internals; overriding the input's sdkCandidate:false per the file-location rubric.
+- File: agent_sdk/agent/runner.py
+- Rationale: Task-worker terminal-state race condition in the core agent loop machinery.
 
-## Candidate 9: GH-147 AC3 (no two consecutive same-role messages across a contextId continuation) is not met for a deferred task: run_loop returns at the DeferredEvent handoff without calling _bridge_trailing_user, runner.py's repair_dangling_tool_use appends a user toolResult, and routes/a2a.py appends another user turn on continuation — yielding a role sequence Bedrock's Converse API rejects. The same gap applies to GH-150's tasks_cancel repair.
+## Candidate 11: The new MAX_CONTEXT_MESSAGES=50 cap silently disables A2A contextId continuation entirely once a single task produces more than ~50 messages: _turn_boundary_slice returns [] with no log line when the trailing cap-sized window contains no plain user turn, and context_messages() returns that empty list, dropping the whole prior transcript rather than truncating it. Verified numerically: max_turns=24 carries 50 messages, max_turns=25 carries 0.
+- Severity: high
+- Component: sdk/build
+- File: agent_sdk/tasks/memory.py
+- Rationale: InMemoryTaskStore internals — core SDK task/context storage, no protocol-route-specific fit, so sdk/build.
+
+## Candidate 12: ContentModel.__init_subclass__ raises TypeError at class-definition time when a subclass declares both a _body_text() method and a to_plain_text() override — before 0.5.45 _body_text had no reserved meaning, so a domain card with an unrelated private helper of that name now fails at import, contradicting the CHANGELOG's 'Migration: none required' claim for this same change.
+- Severity: high
+- Component: sdk/build
+- File: agent_sdk/models/content_types.py
+- Rationale: ContentModel base-class internals — same SDK model-layer bucket as the other content_types.py findings.
+
+## Candidate 13: All three advisor copies (.claude/agents, harness/agents, template) had TimeSeriesChart's typed metadata: {identifier?, metric?, frequency?, source?} row deleted and replaced with a free-form cross-cutting note plus a directive that a conformance audit MUST NOT flag a type for metadata — loosening the frozen A2UI Standard Profile v1 contract to make the SDK's own code conformant. REVIEWS.md Round 8 records this as PROPOSED/unratified, yet it shipped in the release commit anyway, and the test gate only fails on a revert, never on the unratified edit being present.
+- Severity: high
+- Component: harness/agent
+- File: .claude/agents/a2ui-advisor.md
+- Rationale: The a2ui-advisor.md file is the harness's portable conformance-oracle agent definition (used across projects by /a2ui-check), not agent-domain code — maps directly to the harness/agent component.
+
+## Candidate 14: bridge_context_messages' head repair is skipped in exactly the case the head is broken: its RT-007 guard disables the head trim whenever no genuine user-turn boundary exists anywhere in the transcript, so a leading toolResult orphan or a leading assistant message both survive untouched, and routes/a2a.py then appends the new user turn onto a Converse-illegal conversation head — reachable through any external durable TaskStore whose context_messages() lacks a guaranteed-legal head.
 - Severity: high
 - Component: sdk/loop
-- File: agent_sdk/agent/loop.py:790
-- Rationale: Fix is exporting and calling loop.py's own _bridge_trailing_user from every out-of-loop transcript writer (runner.py, routes/a2a.py::tasks_cancel). Core SDK loop internals; overriding the input's sdkCandidate:false per the file-location rubric.
+- File: agent_sdk/agent/loop.py
+- Rationale: Core transcript-normalization logic inside the agent conversation loop.
 
-## Candidate 10: ToolEntry.input_schema() unconditionally appends the $ref:<kind> affordance hint to a ReuseKind field's description, but that same schema is served on MCP tools/list and the agent card (routes/agent_card.py) where the substitution/validation gate does not exist — an MCP client is told it may send $ref:entity_id, and the SDK's own test proves that literal string then reaches the tool body verbatim.
+## Candidate 15: The migration docs claim that from a new _body_text() override, super()._body_text() and super().to_plain_text() 'both resolve correctly' and differ only by one extra indirection — false: super().to_plain_text() from a _body_text() override recurses forever, because the re-entrancy guard only fires for the legacy adoption path, not for new-style _body_text overrides that call super().to_plain_text() directly.
+- Severity: high
+- Component: sdk/build
+- File: docs/content-types.md
+- Rationale: Documents the same ContentModel base-class mechanism as the other content_types.py findings — sdk/build for consistency, since it's SDK reference documentation for core model internals rather than a protocol route or harness file.
+
+## Candidate 16: bridge_context_messages' DanglingToolUseUnreadable recovery pops one message and never re-runs close_dangling_tool_use, so a transcript whose unreadable tail sits on top of a readable dangling toolUse is returned still dangling and folded into a new task's record.messages, which Bedrock's Converse API then rejects.
 - Severity: high
 - Component: sdk/loop
-- File: agent_sdk/agent/registry.py:364
-- Rationale: Fix is entirely inside registry.py (add an include_reuse_hint parameter, pass it only from loop.py); routes/mcp.py and routes/agent_card.py need no change. Core SDK internals; overriding the input's sdkCandidate:false per the file-location rubric.
+- File: agent_sdk/agent/loop.py
+- Rationale: Transcript-repair logic inside the core agent loop module.
 
-## Candidate 11: reuse_fields_for_model / reuse_strict_for_model / reuse_raw_override_for_model key their maps on the Python field name, but model_json_schema() and model_validate use the pydantic alias — so any ReuseKind field with an alias silently fails open: the mismatch gate never fires, no $ref hint is advertised, and a $ref:<kind> token passes through to the tool body as a literal string with no error or warning.
+## Candidate 17: The /admin/api/selfcheck-info endpoint hardcodes "mcp_protocol_version": "2025-06-18" instead of deriving it from routes/mcp.py's SUPPORTED_PROTOCOL_VERSIONS[0] (currently 2025-11-25) — so the operator's own self-check diagnostic (selfcheck.js's probeMcp()) always negotiates the stale version and never exercises fields gated behind the newer negotiated version (e.g. serverInfo.title, GH-43), and misreports the SDK's actual max supported MCP protocol version to any operator debugging connectivity.
 - Severity: high
-- Component: sdk/loop
-- File: agent_sdk/agent/reuse.py:251
-- Rationale: Pure agent/reuse.py (plus registry.py's input_schema lookup) fix — key both by alias-or-field-name. Core SDK internals.
-
-## Candidate 12: run_task_worker's two terminal exception handlers (AgentError, bare Exception) set the task FAILED and publish the terminal frame without calling repair_dangling_tool_use, leaving record.messages ending on an unmatched assistant toolUse that Bedrock's Converse API rejects on replay — reproduced via a documented max_interrupted AgentError path. This also falsifies loop.py's own docstring claim that repair_dangling_tool_use covers every current and future caller.
-- Severity: high
-- Component: sdk/loop
-- File: agent_sdk/agent/runner.py:881
-- Rationale: Pure agent/runner.py fix (call repair_dangling_tool_use before _set_status(FAILED) in both handlers) plus a docstring correction in loop.py. Core SDK internals.
-
-## Candidate 13: The AuditEvent branch re-serializes record.task.status as-is via _status_frame, so the audit status-update frame re-emits the previous chat sentence (status.message) on the A2A stream instead of carrying an empty message — contradicting AuditEvent's own docstring that audit detail should never appear in status.message, and duplicating agent text to the client.
-- Severity: high
-- Component: sdk/loop
-- File: agent_sdk/agent/runner.py:763
-- Rationale: Pure agent/runner.py fix (build the audit frame with a message-free status instead of reusing the record's stale status). Core SDK internals.
-
-## Candidate 14: GH-148 is not actually fixed on AG-UI, the transport the issue's own repro used: routes/ag_ui.py's _fold_history rebuilds resent messages from text-only parts, dropping all toolResult blocks, and every POST /ag-ui/run creates a fresh TaskRecord with no equivalent of context_messages — so scan_resolved() is always empty and the mismatch gate can never fire on AG-UI, despite the todo's Design section and AC explicitly claiming AG-UI parity.
-- Severity: high
-- Component: protocol/ag-ui
-- File: agent_sdk/agent/reuse.py:359 (root cause: agent_sdk/routes/ag_ui.py fold + per-request TaskRecord creation)
-- Rationale: Defect and both proposed fixes (server-side per-thread carrier, or a loud warning) live in the AG-UI route's request/history handling, not the shared reuse mechanism. Core SDK protocol-route behavior.
-
-## Candidate 15: AG-UI cross-request reuse carriage survives exactly one run hop, not a conversation: store.context_messages returns only the single most-recent terminal task's messages, and routes/ag_ui.py deliberately does not fold prior into the new record — so after one intervening unrelated run on the same threadId, $ref no longer resolves and a wrong raw id is silently executed, reopening the exact substitution bug GH-148 exists to catch. CHANGELOG/DESIGN.md/reuse.py all overstate this as fixed; the shipped test only covers two consecutive runs and can't see the decay.
-- Severity: high
-- Component: protocol/ag-ui
-- File: agent_sdk/routes/ag_ui.py:525
-- Rationale: File and root cause are directly in agent_sdk/routes/ag_ui.py (TaskStore lookup scoped to the newest terminal task only). Core SDK protocol-route behavior.
-
-## Candidate 16: The bounded-recovery (RT-A-008) escape hatch that forces a stuck-reject sequence to pass through after N tries never applies to the ambiguity-rejection branch, because that branch returns before the reject_counts increment/threshold check that only lives in the single-resolution mismatch branch. With two or more resolutions of a kind on record (the common multi-entity case), a genuinely new raw value is rejected forever with no in-band recovery, contradicting the module docstring's claim that the guarantee is unconditional.
-- Severity: high
-- Component: sdk/loop
-- File: agent_sdk/agent/reuse.py:676
-- Rationale: Pure agent/reuse.py fix (hoist the reject_counts block to cover every rejection return path, including the ambiguity case). Core SDK internals.
-
-## Candidate 17: The A2UI Standard Profile v1 frozen field contract (`.claude/agents/a2ui-advisor.md` et al., DESIGN.md stable core) documents `TimeSeriesChart.metadata` as a typed sub-shape `{identifier?, metric?, frequency?, source?}`, but no shipped code has ever implemented that shape — `ContentModel.metadata` (agent_sdk/models/content_types.py) has been free-form `dict[str, Any] | None` since its introduction, and GH-63 (v0.5.16) already generalized that free-form shape to all 14 Profile types, treating `TimeSeriesChart` as the pattern's origin rather than a type it widened. RT-004/REVIEWS.md Round 10 reverted a same-wave doc edit that silently dropped the row to match the code (self-authorized, no maintainer sign-off, the exact inverse of GH-149's code-conforms-to-doc resolution) — the row is restored pending this issue. A maintainer needs to decide, as an explicit Profile v1.1 amendment: either (a) drop the typed row and adopt the SDK-wide free-form `metadata` note across all FROZEN types (bump the Profile version, update all three a2ui-advisor copies + `tests/test_rt002_a2ui_wire_shape_mirror_parity.py`'s `ROUND_8_METADATA_ROW_REMOVAL_RATIFIED` to `True` in the same commit), or (b) keep the row and add the typed sub-shape validation to `TimeSeriesChart` that has never existed.
-- Severity: medium
-- Component: sdk/a2ui
-- File: .claude/agents/a2ui-advisor.md:273-291 (TimeSeriesChart field table); agent_sdk/models/content_types.py:228 (ContentModel.metadata base-class field)
-- Rationale: A frozen A2UI Standard Profile v1 field-contract question (DESIGN.md stable core) requiring an explicit maintainer ratification, not a same-wave doc edit — see REVIEWS.md Round 8 and Round 10 for the full history and the standing "wave self-signoff needs user ratification" rule.
+- Component: protocol/mcp
+- File: agent_sdk/routes/admin.py
+- Rationale: A protocol-version constant that has drifted from its single source of truth in routes/mcp.py — directly a protocol-routes / MCP version-negotiation defect, mapping to protocol/mcp.

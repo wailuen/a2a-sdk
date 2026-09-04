@@ -21,6 +21,8 @@
 | C-017 | loop.py→runner.py shared fold/bridge helpers (fold_result_content / jsonable_reuse_value / bridge_trailing_user / close_dangling_tool_use / bridge_context_messages / is_user_turn_boundary) | agent_sdk/agent/loop.py (imported by agent_sdk/agent/runner.py, agent_sdk/routes/a2a.py and agent_sdk/tasks/memory.py) | present |
 | C-018 | repair_dangling_tool_use | agent_sdk/agent/runner.py | present |
 | C-019 | set_task_status (terminal/interrupt status + durable flush choke point) | agent_sdk/agent/runner.py (imported by agent_sdk/routes/a2a.py) | present |
+| C-020 | catalog_wire_contract_parity (validator binding ContentModel fields to _FEW_SHOT_EXAMPLES/_COMPACT_SCHEMAS) | agent_sdk/a2ui/catalog.py | planned |
+| C-021 | StandardProfileV1Contract | agent_sdk/a2ui/profile.py | planned |
 
 ## Descriptions
 
@@ -131,3 +133,9 @@ Contract, in the order it matters:
 6. **Guarded.** A failing durable write degrades to an unpersisted status rather than raising out of a hot status-transition path (RT-B-003).
 
 Any future terminal or interrupt transition MUST route through this function rather than assigning `record.task.status` directly — that is what `tasks_cancel` used to do, hand-rolling a divergent and fail-unsafe copy of items 1, 4 and 6.
+
+**C-020 catalog_wire_contract_parity (planned)** (`agent_sdk/a2ui/catalog.py`)
+w039 candidate. Validator binding every registered `ContentModel`'s declared field/alias set to the hand-written strings that teach the LLM its wire shape (`_FEW_SHOT_EXAMPLES` and `_COMPACT_SCHEMAS` in `catalog.py`). GH-149's root cause: `fundName` lived in the model AND both catalog strings with nothing binding them, caught only when a human read the advisor doc. Verified against current code: the guard exists only as private test helpers (`_declared_wire_keys`, `_compact_schema_top_level_keys` in `tests/test_a2ui_wire.py`) — `catalog.py` itself exports no such validator, and no `register_content_type`/`build_app()` call site invokes one. Any downstream agent that calls `register_content_type` and adds its own `_FEW_SHOT_EXAMPLES`/`_COMPACT_SCHEMAS` entries inherits zero coverage from these test-only helpers. Promote to an exported validator (callable from `build_app()` or from `agent_sdk.testing`) so the same drift cannot recur per agent. Logged as planned, not implemented.
+
+**C-021 StandardProfileV1Contract (planned)** (`agent_sdk/a2ui/profile.py`)
+w039 candidate. Machine-readable table of the frozen A2UI Standard Profile v1 field contracts. Today the frozen `FundPerformance` contract exists only as a markdown table duplicated in `.claude/agents/a2ui-advisor.md`'s `FundPerformance` field-contract section and its `harness/agents/a2ui-advisor.md` mirror, with no code artifact — which is why a model field outside the frozen set could share `catalog_id urn:a2ui-profile:standard:v1` with no gate and no signal. Verified against current code: `agent_sdk/a2ui/profile.py` does not exist (confirmed via directory listing — `agent_sdk/a2ui/` contains only `__init__.py`, `catalog.py`, `translator.py`). A single in-code contract (field name, wire alias, type, frozen/extension flag) that both `register_content_type` and the two advisor docs derive from would turn GH-149's class of drift into an import-time failure, and would give a future intentional extension a place to declare itself as versioned rather than silently widening a frozen type. Reusable by every agent that registers its own `ContentModel`. Logged as planned, not implemented.

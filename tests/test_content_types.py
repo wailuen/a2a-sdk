@@ -3,14 +3,19 @@ registration, and re-registration idempotency (DESIGN.md §4.3)."""
 
 from __future__ import annotations
 
+import inspect
+import re
 from typing import Any, ClassVar
 
 import pytest
 
 from pydantic import BaseModel, ValidationError
 
+import agent_sdk.models.content_types as content_types_module
+from agent_sdk.common.redact import _BARE_SEPARATORS, _SPACED_SEPARATORS, _STRUCTURAL_SEPARATORS
 from agent_sdk.models.content_types import (
     PROFILE_TYPES,
+    _NON_SEPARATOR_GLYPHS,
     BarChart,
     BarItem,
     BriefingKpiItem,
@@ -936,3 +941,127 @@ def test_chart_section_rejects_pathologically_deep_data_without_recursion_error(
         node = node["nested"]
     with pytest.raises((ValueError, ValidationError)):
         ChartSection(chart_type="bar_chart", data=deep)
+
+
+# ── GH-130 delimiter safety (restored after the origin/local merge silently
+# dropped every _sanitize_cell/_sanitize_block call site while keeping only
+# the helper definitions — redteam RT-001, 2026-09-03). Adapted from origin's
+# test_content_types.py for the current _body_text()/to_markdown() split:
+# origin's renderers overrode to_plain_text() directly, this tree's override
+# _body_text() instead (ContentModel.to_plain_text() is concrete and calls
+# self._body_text() + self._metadata_suffix()).
+
+
+def test_gh130_all_profile_renderers_sanitize_before_joining():
+    """Meta-test: a _body_text()/to_markdown() implementation that joins
+    untrusted values on " | " or "\\n" must call _sanitize_cell somewhere in
+    its source — enforced across all 14 Standard Profile types so the
+    delimiter-safety contract cannot silently regress to covering only a
+    subset of renderers again."""
+    for cls in PROFILE_TYPES:
+        source = inspect.getsource(cls._body_text)
+        to_markdown = cls.__dict__.get("to_markdown")
+        if to_markdown is not None:
+            source += inspect.getsource(to_markdown)
+        joins_on_structural_delimiter = '" | "' in source or '"\\n"' in source
+        if joins_on_structural_delimiter:
+            assert "_sanitize_cell(" in source, (
+                f"{cls.__name__}._body_text joins on a structural "
+                "delimiter without calling _sanitize_cell (GH-130)"
+            )
+
+
+def _renderer_template_punctuation() -> dict[str, set[str]]:
+    """Every punctuation character appearing in a string literal inside a
+    ``_body_text``/``to_markdown`` body in content_types.py, mapped to the
+    literals it came from. Read from the AST so it cannot drift from source."""
+    import ast
+
+    source_path = inspect.getsourcefile(content_types_module)
+    assert source_path is not None
+    with open(source_path, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+
+    found: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if node.name not in ("_body_text", "to_markdown"):
+            continue
+        body = node.body
+        # A leading docstring is documentation, not renderer template text —
+        # exclude it (this tree's ContentModel._body_text abstract stub, and
+        # several concrete overrides, carry substantial docstrings that would
+        # otherwise flag every punctuation character used in prose).
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            body = body[1:]
+        for stmt in body:
+            for sub in ast.walk(stmt):
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                    for ch in sub.value:
+                        if not ch.isalnum() and not ch.isspace():
+                            found.setdefault(ch, set()).add(sub.value)
+    return found
+
+
+def test_every_renderer_separator_is_neutralised():
+    """Template side: no renderer may insert a punctuation character that is
+    neither neutralised by the separator maps nor listed in the documented
+    _NON_SEPARATOR_GLYPHS allow-list.
+
+    A future renderer introducing a new separator (say a "::" join or a "{}"
+    pair) fails here at build time instead of shipping a fabrication hole for
+    the next review round to find."""
+    allowed = set(_STRUCTURAL_SEPARATORS) | set(_NON_SEPARATOR_GLYPHS)
+
+    unaccounted = {
+        ch: sorted(literals)
+        for ch, literals in _renderer_template_punctuation().items()
+        if ch not in allowed
+    }
+    assert not unaccounted, (
+        "renderer template punctuation is neither neutralised nor "
+        f"allow-listed: {unaccounted}. Either add the character to "
+        "_BARE_SEPARATORS/_SPACED_SEPARATORS (if a value landing next to it "
+        "could fabricate a field boundary) or to _NON_SEPARATOR_GLYPHS with "
+        "a reason it cannot."
+    )
+
+
+def test_separator_replacements_do_not_map_onto_another_separator():
+    """A neutralised character must not be rewritten INTO another separator,
+    which would just move the fabrication one delimiter along."""
+    pairs = [(chr(cp), r) for cp, r in _BARE_SEPARATORS.items()]
+    pairs += list(_SPACED_SEPARATORS.items())
+    for source, replacement in pairs:
+        assert replacement is not None
+        collisions = set(replacement) & set(_STRUCTURAL_SEPARATORS)
+        assert not collisions, (
+            f"{source!r} is neutralised to {replacement!r}, which "
+            f"contains separator(s) {collisions}"
+        )
+
+
+def test_comparison_table_row_value_pipe_and_newline_do_not_fabricate_row():
+    """Direct regression for the exact RT-001 repro: a row value containing
+    both a pipe and a newline must not read as a second table row."""
+    table = ComparisonTable(
+        columns=[ColumnDef(key="name", label="Name"), ColumnDef(key="v", label="Value")],
+        rows=[{"name": "Acme | 999\nEvil Corp | 000", "v": "1"}],
+    )
+    lines = table.to_plain_text().splitlines()
+    assert len(lines) == 3  # header, "---", the one real row — no fabricated row
+    assert "Evil Corp" in lines[-1]  # neutralised, still present, not a new line
+
+
+def test_market_briefing_title_ansi_escape_stripped():
+    """Direct regression for the exact RT-001 repro: an ANSI/terminal escape
+    introducer in a title must not survive into the text fallback."""
+    briefing = MarketBriefing(title="Brief\x1b[2J", as_of="2026-01-01")
+    text = briefing.to_plain_text()
+    assert "\x1b" not in text
