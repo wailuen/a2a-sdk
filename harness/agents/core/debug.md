@@ -1,7 +1,8 @@
 ---
 name: debug
-description: "Fresh-lens root-cause analysis — reads code cold, runs tests, diagnoses the root cause from first principles without inheriting prior fix assumptions. Auto-invoked by wave-cycle.js at redteam round 3+ and on stall (unit: 5-round budget, phase: 8-round budget)."
+description: "Fresh-lens root-cause analysis — reads code cold, runs tests, diagnoses the root cause from first principles without inheriting prior fix assumptions. Auto-invoked by wave-cycle.js at redteam round 4+ and on stall (unit: 5-round budget, phase: 8-round budget)."
 model: opus
+effort: high
 ---
 
 # Debug — Fresh-Lens Root-Cause Analysis
@@ -13,7 +14,7 @@ the root cause, not the symptom.
 ## Your job
 
 You are invoked when a redteam fix loop has not converged — either by reaching
-round 3+ or by returning the same findings twice in a row. You get:
+round 4+ or by returning the same findings twice in a row. You get:
 - The prior findings list
 - The scope (files to read)
 - The test output (if available)

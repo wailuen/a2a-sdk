@@ -2,6 +2,7 @@
 name: mcp-advisor
 description: "Portable MCP build + conformance advisor — how to build an MCP server (tools/resources/prompts, transports, OAuth, structured output, security) that connects to Claude.ai connectors first and any MCP-compliant client second. Spec-grounded (2025-06-18 baseline, 2025-11-25 latest), project-agnostic. Advises and reviews; does not implement."
 model: sonnet
+effort: high
 ---
 
 # MCP Build + Conformance Advisor (portable)

@@ -487,3 +487,55 @@ fact-check surfaced (no shipped code has ever implemented `TimeSeriesChart`'s ty
 sub-shape; GH-63 already treated `TimeSeriesChart.metadata` as the free-form pattern's origin) is
 recorded as Candidate 17 in `workspace/sdk-candidates.md` for `/sdk-issue-scan` to file as a GitHub
 issue — a maintainer's decision on a Profile v1.1 amendment, not a wave's own doc edit.
+
+## Round 11 — Profile v1.1 `metadata` ratification (2026-10-09)
+
+**SIGNED OFF** (maintainer wailuen, 2026-10-09, via /gh-review, recorded in #153). Applied to every
+advisor copy; Profile v1.1 is in force.
+
+Checkable reference: https://github.com/wailuen/a2a-sdk/issues/153
+
+Current state (applied): all three a2ui-advisor copies (`.claude`, `harness`, `template`), DESIGN.md,
+README.md, the a2ui-check / agent-stack-check skills and the `content_types.py` docstring describe
+Profile **v1.1**. The `TimeSeriesChart` table no longer carries the typed `metadata` row, and the
+Field-contract conventions section carries the cross-cutting `metadata` note. The catalog URN stays
+`urn:a2ui-profile:standard:v1` and `CATALOG_ID` is unchanged. `ROUND_8_METADATA_ROW_REMOVAL_RATIFIED`
+is derived from this entry and is `True`; the parity tests REQUIRE the cross-cutting marker and FORBID
+the row. Reverting the status line without reverting the edit below (or vice versa) fails those tests,
+so the record and the advisor text can never disagree. No separate release gate exists: the parity
+tests are the enforcement (maintainer ruling, 2026-10-09).
+
+History: Round 8 recorded the row removal as PROPOSED; Round 10 reverted the self-authorized edit
+because a wave cannot ratify a frozen-contract change alone. w041 re-applied it while this entry
+still read PROPOSED (redteam RT-001, round 4); that application is reverted again here.
+
+| Scope | Sev | Decision (applied 2026-10-09) |
+|---|---|---|
+| A2UI Standard Profile | MED | Remove the `TimeSeriesChart` `metadata` row from all three a2ui-advisor copies; bump every "Standard Profile v1" label in the advisor, a2ui-check / agent-stack-check skills, DESIGN.md and README.md to v1.1; add the cross-cutting note and the versioning/changelog text below. URN `urn:a2ui-profile:standard:v1` and `CATALOG_ID` unchanged. |
+
+Advisor text as applied (Field-contract conventions bullet) — portable, cites only the in-document
+Profile changelog, never this file (RT-005):
+
+> - **`metadata` is a cross-cutting field, not a per-type one.** Every FROZEN type may carry an
+>   optional free-form `metadata` object (or `null`) as an out-of-band envelope; it has no fixed
+>   sub-shape and is therefore not listed in any per-type table. Renderers and Path-B extractors
+>   MUST accept and MAY ignore `metadata` on every FROZEN type; conformance audits MUST NOT flag a
+>   type for having or lacking it. (Profile v1.1 amendment — see Profile changelog below.)
+
+Versioning paragraph addition as applied (states the receiver-side duty, RT-004): v1.1 loosens the
+contract for senders (every v1 payload stays valid) but adds a receiver duty — a renderer must now
+tolerate `metadata` on all 14 FROZEN types, not only `TimeSeriesChart`. The major URN is kept
+because the catalogId cannot distinguish v1 from v1.1 payloads, so the amendment is only safe if
+v1 receivers already ignore unknown fields; the advisor must say so and tell strict v1 renderers
+that reject unlisted fields to upgrade. If the maintainer judges that duty a breaking change, the
+alternative would have been a `urn:a2ui-profile:standard:v2` URN instead of a minor bump; the
+maintainer approved the minor bump in #153.
+
+Profile changelog line as applied: `v1.1 (2026-10-09): TimeSeriesChart's typed metadata row
+removed; metadata is a cross-cutting free-form field on every FROZEN type; receivers MUST accept it.
+v1: initial freeze.`
+
+No runtime change in either state: `ContentModel.metadata` and wire output are untouched.
+
+Registry note (C-021 StandardProfileV1Contract): C-021 must follow the state this entry
+records (v1.1: no typed `TimeSeriesChart.metadata` row; `metadata` is cross-cutting free-form).

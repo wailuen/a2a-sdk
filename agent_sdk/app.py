@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 from asyncio import sleep as _asyncio_sleep
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
@@ -35,9 +36,9 @@ from .auth.middleware import AuthRuntime
 from .auth.oauth_tokens import OAuthTokenStore
 from .common.cors import CorsMiddleware
 from .common.limits import RateLimiter
-from .config import BaseAgentSettings
+from .config import BaseAgentSettings, parse_idp_issuer
 from .credentials.fields import CredentialField
-from .credentials.store import NS_BEDROCK, NS_MODEL, CredentialStore, resolver_for_source, validate_namespace
+from .credentials.store import NS_BEDROCK, NS_MODEL, NS_OAUTH_IDP, CredentialStore, resolver_for_source, validate_namespace
 from .credentials.encrypted_sqlite import EncryptedSqliteStore
 from .models.content_types import ContentModel, content_type_for
 from .observability import configure_logging, request_id_middleware
@@ -494,6 +495,65 @@ class Agent:
         else:
             raise ValueError(exc_msg)
 
+    def _validate_idp_settings(self) -> None:
+        settings = self.settings
+        if settings.oauth_idp == "none":
+            if settings.oauth_idp_disable_api_keys:
+                raise ValueError(
+                    "AGENT_SDK_OAUTH_IDP_DISABLE_API_KEYS requires AGENT_SDK_OAUTH_IDP=oidc."
+                )
+            if settings.oauth_idp_allow_all_issuer_users:
+                raise ValueError(
+                    "AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS requires AGENT_SDK_OAUTH_IDP=oidc."
+                )
+            return
+        if not settings.oauth_idp_issuer:
+            raise ValueError("AGENT_SDK_OAUTH_IDP=oidc requires AGENT_SDK_OAUTH_IDP_ISSUER.")
+        if not settings.oauth_idp_client_id:
+            raise ValueError("AGENT_SDK_OAUTH_IDP=oidc requires AGENT_SDK_OAUTH_IDP_CLIENT_ID.")
+        tenant_id = parse_idp_issuer(settings.oauth_idp_issuer)
+        if settings.oauth_idp_allow_all_issuer_users:
+            logger.warning(
+                "AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS is set: every account at the "
+                "configured issuer is admitted to sign in and approve consent."
+            )
+        elif (
+            tenant_id is None
+            and not settings.oauth_idp_required_role
+            and not settings.oauth_idp_required_group
+        ):
+            raise ValueError(
+                "AGENT_SDK_OAUTH_IDP_ISSUER is not an Entra tenant, so any account at that "
+                "issuer could sign in. Set AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE or "
+                "AGENT_SDK_OAUTH_IDP_REQUIRED_GROUP, or set "
+                "AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS=true to admit every account."
+            )
+        if settings.oauth_one_time_consent:
+            raise ValueError(
+                "AGENT_SDK_OAUTH_ONE_TIME_CONSENT cannot be combined with AGENT_SDK_OAUTH_IDP=oidc "
+                "— IdP sign-in replaces admin-key consent. Unset one of them."
+            )
+        try:
+            import jwt  # noqa: F401
+        except ImportError:
+            raise ValueError(
+                "AGENT_SDK_OAUTH_IDP=oidc requires PyJWT: install agent-sdk[oidc]."
+            ) from None
+        if "AGENT_SDK_OAUTH_IDP_SURFACES" in os.environ:
+            logger.warning(
+                "AGENT_SDK_OAUTH_IDP_SURFACES is unsupported and ignored: IdP sign-in "
+                "applies to every authorize flow."
+            )
+
+    def _warn_idp_secret_missing(self, credential_store: CredentialStore) -> None:
+        if self.settings.oauth_idp == "none":
+            return
+        if credential_store.get(NS_OAUTH_IDP, "client_secret") is None:
+            logger.warning(
+                "AGENT_SDK_OAUTH_IDP=oidc but no client_secret is stored; set it in "
+                "/admin -> Credentials. Sign-in is unavailable until it exists."
+            )
+
     def build_app(self) -> FastAPI:
         settings = self.settings
         base_url = settings.resolved_base_url
@@ -512,13 +572,18 @@ class Agent:
                     entry.name,
                 )
 
+        self._validate_idp_settings()
         credential_store = self._build_credential_store()
+        self._warn_idp_secret_missing(credential_store)
         api_keys = ApiKeyStore(credential_store)
         bootstrap = BootstrapManager(api_keys)
+        idp_on = settings.oauth_idp == "oidc"
         oauth_store = OAuthTokenStore(
             credential_store,
             issuer=base_url,
             canonical_resource=f"{base_url}/mcp",
+            session_ttl_seconds=settings.oauth_idp_session_hours * 3600 if idp_on else None,
+            require_user=idp_on,
         )
         auth = AuthRuntime(
             api_keys=api_keys,
@@ -528,6 +593,7 @@ class Agent:
             prm_url=f"{base_url}/.well-known/oauth-protected-resource/mcp",
             bare_prm_url=f"{base_url}/.well-known/oauth-protected-resource",
             oauth_one_time_consent=settings.oauth_one_time_consent,
+            idp_disable_api_keys=settings.oauth_idp_disable_api_keys,
             identity_limiter=RateLimiter(settings.rate_limit_per_minute),
             unauth_limiter=RateLimiter(settings.unauth_rate_limit_per_minute),
         )
@@ -735,6 +801,24 @@ class Agent:
         app.state.skills = skills
         app.state.model_client = model_client
         app.state.oauth = oauth_store
+        app.state.idp_rp = None
+        app.state.idp_flows = None
+        if idp_on:
+            from .auth.oidc import IdpFlowStore, OidcConfig, OidcRelyingParty
+
+            assert settings.oauth_idp_issuer and settings.oauth_idp_client_id
+            app.state.idp_rp = OidcRelyingParty(
+                OidcConfig(
+                    issuer=settings.oauth_idp_issuer,
+                    client_id=settings.oauth_idp_client_id,
+                    tenant_id=parse_idp_issuer(settings.oauth_idp_issuer),
+                    required_role=settings.oauth_idp_required_role,
+                    required_group=settings.oauth_idp_required_group,
+                    redirect_uri=f"{base_url}/oauth/idp/callback",
+                ),
+                lambda: credential_store.get(NS_OAUTH_IDP, "client_secret"),
+            )
+            app.state.idp_flows = IdpFlowStore()
         app.state.loop_policies = policies
         app.state.persona = persona_str
         app.state.system_prompt = system_prompt

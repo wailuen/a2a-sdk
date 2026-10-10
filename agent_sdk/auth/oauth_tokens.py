@@ -8,9 +8,13 @@ Persistence split (DESIGN §6):
 
 - **Client registrations** (RFC 7591 DCR) → ``NS_OAUTH_CLIENTS`` in the
   encrypted store — restarts never wipe Claude.ai connector registrations.
-  Bounded at ``MAX_CLIENTS`` with LRU eviction of *never-consented* clients
-  only (a consented client is a live connector; evicting it would orphan its
-  refresh tokens).
+  Bounded at ``MAX_CLIENTS`` with LRU eviction. Two approval marks are kept
+  apart on purpose: ``consented`` means an *admin* approved the client (the
+  admin-key consent POST or ``provision-org-oauth-client``) — it is the only
+  bit the one-time-consent shortcut trusts, and such a client is never
+  evicted. ``user_consented_at`` records that a signed-in IdP user clicked
+  Allow (GH-152) — it never grants the admin shortcut, and it shields the
+  client from eviction only while the client holds a live refresh family.
 - **Refresh tokens** → ``NS_OAUTH_REFRESH``, sha256-hashed row keys, SINGLE-USE
   rotation: every refresh mints a new access+refresh pair and tombstones the
   presented token (``rotated: true``). Presenting a rotated token again is
@@ -82,6 +86,8 @@ class _AuthCode:
     scope: str
     audience: str
     expires_at: float
+    user: str | None = None
+    label: str | None = None
 
 
 @dataclass(slots=True)
@@ -92,6 +98,7 @@ class _AccessToken:
     family_id: str
     label: str | None
     expires_at: float
+    user: str | None = None
 
 
 def verify_pkce_s256(code_verifier: str, code_challenge: str) -> bool:
@@ -120,8 +127,12 @@ class OAuthTokenStore:
         *,
         issuer: str,
         canonical_resource: str,
+        session_ttl_seconds: int | None = None,
+        require_user: bool = False,
     ) -> None:
         self._store = credential_store
+        self._session_ttl = session_ttl_seconds
+        self._require_user = require_user
         self.issuer = issuer.rstrip("/")
         self.canonical_resource = canonical_resource.rstrip("/")
         # The exact two-value audience equivalence set (§5.5).
@@ -147,11 +158,14 @@ class OAuthTokenStore:
     # ── client registrations (RFC 7591, persisted) ──
 
     def register_client(
-        self, redirect_uris: list[str], *, client_name: str | None = None
+        self,
+        redirect_uris: list[str],
+        *,
+        client_name: str | None = None,
     ) -> dict[str, Any]:
         """Persist a public-client registration; returns the stored record.
-        Enforces the registration cap with LRU eviction of never-consented
-        clients (a flood of junk DCRs can never displace a live connector)."""
+        Enforces the registration cap with LRU eviction (a flood of junk DCRs
+        can never displace an admin-approved client or a live connector)."""
         self._evict_clients_if_needed()
         client_id = secrets.token_urlsafe(16)
         record: dict[str, Any] = {
@@ -177,27 +191,63 @@ class OAuthTokenStore:
         return record if isinstance(record, dict) else None
 
     def mark_consented(self, client_id: str) -> None:
-        """Consent flips the client out of the LRU-evictable pool."""
+        """ADMIN approval only (admin-key consent POST, provision-org CLI).
+
+        Sets ``consented`` — the bit the one-time-consent shortcut trusts as
+        "an admin approved this client". Never call this from a path a
+        non-admin can drive; IdP user consent uses :meth:`mark_user_consented`.
+        """
         record = self.get_client(client_id)
         if record is not None and not record.get("consented"):
             record["consented"] = True
             self._store.set(NS_OAUTH_CLIENTS, client_id, json.dumps(record))
 
+    def mark_user_consented(self, client_id: str) -> None:
+        """A signed-in IdP user allowed this client (GH-152).
+
+        Deliberately a separate field from ``consented``: any directory user
+        can drive this, so it must never be promoted to admin approval if the
+        operator later switches sign-in off with one-time consent on.
+        """
+        record = self.get_client(client_id)
+        if record is not None and not record.get("user_consented_at"):
+            record["user_consented_at"] = _now()
+            self._store.set(NS_OAUTH_CLIENTS, client_id, json.dumps(record))
+
     def _evict_clients_if_needed(self) -> None:
+        """Make room for one more registration.
+
+        Never evicted: admin-approved clients (``consented``) — a scarce,
+        admin-only mark, so they cannot fill the table from outside; this is
+        also every client approved before IdP sign-in existed, so an upgrade
+        never creates victims. Protected while live: user-consented clients
+        with an unexpired refresh family. Everything else (never-approved, or
+        user-consented with no live family) is evictable, oldest first. The
+        rule is the same whatever ``oauth_idp`` is set to, so a mode switch
+        never changes which clients survive.
+        """
         client_ids = self._store.list_fields(NS_OAUTH_CLIENTS)
         if len(client_ids) < MAX_CLIENTS:
             return
         evictable: list[tuple[float, str]] = []
+        live: set[str] | None = None
         for cid in client_ids:
             record = self.get_client(cid)
             if record is None:
                 # Corrupt row — unusable, treat as evictable immediately.
                 evictable.append((0.0, cid))
-            elif not record.get("consented"):
-                evictable.append((float(record.get("created_at") or 0.0), cid))
+                continue
+            if record.get("consented"):
+                continue
+            if record.get("user_consented_at"):
+                if live is None:
+                    live = self._clients_with_live_refresh()
+                if cid in live:
+                    continue
+            evictable.append((float(record.get("created_at") or 0.0), cid))
         if not evictable:
-            # Every registered client has consent — refuse rather than evict a
-            # live connector. Operationally near-impossible at MAX_CLIENTS=200.
+            # Every registered client is admin-approved or a live
+            # user-consented connector — refuse rather than evict one.
             raise AgentError(
                 ErrorCategory.RATE_LIMITED, "client registration capacity reached"
             )
@@ -205,7 +255,16 @@ class OAuthTokenStore:
         overflow = len(client_ids) - MAX_CLIENTS + 1
         for _, cid in evictable[:overflow]:
             self._store.delete(NS_OAUTH_CLIENTS, cid)
-            logger.info("oauth client evicted (never consented) client_id=%s...", cid[:8])
+            logger.info("oauth client evicted (unused) client_id=%s...", cid[:8])
+
+    def _clients_with_live_refresh(self) -> set[str]:
+        now = _now()
+        live: set[str] = set()
+        for token_hash in self._store.list_fields(NS_OAUTH_REFRESH):
+            record = self._get_refresh(token_hash)
+            if record is not None and float(record.get("expires_at") or 0.0) > now:
+                live.add(str(record.get("client_id") or ""))
+        return live
 
     # ── authorization codes (memory-only, single-use) ──
 
@@ -217,6 +276,8 @@ class OAuthTokenStore:
         code_challenge: str,
         scope: str,
         audience: str,
+        user: str | None = None,
+        label: str | None = None,
     ) -> str:
         code = secrets.token_urlsafe(32)
         self._codes[_hash(code)] = _AuthCode(
@@ -226,6 +287,8 @@ class OAuthTokenStore:
             scope=scope,
             audience=audience,
             expires_at=_now() + CODE_TTL_SECONDS,
+            user=user,
+            label=label,
         )
         while len(self._codes) > _MAX_CODES:
             self._codes.popitem(last=False)
@@ -257,6 +320,8 @@ class OAuthTokenStore:
             "client_id": record.client_id,
             "scope": record.scope,
             "audience": record.audience,
+            "user": record.user,
+            "label": record.label,
         }
 
     # ── access tokens (memory-only) + refresh tokens (persisted) ──
@@ -269,11 +334,22 @@ class OAuthTokenStore:
         audience: str,
         label: str | None = None,
         family_id: str | None = None,
+        user: str | None = None,
+        family_expires_at: float | None = None,
     ) -> dict[str, Any]:
         """Mint an access+refresh pair sharing one rotation family. The
         audience travels from the code metadata into both tokens and survives
         every subsequent rotation (§5.5)."""
         family = family_id or secrets.token_urlsafe(16)
+        now = _now()
+        if family_expires_at is None and family_id is None and self._session_ttl is not None:
+            family_expires_at = now + self._session_ttl
+        access_ttl: float = ACCESS_TTL_SECONDS
+        refresh_ttl: float = REFRESH_TTL_SECONDS
+        if family_expires_at is not None:
+            remaining = max(family_expires_at - now, 0.0)
+            access_ttl = min(access_ttl, remaining)
+            refresh_ttl = min(refresh_ttl, remaining)
 
         access = secrets.token_urlsafe(32)
         self._prune_access()
@@ -283,32 +359,32 @@ class OAuthTokenStore:
             audience=audience,
             family_id=family,
             label=label,
-            expires_at=_now() + ACCESS_TTL_SECONDS,
+            expires_at=now + access_ttl,
+            user=user,
         )
         while len(self._access) > _MAX_ACCESS_TOKENS:
             self._access.popitem(last=False)
 
         refresh = secrets.token_urlsafe(32)
-        self._store.set(
-            NS_OAUTH_REFRESH,
-            _hash(refresh),
-            json.dumps(
-                {
-                    "client_id": client_id,
-                    "scope": scope,
-                    "audience": audience,
-                    "family_id": family,
-                    "label": label,
-                    "rotated": False,
-                    "created_at": _now(),
-                    "expires_at": _now() + REFRESH_TTL_SECONDS,
-                }
-            ),
-        )
+        refresh_record: dict[str, Any] = {
+            "client_id": client_id,
+            "scope": scope,
+            "audience": audience,
+            "family_id": family,
+            "label": label,
+            "rotated": False,
+            "created_at": now,
+            "expires_at": now + refresh_ttl,
+        }
+        if user is not None:
+            refresh_record["user"] = user
+        if family_expires_at is not None:
+            refresh_record["family_expires_at"] = family_expires_at
+        self._store.set(NS_OAUTH_REFRESH, _hash(refresh), json.dumps(refresh_record))
         return {
             "access_token": access,
             "refresh_token": refresh,
-            "expires_in": ACCESS_TTL_SECONDS,
+            "expires_in": int(access_ttl),
             "scope": scope,
         }
 
@@ -343,6 +419,18 @@ class OAuthTokenStore:
         if float(record.get("expires_at") or 0.0) <= _now():
             self._store.delete(NS_OAUTH_REFRESH, token_hash)
             return None
+        family_cap = record.get("family_expires_at")
+        if family_cap is not None and float(family_cap) <= _now():
+            if family_id:
+                self.revoke_family(family_id)
+            self._store.delete(NS_OAUTH_REFRESH, token_hash)
+            return None
+        if self._require_user and not record.get("user"):
+            logger.warning("oauth refresh without user refused — revoking token family")
+            if family_id:
+                self.revoke_family(family_id)
+            self._store.delete(NS_OAUTH_REFRESH, token_hash)
+            return None
         if record.get("client_id") != client_id:
             # Bound-client mismatch — a stolen token must not be redeemable
             # under a different client_id (pitchbook RT-OA-002, kept).
@@ -359,6 +447,8 @@ class OAuthTokenStore:
             audience=str(record.get("audience") or self.canonical_resource),
             label=record.get("label"),
             family_id=family_id or None,
+            user=record.get("user"),
+            family_expires_at=float(family_cap) if family_cap is not None else None,
         )
 
     def revoke_family(self, family_id: str) -> None:
@@ -393,6 +483,7 @@ class OAuthTokenStore:
             subject=record.client_id,
             admin=False,
             label=record.label or f"oauth:{record.client_id[:8]}",
+            user=record.user,
         )
 
     # ── revocation (RFC 7009) ──
@@ -403,20 +494,24 @@ class OAuthTokenStore:
         may revoke any. Silent no-op otherwise — RFC 7009 §2.2: the caller
         never learns whether the token existed or who owned it."""
 
-        def _owned(owner_client_id: str) -> bool:
-            return caller.kind == "api_key" or owner_client_id == caller.subject
+        def _owned(owner_client_id: str, owner_user: str | None) -> bool:
+            if caller.kind == "api_key":
+                return True
+            return owner_client_id == caller.subject and owner_user == caller.user
 
         token_hash = _hash(token)
 
         access = self._access.get(token_hash)
         if access is not None:
-            if _owned(access.client_id):
+            if _owned(access.client_id, access.user):
                 self._access.pop(token_hash, None)
                 logger.info("oauth access token revoked")
             return
 
         refresh = self._get_refresh(token_hash)
-        if refresh is not None and _owned(str(refresh.get("client_id") or "")):
+        if refresh is not None and _owned(
+            str(refresh.get("client_id") or ""), refresh.get("user")
+        ):
             # Revoking a refresh token kills its family (RFC 7009 §2.1 SHOULD:
             # related access tokens go with it).
             family_id = str(refresh.get("family_id") or "")

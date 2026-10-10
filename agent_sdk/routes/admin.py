@@ -41,7 +41,7 @@ from ..agent.registry import ToolInputValidationError
 from ..auth.middleware import AuthRuntime, _prm_challenge, require_admin, unauth_rate_limit
 from ..common.redact import frame_locations
 from ..credentials.fields import CredentialField, validate_credential_url
-from ..credentials.store import NS_BEDROCK, NS_MODEL, RESERVED_NAMESPACES, CredentialStore
+from ..credentials.store import NS_BEDROCK, NS_MODEL, NS_OAUTH_IDP, RESERVED_NAMESPACES, CredentialStore
 from ..models.errors import AgentError, ErrorCategory
 from ..sources import SourceAdapter
 
@@ -104,6 +104,16 @@ _MODEL_FIELDS: tuple[CredentialField, ...] = (
         secret=True,
         required=False,
         help_text="API key for api.anthropic.com. Reserved for future Anthropic model-backend support.",
+    ),
+)
+
+_OAUTH_IDP_FIELDS: tuple[CredentialField, ...] = (
+    CredentialField(
+        name="client_secret",
+        label="IdP sign-in client secret",
+        secret=True,
+        required=False,
+        help_text="Client secret of the app registration used for AGENT_SDK_OAUTH_IDP sign-in.",
     ),
 )
 
@@ -409,6 +419,11 @@ def _resolve_credential_field(
             if field.name == field_name:
                 return NS_MODEL, field
         raise HTTPException(status_code=404, detail="unknown model backend credential field")
+    if source == NS_OAUTH_IDP:
+        for field in _OAUTH_IDP_FIELDS:
+            if field.name == field_name:
+                return NS_OAUTH_IDP, field
+        raise HTTPException(status_code=404, detail="unknown IdP credential field")
     if source in RESERVED_NAMESPACES:
         raise HTTPException(status_code=400, detail="reserved namespace")
     for adapter in _adapters(request).values():
@@ -439,6 +454,10 @@ async def list_credentials(request: Request) -> dict[str, Any]:
         "model": {
             "source_name": NS_MODEL,
             "fields": [_field_summary(store, NS_MODEL, f) for f in _MODEL_FIELDS],
+        },
+        "oauth_idp": {
+            "source_name": NS_OAUTH_IDP,
+            "fields": [_field_summary(store, NS_OAUTH_IDP, f) for f in _OAUTH_IDP_FIELDS],
         },
         "bedrock": {
             "source_name": NS_BEDROCK,

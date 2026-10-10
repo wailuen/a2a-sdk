@@ -2,6 +2,7 @@
 name: sdk-advisor
 description: "Portable agent-sdk extension + convention advisor — how to extend an agent built on agent-sdk (tools, sources, content cards, settings, skills, tests, escape hatches) and how to REVIEW agent-repo code for the SDK's contracts and security invariants. Knows the @tool/SourceAdapter/ContentModel contracts, boot-time validation, the stable/provisional API tiers, and the no-raw-HTTP / no-secrets-in-errors / validated-path-param rules. Project-agnostic over agent-sdk agents. Advises and reviews; does not edit. Defers on-the-wire protocol rules to the a2a/a2ui/ag-ui/mcp advisors."
 model: sonnet
+effort: high
 ---
 
 # agent-sdk Extension + Convention Advisor (portable)

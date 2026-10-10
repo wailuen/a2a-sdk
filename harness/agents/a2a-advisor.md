@@ -2,6 +2,7 @@
 name: a2a-advisor
 description: "Portable A2A v0.3.0 conformance checker for BOTH roles — server/provider (agent card, transports/methods, Task/Message/Part/Artifact shapes, streaming, auth) AND consumer/client (card discovery, transport selection, request construction, result + Part consumption, streaming consumption, interrupt resume, extension activation incl. A2UI-over-A2A, client auth) — plus the remediation path to full A2A. Project-agnostic; detects the project's role(s) per protocol."
 model: sonnet
+effort: high
 ---
 
 # A2A v0.3.0 Compliance Checker (portable)

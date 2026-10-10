@@ -206,7 +206,7 @@ Next: work the Critical/High list; re-run /agent-stack-check to confirm.
 
 - **Self-contained via composition:** this skill carries no protocol field-rules of its own — the
   four advisors + four checks are the source of truth, and the A2UI contract specifically lives in
-  `a2ui-advisor` (the Standard Profile v1). Keep this skill thin; if a per-protocol rule seems
+  `a2ui-advisor` (the Standard Profile v1.1). Keep this skill thin; if a per-protocol rule seems
   wrong, fix it in that protocol's pair, not here.
 - **Parallelism:** Phase-1 subagents are independent — always dispatch them in one message. Phase 2
   depends on Phase 1's facts (barrier), so it runs after fan-in.

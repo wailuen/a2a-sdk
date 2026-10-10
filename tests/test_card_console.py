@@ -623,3 +623,10 @@ async def test_console_page_and_health(client):
     # traversal blocked
     r = await client.get("/admin/static/../../config.py")
     assert r.status_code in (400, 404)
+
+
+async def test_console_credentials_page_renders_oauth_idp_card(client):
+    r = await client.get("/admin/static/console.js")
+    assert r.status_code == 200
+    assert "data.oauth_idp" in r.text
+    assert "IdP sign-in (AGENT_SDK_OAUTH_IDP)" in r.text

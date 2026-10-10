@@ -46,9 +46,10 @@ def client_ip(
 ) -> str:
     """Effective client IP for rate-limit keys."""
     if peer_host and peer_host in trusted_proxies and forwarded_for:
-        # leftmost untrusted hop
         chain = [h.strip() for h in forwarded_for.split(",") if h.strip()]
-        for hop in chain:
+        for hop in reversed(chain):
             if hop not in trusted_proxies:
                 return hop
+        if chain:
+            return chain[0]
     return peer_host or "unknown"

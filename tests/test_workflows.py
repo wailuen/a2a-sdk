@@ -2417,6 +2417,8 @@ SDK_WAVE_AUTH_INTERNAL_MEMBERS = [
     # Same "trace transitive require_identity consumers" rule that added the two members
     # above.
     "agent_sdk/auth/identity",
+    # C-014 / GH-152: the OIDC relying-party client mints the user-bound identity.
+    "agent_sdk/auth/oidc",
 ]
 
 
@@ -2470,6 +2472,7 @@ WAVE_CYCLE_AUTH_SURFACE_MEMBERS = [
     # return, one hop further down the same "trace transitive require_identity
     # consumers" chain. Mirrors SDK_WAVE_AUTH_INTERNAL_MEMBERS's agent_sdk/auth/identity.
     "src/auth/identity",
+    "src/auth/oidc",
 ]
 
 
@@ -2973,9 +2976,20 @@ def test_gh132_lrn_capture_capped_per_wave(wf_path: Path) -> None:
         f"{wf_path.name}: the LRN-write fan-out guard must check the CAPPED lrnCandidates "
         "list, not the full toCodeify list."
     )
-    assert "await parallel(lrnCandidates.map(function(f, i) {" in codify, (
+    # The fan-out may dispatch one agent per finding, or batch findings per codify agent
+    # (lrnAssignments/lrnBatches) — either way its input must be the CAPPED list.
+    assert (
+        "await parallel(lrnCandidates.map(function(f, i) {" in codify
+        or (
+            "const lrnAssignments = lrnCandidates.map(function(f, i) {" in codify
+            and "await parallel(lrnBatches.map(function(batch) {" in codify
+        )
+    ), (
         f"{wf_path.name}: the parallel LRN-write fan-out must iterate the capped "
         "lrnCandidates list, not the full toCodeify list."
+    )
+    assert "toCodeify.map(" not in codify, (
+        f"{wf_path.name}: no LRN-write fan-out may iterate the uncapped toCodeify list."
     )
 
 

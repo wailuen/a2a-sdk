@@ -333,6 +333,14 @@ async function renderCredentials(pane, ctx) {
     });
   }
 
+  if (data.oauth_idp) {
+    groups.push({
+      source_name: data.oauth_idp.source_name,
+      display_name: "IdP sign-in (AGENT_SDK_OAUTH_IDP)",
+      fields: data.oauth_idp.fields,
+    });
+  }
+
   if (!groups.length) {
     body.appendChild(el("p", { class: "muted" }, "No credentialed sources registered."));
     return;

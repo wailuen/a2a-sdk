@@ -1,50 +1,40 @@
 """RT-002: the A2UI-over-A2A `DataPart.data` wire-shape rule must be stated
 consistently across every mirror of the conformance oracle — a2ui-advisor.md,
-a2a-advisor.md, a2ui-check/SKILL.md, and a2a-check/SKILL.md — in both the
-repo (`.claude/`) and harness (`harness/`) trees. Before this fix only
-a2ui-advisor.md (and its harness mirror) had been updated for GH-128's
-`data.messages` object-wrapping; the other three still flatly asserted
-"`data` MUST be a bare array" / "protocol error" otherwise, so the static
-conformance gate (a2a-advisor pass of `/agent-stack-check`) would flag the
-landed GH-128 fix as a violation and oscillate on re-run.
+a2a-advisor.md, a2ui-check/SKILL.md, and a2a-check/SKILL.md — in the repo
+(`.claude/`), harness (`harness/`) and template (`template/.claude/`) trees.
+Before this fix only a2ui-advisor.md (and its harness mirror) had been updated
+for GH-128's `data.messages` object-wrapping; the other three still flatly
+asserted "`data` MUST be a bare array" / "protocol error" otherwise, so the
+static conformance gate would flag the landed GH-128 fix as a violation.
 
-Scope: repo-tracked mirrors only (`.claude/` + `harness/`), matching the
-established C-014 `AUTH_SURFACE` / GH-117 parity-test precedent. The user's
-live `~/.claude` copies are outside pytest's reach (not repo-tracked) and are
-kept in sync by hand per the same mirror convention.
+Repo and harness copies are git-tracked; the user's live `~/.claude` copies are
+outside pytest's reach and are kept in sync by hand.
 
-RT-A08 follow-up: `template/.claude/agents/a2ui-advisor.md` is a *third*
-a2ui-advisor copy (the peer-repo template seed) but `template/` is entirely
-gitignored, so no diff-based check ever covers it — a fix landing in
-`.claude/`+`harness/` alone can silently stay unpropagated there. Unlike the
-DataPart wire-shape content above (template deliberately still diverges there
-per the tracked GH-128 follow-on, issue #151 — do not fold it into the
-byte-identical check), the frozen `TimeSeriesChart.metadata` row below IS
-expected to already match in all three copies, so it is checked directly off
-disk (present on disk despite being untracked), following the same
-gitignored-template-read precedent as `tests/test_workflow_sync.py`.
+`template/` is entirely gitignored, so no diff-based check ever covers it.
+The four template mirrors are therefore checked directly off disk: each must
+be byte-identical to its harness copy, so DataPart wording, the spec-conflict
+markers and the Profile v1.1 `TimeSeriesChart.metadata` state cannot drift.
+Every template-reading test is marked strict xfail (not skip, not hard-fail)
+when `template/` is absent, so a clean clone stays green while the
+"propagation unverified" state remains visible, per test_workflow_sync.py.
 
-RT-004 follow-up (REVIEWS.md Round 10): w040 (RT-005/RT-006, REVIEWS.md
-Round 8) deleted the frozen `TimeSeriesChart.metadata` row from all three
-copies and replaced it with a free-form "metadata is cross-cutting" note +
-a "MUST NOT flag" directive — self-authorized inside the same wave that used
-the OPPOSITE argument (GH-149) to delete a *code* field in order to conform
-to this exact table. REVIEWS.md Round 8 recorded the doc edit as PROPOSED,
-pending maintainer ratification, never SIGNED OFF — but the prior version of
-this test only warned if the row was reverted, so nothing blocked the
-unratified loosening itself from shipping. RT-004 reverts the doc edit (the
-row is restored below) and inverts the gate: while
-`ROUND_8_METADATA_ROW_REMOVAL_RATIFIED` is False, an advisor copy that
-removes the frozen row (or reintroduces the cross-cutting override) now
-FAILS the suite, not just warns. The underlying gap this documented — no
-shipped code has ever implemented the typed sub-shape — is tracked
-separately in `workspace/sdk-candidates.md` for a maintainer to decide as
-its own Profile v1.1 amendment, not a silent same-wave doc edit.
+Profile v1.1 (REVIEWS.md Round 11): the maintainer signed off removing the
+frozen `TimeSeriesChart.metadata` row in favour of a cross-cutting `metadata`
+note (issue #153). The gate flag `ROUND_8_METADATA_ROW_REMOVAL_RATIFIED` is
+derived from REVIEWS.md and is True while the status line reads SIGNED OFF and
+the `Checkable reference:` line holds a wailuen/a2a-sdk GitHub URL or a commit
+SHA. Every advisor-copy assertion branches on the flag: while True every copy,
+template included, must LACK the typed row and CARRY the cross-cutting marker;
+if the record is reverted the reverse. The REVIEWS.md record and the advisor
+text therefore cannot disagree without a test failing.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
+
+import pytest
 
 import agent_sdk.app as _app_module
 
@@ -55,7 +45,7 @@ STALE_PHRASES = (
     "`data` not an array",
     "is an array | Even for one message",
     "`data` = array of A2UI messages",
-    "data[] is an array; first message is createSurface",
+    "data[] is an array",
 )
 
 # The reconciled rule every mirror must state: a genuine, unresolved spec
@@ -71,63 +61,103 @@ AGENT_MIRROR_PAIRS = [
     (".claude/skills/a2a-check/SKILL.md", "harness/skills/a2a-check/SKILL.md"),
 ]
 
-
 TEMPLATE_A2UI_ADVISOR = "template/.claude/agents/a2ui-advisor.md"
 
-# RT-004: the frozen TimeSeriesChart.metadata row is part of the A2UI
-# Standard Profile v1 field contract (DESIGN.md stable core) and must not be
-# edited by a wave to match its own code without maintainer ratification.
+TEMPLATE_MIRRORS = [
+    TEMPLATE_A2UI_ADVISOR,
+    "template/.claude/agents/a2a-advisor.md",
+    "template/.claude/skills/a2ui-check/SKILL.md",
+    "template/.claude/skills/a2a-check/SKILL.md",
+]
+
+# The frozen Profile v1 typed TimeSeriesChart.metadata row. Present while the
+# Present only before the Profile v1.1 amendment (REVIEWS.md Round 11) was ratified.
 STALE_TIME_SERIES_METADATA_ROW = (
     "| `metadata` | `{identifier?, metric?, frequency?, source?}` | — | |"
 )
-# The unratified w040 replacement — a copy carrying this while the row above
-# is absent is exactly the self-authorized loosening RT-004 reverted.
+# The ratified v1.1 replacement note: required once Round 11 is signed off.
 METADATA_CROSS_CUTTING_MARKER = (
     "`metadata` is a cross-cutting field, not a per-type one."
 )
 
-# RT-004 (w040 follow-up, REVIEWS.md Round 10): REVIEWS.md Round 8 recorded
-# the row's removal as PROPOSED, pending user ratification — explicitly NOT
-# SIGNED OFF, per the standing rule that a wave's own redteam/implementer
-# cannot ratify a frozen-contract doc change alone
-# (memory/feedback-wave-signoff-needs-user-ratification). Flip this to True
-# ONLY alongside a REVIEWS.md entry that records a maintainer's SIGNED OFF
-# ruling — never as a bare test edit. Until then, an advisor copy that
-# removes the frozen row (the unratified direction) must hard-fail, not warn
-# — inverted from the pre-RT-004 gate, which only warned on a *revert* of
-# the removal and let the removal itself ship unchecked.
-ROUND_8_METADATA_ROW_REMOVAL_RATIFIED = False
+
+
+_STATUS_SIGNED_OFF = re.compile(r"^\*\*SIGNED OFF\*\*")
+# Format check only: a wailuen/a2a-sdk issue/PR URL (optionally a comment
+# anchor) or a full commit SHA. Whoever reviews the sign-off commit must open
+# the reference and confirm it is the maintainer's own approval.
+_REFERENCE_LINE = re.compile(
+    r"^Checkable reference:\s*("
+    r"https://github\.com/wailuen/a2a-sdk/(?:issues|pull)/\d+"
+    r"(?:#(?:issuecomment|discussion_r|pullrequestreview)-?\d+)?"
+    r"|[0-9a-f]{40}"
+    r")\s*$",
+)
+
+
+def round_11_checkable_reference_recorded(reviews_text: str) -> bool:
+    """True only when the Round 11 status line is SIGNED OFF and its
+    `Checkable reference:` line holds a real reference."""
+    if "## Round 11" not in reviews_text:
+        return False
+    section = reviews_text.split("## Round 11", 1)[1].split("\n## ", 1)[0]
+    lines = section.splitlines()[1:]
+    status = next((ln for ln in lines if ln.strip()), "")
+    if not _STATUS_SIGNED_OFF.match(status):
+        return False
+    return any(_REFERENCE_LINE.match(ln) for ln in lines)
 
 
 def _repo_root() -> Path:
     return Path(_app_module.__file__).parent.parent
 
 
+requires_template = pytest.mark.xfail(
+    not (_repo_root() / "template").exists(),
+    strict=True,
+    reason="template/ (gitignored peer repo) is absent from this checkout; "
+    "propagation unverified",
+)
+
+
 def _read(relative: str) -> str:
     return (_repo_root() / relative).read_text()
 
 
-def _assert_metadata_row_present_or_fail(
-    path: str, text: str, *, ratified: bool = ROUND_8_METADATA_ROW_REMOVAL_RATIFIED
+ROUND_8_METADATA_ROW_REMOVAL_RATIFIED = round_11_checkable_reference_recorded(
+    _read("REVIEWS.md")
+)
+
+
+def _assert_metadata_row_state(
+    path: str, text: str, ratified: bool = ROUND_8_METADATA_ROW_REMOVAL_RATIFIED
 ) -> None:
+    """Enforce the advisor state that matches the REVIEWS.md Round 11 record."""
+    has_row = STALE_TIME_SERIES_METADATA_ROW in text
+    has_marker = METADATA_CROSS_CUTTING_MARKER in text
     if ratified:
+        if has_row:
+            raise AssertionError(
+                f"{path} still carries the typed TimeSeriesChart.metadata "
+                f"row, but REVIEWS.md Round 11 records Profile v1.1 as "
+                f"SIGNED OFF — apply the amendment to every copy"
+            )
+        if not has_marker:
+            raise AssertionError(
+                f"{path} is missing the cross-cutting `metadata` note that "
+                f"the signed-off Profile v1.1 amendment requires"
+            )
         return
-    if STALE_TIME_SERIES_METADATA_ROW not in text:
+    if not has_row:
         raise AssertionError(
-            f"{path} is missing the frozen TimeSeriesChart.metadata row "
-            f"while its removal remains UNRATIFIED "
-            f"(ROUND_8_METADATA_ROW_REMOVAL_RATIFIED=False) — a wave may not "
-            f"edit a frozen A2UI Standard Profile v1 field contract to "
-            f"conform to its own code without maintainer sign-off; see "
-            f"REVIEWS.md Round 10 / RT-004"
+            f"{path} dropped the frozen TimeSeriesChart.metadata row while "
+            f"REVIEWS.md Round 11 is still pending ratification — a wave may "
+            f"not apply an unratified frozen-contract edit"
         )
-    if METADATA_CROSS_CUTTING_MARKER in text:
+    if has_marker:
         raise AssertionError(
-            f"{path} carries the unratified cross-cutting `metadata` "
-            f"override note — REVIEWS.md Round 10 reverted this edit "
-            f"pending maintainer ratification; it must not reappear until "
-            f"ROUND_8_METADATA_ROW_REMOVAL_RATIFIED is flipped alongside a "
-            f"SIGNED OFF REVIEWS.md entry"
+            f"{path} carries the cross-cutting `metadata` note while "
+            f"REVIEWS.md Round 11 is still pending ratification"
         )
 
 
@@ -167,14 +197,14 @@ def test_every_mirror_states_the_reconciled_spec_conflict_and_hint():
             )
 
 
-def test_all_three_a2ui_advisor_copies_keep_the_frozen_metadata_row():
+@requires_template
+def test_all_three_a2ui_advisor_copies_match_the_round_11_record():
     """RT-A08: the untracked `template/` copy must not silently drift from
     the two git-tracked copies just because no diff watches it. RT-003: the
     template copy is a hard requirement here — its absence must fail
     loudly, not silently shrink the 'all three copies' check down to two.
-    RT-004: the frozen `TimeSeriesChart.metadata` row is the enforced state
-    (REVIEWS.md Round 10) — no copy may drop it, or reintroduce the w040
-    cross-cutting override, without maintainer ratification."""
+    Every copy must match the REVIEWS.md Round 11 ratification state
+    (ROUND_8_METADATA_ROW_REMOVAL_RATIFIED)."""
     template_path = _repo_root() / TEMPLATE_A2UI_ADVISOR
     assert template_path.exists(), (
         f"{TEMPLATE_A2UI_ADVISOR} is missing — this test must fail rather "
@@ -189,4 +219,77 @@ def test_all_three_a2ui_advisor_copies_keep_the_frozen_metadata_row():
     }
 
     for path, text in copies.items():
-        _assert_metadata_row_present_or_fail(path, text)
+        _assert_metadata_row_state(path, text)
+
+
+@requires_template
+@pytest.mark.parametrize("template_rel", TEMPLATE_MIRRORS)
+def test_template_mirrors_state_reconciled_wire_shape_rule(template_rel: str):
+    assert (_repo_root() / template_rel).exists(), (
+        f"{template_rel} is missing — template/ (wailuen/a2a-agent-template) "
+        f"is required; this test must fail rather than skip propagation checks"
+    )
+    text = _read(template_rel)
+    for stale in STALE_PHRASES:
+        assert stale not in text, f"{template_rel} contains stale phrasing {stale!r}"
+    for marker in REQUIRED_MARKERS:
+        assert marker in text, f"{template_rel} lacks the marker {marker!r}"
+    harness_rel = template_rel.replace("template/.claude/", "harness/", 1)
+    assert text == _read(harness_rel), (
+        f"{template_rel} has drifted from {harness_rel}"
+    )
+
+
+def _signed_off(reviews_text: str, reference_line: str) -> str:
+    head, rest = reviews_text.split("## Round 11", 1)
+    lines = rest.splitlines()
+    out = []
+    for ln in lines:
+        if ln.startswith("**PROPOSED**"):
+            ln = "**SIGNED OFF** — confirmed by the maintainer."
+        elif ln.startswith("Checkable reference:"):
+            ln = reference_line
+        out.append(ln)
+    return head + "## Round 11" + "\n".join(out)
+
+
+# Clearly fake placeholder — not a real issue or approval.
+_FAKE_SIGNOFF_URL = (
+    "https://github.com/wailuen/a2a-sdk/issues/999999#issuecomment-999999"
+)
+
+
+def test_real_reviews_md_flips_true_after_documented_signoff_edit():
+    reviews = _read("REVIEWS.md")
+    signed = _signed_off(reviews, f"Checkable reference: {_FAKE_SIGNOFF_URL}")
+    assert round_11_checkable_reference_recorded(signed) is True
+
+
+@pytest.mark.parametrize(
+    "reference_line",
+    [
+        "Checkable reference: no session ID exists",
+        "Checkable reference: http TBD",
+        "Checkable reference: **PENDING**",
+        "Checkable reference:",
+        "Checkable reference: https://github.com/someone/else/issues/1",
+        "Checkable reference: https://github.com/wailuen/a2a-sdk",
+        "Checkable reference: session 123e4567-e89b-12d3-a456-426614174000",
+        "Checkable reference: " + "a" * 39,
+    ],
+)
+def test_non_references_do_not_satisfy_the_gate(reference_line: str):
+    signed = _signed_off(_read("REVIEWS.md"), reference_line)
+    assert round_11_checkable_reference_recorded(signed) is False
+
+
+@pytest.mark.parametrize(
+    "reference_line",
+    [
+        "Checkable reference: " + "a" * 40,
+        "Checkable reference: https://github.com/wailuen/a2a-sdk/pull/999999",
+    ],
+)
+def test_sha_and_repo_url_references_are_accepted(reference_line: str):
+    signed = _signed_off(_read("REVIEWS.md"), reference_line)
+    assert round_11_checkable_reference_recorded(signed) is True

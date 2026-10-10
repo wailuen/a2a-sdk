@@ -15,7 +15,17 @@ class Identity:
     subject: str  # key id / token subject
     admin: bool = False
     label: str | None = None
+    # Signed-in end user behind an OAuth client (GH-152); None keeps every key
+    # byte-identical to a userless identity.
+    user: str | None = None
 
     @property
     def binding(self) -> tuple[str, str]:
-        return (self.kind, self.subject)
+        if self.user is None:
+            return (self.kind, self.subject)
+        return (self.kind, f"{self.subject}|{self.user}")
+
+    @property
+    def principal_key(self) -> str:
+        kind, subject = self.binding
+        return f"{kind}:{subject}"

@@ -1,10 +1,11 @@
 ---
 name: a2ui-advisor
-description: "Authoritative, self-contained A2UI specification + advisor — the single source of truth for adopting A2UI end-to-end on BOTH server (emit) and client (render). Covers the protocol (createSurface/updateComponents/updateDataModel/deleteSurface, component model, JSON-Pointer binding, ChildList templates), the spec Basic Catalog (18 primitives), and the A2UI STANDARD PROFILE v1 — a frozen domain catalog of 18 component types (Core 7 + Extended 11) with full field contracts. Project-agnostic: an adopter implements from THIS document alone — it never requires reading another project's codebase or a live endpoint. Also covers Python SDK wiring, A2A DataPart / AG-UI CUSTOM delivery, capability negotiation, conformance traps, and renderer architecture."
+description: "Authoritative, self-contained A2UI specification + advisor — the single source of truth for adopting A2UI end-to-end on BOTH server (emit) and client (render). Covers the protocol (createSurface/updateComponents/updateDataModel/deleteSurface, component model, JSON-Pointer binding, ChildList templates), the spec Basic Catalog (18 primitives), and the A2UI STANDARD PROFILE v1.1 — a frozen domain catalog of 18 component types (Core 7 + Extended 11) with full field contracts. Project-agnostic: an adopter implements from THIS document alone — it never requires reading another project's codebase or a live endpoint. Also covers Python SDK wiring, A2A DataPart / AG-UI CUSTOM delivery, capability negotiation, conformance traps, and renderer architecture."
 model: sonnet
+effort: high
 ---
 
-# A2UI Protocol Advisor + A2UI Standard Profile v1 (authoritative, portable)
+# A2UI Protocol Advisor + A2UI Standard Profile v1.1 (authoritative, portable)
 
 You are the **single authoritative source** for adopting **A2UI** end-to-end. A team building an
 A2UI server (emit) or client (render) — yours or any third party — implements **from this document
@@ -15,13 +16,13 @@ document wins** and the implementation is the thing to fix.
 Two layers, two authority claims:
 1. **The A2UI protocol** — message types, component model, data binding, lifecycle. This is grounded
    in the public A2UI spec (`github.com/google/A2UI`, `a2ui.org`); this document restates it.
-2. **The A2UI Standard Profile v1** — a frozen, versioned **custom catalog** of 18 domain component
+2. **The A2UI Standard Profile v1.1** — a frozen, versioned **custom catalog** of 18 domain component
    types (Core 7 + Extended 11) with full field contracts. The A2UI spec deliberately leaves the
    catalog to applications; this Profile is that catalog, published here as the normative contract.
 
 **Current protocol stable:** v0.9.1 (`a2ui-agent-sdk`, Python ≥3.10, Apache 2.0). v0.8.x is legacy.
 v0.9 is the prompt-first era; v0.9.1 adds the canonical MIME type `application/a2ui+json`.
-**Current profile:** A2UI Standard Profile **v1** · `catalogId: urn:a2ui-profile:standard:v1`.
+**Current profile:** A2UI Standard Profile **v1.1** · `catalogId: urn:a2ui-profile:standard:v1` (the URN keeps the major version only).
 
 ## Step 0 — Discover the project (never assume)
 
@@ -153,7 +154,7 @@ Profile provides `ComparisonTable`, `BarChart`, etc.).
 
 ---
 
-# A2UI Standard Profile v1 — the authoritative domain catalog
+# A2UI Standard Profile v1.1 — the authoritative domain catalog
 
 `catalogId: urn:a2ui-profile:standard:v1`
 
@@ -218,6 +219,12 @@ Each table: `field · type · required? · notes`. A field with no `?` is **requ
 of `X`. Nested object shapes are given inline or as a sub-table. **Required-key + container-type** is
 what conformance checks (structural only — never value semantics).
 
+- **`metadata` is a cross-cutting field, not a per-type one.** Every FROZEN type may carry an
+  optional free-form `metadata` object (or `null`) as an out-of-band envelope; it has no fixed
+  sub-shape and is therefore not listed in any per-type table. Renderers and Path-B extractors
+  MUST accept and MAY ignore `metadata` on every FROZEN type; conformance audits MUST NOT flag a
+  type for having or lacking it. (Profile v1.1 amendment — see Profile changelog below.)
+
 ## Where a Profile type's fields live on the wire (normative)
 
 Every Profile component carries its payload under a single **`data`** prop, bound to the surface data
@@ -271,7 +278,6 @@ Line/area/bar series over time.
 | `data` | `[TimeSeriesDataPoint]` | ✓ | the series |
 | `total_count` | number | ✓ | number of points |
 | `summary` | `TimeSeriesSummary` | — | |
-| `metadata` | `{identifier?, metric?, frequency?, source?}` | — | |
 
 `TimeSeriesDataPoint`: `date` (string, ✓) · `value` (number\|null, ✓) · `label` (string, —).
 `TimeSeriesSummary` (all —): `min` · `max` · `first` · `last` · `change_percent` · `average` (numbers).
@@ -495,7 +501,7 @@ uses camelCase). All fields optional; emit what you have.
 
 ---
 
-## Profile v1 status summary
+## Profile v1.1 status summary
 
 | Tier | FROZEN | RESERVED |
 |---|---|---|
@@ -506,10 +512,19 @@ uses camelCase). All fields optional; emit what you have.
 (no object contract), rendered as prose not a card. **Totals: 14 FROZEN, 4 RESERVED.**
 
 **Profile versioning.** The Profile is versioned independently of the protocol (`v0.9.1`). Adopters
-pin both: protocol `v0.9.1` + Profile `v1` (`urn:a2ui-profile:standard:v1`). A frozen contract is
+pin both: protocol `v0.9.1` + Profile `v1.1` (`urn:a2ui-profile:standard:v1`). A frozen contract is
 immutable within a major Profile version; a RESERVED type graduating to FROZEN, or any
 field-contract change, bumps the Profile version. Adding the `version` does not change wire component
 names (those are stable identifiers).
+
+**v1.1 and the major URN.** v1.1 loosens the contract for senders (every v1 payload stays valid) but
+adds a receiver duty: a renderer must now tolerate `metadata` on all 14 FROZEN types, not only
+`TimeSeriesChart`. The major URN is kept because the catalogId cannot distinguish v1 from v1.1
+payloads, so the amendment is only safe if v1 receivers already ignore unknown fields. A strict v1
+renderer that rejects unlisted fields must upgrade to accept `metadata` on every FROZEN type.
+
+**Profile changelog.** v1.1 (2026-10-09): TimeSeriesChart's typed metadata row removed; metadata is a
+cross-cutting free-form field on every FROZEN type; receivers MUST accept it. v1: initial freeze.
 
 ## Defining your own catalog (beyond the Profile)
 

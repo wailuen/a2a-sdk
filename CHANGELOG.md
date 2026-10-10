@@ -6,6 +6,25 @@ internals, `contrib/`) may change in minors with notice here.
 
 ## [Unreleased]
 
+### Added
+
+- **GH-152 fail-closed IdP gate:** with `AGENT_SDK_OAUTH_IDP=oidc` and a non-Entra issuer, boot now fails unless `AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE` or `_REQUIRED_GROUP` is set, or the new opt-out `AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS=true` (setting `oauth_idp_allow_all_issuer_users`, default false) is set. The opt-out logs one boot WARNING and is refused without `oidc`. Entra GUID issuers and role/group setups are unchanged.
+
+- **GH-152-B/C — opt-in OIDC/Entra sign-in at `/oauth/authorize` (off unless `AGENT_SDK_OAUTH_IDP=oidc`):** `GET /oauth/authorize` now redirects the browser to the identity provider. Two new routes, `/oauth/idp/callback` and `/oauth/idp/consent`, finish the sign-in and show the consent page. Under `oidc`, `POST /oauth/authorize` is disabled.
+- **`Identity.user` and `Identity.principal_key` (GH-152-C):** public stable-core fields, added as trailing fields so existing callers keep working.
+- **`OAuthTokenStore` kwargs:** `session_ttl_seconds` and `require_user` on the store, and `user=` on `mint_code` and `mint_token_pair`.
+- **Session cap and legacy-family refusal:** refresh families now have an absolute lifetime cap (`oauth_idp_session_hours`). Under `oidc`, refresh families that carry no user are refused.
+- **API-key switch (GH-152-D):** `AGENT_SDK_OAUTH_IDP_DISABLE_API_KEYS` turns off non-admin API keys. Admin keys keep working.
+- With `AGENT_SDK_OAUTH_IDP=none`, nothing changes. Approving a client at the IdP consent page records `user_consented_at` on the client, never the admin-only `consented` flag, so a later switch to `AGENT_SDK_OAUTH_IDP=none` with `AGENT_SDK_OAUTH_ONE_TIME_CONSENT=true` cannot auto-approve clients a directory user once allowed. New `OAuthTokenStore.mark_user_consented()`. Client eviction, in every mode: admin-approved (`consented`) clients are never evicted — this includes org clients approved before the upgrade; user-consented clients are protected only while they hold a live refresh family; all others are evictable oldest-first.
+
+**GH-152-E — docs and wave-runner surface for IdP sign-in (docs, skills and tests):** DESIGN.md §5.5 gains an IdP sign-in addendum; §6 documents `Identity.user`, the `__oauth_idp__` namespace, the session cap with its removal-lag statement, and the API-key switch route table. `docs/security.md` gets the IdP section and the surface table now lists the callback/consent routes; the stale "A2A, AG-UI | API key" row now reads "API key or OAuth token". The `/setup` skill gains Entra app-registration steps. `agent_sdk/auth/oidc` (C-014) joins `AUTH_SURFACE` in `sdk-wave.js` and `src/auth/oidc` in the three `wave-cycle.js` mirrors; `tests/test_workflows.py` pins both. Follow-ups listed in ADR-003: OBO from the user token, Entra re-check at refresh, Graph group-overage fallback, extra-host allowlist, remembered consent.
+
+**GH-152-A — IdP sign-in settings and boot validation (off by default, additive):** new `BaseAgentSettings` fields `oauth_idp` (`AGENT_SDK_OAUTH_IDP`, `none`|`oidc`, default `none`), `oauth_idp_issuer` (`AGENT_SDK_OAUTH_IDP_ISSUER`), `oauth_idp_client_id` (`AGENT_SDK_OAUTH_IDP_CLIENT_ID`), `oauth_idp_required_role` (`AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE`), `oauth_idp_required_group` (`AGENT_SDK_OAUTH_IDP_REQUIRED_GROUP`), `oauth_idp_session_hours` (`AGENT_SDK_OAUTH_IDP_SESSION_HOURS`, default 720, bounds 1-2160) and `oauth_idp_disable_api_keys` (`AGENT_SDK_OAUTH_IDP_DISABLE_API_KEYS`, default false). `build_app()` refuses a missing issuer or client id, a multi-tenant or v1 Entra issuer, a missing `agent-sdk[oidc]` extra, `AGENT_SDK_OAUTH_ONE_TIME_CONSENT=true` with `oidc`, and the disable-API-keys switch without `oidc`. The client secret lives in the reserved `__oauth_idp__` credential namespace (admin Credentials card, set/unset only). New optional extra `oidc = ["PyJWT[crypto]>=2.8"]`. With `oauth_idp=none` nothing changes.
+
+**GH-151 — template A2UI/A2A advisor and check-skill mirrors re-synced (docs/tests only, no runtime change):** `template/.claude/agents/a2ui-advisor.md`, `template/.claude/skills/a2ui-check/SKILL.md`, `template/.claude/agents/a2a-advisor.md` and `template/.claude/skills/a2a-check/SKILL.md` are now byte-identical to their `harness/` mirrors, so `/a2ui-check` run from a seeded agent repo no longer flags the SDK's own `data.messages` DataPart (advertised via `dataEncoding`) as a protocol error. `tests/test_rt002_a2ui_wire_shape_mirror_parity.py` now reads the template copies off disk (strict xfail when `template/` is absent) and the "#151 — do not fold it in" carve-out is removed. Template edits must be committed in the template's own repo.
+
+**Profile v1.1 `metadata` amendment — ratified and applied:** the maintainer signed off REVIEWS.md Round 11 on 2026-10-09 (recorded in https://github.com/wailuen/a2a-sdk/issues/153). The typed `TimeSeriesChart.metadata` row is removed from all three a2ui-advisor copies; `metadata` is a cross-cutting free-form field on every FROZEN type, and receivers MUST accept it. Docs now say Standard Profile v1.1. The catalog URN `urn:a2ui-profile:standard:v1` and `CATALOG_ID` are unchanged. The parity tests enforce the state via the REVIEWS.md-derived `ROUND_8_METADATA_ROW_REMOVAL_RATIFIED` flag (now True); no separate release gate. No runtime change.
+
 **Reconciliation note (w042):** this repo's local `main` had diverged from `origin/main` at
 `v0.5.44` — origin went on to tag `v0.6.0` and `v0.7.0` (the admission-cap and terminal-resume
 error-code work recorded further below) independently of the `v0.8.0` work in this file's next
@@ -13,7 +32,7 @@ section, drafted on the local branch over the same period. The merge that reconc
 histories landed both lineages' code, but the `v0.6.0`/`v0.7.0` CHANGELOG sections themselves
 were only added back here afterward — see the `[0.7.0]` and `[0.6.0]` sections below, positioned
 in their real chronological place (before `[0.5.44]`'s successors, after `[0.8.0]` which
-supersedes them). No new unreleased work sits ahead of `[0.8.0]` as of this reconciliation.
+supersedes them). The GH-152 IdP sign-in work listed under `[Unreleased]` above is the only work sitting ahead of `[0.8.0]`.
 
 ## [0.8.0] — 2026-09-02
 

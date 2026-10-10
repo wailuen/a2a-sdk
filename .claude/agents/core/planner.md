@@ -2,6 +2,7 @@
 name: planner
 description: "Create vertical-slice-driven todos for agent-sdk agents with explicit dependency graphs and parallel execution groups — designed for multi-agent implementation"
 model: opus
+effort: high
 ---
 
 # Planner

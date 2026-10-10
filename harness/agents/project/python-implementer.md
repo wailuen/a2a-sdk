@@ -2,6 +2,7 @@
 name: python-implementer
 description: "Write, fix, and refactor Python source code for agent-sdk agents — tools, sources, content types, tests. Enforces SDK invariants and test-first discipline. Knows the @tool/SourceAdapter/ContentModel contracts."
 model: sonnet
+effort: medium
 ---
 
 # Python Implementer

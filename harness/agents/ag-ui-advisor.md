@@ -2,6 +2,7 @@
 name: ag-ui-advisor
 description: "Portable AG-UI protocol expert — event catalog (34 types), RunAgentInput schema, SSE transport + camelCase wire, GenUI modes (Static/Declarative/Open-ended), CUSTOM event spec, conformance traps, audit, and integration with A2A + A2UI. Project-agnostic."
 model: sonnet
+effort: high
 ---
 
 # AG-UI Protocol Advisor (portable)

@@ -235,7 +235,7 @@ You write tools, adapters, and config. The SDK owns everything else:
 |---------|-------------|
 | **A2A v0.3.0** | HTTP+JSON + SSE tasks, streaming, interrupt/resume, identity-bound access, full error table |
 | **AG-UI** | `POST /ag-ui/run` SSE, frozen CUSTOM event contracts |
-| **A2UI v0.9.1** | Standard Profile v1 content types → self-cleaning cards over A2A DataParts and AG-UI CUSTOM events |
+| **A2UI v0.9.1** | Standard Profile v1.1 content types → self-cleaning cards over A2A DataParts and AG-UI CUSTOM events |
 | **MCP 2025-06-18** | Streamable HTTP, PKCE, DCR, token rotation, two-value audience, exact CORS |
 | **OAuth 2.1** | Full server-side chain: metadata, DCR, authorize, token, rotate, revoke |
 | **Agentic loop** | Bedrock Converse (default) or any `ModelClient`, tool tiers, deadlines, token budgets, interrupts, skills |

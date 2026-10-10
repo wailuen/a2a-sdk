@@ -6,10 +6,11 @@ Every resolved identity is **kind-tagged**: `api_key` or `oauth`.
 
 | Surface | Accepts |
 |---|---|
-| A2A, AG-UI | API key |
+| A2A, AG-UI | API key or OAuth token |
 | `/mcp` | API key or OAuth token |
 | `/admin/*`, key management | API key (admin) — `oauth` kind rejected |
 | `/oauth/token` | unauthenticated by design (public client + PKCE) |
+| `/oauth/idp/callback`, `/oauth/idp/consent` | unauthenticated by design (single-use state, browser cookie, consent ticket; per-IP rate limited). Only active with `AGENT_SDK_OAUTH_IDP=oidc`. A documented SI-5 exception |
 | `/oauth/revoke` | oauth callers for their **own** tokens only |
 
 Task and interrupt access is identity-bound; a foreign id behaves exactly
@@ -33,6 +34,22 @@ consumes it atomically. There is no open-until-first-key window.
   strict RFC 8707 single-URI matching — Claude.ai sends the bare origin in
   some flows). The real privilege boundary is the kind-based surface table
   above.
+
+### Optional IdP sign-in (Entra ID / OIDC)
+
+Off by default (`AGENT_SDK_OAUTH_IDP=none`). With `oidc`:
+
+- `/oauth/authorize` sends the user to your IdP; the admin-key consent page is disabled. A consent page (client name, redirect host, signed-in user) follows sign-in, to block confused-deputy code theft through open client registration.
+- The ID token is checked for signature (RS256 only), issuer, audience, expiry, nonce and, on Entra, tenant. Optional `AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE` / `_REQUIRED_GROUP` add a claim check. Group overage is denied.
+- Who may sign in is managed in Entra (enterprise application "Assignment required"), not in the SDK.
+- Tokens carry `Identity.user` (`<tenant>:<object id>` on Entra). Tasks, rate limits and stream caps are per person.
+- The client secret lives in the credential store under `__oauth_idp__` only.
+- **Per-source flow limit:** each client IP (same derivation as the unauthenticated rate limit, so `AGENT_SDK_TRUSTED_PROXIES` applies; an IPv6 address counts as its /64) may hold at most 50 in-flight sign-ins in a 1,000-entry table. No source can push out another source's sign-ins. What a caller sees: (a) a source at its 50 limit replaces its own oldest sign-in, with no error; that oldest sign-in just stops working ("sign-in link is invalid or has expired"). (b) When the table is full, a source already holding sign-ins also replaces its own oldest; a source holding none is refused, and the client gets an `error=temporarily_unavailable` redirect (generic, nothing echoed but the client's own `state`). (c) Past the unauthenticated rate limit the caller gets the usual 429. Residual risk: about 20 IPs (or IPv6 /64s) holding 50 sign-ins each can keep the table full and block new sign-ins for the whole tenant until their sign-ins expire (10 minutes). The per-IP rate limit is the only bound on that.
+- **Removal lag:** the SDK keeps no IdP token. A person removed in Entra keeps access until their token family expires, at most `AGENT_SDK_OAUTH_IDP_SESSION_HOURS` (default 720 hours, 30 days). Lower it for faster cut-off.
+- `AGENT_SDK_OAUTH_IDP_DISABLE_API_KEYS=true` rejects non-admin API keys on A2A, AG-UI and `/mcp`. Admin keys still work everywhere, so protect them.
+- **Who may sign in (fail-closed):** with a non-Entra issuer the SDK cannot pin a tenant, so any account at that IdP would otherwise pass. Boot therefore refuses `oidc` unless the issuer is an Entra tenant pinned by GUID (the Microsoft personal-account tenant `9188040d-6c67-4c5b-b112-36a304b66dad` does not count and is refused), OR `AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE` / `_REQUIRED_GROUP` is set, OR you set the explicit opt-out `AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS=true`. The opt-out admits every account at the issuer and logs one WARNING at boot. It is valid only with `AGENT_SDK_OAUTH_IDP=oidc` (boot refuses it otherwise). Entra GUID issuers and setups with a role/group are unchanged.
+- Cannot combine with `AGENT_SDK_OAUTH_ONE_TIME_CONSENT=true` (boot refuses).
+- A user clicking Allow is recorded as `user_consented_at`, never as admin approval (`consented`). Switching sign-in back off with one-time consent on therefore never auto-approves a client that only a directory user allowed; the admin-key page is shown again.
 
 ## Credential store
 

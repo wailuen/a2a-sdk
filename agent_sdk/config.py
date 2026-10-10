@@ -8,6 +8,8 @@ for parity with the reference agents.
 
 from __future__ import annotations
 
+import re
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -16,6 +18,57 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 PLACEHOLDER_AGENT_NAME = "agent"
+
+
+_ENTRA_LOGIN_HOSTS = frozenset(
+    {
+        "login.microsoftonline.com",
+        "login.microsoftonline.us",
+        "login.partner.microsoftonline.cn",
+        "login.windows.net",
+        "sts.windows.net",
+    }
+)
+_GUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_ISSUER_SETTING = "AGENT_SDK_OAUTH_IDP_ISSUER"
+_CONSUMERS_TENANT_GUID = "9188040d-6c67-4c5b-b112-36a304b66dad"
+
+
+def parse_idp_issuer(issuer: str) -> str | None:
+    """Validate an OIDC issuer; return the Entra tenant GUID, or None for a non-Entra issuer.
+
+    Raises ValueError (naming the setting, never echoing the value) for a non-https
+    issuer, one with a query/fragment, or an Entra issuer that is not the
+    single-tenant ``https://<login host>/<tenant GUID>/v2.0`` form.
+    """
+    try:
+        parsed = urlparse(issuer)
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        raise ValueError(f"{_ISSUER_SETTING} is not a valid URL") from None
+    if parsed.scheme != "https" or not host:
+        raise ValueError(f"{_ISSUER_SETTING} must be an https:// URL")
+    if parsed.query or parsed.fragment or "?" in issuer or "#" in issuer:
+        raise ValueError(f"{_ISSUER_SETTING} must not contain a query or fragment")
+    if host not in _ENTRA_LOGIN_HOSTS:
+        return None
+    if host == "sts.windows.net":
+        raise ValueError(
+            f"{_ISSUER_SETTING} must be a v2.0 Entra issuer; the v1 sts.windows.net issuer is not supported"
+        )
+    segments = [seg for seg in parsed.path.split("/") if seg]
+    if len(segments) != 2 or segments[1] != "v2.0" or parsed.path.endswith("/"):
+        raise ValueError(
+            f"{_ISSUER_SETTING} must be https://<login host>/<tenant GUID>/v2.0"
+        )
+    if not _GUID_RE.fullmatch(segments[0]) or segments[0].lower() == _CONSUMERS_TENANT_GUID:
+        raise ValueError(
+            f"{_ISSUER_SETTING} must name one tenant by GUID; "
+            "common, organizations, consumers and domain names are not supported"
+        )
+    return segments[0].lower()
 
 
 def _is_local(url: str) -> bool:
@@ -132,6 +185,29 @@ class BaseAgentSettings(BaseSettings):
     # only ever delivered to the client's registered redirect_uri.
     oauth_one_time_consent: bool = Field(
         default=False, alias="AGENT_SDK_OAUTH_ONE_TIME_CONSENT"
+    )
+    # ── IdP sign-in at /oauth/authorize (GH-152, ADR-003). Off by default. ──
+    # The client secret is NOT a setting: it lives in the credential store
+    # under __oauth_idp__/client_secret (SI-4, SI-6).
+    oauth_idp: Literal["none", "oidc"] = Field(default="none", alias="AGENT_SDK_OAUTH_IDP")
+    oauth_idp_issuer: str | None = Field(default=None, alias="AGENT_SDK_OAUTH_IDP_ISSUER")
+    oauth_idp_client_id: str | None = Field(
+        default=None, alias="AGENT_SDK_OAUTH_IDP_CLIENT_ID"
+    )
+    oauth_idp_required_role: str | None = Field(
+        default=None, alias="AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE"
+    )
+    oauth_idp_required_group: str | None = Field(
+        default=None, alias="AGENT_SDK_OAUTH_IDP_REQUIRED_GROUP"
+    )
+    oauth_idp_session_hours: int = Field(
+        default=720, ge=1, le=2160, alias="AGENT_SDK_OAUTH_IDP_SESSION_HOURS"
+    )
+    oauth_idp_disable_api_keys: bool = Field(
+        default=False, alias="AGENT_SDK_OAUTH_IDP_DISABLE_API_KEYS"
+    )
+    oauth_idp_allow_all_issuer_users: bool = Field(
+        default=False, alias="AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS"
     )
     max_turns: int = Field(default=20, alias="AGENT_SDK_MAX_TURNS")
     max_output_tokens: int = Field(default=8192, alias="AGENT_SDK_MAX_OUTPUT_TOKENS")

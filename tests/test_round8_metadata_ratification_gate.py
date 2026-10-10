@@ -1,19 +1,7 @@
-"""RT-004 (w040 follow-up, REVIEWS.md Round 10): a wave's own redteam/
-implementer cannot ratify a frozen A2UI Standard Profile v1 field-contract
-doc edit alone (memory/feedback-wave-signoff-needs-user-ratification).
-
-REVIEWS.md Round 8 recorded w040's removal of `TimeSeriesChart`'s typed
-`metadata` row as PROPOSED, pending user ratification — never SIGNED OFF.
-The pre-RT-004 gate only warned when a reverted row reappeared, so nothing
-blocked the unratified removal itself from shipping — the exact inverse of
-GH-149, where code was changed to conform to this same frozen table.
-
-RT-004 reverts the doc edit (the row is restored) and inverts the gate: this
-test pins the new behaviour — while `ROUND_8_METADATA_ROW_REMOVAL_RATIFIED`
-is False, an advisor copy missing the frozen row (or carrying the unratified
-cross-cutting override note) now FAILS the suite; flipping the flag to True
-(only once a maintainer marks a REVIEWS.md entry SIGNED OFF) is required
-before the row may be dropped again.
+"""Profile v1.1 (REVIEWS.md Round 11): the `TimeSeriesChart.metadata` row removal
+is SIGNED OFF (#153). These tests pin the flag derivation, the reference format
+and both branches of the advisor-state check in
+`test_rt002_a2ui_wire_shape_mirror_parity`.
 """
 
 from __future__ import annotations
@@ -24,40 +12,72 @@ from tests.test_rt002_a2ui_wire_shape_mirror_parity import (
     METADATA_CROSS_CUTTING_MARKER,
     ROUND_8_METADATA_ROW_REMOVAL_RATIFIED,
     STALE_TIME_SERIES_METADATA_ROW,
-    _assert_metadata_row_present_or_fail,
+    _assert_metadata_row_state,
+    _read,
+    round_11_checkable_reference_recorded,
 )
 
 
-def test_round_8_is_not_yet_ratified():
-    """Guards against silently flipping the flag without a REVIEWS.md update."""
-    assert ROUND_8_METADATA_ROW_REMOVAL_RATIFIED is False, (
-        "ROUND_8_METADATA_ROW_REMOVAL_RATIFIED flipped to True — this must "
-        "only happen alongside a REVIEWS.md entry marked SIGNED OFF by a "
-        "maintainer, not as an incidental test edit"
+def test_flag_is_derived_from_reviews_md_not_hardcoded():
+    assert ROUND_8_METADATA_ROW_REMOVAL_RATIFIED is round_11_checkable_reference_recorded(
+        _read("REVIEWS.md")
     )
 
 
-def test_missing_row_fails_while_unratified():
-    text = "no frozen row here"
-    with pytest.raises(AssertionError, match="missing the frozen"):
-        _assert_metadata_row_present_or_fail(
-            "fake/path.md", text, ratified=False
-        )
+def test_signed_off_text_requires_checkable_reference():
+    text = _read("REVIEWS.md")
+    section = text.split("## Round 11", 1)[1].split("\n## ", 1)[0]
+    status = next((ln for ln in section.splitlines()[1:] if ln.strip()), "")
+    if status.startswith("**SIGNED OFF**"):
+        assert round_11_checkable_reference_recorded(text)
 
 
-def test_cross_cutting_override_fails_even_alongside_the_row_while_unratified():
-    text = f"...\n{STALE_TIME_SERIES_METADATA_ROW}\n...\n{METADATA_CROSS_CUTTING_MARKER}\n..."
-    with pytest.raises(AssertionError, match="unratified cross-cutting"):
-        _assert_metadata_row_present_or_fail(
-            "fake/path.md", text, ratified=False
-        )
+def test_pending_or_proposed_blocks_ratification():
+    base = "## Round 11 x\n\n{}\nCheckable reference: {}\n"
+    assert not round_11_checkable_reference_recorded(base.format("**PROPOSED**", "https://x/y"))
+    assert not round_11_checkable_reference_recorded(base.format("**SIGNED OFF**", "**PENDING**"))
+    assert not round_11_checkable_reference_recorded(base.format("**SIGNED OFF**", "none"))
+    assert round_11_checkable_reference_recorded(
+        base.format("**SIGNED OFF**", "https://github.com/wailuen/a2a-sdk/issues/999999")
+    )
 
 
-def test_present_row_with_no_override_is_silent_while_unratified():
-    text = f"...\n{STALE_TIME_SERIES_METADATA_ROW}\n..."
-    _assert_metadata_row_present_or_fail("fake/path.md", text, ratified=False)
+ROW = STALE_TIME_SERIES_METADATA_ROW
+MARKER = METADATA_CROSS_CUTTING_MARKER
 
 
-def test_missing_row_is_authorized_once_ratified():
-    text = "no frozen row here"
-    _assert_metadata_row_present_or_fail("fake/path.md", text, ratified=True)
+def test_ratified_state_rejects_row():
+    with pytest.raises(AssertionError, match="still carries the typed"):
+        _assert_metadata_row_state("fake.md", f"{ROW}\n{MARKER}", ratified=True)
+
+
+def test_ratified_state_requires_marker():
+    with pytest.raises(AssertionError, match="missing the cross-cutting"):
+        _assert_metadata_row_state("fake.md", "nothing", ratified=True)
+
+
+def test_ratified_state_passes_with_marker_and_no_row():
+    _assert_metadata_row_state("fake.md", MARKER, ratified=True)
+
+
+def test_pending_state_rejects_row_removal():
+    with pytest.raises(AssertionError, match="dropped the frozen"):
+        _assert_metadata_row_state("fake.md", MARKER, ratified=False)
+
+
+def test_pending_state_rejects_marker():
+    with pytest.raises(AssertionError, match="pending ratification"):
+        _assert_metadata_row_state("fake.md", f"{ROW}\n{MARKER}", ratified=False)
+
+
+def test_pending_state_passes_with_row_and_no_marker():
+    _assert_metadata_row_state("fake.md", ROW, ratified=False)
+
+
+def test_default_follows_the_reviews_md_flag():
+    text = MARKER if ROUND_8_METADATA_ROW_REMOVAL_RATIFIED else ROW
+    _assert_metadata_row_state("fake.md", text)
+
+
+def test_round_11_is_signed_off_and_flag_is_true():
+    assert ROUND_8_METADATA_ROW_REMOVAL_RATIFIED is True

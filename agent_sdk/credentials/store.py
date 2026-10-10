@@ -23,9 +23,11 @@ NS_BEDROCK = "__bedrock__"
 # /admin → Model Backend. The agent reads from this namespace at startup to
 # construct the model client — no key ever lives in .env.
 NS_MODEL = "__model__"
+# IdP sign-in client secret (GH-152, ADR-003 D7). Admin-set, never in .env.
+NS_OAUTH_IDP = "__oauth_idp__"
 
 RESERVED_NAMESPACES = frozenset(
-    {NS_API_KEYS, NS_OAUTH_CLIENTS, NS_OAUTH_REFRESH, NS_BEDROCK, NS_MODEL, "__meta__"}
+    {NS_API_KEYS, NS_OAUTH_CLIENTS, NS_OAUTH_REFRESH, NS_BEDROCK, NS_MODEL, NS_OAUTH_IDP, "__meta__"}
 )
 NAMESPACE_RE = re.compile(r"^[a-z_][a-z0-9_]{0,63}$")
 

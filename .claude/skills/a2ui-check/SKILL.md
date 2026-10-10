@@ -1,12 +1,12 @@
 ---
 name: a2ui-check
-description: "Audit an A2UI implementation for conformance to protocol v0.9.1 AND the A2UI Standard Profile v1 (Core 7 + Extended 11 component types with frozen field contracts). Static code audit + optional live probes across message types (createSurface/updateComponents/updateDataModel/deleteSurface), catalog wiring, Python SDK, A2A DataPart / AG-UI CUSTOM delivery, client renderer (Path A) or backend extraction (Path B), capability negotiation, structural field-contract validation, and the field-hardened conformance traps. Portable and self-contained — audits against the published spec (the a2ui-advisor agent), never against another project's codebase."
+description: "Audit an A2UI implementation for conformance to protocol v0.9.1 AND the A2UI Standard Profile v1.1 (Core 7 + Extended 11 component types with frozen field contracts). Static code audit + optional live probes across message types (createSurface/updateComponents/updateDataModel/deleteSurface), catalog wiring, Python SDK, A2A DataPart / AG-UI CUSTOM delivery, client renderer (Path A) or backend extraction (Path B), capability negotiation, structural field-contract validation, and the field-hardened conformance traps. Portable and self-contained — audits against the published spec (the a2ui-advisor agent), never against another project's codebase."
 ---
 
-# /a2ui-check — A2UI v0.9.1 + Standard Profile v1 conformance audit
+# /a2ui-check — A2UI v0.9.1 + Standard Profile v1.1 conformance audit
 
 Systematic audit of an A2UI implementation against the **A2UI protocol v0.9.1** and the **A2UI
-Standard Profile v1** (`urn:a2ui-profile:standard:v1`). Covers **both server (emit) and client
+Standard Profile v1.1** (`urn:a2ui-profile:standard:v1`). Covers **both server (emit) and client
 (render)**. **Portable / self-contained** — the contract is the published spec in the **`a2ui-advisor`
 agent**; this skill audits an implementation against that spec, never against any other project's
 source or a live endpoint.
@@ -138,7 +138,7 @@ instead that the backend folds the message sequence, resolves bindings, validate
 payload against the Profile field contract (A9), and emits the project's own content blocks; the
 frontend renders those with no surface model / JSON-Pointer logic of its own.
 
-### A9 — A2UI Standard Profile v1 catalog conformance
+### A9 — A2UI Standard Profile v1.1 catalog conformance
 
 The Profile defines **18 component types** — **Core (7)** every renderer MUST support, **Extended
 (11)** gated by client capability. Full field contracts live in the `a2ui-advisor` agent; this
@@ -239,7 +239,7 @@ A8 Renderer (Path A):    N/A (Path B) | ...
 A9 Profile catalog:      [PASS] FROZEN payloads conform ... [FLAG] RESERVED type emitted with shape ...
 
 Findings: Critical → High → Medium → Low
-Verdict: conformant to protocol v0.9.1? <y/n>   to Standard Profile v1? <y/n>
+Verdict: conformant to protocol v0.9.1? <y/n>   to Standard Profile v1.1? <y/n>
 Remediation (cheapest-unblock-first): MIME type → version field → root component → createSurface-before-update → catalogId → field-contract drift → capability/tier gating → renderer binding
 Next action: <or "consult a2ui-advisor for the full <Type> field contract">
 ```

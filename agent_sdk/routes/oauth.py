@@ -38,19 +38,29 @@ Errors never echo caller-supplied values (codes, verifiers, tokens, URIs).
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
 import json
 import logging
 import re
+import secrets
 from typing import Any
 from urllib.parse import ParseResult, parse_qsl, urlencode, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from ..auth.middleware import AuthRuntime, _prm_challenge, unauth_rate_limit
+from ..auth.middleware import (
+    AuthRuntime,
+    _client_key,
+    _prm_challenge,
+    unauth_rate_limit,
+)
 from ..auth.oauth_tokens import OAuthTokenStore
+from ..auth.oidc import IdpDenied, IdpFlowStore, IdpUnavailable, OidcRelyingParty
 from ..common.etag import etag_for, matches
+from ..credentials.store import NS_OAUTH_IDP
 from ..models.errors import AgentError
 
 logger = logging.getLogger(__name__)
@@ -83,6 +93,58 @@ def _oauth(request: Request) -> OAuthTokenStore:
 
 def _runtime(request: Request) -> AuthRuntime:
     return request.app.state.auth
+
+
+_IDP_COOKIE = "__Host-agent_sdk_idp"
+_IDP_COOKIE_MAX_AGE = 600
+_IDP_MAX_FLOW_COOKIES = 8
+
+
+def _flow_id(state: str) -> str:
+    return hashlib.sha256(state.encode()).hexdigest()[:16]
+
+
+def _flow_cookie_name(flow_id: str) -> str:
+    return f"{_IDP_COOKIE}_{flow_id}"
+
+
+def _set_flow_cookie(response: Response, name: str, value: str) -> None:
+    response.set_cookie(
+        name,
+        value,
+        max_age=_IDP_COOKIE_MAX_AGE,
+        path="/",
+        secure=True,
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def _clear_flow_cookie(response: Response, name: str) -> Response:
+    response.delete_cookie(name, path="/", secure=True, httponly=True, samesite="lax")
+    return response
+
+
+def _split_ticket(raw: str) -> tuple[str, str]:
+    flow_id, _, ticket = raw.partition(".")
+    if len(flow_id) != 16 or not ticket:
+        return "", ""
+    return flow_id, ticket
+
+
+def _idp(request: Request) -> tuple[OidcRelyingParty, IdpFlowStore] | None:
+    rp = getattr(request.app.state, "idp_rp", None)
+    flows = getattr(request.app.state, "idp_flows", None)
+    if rp is None or flows is None:
+        return None
+    return rp, flows
+
+
+def _require_idp(request: Request) -> tuple[OidcRelyingParty, IdpFlowStore]:
+    found = _idp(request)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -543,7 +605,9 @@ async def oauth_authorize_page(request: Request) -> Response:
 
     One-time consent (GH-136): when ``oauth_one_time_consent`` is enabled
     AND this client has already been approved by an admin (``consented``, set
-    by the POST path), skip the page and issue the code directly.
+    only by the admin-key POST path and ``provision-org-oauth-client`` — IdP
+    user consent writes ``user_consented_at`` instead and never reaches this
+    shortcut), skip the page and issue the code directly.
 
     This is a SHORT-CIRCUIT, never a bypass of validation: ``_validate_authorize``
     has already run, so an unknown client, an unregistered ``redirect_uri``, a
@@ -577,6 +641,10 @@ async def oauth_authorize_page(request: Request) -> Response:
         return error
     assert cleaned is not None
 
+    idp = _idp(request)
+    if idp is not None:
+        return await _federate(request, idp, params, cleaned)
+
     runtime = _runtime(request)
     client = store.get_client(cleaned["client_id"])
     if runtime.oauth_one_time_consent and (client or {}).get("consented"):
@@ -602,6 +670,198 @@ async def oauth_authorize_page(request: Request) -> Response:
         )
 
     return _consent_page(cleaned, params)
+
+
+# ---------------------------------------------------------------------------
+# Upstream IdP sign-in (opt-in, GH-152 / ADR-003) — only live when
+# AGENT_SDK_OAUTH_IDP=oidc; both routes 404 otherwise.
+# ---------------------------------------------------------------------------
+
+
+def _pkce_pair() -> tuple[str, str]:
+    verifier = secrets.token_urlsafe(48)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return verifier, base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def _redirect_with(redirect_uri: str, query: dict[str, str], status: int) -> RedirectResponse:
+    sep = "&" if urlparse(redirect_uri).query else "?"
+    return RedirectResponse(
+        url=f"{redirect_uri}{sep}{urlencode(query)}",
+        status_code=status,
+        headers=_redirect_security_headers(redirect_uri),
+    )
+
+
+async def _federate(
+    request: Request,
+    idp: tuple[OidcRelyingParty, IdpFlowStore],
+    params: dict[str, str],
+    cleaned: dict[str, Any],
+) -> Response:
+    rp, flows = idp
+    redirect_uri, state = cleaned["redirect_uri"], cleaned["state"]
+    # Read per request, never cached (SI-4): rotation needs no restart.
+    if not request.app.state.credential_store.get(NS_OAUTH_IDP, "client_secret"):
+        return _error_redirect(redirect_uri, "temporarily_unavailable", state)
+    verifier, challenge = _pkce_pair()
+    nonce = secrets.token_urlsafe(24)
+    binding = secrets.token_urlsafe(32)
+    try:
+        flow_state = flows.put(
+            params=params,
+            code_verifier=verifier,
+            nonce=nonce,
+            binding=binding,
+            source=_client_key(request, _runtime(request)),
+        )
+    except IdpUnavailable:
+        return _error_redirect(redirect_uri, "temporarily_unavailable", state)
+    try:
+        url = await rp.build_authorize_url(flow_state, nonce, challenge)
+    except IdpUnavailable:
+        flows.pop(flow_state, binding)
+        return _error_redirect(redirect_uri, "temporarily_unavailable", state)
+    response = RedirectResponse(
+        url=url,
+        status_code=302,
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+    )
+    new_name = _flow_cookie_name(_flow_id(flow_state))
+    prefix = f"{_IDP_COOKIE}_"
+    existing = [n for n in request.cookies if n.startswith(prefix) and n != new_name]
+    for stale in existing[: max(0, len(existing) - (_IDP_MAX_FLOW_COOKIES - 1))]:
+        _clear_flow_cookie(response, stale)
+    _set_flow_cookie(response, new_name, binding)
+    logger.info("oauth authorize federated client_id=%s...", cleaned["client_id"][:8])
+    return response
+
+
+def _idp_local_error() -> HTMLResponse:
+    return _error_page("This sign-in link is invalid or has expired. Start again from the app.")
+
+
+def _idp_consent_page(
+    cleaned: dict[str, Any], label: str | None, ticket: str
+) -> HTMLResponse:
+    host = urlparse(cleaned["redirect_uri"]).hostname or ""
+    who = html.escape(label) if label else "your account"
+    body = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Authorize access</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+       background: #f5f6fa; color: #333; display: flex; min-height: 100vh;
+       align-items: center; justify-content: center; margin: 0; }}
+.box {{ background: #fff; border: 1px solid #e0e0e0; border-radius: 8px;
+        padding: 28px; width: 380px; max-width: 90vw; }}
+h1 {{ font-size: 1.2rem; margin: 0 0 8px; }}
+p {{ font-size: 0.9rem; color: #555; margin: 0 0 14px; }}
+code {{ background: #f0f1f4; padding: 1px 5px; border-radius: 3px; }}
+button {{ width: 48%; padding: 10px; border: none; border-radius: 4px;
+          background: #1565c0; color: #fff; font-size: 0.95rem; cursor: pointer; }}
+button.deny {{ background: #757575; }}
+</style>
+</head>
+<body>
+<div class="box">
+<h1>Authorize access</h1>
+<p>Signed in as <strong>{who}</strong>.</p>
+<p><strong>{html.escape(str(cleaned["client_name"]))}</strong> (returns to
+<code>{html.escape(host)}</code>) is requesting access to
+<code>{html.escape(str(cleaned["audience"]))}</code>.</p>
+<form method="post" action="/oauth/idp/consent">
+<input type="hidden" name="ticket" value="{html.escape(ticket, quote=True)}">
+<button type="submit" name="decision" value="allow">Allow</button>
+<button type="submit" name="decision" value="deny" class="deny">Deny</button>
+</form>
+</div>
+</body>
+</html>
+"""
+    return HTMLResponse(
+        content=body,
+        status_code=200,
+        headers=_redirect_security_headers(str(cleaned["redirect_uri"])),
+    )
+
+
+@router.get("/oauth/idp/callback", dependencies=[Depends(unauth_rate_limit)])
+async def oauth_idp_callback(request: Request) -> Response:
+    """Unauthenticated by design (ADR-003 D12): gated by single-use ``state``
+    bound to the per-flow ``__Host-agent_sdk_idp_<id>`` browser cookie."""
+    rp, flows = _require_idp(request)
+    state = request.query_params.get("state", "")
+    flow_id = _flow_id(state)
+    name = _flow_cookie_name(flow_id)
+    cookie = request.cookies.get(name, "")
+    flow = flows.pop(state, cookie) if state and cookie else None
+    if flow is None:
+        return _clear_flow_cookie(_idp_local_error(), name) if cookie else _idp_local_error()
+    cleaned, error = _validate_authorize(_oauth(request), flow.params)
+    if error is not None or cleaned is None:
+        return _clear_flow_cookie(_idp_local_error(), name)
+    redirect_uri, client_state = cleaned["redirect_uri"], cleaned["state"]
+
+    if request.query_params.get("error"):
+        return _clear_flow_cookie(_error_redirect(redirect_uri, "access_denied", client_state), name)
+    code = request.query_params.get("code", "")
+    if not code or len(code) > _MAX_PARAM_LEN * 4:
+        return _clear_flow_cookie(_error_redirect(redirect_uri, "access_denied", client_state), name)
+    try:
+        id_token = await rp.exchange_code(code, flow.code_verifier)
+        user, label = await rp.validate_id_token(id_token, flow.nonce)
+    except IdpDenied:
+        logger.info("oauth idp sign-in denied client_id=%s...", cleaned["client_id"][:8])
+        return _clear_flow_cookie(_error_redirect(redirect_uri, "access_denied", client_state), name)
+    except IdpUnavailable:
+        return _clear_flow_cookie(
+            _error_redirect(redirect_uri, "temporarily_unavailable", client_state), name
+        )
+    ticket = flows.put_consent(flow, user=user, label=label, binding=cookie)
+    return _idp_consent_page(cleaned, label, f"{flow_id}.{ticket}")
+
+
+@router.post("/oauth/idp/consent", dependencies=[Depends(unauth_rate_limit)])
+async def oauth_idp_consent(request: Request) -> Response:
+    """Unauthenticated by design (ADR-003 D12): gated by a single-use consent
+    ticket bound to the same browser cookie as the callback."""
+    _, flows = _require_idp(request)
+    form = await _parse_form(request)
+    flow_id, ticket = _split_ticket(form.get("ticket", ""))
+    name = _flow_cookie_name(flow_id)
+    cookie = request.cookies.get(name, "") if flow_id else ""
+    found = flows.pop_consent(ticket, cookie) if ticket and cookie else None
+    if found is None:
+        return _idp_local_error()
+    store = _oauth(request)
+    cleaned, error = _validate_authorize(store, found.flow.params)
+    if error is not None or cleaned is None:
+        return _clear_flow_cookie(_idp_local_error(), name)
+    redirect_uri, client_state = cleaned["redirect_uri"], cleaned["state"]
+    if form.get("decision") != "allow":
+        return _clear_flow_cookie(_error_redirect(redirect_uri, "access_denied", client_state), name)
+    # User consent, NOT admin approval: never set ``consented`` here, or a
+    # later switch to oauth_idp=none + one-time consent would auto-approve
+    # every client any directory user ever allowed (RT-001).
+    store.mark_user_consented(cleaned["client_id"])
+    code = store.mint_code(
+        client_id=cleaned["client_id"],
+        redirect_uri=redirect_uri,
+        code_challenge=cleaned["code_challenge"],
+        scope=cleaned["scope"],
+        audience=cleaned["audience"],
+        user=found.user,
+        label=found.label,
+    )
+    query: dict[str, str] = {"code": code}
+    if client_state:
+        query["state"] = client_state
+    logger.info("oauth idp consent allowed client_id=%s...", cleaned["client_id"][:8])
+    return _clear_flow_cookie(_redirect_with(redirect_uri, query, 303), name)
 
 
 async def _parse_form(request: Request) -> dict[str, str]:
@@ -635,6 +895,8 @@ async def oauth_authorize_approve(request: Request) -> Response:
     is consulted, and it can only ever resolve ``kind="api_key"`` identities
     (§5.5 — a connector token can never approve a new authorization).
     """
+    if _idp(request) is not None:
+        return _error_page("This sign-in method is not available.")
     store = _oauth(request)
     runtime = _runtime(request)
 
@@ -733,12 +995,13 @@ async def oauth_token(request: Request) -> JSONResponse:
         if meta is None:
             return _token_error("invalid_grant", "code is invalid, expired, or used")
         client = store.get_client(client_id) or {}
-        label = client.get("client_name")
+        label = meta.get("label") or client.get("client_name")
         pair = store.mint_token_pair(
             client_id=meta["client_id"],
             scope=meta["scope"],
             audience=meta["audience"],
             label=label if isinstance(label, str) else None,
+            user=meta.get("user"),
         )
         logger.info("oauth token issued grant=code client_id=%s...", client_id[:8])
         return _token_success(pair)

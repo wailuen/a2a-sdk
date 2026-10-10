@@ -104,7 +104,7 @@ def identity_key(identity: Identity) -> str:
     really a per-ORG cap under those modes. That is why the defaults are in the
     low hundreds and are operator-overridable.
     """
-    return f"{identity.kind}:{identity.subject}"
+    return identity.principal_key
 
 
 def slot_table(app: Any, attr: str) -> "OrderedDict[str, StreamSlot]":

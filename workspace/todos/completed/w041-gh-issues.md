@@ -1,0 +1,50 @@
+# w041 — GitHub issue #151 + Profile v1.1 `metadata` ratification
+
+Sourced from open issues on wailuen/a2a-sdk (/gh-review 2026-10-09). Two items in one
+group (same files — run sequentially, GH-151 first). Target: next patch after the unreleased 0.8.0 (0.8.1).
+
+Triage of the other open issues this run: #145/#147/#148/#149/#150 are fixed in
+local main but unpushed (close after /sdk-release); #152 needs a developer decision.
+
+---
+
+- [x] `GH-151` a2ui-advisor.md: template copy's DataPart wire-format section drifted from .claude/harness copies and actual SDK behavior ‖ group:G
+  - Creates: (modifies `template/.claude/agents/a2ui-advisor.md`, `template/.claude/skills/a2ui-check/SKILL.md`, `tests/test_rt002_a2ui_wire_shape_mirror_parity.py`, `agent_sdk/models/content_types.py` docstring; possibly `template/.claude/agents/a2a-advisor.md`, `template/.claude/skills/a2a-check/SKILL.md`)
+  - Reads: `harness/agents/a2ui-advisor.md` (canonical; byte-identical to `.claude/agents/a2ui-advisor.md`), `harness/skills/a2ui-check/SKILL.md`, `harness/agents/a2a-advisor.md`, `harness/skills/a2a-check/SKILL.md`, `agent_sdk/agent/runner.py:380` (`build_artifact` — always emits `DataPart(data={"messages": [...]})`), `agent_sdk/a2ui/catalog.py:358-380` (`a2ui_extension` advertises `dataEncoding: "data.messages"`), `tests/test_workflow_sync.py` (template-absent xfail pattern)
+  - Severity: medium
+  - Root cause: The harness/.claude copies of a2ui-advisor are correct and project-agnostic: they describe the A2A v0.3.0 (object) vs A2UI v0.9.1 (bare array) conflict and tell a wrapping server to advertise `dataEncoding: "data.messages"`, which is exactly what the SDK does. The template copy drifted: it mandates the object form with no `dataEncoding` hint and its client snippet reads only `data.messages` with no bare-array fallback. `template/.claude/skills/a2ui-check/SKILL.md` is worse — it still says `data` must be a bare array and flags anything else as a protocol error (lines ~61/93/111/200), so `/a2ui-check` run from the template flags the SDK's own output as a violation. No automated sync covers agents/skills; `test_rt002_a2ui_wire_shape_mirror_parity.py` explicitly carves the template copy out, citing #151. Do NOT adopt the issue's suggestion to restate the SDK's wrapping choice as a universal MUST in the portable advisor — that would misjudge third-party servers that legitimately send a bare array.
+  - AC: The DataPart wire-format section, client-fold snippet, trap #11 and checklist line in `template/.claude/agents/a2ui-advisor.md` match `harness/agents/a2ui-advisor.md` (diff of those sections is empty; `dataEncoding` appears in the template copy).
+  - AC: `harness/agents/a2ui-advisor.md` and `.claude/agents/a2ui-advisor.md` stay byte-identical and project-agnostic. At most one non-normative line is added noting that an always-wrapping implementation satisfies option (b) via the `dataEncoding` hint.
+  - AC: The DataPart rows of `template/.claude/skills/a2ui-check/SKILL.md` match `harness/skills/a2ui-check/SKILL.md`; none of the RT-002 `STALE_PHRASES` (e.g. "data not an array — protocol error", "data[] is an array") remain.
+  - AC: `template/.claude/agents/a2a-advisor.md` and `template/.claude/skills/a2a-check/SKILL.md` are diffed against their harness mirrors for the D7.11 `dataEncoding` / A2UI-over-A2A wording, and any DataPart-shape drift is copied over.
+  - AC: `tests/test_rt002_a2ui_wire_shape_mirror_parity.py` reads the template copies off disk (xfail when `template/` is absent, mirroring `tests/test_workflow_sync.py`), asserts no `STALE_PHRASES` and that `dataEncoding` is present; the "#151 — do not fold it in" carve-out is removed from its docstring.
+  - AC: The `agent_sdk/models/content_types.py` docstring note (~lines 62-64) saying the three advisor copies still diverge (#151) is removed.
+  - AC: `pytest tests/test_rt002_a2ui_wire_shape_mirror_parity.py tests/test_workflow_sync.py` passes.
+  - AC: Template edits are left for the developer to commit in the template's own repo (wailuen/a2a-agent-template — `template/` is gitignored by a2a-sdk). The template repo already has unrelated uncommitted edits (planner.md, sdk-advisor.md, acceptance/add-tool/setup SKILL.md, wave-cycle.js); the wave must not revert or reformat them.
+  - SI: Must not touch the Standard Profile frozen field tables — that is the separate RATIFY-R8 item below.
+  - GH: https://github.com/wailuen/a2a-sdk/issues/151
+
+- [x] `RATIFY-R8` A2UI Standard Profile v1.1 — drop `TimeSeriesChart`'s typed `metadata` row; `metadata` becomes a cross-cutting free-form field (maintainer SIGNED OFF 2026-10-09) ‖ group:G
+  - Sign-off: recorded in https://github.com/wailuen/a2a-sdk/issues/153 (REVIEWS.md Round 11, SIGNED OFF 2026-10-09). The release gate (`SDK_RELEASE_GATE`) was removed by maintainer ruling; the parity tests keep the record and advisor text consistent. The wave-runner script rebuild (restoring origin's GH-129..139 work lost in merge 0dc0517) was accepted by the maintainer on 2026-10-09.
+  - Creates: (modifies `.claude/agents/a2ui-advisor.md`, `harness/agents/a2ui-advisor.md`, `template/.claude/agents/a2ui-advisor.md`, `tests/test_rt002_a2ui_wire_shape_mirror_parity.py`, `tests/test_round8_metadata_ratification_gate.py`, `agent_sdk/models/content_types.py` module docstring, `REVIEWS.md`, `CHANGELOG.md`)
+  - Reads: `REVIEWS.md` Round 8 + Round 10 (the proposal and its revert), `git show 5b669b3 -- harness/agents/a2ui-advisor.md` (the original proposed cross-cutting note text), the advisor's "Profile versioning" paragraph (~line 508)
+  - Severity: medium
+  - Root cause: Round 8 found `TimeSeriesChart`'s typed `metadata: {identifier?, metric?, frequency?, source?}` row was never implemented by any shipped code; the SDK has always used free-form `dict[str, Any] | None` metadata on every ContentModel (GH-63). A wave removed the row without sign-off; Round 10 reverted it pending maintainer ratification. The maintainer approved the removal on 2026-10-09 during /gh-review (AskUserQuestion answer: "Approve removal").
+  - AC: In all three a2ui-advisor copies, the `| `metadata` | `{identifier?, metric?, frequency?, source?}` | — | |` row is removed from the `TimeSeriesChart` table, and a cross-cutting note is added in the Field-contract conventions section starting with the exact marker sentence "`metadata` is a cross-cutting field, not a per-type one." (free-form object or null on every FROZEN type; a conformance audit MUST NOT flag a type for having or lacking it). The note cites the Profile v1.1 amendment, not "PROPOSED".
+  - AC: The Profile is bumped to v1.1: the status summary and versioning paragraph record v1.1 and this change. The catalog URN stays `urn:a2ui-profile:standard:v1` (and `CATALOG_ID` in content_types.py is unchanged), because the change only loosens the sender contract: every payload valid under v1 stays valid (receivers gain a tolerance duty, see the versioning AC). The versioning paragraph gains text stating this is backward-compatible for senders only, and states the receiver-side duty explicitly: renderers and audits MUST tolerate (accept or ignore) a free-form `metadata` object on every FROZEN type, and MUST ignore unknown fields generally; a strict v1 renderer that rejects unlisted fields is non-conformant with v1.1, and because the catalogId is unchanged it cannot tell v1 from v1.1 payloads. The text justifies keeping the major URN on that basis (receiver tolerance of unknown fields is part of the v1 contract from here on), or else admits a receiver-side contract change. `.claude` and `harness` copies stay byte-identical.
+  - AC: `ROUND_8_METADATA_ROW_REMOVAL_RATIFIED = True` in `tests/test_rt002_a2ui_wire_shape_mirror_parity.py`; the gate is inverted so every advisor copy (template included) MUST lack the typed row and MUST carry the cross-cutting marker. `tests/test_round8_metadata_ratification_gate.py` is rewritten to pin the ratified state (flag is True; a copy that restores the row or drops the marker fails).
+  - AC: `REVIEWS.md` gets a new "Round 11 — Profile v1.1 `metadata` ratification (2026-10-09)" entry marked **SIGNED OFF** by the maintainer (wailuen, via /gh-review AskUserQuestion), referencing Rounds 8 and 10. This is the only place the sign-off is recorded; the wave must not cite any other authority.
+  - AC: `agent_sdk/models/content_types.py` module docstring (~lines 21, 54-60) is updated to say the Profile v1.1 amendment is ratified, not pending.
+  - AC: `CHANGELOG.md` `[Unreleased]` gets an entry for the Profile v1.1 amendment (doc/contract change, no runtime behaviour change).
+  - AC: `pytest tests/test_rt002_a2ui_wire_shape_mirror_parity.py tests/test_round8_metadata_ratification_gate.py tests/test_content_types.py` passes.
+  - SI: No runtime code changes — `ContentModel.metadata` and wire output are untouched.
+  - Reuses: C-021  # C-021 StandardProfileV1Contract (agent_sdk/a2ui/profile.py) is registered as PLANNED, not present. It is the intended single in-code source for the frozen Profile field tables. This todo hand-edits the same TimeSeriesChart table in three markdown copies (.claude, harness, template) and pins the result with string-match tests. Do not build C-021 in this wave. Do record in the Round 11 REVIEWS.md entry and in the C-021 registry description that Profile v1.1 makes `metadata` a cross-cutting free-form field, not a per-type row, so a later C-021 does not bring back the typed TimeSeriesChart.metadata contract.
+
+---
+
+**Archived 2026-10-09 (by /gh-review after maintainer rulings).** sdk-wave run wf_35ba5194-f77
+ended with the unit redteam budget exhausted (`deferred/w041-group-G-budget-exhausted.md`) because
+its agents correctly refused an unverifiable in-session sign-off. The maintainer then recorded the
+sign-off as https://github.com/wailuen/a2a-sdk/issues/153, the v1.1 edits were applied, the
+wave-added release gate was removed, and the wave-runner script rebuild was accepted. Full suite
+after all edits: 2630 passed, 3 skipped, 0 failed.

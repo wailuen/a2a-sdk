@@ -1,7 +1,6 @@
 # Learning index
 
-Entries ordered by LRN number. Planner and implementers apply Check/Prevention
-clauses relevant to touched files.
+Entries ordered by LRN number.
 
 | LRN | Description | File |
 |-----|-------------|------|
@@ -18,7 +17,7 @@ clauses relevant to touched files.
 | LRN-011 | Bootstrap token goes to stderr; agent-verify boot command must use 2>&1 | [LRN-011](LRN-011--Users-wailuen-Development-a2a-sdk-harness-skills-agent-verify-SKILL-md.md) |
 | LRN-012 | wave-cycle.js A2UI audit prompt misstated Standard Profile type counts as Core 7 + Extended 11 instead of Core 6 + Extended 8 | [LRN-012](LRN-012-harness-workflows-wave-cycle-js.md) |
 | LRN-013 | AC "integration note" wording targets the Integration section, not step bodies | [LRN-013](LRN-013-harness-skills-upgrade-SKILL-md.md) |
-| LRN-014 | `pytest -q tests/` bypasses `addopts` ignore exclusions | [LRN-014](LRN-014-pytest-explicit-path-bypasses-addopts.md) |
+| LRN-014 | pytest explicit path bypasses addopts | [LRN-014](LRN-014-pytest-explicit-path-bypasses-addopts.md) |
 | LRN-015 | MCP tools/call — emits coercion failure must return isError:True, never except:pass | [LRN-015](LRN-015-mcp-coercion-failure-must-return-iserror.md) |
 | LRN-016 | SSRF IP-block logic must live in agent_sdk/common/http.py — never duplicated | [LRN-016](LRN-016-ssrf-single-predicate-common-http.md) |
 | LRN-017 | wave-cycle.js — schema-gated gate agents required at redteam and proto-fix checkpoints | [LRN-017](LRN-017-wave-cycle-gate-agents-at-checkpoints.md) |
@@ -54,10 +53,10 @@ clauses relevant to touched files.
 | LRN-047 | Terminal re-message rule violated — _continue_from_terminal creates new task instead of returning error | [LRN-047](LRN-047-terminal-re-message-creates-task-instead-of-error.md) |
 | LRN-048 | Inbound Message mutated with server-assigned taskId/contextId before archiving in history | [LRN-048](LRN-048-inbound-message-contextid-mutation-in-history.md) |
 | LRN-049 | AG-UI CUSTOM events wrongly gated on catalog membership — must emit freely | [LRN-049](LRN-049-agui-custom-emit-freely-catalog-gate-wrong.md) |
-| LRN-050 | CLAUDE.md/gitignore consistency gap | [LRN-050](LRN-050-claudemd-gitignore-consistency-gap.md) |
-| LRN-051 | uv --no-dev is a silent no-op on extras-only dependency layouts | [LRN-051](LRN-051-uv-no-dev-silent-noop-on-extras-only-layouts.md) |
-| LRN-052 | gitignored/untracked path cannot land in a wave todo | [LRN-052](LRN-052-gitignored-path-cannot-land-in-wave-todo.md) |
-| LRN-053 | wave scope must union Creates: AND Modifies: paths | [LRN-053](LRN-053-wave-scope-must-union-creates-and-modifies.md) |
+| LRN-050 | claudemd gitignore consistency gap | [LRN-050](LRN-050-claudemd-gitignore-consistency-gap.md) |
+| LRN-051 | uv no dev silent noop on extras only layouts | [LRN-051](LRN-051-uv-no-dev-silent-noop-on-extras-only-layouts.md) |
+| LRN-052 | gitignored path cannot land in wave todo | [LRN-052](LRN-052-gitignored-path-cannot-land-in-wave-todo.md) |
+| LRN-053 | wave scope must union creates and modifies | [LRN-053](LRN-053-wave-scope-must-union-creates-and-modifies.md) |
 | LRN-054 | Dockerfile lockfile COPY requires lockfile-producer todos in same wave | [LRN-054](LRN-054-dockerfile-lockfile-producer-consumer-coupling.md) |
 | LRN-055 | gitignore placed in wrong directory fails to protect credential files | [LRN-055](LRN-055-gitignore-wrong-directory-scope.md) |
 | LRN-056 | Wave todo path under gitignored/untracked tree is silently undeliverable | [LRN-056](LRN-056-gitignored-tree-todo-path.md) |
@@ -106,10 +105,10 @@ clauses relevant to touched files.
 | LRN-099 | A2A REST action suffix can differ from the JSON-RPC method name | [LRN-099](LRN-099-a2a-rest-suffix-differs-from-method-name.md) |
 | LRN-100 | Budget-exhausted deferred marker must be relocated once findings are resolved | [LRN-100](LRN-100-budget-exhausted-deferred-must-be-relocated.md) |
 | LRN-101 | Agent card description must never fall back to empty string | [LRN-101](LRN-101-agent-card-description-empty-string-fallback.md) |
-| LRN-102 | TOOL_PROGRESS CUSTOM event emitted in ag_ui.py but absent from CUSTOM_EVENTS tuple, card schema, DESIGN.md contract table, and console router — parity guard silent because both sides missing | [LRN-102](LRN-102-tool-progress-custom-event-parity-gap.md) |
-| LRN-103 | A2A multi-turn continuation must use contextId, not taskId, for completed tasks | [LRN-103](LRN-103-a2a-multiturn-contextid-continuation.md) |
-| LRN-104 | deferred imports in model clients must not be silently caught by bare except Exception | [LRN-104](LRN-104-deferred-import-silent-wrap.md) |
-| LRN-105 | bare "except Exception" in model client invoke paths swallows distinct error categories (e.g. RateLimitError) as generic UPSTREAM | [LRN-105](LRN-105-broad-except-swallows-error-category.md) |
+| LRN-102 | tool progress custom event parity gap | [LRN-102](LRN-102-tool-progress-custom-event-parity-gap.md) |
+| LRN-103 | a2a multiturn contextid continuation | [LRN-103](LRN-103-a2a-multiturn-contextid-continuation.md) |
+| LRN-104 | deferred import silent wrap | [LRN-104](LRN-104-deferred-import-silent-wrap.md) |
+| LRN-105 | broad except swallows error category | [LRN-105](LRN-105-broad-except-swallows-error-category.md) |
 | LRN-106 | caplog assertions on agent_sdk.* loggers false-green outside full-suite order | [LRN-106](LRN-106-caplog-propagate-false-order-dependent.md) |
 | LRN-107 | Fixed broken test idiom recurs uncaught in a sibling test | [LRN-107](LRN-107-duplicated-broken-test-idiom.md) |
 | LRN-108 | Unautomated documentation anchors drift silently | [LRN-108](LRN-108-unautomated-doc-anchor-drift.md) |
@@ -157,44 +156,29 @@ clauses relevant to touched files.
 | LRN-150 | Cross-turn index seeded from newest-terminal-task-only decays after one hop | [LRN-150](LRN-150-cross-turn-index-single-hop-decay.md) |
 | LRN-151 | Early return above a bounded-recovery counter exempts that rejection path from the guarantee | [LRN-151](LRN-151-early-return-bypasses-bounded-recovery-counter.md) |
 | LRN-152 | Presence-only meta-test misses per-field sanitisation gaps | [LRN-152](LRN-152-presence-only-sanitizer-meta-test.md) |
-| LRN-240 | Durable write hook wired only into repair path, not happy-path completion | [LRN-240](LRN-240-terminal-write-hook-happy-path-gap.md) |
 | LRN-153 | Breaking changes filed under the wrong CHANGELOG heading forfeit the §4.0 exemption | [LRN-153](LRN-153-breaking-change-heading-misclassification.md) |
-| LRN-241 | Hand-listed text fallback silently drops wire fields added later | [LRN-241](LRN-241-hand-listed-text-fallback-field-drift.md) |
 | LRN-154 | LRN-133 gate excludes non-wave GH fixes | [LRN-154](LRN-154-check-reconciliation-scope-gap.md) |
-| LRN-242 | Conformance failure resolved by editing the portable oracle, not the code | [LRN-242](LRN-242-editing-conformance-oracle-to-pass.md) |
 | LRN-155 | prose field skipped GH-130 sanitization applied to its render-method siblings | [LRN-155](LRN-155-partial-sanitization-coverage-gap.md) |
-| LRN-243 | New terminal-status flush marks tasks terminal before transcript persists | [LRN-243](LRN-243-terminal-status-flush-outpaces-contract.md) |
 | LRN-156 | Hard cost backstop must ship with operator-reachable override | [LRN-156](LRN-156-hard-backstop-needs-override-escape-hatch.md) |
-| LRN-244 | Shared helper's new raising hook guarded at one call site, not all | [LRN-244](LRN-244-shared-helper-guard-not-reaudited-all-callers.md) |
 | LRN-157 | Parametrize helper drops missing mirror-repo paths | [LRN-157](LRN-157-mirror-path-silent-filter.md) |
 | LRN-158 | Single-line sanitizer applied to a multi-line markdown field corrupts it | [LRN-158](LRN-158-delimiter-sanitizer-multiline-corruption.md) |
 | LRN-159 | Byte-identical sync guard spans only wave-cycle.js mirrors, blind to sdk-wave.js | [LRN-159](LRN-159-cross-runner-port-gate-unenforced.md) |
 | LRN-160 | Files named only in Reuses:/SI: prose evade wave scope and all gates | [LRN-160](LRN-160-prose-only-scope-declaration-gap.md) |
 | LRN-161 | xfail(strict=True) absorbs unverifiable state, doesn't block archive | [LRN-161](LRN-161-xfail-strict-not-archive-gate.md) |
 | LRN-162 | Wave runs template/ deliverable with no template/ checkout | [LRN-162](LRN-162-peer-repo-checkout-missing.md) |
-| LRN-245 | Re-resolving a label to a new value appends a second index entry, deadlocking $ref | [LRN-245](LRN-245-resolved-index-label-append-deadlock.md) |
-| LRN-246 | Hoisting metadata onto ContentModel silently dropped it from a _Wire sub-shape | [LRN-246](LRN-246-non-contentmodel-metadata-field-loss.md) |
 | LRN-163 | Sync guard blind to cross-runner gate drift (wave-cycle.js vs sdk-wave.js) | [LRN-163](LRN-163-sync-guard-cross-runner-blind-spot.md) |
-| LRN-247 | Unconditional dict-strip on model_dump() crashes for RootModel/list-shaped dumps | [LRN-247](LRN-247-non-dict-model-dump-strip-crash.md) |
 | LRN-164 | Round-cap exit drops severity-floor findings without deferred note | [LRN-164](LRN-164-severity-floor-exit-durability-gap.md) |
 | LRN-165 | Unit round-cap exit skips codify capture, archive block | [LRN-165](LRN-165-budget-exit-bypasses-capture-and-gate.md) |
-| LRN-248 | LRN-044 regression — a remediation sweep left one bare except unlogged | [LRN-248](LRN-248-partial-bare-except-remediation-sweep.md) |
 | LRN-166 | Text gate parser has quote and multi-fence blind spots | [LRN-166](LRN-166-gate-parser-blind-spot.md) |
-| LRN-249 | LRN-144 Check failure — legitimate second bridge call site left the LRN unamended | [LRN-249](LRN-249-unamended-call-site-invariant-drift.md) |
 | LRN-167 | Cost backstop default must scale with wave shape | [LRN-167](LRN-167-undersized-fixed-cost-backstop.md) |
 | LRN-168 | Todo Creates/Modifies omits an actually-touched tracked file | [LRN-168](LRN-168-todo-omits-modified-file.md) |
 | LRN-169 | Security contract documented on private docstring, not public authoring guide | [LRN-169](LRN-169-teaching-surface-security-gap.md) |
 | LRN-170 | Round-cap durability fix (LRN-164) unported to sdk-wave.js | [LRN-170](LRN-170-round-cap-fix-unported.md) |
 | LRN-171 | Renderer delimiter contract applied to the wrapped field but not its same-line neighbor | [LRN-171](LRN-171-delimiter-contract-same-line-neighbor-gap.md) |
 | LRN-172 | Round-budget loop exits skip archive-blocking flags (fail-open) | [LRN-172](LRN-172-round-budget-exit-fail-open.md) |
-| LRN-250 | Template-method adoption shim recurses on concrete-subclass super() calls | [LRN-250](LRN-250-template-method-adoption-recursion.md) |
 | LRN-173 | Reused wave ID collides with completed/ basename and clobbers history | [LRN-173](LRN-173-wave-id-basename-collision.md) |
-| LRN-251 | Wave self-ratified a cross-identity data-exposure policy as documented design | [LRN-251](LRN-251-wave-self-ratifies-security-policy.md) |
 | LRN-174 | Wave executes with a declared template/ deliverable it cannot reach | [LRN-174](LRN-174-unrunnable-peer-repo-deliverable.md) |
-| LRN-252 | Wave resolved one contract divergence by deletion and an identical one by widening the frozen spec | [LRN-252](LRN-252-wave-amends-frozen-protocol-contract.md) |
 | LRN-175 | Terminal exception handlers lack already-terminal guard present on other writers | [LRN-175](LRN-175-terminal-except-handler-missing-guard.md) |
-| LRN-253 | Gate/budget fixes skip sdk-wave.js, again | [LRN-253](LRN-253-unported-runner-fix-recurrence.md) |
-| LRN-254 | Context-message cap silently drops entire transcript instead of truncating | [LRN-254](LRN-254-silent-context-cap-drops-transcript.md) |
 | LRN-176 | Todo checked [x] with a "Landed:" note despite an unenacted peer-repo diff | [LRN-176](LRN-176-todo-marked-complete-unverified.md) |
 | LRN-177 | Actionable errors need reachability tests, not raise-site unit tests | [LRN-177](LRN-177-actionable-error-reachability-gap.md) |
 | LRN-178 | Cross-client invariant lapses when fixed in only one model client | [LRN-178](LRN-178-cross-client-guard-gap.md) |
@@ -207,15 +191,10 @@ clauses relevant to touched files.
 | LRN-185 | Mandatory third-party sanitiser contract points at an unexported private helper | [LRN-185](LRN-185-unexported-helper-mandatory-contract.md) |
 | LRN-186 | Protocol advisor filter(Boolean) drops null results (fail-open) | [LRN-186](LRN-186-protocol-advisor-filter-boolean-fail-open.md) |
 | LRN-187 | Doc-file AC verified against working tree, not the landing commit | [LRN-187](LRN-187-doc-ac-checked-against-working-tree.md) |
-| LRN-255 | Same-wave Check reconciliation sweeps miss sibling LRNs | [LRN-255](LRN-255-incomplete-check-reconciliation-sweep.md) |
 | LRN-188 | Grep-path guard blind to backslash-continued commands | [LRN-188](LRN-188-grep-continuation-blind-spot.md) |
-| LRN-256 | Wave run on a branch behind origin re-fixes shipped issues | [LRN-256](LRN-256-wave-base-branch-behind-origin.md) |
 | LRN-189 | isinstance-check helper without TypeGuard breaks mypy narrowing | [LRN-189](LRN-189-helper-missing-typeguard-annotation.md) |
-| LRN-257 | Root config files invisible to all four archive-gate clauses | [LRN-257](LRN-257-root-config-blind-spot.md) |
-| LRN-258 | Parse-phase hard-abort gate leaves wave permanently unresumable | [LRN-258](LRN-258-hard-abort-gate-no-escape-hatch.md) |
 | LRN-190 | Single-pop repair doesn't re-check the invariant it was fixing | [LRN-190](LRN-190-single-pass-repair-leaves-second-violation.md) |
 | LRN-191 | Hardcoded MCP protocol-version literal drifts from the real source of truth | [LRN-191](LRN-191-hardcoded-protocol-version-outside-source-of-truth.md) |
-| LRN-259 | Wave scope extraction accepts directory/glob tokens | [LRN-259](LRN-259-scope-extraction-accepts-directory-glob-tokens.md) |
 | LRN-192 | Check clause delegates coverage to a test that never actually runs | [LRN-192](LRN-192-check-vacuous-test-delegation.md) |
 | LRN-193 | Generator finally is not a lifecycle hook for pre-stream admission slots | [LRN-193](LRN-193-generator-finally-not-a-lifecycle-hook.md) |
 | LRN-194 | Identity-scoped error-code split lacks foreign-identity test | [LRN-194](LRN-194-identity-scoped-error-code-oracle.md) |
@@ -264,3 +243,55 @@ clauses relevant to touched files.
 | LRN-237 | Guarded repair wrapper conflates in-memory failure with flush-only failure | [LRN-237](LRN-237-repair-wrapper-conflates-failure-modes.md) |
 | LRN-238 | Exception class name interpolated into wire-facing tool error text | [LRN-238](LRN-238-exception-class-name-wire-leak.md) |
 | LRN-239 | Voluntary stable-core break shipped under a patch version bump | [LRN-239](LRN-239-patch-bump-hides-stable-core-break.md) |
+| LRN-240 | Durable write hook wired only into repair path, not happy-path completion | [LRN-240](LRN-240-terminal-write-hook-happy-path-gap.md) |
+| LRN-241 | Hand-listed text fallback silently drops wire fields added later | [LRN-241](LRN-241-hand-listed-text-fallback-field-drift.md) |
+| LRN-242 | Conformance failure resolved by editing the portable oracle, not the code | [LRN-242](LRN-242-editing-conformance-oracle-to-pass.md) |
+| LRN-243 | New terminal-status flush marks tasks terminal before transcript persists | [LRN-243](LRN-243-terminal-status-flush-outpaces-contract.md) |
+| LRN-244 | Shared helper's new raising hook guarded at one call site, not all | [LRN-244](LRN-244-shared-helper-guard-not-reaudited-all-callers.md) |
+| LRN-245 | Re-resolving a label to a new value appends a second index entry, deadlocking $ref | [LRN-245](LRN-245-resolved-index-label-append-deadlock.md) |
+| LRN-246 | Hoisting metadata onto ContentModel silently dropped it from a _Wire sub-shape | [LRN-246](LRN-246-non-contentmodel-metadata-field-loss.md) |
+| LRN-247 | Unconditional dict-strip on model_dump() crashes for RootModel/list-shaped dumps | [LRN-247](LRN-247-non-dict-model-dump-strip-crash.md) |
+| LRN-248 | LRN-044 regression — a remediation sweep left one bare except unlogged | [LRN-248](LRN-248-partial-bare-except-remediation-sweep.md) |
+| LRN-249 | LRN-144 Check failure — legitimate second bridge call site left the LRN unamended | [LRN-249](LRN-249-unamended-call-site-invariant-drift.md) |
+| LRN-250 | Template-method adoption shim recurses on concrete-subclass super() calls | [LRN-250](LRN-250-template-method-adoption-recursion.md) |
+| LRN-251 | Wave self-ratified a cross-identity data-exposure policy as documented design | [LRN-251](LRN-251-wave-self-ratifies-security-policy.md) |
+| LRN-252 | Wave resolved one contract divergence by deletion and an identical one by widening the frozen spec | [LRN-252](LRN-252-wave-amends-frozen-protocol-contract.md) |
+| LRN-253 | Gate/budget fixes skip sdk-wave.js, again | [LRN-253](LRN-253-unported-runner-fix-recurrence.md) |
+| LRN-254 | Context-message cap silently drops entire transcript instead of truncating | [LRN-254](LRN-254-silent-context-cap-drops-transcript.md) |
+| LRN-255 | Same-wave Check reconciliation sweeps miss sibling LRNs | [LRN-255](LRN-255-incomplete-check-reconciliation-sweep.md) |
+| LRN-256 | Wave run on a branch behind origin re-fixes shipped issues | [LRN-256](LRN-256-wave-base-branch-behind-origin.md) |
+| LRN-257 | Root config files invisible to all four archive-gate clauses | [LRN-257](LRN-257-root-config-blind-spot.md) |
+| LRN-258 | Parse-phase hard-abort gate leaves wave permanently unresumable | [LRN-258](LRN-258-hard-abort-gate-no-escape-hatch.md) |
+| LRN-259 | Wave scope extraction accepts directory/glob tokens | [LRN-259](LRN-259-scope-extraction-accepts-directory-glob-tokens.md) |
+| LRN-260 | Todo-requested registry/REVIEWS updates not verified by redteam | [LRN-260](LRN-260-registry-update-unchecked.md) |
+| LRN-261 | Ratification gate keyed to bare SIGNED OFF text | [LRN-261](LRN-261-signoff-text-only-gate.md) |
+| LRN-262 | Sign-off gate substring-matches whole section, never flips | [LRN-262](LRN-262-whole-section-substring-gate.md) |
+| LRN-263 | Tests enforce frozen-contract edit while ratification flag False | [LRN-263](LRN-263-unratified-oracle-edit-tests.md) |
+| LRN-264 | Advisor docs say Ratified while REVIEWS says unratified | [LRN-264](LRN-264-advisor-status-disagreement.md) |
+| LRN-265 | Ratification flag computed but never branched on by tests | [LRN-265](LRN-265-unused-ratification-flag.md) |
+| LRN-266 | New credential namespace not rendered in admin console | [LRN-266](LRN-266-console-ui-missing-new-namespace.md) |
+| LRN-267 | CHANGELOG labels runtime wave as docs-only | [LRN-267](LRN-267-changelog-misses-runtime-changes.md) |
+| LRN-268 | Plan-time component ID goes stale in Reuses | [LRN-268](LRN-268-stale-component-id-reuses.md) |
+| LRN-269 | Secret-leak test checks values code never saw | [LRN-269](LRN-269-vacuous-secret-leak-test.md) |
+| LRN-270 | Unchanged-behavior test skips listed probes | [LRN-270](LRN-270-unchanged-probe-test-incomplete.md) |
+| LRN-271 | Template mirror edited but never committed or pushed | [LRN-271](LRN-271-template-mirror-unpropagated.md) |
+| LRN-272 | New consent path skips client-lifecycle side effects | [LRN-272](LRN-272-consent-path-lifecycle-parity.md) |
+| LRN-273 | Template mirror gap persists across redteam rounds | [LRN-273](LRN-273-template-mirror-still-open.md) |
+| LRN-274 | Widened actor invalidates capacity-bound assumptions | [LRN-274](LRN-274-widened-actor-capacity-bound.md) |
+| LRN-275 | Test imports dependency missing from gate extra | [LRN-275](LRN-275-test-dep-not-in-gate-extra.md) |
+| LRN-276 | Template mirror edits left uncommitted in peer repo | [LRN-276](LRN-276-template-mirror-unpropagated.md) |
+| LRN-277 | Redteam fix to shared store not gated on feature flag | [LRN-277](LRN-277-fix-not-gated-on-flag.md) |
+| LRN-278 | Passing in-repo parity test mistaken for template propagation | [LRN-278](LRN-278-parity-test-not-propagation.md) |
+| LRN-279 | Dirty template tree blocks whole-file staging of wave hunks | [LRN-279](LRN-279-dirty-template-hunk-staging.md) |
+| LRN-280 | Weaker approver writes trust flag read by stronger path | [LRN-280](LRN-280-weak-approver-shared-trust-flag.md) |
+| LRN-281 | New exemption flag leaves pre-upgrade records evictable | [LRN-281](LRN-281-unmigrated-exemption-flag-eviction.md) |
+| LRN-282 | Forwarded-for parser trusts attacker-chosen leftmost hop | [LRN-282](LRN-282-xff-leftmost-hop-spoof.md) |
+| LRN-283 | Name imported and redefined locally breaks mypy gate | [LRN-283](LRN-283-import-local-redef-mypy.md) |
+| LRN-284 | Per-source quota ties evict oldest and ignore IPv6 prefix | [LRN-284](LRN-284-quota-tie-evicts-oldest.md) |
+| LRN-285 | Evicting heaviest source still lets one source evict another | [LRN-285](LRN-285-heaviest-source-eviction-unfair.md) |
+| LRN-286 | Client-IP key wiring lacks route-level test | [LRN-286](LRN-286-ip-key-route-wiring-untested.md) |
+| LRN-287 | Todo "Reuses: C-NNN" either/or directive landed neither branch | [LRN-287](LRN-287-registry-reuse-directive-unmet.md) |
+| LRN-288 | Docs and ADR describe eviction/refusal policy the code no longer has | [LRN-288](LRN-288-stale-policy-docs.md) |
+| LRN-289 | IdP sign-in admits any user of a non-Entra issuer with no role/group | [LRN-289](LRN-289-idp-admission-fail-open.md) |
+| LRN-290 | Todo done while template peer-repo edit is uncommitted | [LRN-290](LRN-290-peer-repo-unpushed-edit.md) |
+| LRN-291 | Pinned-tenant check misses multi-user tenant GUIDs | [LRN-291](LRN-291-pinned-tenant-guid-bypass.md) |

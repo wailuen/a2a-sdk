@@ -2,6 +2,7 @@
 name: codify
 description: "Turn an execution outcome (bug found, pattern validated, gotcha discovered) into a permanent learning record in workspace/learning/ — wired into redteam and planner"
 model: sonnet
+effort: medium
 ---
 
 # Codify

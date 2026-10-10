@@ -1,8 +1,8 @@
-"""A2UI Standard Profile v1 content models (FROZEN — DESIGN.md §5.4).
+"""A2UI Standard Profile v1.1 content models (FROZEN — DESIGN.md §5.4).
 
 Wire-isomorphic Pydantic models for the 14 FROZEN Profile types plus the
 registry that the translator, catalog and console all read (Standard Profile
-v1 = 14 FROZEN + 4 RESERVED names at RESERVED_COMPONENTS — 18 total). Field
+v1.1 = 14 FROZEN + 4 RESERVED names at RESERVED_COMPONENTS — 18 total). Field
 contracts
 are frozen at catalog ``urn:a2ui-profile:standard:v1`` — do not "fix"
 inconsistencies (e.g. the two different date_range key pair shapes); they are
@@ -18,7 +18,7 @@ refuses the component names.
 on the base class (RT-006) — every subclass inherits it rather than
 redeclaring it. It is an SDK-WIDE out-of-band envelope (GH-63) for disclosure
 annotations such as ``metadata={"coverage_note": "Partial: 5 of 20 funds"}`` —
-NOT a per-type Profile v1 field.
+NOT a per-type Profile v1.1 field.
 
 Because the field is declared once on the base class, every rule about it is
 enforced once on the base class too (RT-003/RT-006, round 4) — none of the
@@ -51,17 +51,13 @@ field-contract tables (``.claude/agents/a2ui-advisor.md``,
 ``harness/agents/a2ui-advisor.md``, ``template/.claude/agents/a2ui-advisor.md``)
 that dropped ``TimeSeriesChart``'s per-type typed ``metadata`` row to match
 this base-class hoist was reverted pending maintainer ratification — a
-frozen A2UI Standard Profile v1 field contract (DESIGN.md stable core) may
-not be edited inside a wave to conform to its own code, the same rule
-GH-149 applied in the opposite direction (code changed to conform to the
-frozen table). The row therefore still appears in all three advisor copies,
-describing a typed sub-shape this base-class field has never implemented;
-that gap is tracked in ``workspace/sdk-candidates.md`` for a maintainer to
-resolve as an explicit Profile v1.1 decision, not a silent doc edit.
-
-The three advisor copies still diverge on the unrelated ``DataPart`` wire-
-format section (GH-128 follow-on) — tracked as
-https://github.com/wailuen/a2a-sdk/issues/151, not this docstring.
+frozen A2UI Standard Profile field contract (DESIGN.md stable core) may
+not be edited inside a wave to conform to its own code. The maintainer then
+ratified the removal as Profile v1.1 (REVIEWS.md Round 11, SIGNED OFF
+2026-10-09, GitHub issue #153): the row is gone from all three advisor
+copies, since this base-class field never implemented its typed sub-shape,
+and ``metadata`` is a cross-cutting free-form field on every FROZEN type.
+The catalog URN and ``CATALOG_ID`` are unchanged.
 
 Domain extension: agents register their own card types with
 ``register_content_type`` — subclass ``ContentModel``, declare ``data_type``

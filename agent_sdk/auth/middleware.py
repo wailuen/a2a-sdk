@@ -12,6 +12,7 @@ surface carry ``WWW-Authenticate`` pointing at the PRM.
 
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -41,6 +42,8 @@ class AuthRuntime:
     # GH-136: when True, an already-consented DCR client re-authorizes without
     # the admin-key consent page (settings.oauth_one_time_consent).
     oauth_one_time_consent: bool = False
+    # GH-152: when True, require_identity rejects NON-ADMIN api_key identities.
+    idp_disable_api_keys: bool = False
     identity_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(100))
     unauth_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(30))
 
@@ -51,7 +54,16 @@ def _runtime(request: Request) -> AuthRuntime:
 
 def _client_key(request: Request, runtime: AuthRuntime) -> str:
     peer = request.client.host if request.client else None
-    return client_ip(peer, request.headers.get("x-forwarded-for"), runtime.trusted_proxies)
+    ip = client_ip(peer, request.headers.get("x-forwarded-for"), runtime.trusted_proxies)
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
 
 
 def _bearer(request: Request) -> str | None:
@@ -96,8 +108,7 @@ def resolve_identity(request: Request) -> Identity | None:
     return identity
 
 
-async def require_identity(request: Request) -> Identity:
-    """Any authenticated caller (api_key or oauth kind)."""
+async def _resolve_identity(request: Request) -> Identity:
     runtime = _runtime(request)
     ip_key = _client_key(request, runtime)
     token = _bearer(request)
@@ -114,16 +125,29 @@ async def require_identity(request: Request) -> Identity:
             raise _rate_limited()
         raise _unauthorized(request, runtime, "invalid credentials")
 
-    if not runtime.identity_limiter.allow(f"{identity.kind}:{identity.subject}"):
+    if not runtime.identity_limiter.allow(identity.principal_key):
         raise _rate_limited()
     request.state.identity = identity
+    return identity
+
+
+async def require_identity(request: Request) -> Identity:
+    """Any authenticated caller (api_key or oauth kind). With
+    ``idp_disable_api_keys`` non-admin API keys are refused (admin keys stay
+    valid so the console and probes keep working)."""
+    identity = await _resolve_identity(request)
+    runtime = _runtime(request)
+    if runtime.idp_disable_api_keys and identity.kind == "api_key" and not identity.admin:
+        if not runtime.unauth_limiter.allow(_client_key(request, runtime)):
+            raise _rate_limited()
+        raise _unauthorized(request, runtime, "invalid credentials")
     return identity
 
 
 async def require_api_key_identity(request: Request) -> Identity:
     """Surfaces that reject oauth-kind callers (/admin/*, /oauth/authorize,
     key management — §5.5)."""
-    identity = await require_identity(request)
+    identity = await _resolve_identity(request)
     if identity.kind != "api_key":
         raise HTTPException(
             status_code=403, detail="this surface requires an API key identity"

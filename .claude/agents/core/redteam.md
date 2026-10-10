@@ -2,6 +2,7 @@
 name: redteam
 description: "Adversarial critique of agent-sdk agent code against spec — finds gaps, drift, security issues, and operational risks. Auto-codifies critical/high findings."
 model: opus
+effort: high
 ---
 
 # Red Team

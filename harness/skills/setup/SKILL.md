@@ -75,6 +75,28 @@ Collect, then echo back a summary for confirmation before touching any file:
      (Phase 3); leave OAuth's one-time consent unset (`false`) only if the
      operator wants every authorization, including repeat ones, to hit the
      admin gate.
+   - **If Entra ID sign-in is wanted** (named people from your tenant only), also
+     collect the tenant GUID and plan these Entra steps (placeholders only, never
+     real secrets in the repo):
+     1. Entra admin center, App registrations, New registration. Single tenant.
+        Redirect URI (Web): `<PUBLIC_URL>/oauth/idp/callback`.
+     2. Copy the Application (client) ID and Directory (tenant) ID.
+     3. Certificates and secrets, New client secret. Keep the value for the admin
+        Credentials card (namespace `__oauth_idp__`, field `client_secret`).
+        It never goes in `.env`.
+     4. Enterprise applications, your app, Properties: set Assignment required =
+        Yes, then assign users or groups. Optionally add an app role and set
+        `AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE`.
+     5. In `.env` (Phase 3): `AGENT_SDK_OAUTH_IDP=oidc`,
+        `AGENT_SDK_OAUTH_IDP_ISSUER=https://login.microsoftonline.com/<TENANT_GUID>/v2.0`,
+        `AGENT_SDK_OAUTH_IDP_CLIENT_ID=<CLIENT_ID>`. Install the `agent-sdk[oidc]`
+        extra. Do not set `AGENT_SDK_OAUTH_ONE_TIME_CONSENT` with it.
+     Non-Entra issuer: boot refuses unless `AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE` or
+     `AGENT_SDK_OAUTH_IDP_REQUIRED_GROUP` is set, or you set
+     `AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS=true` (admits every account at
+     the issuer; logs a warning; only valid with `AGENT_SDK_OAUTH_IDP=oidc`).
+     Note: a removed user keeps access until their session ends (default 30 days,
+     `AGENT_SDK_OAUTH_IDP_SESSION_HOURS`).
 5. **Model backend** — Bedrock (default) or another `ModelClient`. Collect the
    routing env vars for the chosen backend (these go in `.env`; API keys never go
    in `.env` — they are seeded via the credential store after bootstrapping):
