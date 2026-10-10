@@ -6,7 +6,36 @@ internals, `contrib/`) may change in minors with notice here.
 
 ## [Unreleased]
 
-### Added
+_Nothing yet._
+
+## [0.9.0] — 2026-10-10
+
+Rolls up everything since `v0.7.0`, including the `[0.8.0]` work below, which was drafted in
+September but never tagged. Closes GH-145, GH-147, GH-148, GH-149, GH-150, GH-151, GH-152, GH-153.
+
+### 🟠 Security
+
+- **Per-source sign-in flow quota (w043):** the in-progress IdP sign-in table is now limited per
+  source address (IPv6 grouped by /64), so one source can no longer evict other users' sign-ins; a
+  new source finding the table full gets a generic `temporarily_unavailable` instead of evicting anyone.
+- **`client_ip()` no longer trusts the caller's own `X-Forwarded-For` hop (w043):** it walks the
+  header from the right past configured trusted proxies, so a spoofed leftmost value is billed to the
+  real peer. This affects every per-IP limit, including `unauth_rate_limit`.
+- **Two sign-ins in one browser (w043):** each federated flow gets its own browser binding cookie, so
+  a second authorize no longer breaks the first.
+- **Microsoft personal-account tenant refused (w044):** the tenant GUID
+  `9188040d-6c67-4c5b-b112-36a304b66dad` is rejected like the `consumers` alias, so a "pinned"
+  Entra issuer can't admit every personal Microsoft account.
+
+### — Harness
+
+- Per-agent `effort:` for the Claude 5.5 models: `high` for redteam, debug, planner, sdk-advisor
+  and the four protocol advisors; `medium` for analyst, codify and python-implementer. `debug.md`
+  now says it runs at round 4+.
+- Wave runners (`sdk-wave.js`, both `wave-cycle.js`): restored origin's GH-129..139 work that merge
+  `0dc0517` dropped; a group's budget overrun now stops the wave, and a crashed group loop blocks archive.
+
+### ✅ Features, fixes and docs (from the waves)
 
 - **GH-152 fail-closed IdP gate:** with `AGENT_SDK_OAUTH_IDP=oidc` and a non-Entra issuer, boot now fails unless `AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE` or `_REQUIRED_GROUP` is set, or the new opt-out `AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS=true` (setting `oauth_idp_allow_all_issuer_users`, default false) is set. The opt-out logs one boot WARNING and is refused without `oidc`. Entra GUID issuers and role/group setups are unchanged.
 
@@ -32,9 +61,9 @@ section, drafted on the local branch over the same period. The merge that reconc
 histories landed both lineages' code, but the `v0.6.0`/`v0.7.0` CHANGELOG sections themselves
 were only added back here afterward — see the `[0.7.0]` and `[0.6.0]` sections below, positioned
 in their real chronological place (before `[0.5.44]`'s successors, after `[0.8.0]` which
-supersedes them). The GH-152 IdP sign-in work listed under `[Unreleased]` above is the only work sitting ahead of `[0.8.0]`.
+supersedes them). The GH-152 IdP sign-in work listed above is the only work sitting ahead of `[0.8.0]`.
 
-## [0.8.0] — 2026-09-02
+## [0.8.0] — 2026-09-02 (never tagged; shipped in v0.9.0)
 
 **RT-002 (redteam, high, versioning discipline): this release was drafted under a same-minor
 patch bump (`0.5.45`) even though two of the entries below are VOLUNTARY breaking changes to the
