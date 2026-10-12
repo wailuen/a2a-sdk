@@ -198,6 +198,18 @@ class LoopPolicies:
     # SAME opt-in shape as ReuseKind's own `strict`/`allow_raw_override`
     # flags — never the other way around.
     reuse_forced_passthrough_limit: int = 0
+    # GH-155 (maintainer ruling 2026-10-11): on the max-turns / token-budget
+    # exits make ONE tools-disabled model call so the user gets an answer
+    # from what was gathered; only if that call fails (raises, or returns no
+    # usable text) is the fixed SDK notice sent. The run still ends ok=False.
+    # ``final_summary_max_tokens`` is that call's OUTPUT cap only (also
+    # bounded by ``max_output_tokens``); it is not a spend allowance. The
+    # cost of a cap exit is therefore bounded by exactly one extra call
+    # whose output is at most this many tokens; its input is the transcript
+    # re-send, the same size the next turn would have sent. 0 disables the
+    # call (notice only).
+    final_summary: bool = True
+    final_summary_max_tokens: int = 1024
 
 
 def resolve_tool_timeout(name: str, entry: ToolEntry, policies: LoopPolicies) -> float:
@@ -386,6 +398,94 @@ def bridge_trailing_user(messages: list[dict[str, Any]], text: str | None = None
 # event before it can reach a stream, so it exists to keep run_loop's
 # "always terminates with a DoneEvent" contract, not to be shown to a user.
 _SEALED_TRANSCRIPT_ERROR = "task was already terminated by another owner"
+
+_FINAL_SUMMARY_INSTRUCTION = (
+    "You have reached the limit for this task and can call no more tools. "
+    "Using only what you have gathered so far, write a short final answer for "
+    "the user. Say clearly what is still missing or uncertain."
+)
+_FINAL_SUMMARY_NOTICE_TURNS = (
+    "I reached my step limit before finishing. The work so far may be "
+    "incomplete. Please try again with a narrower request."
+)
+_FINAL_SUMMARY_NOTICE_BUDGET = (
+    "I reached my budget limit before finishing. The work so far may be "
+    "incomplete. Please try again with a narrower request."
+)
+
+
+def _summary_request_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Copy of ``messages`` whose trailing user turn also carries the summarize
+    instruction (never two same-role messages in a row). The real transcript is
+    left untouched so the instruction is never persisted."""
+    tail = messages[-1] if messages else None
+    if isinstance(tail, dict) and tail.get("role") == "user":
+        content = tail.get("content")
+        blocks = list(content) if isinstance(content, list) else (
+            [{"text": str(content)}] if content else []
+        )
+        blocks.append({"text": _FINAL_SUMMARY_INSTRUCTION})
+        return [*messages[:-1], {**tail, "content": blocks}]
+    return [*messages, {"role": "user", "content": [{"text": _FINAL_SUMMARY_INSTRUCTION}]}]
+
+
+def _summary_max_tokens(policies: LoopPolicies) -> int:
+    """GH-155: output cap for the summary call at a cap exit. 0 means: skip it
+    and send the fixed notice. Per the maintainer ruling the cap bounds the
+    summary's OUTPUT only — the re-sent transcript is not charged against it,
+    so the summary is reachable on the token-budget exit, not just max-turns."""
+    return max(min(policies.final_summary_max_tokens, policies.max_output_tokens), 0)
+
+
+async def _final_summary(
+    *,
+    model: ModelClient,
+    system: str,
+    messages: list[dict[str, Any]],
+    tool_specs: list[dict[str, Any]],
+    policies: LoopPolicies,
+    max_tokens: int,
+    notice: str,
+    is_sealed: Callable[[], bool],
+) -> AsyncIterator[LoopEvent]:
+    """GH-155: one tools-disabled call at a cap exit. Yields TextEvent (+
+    UsageEvent) and folds the reply into ``messages``; on any failure or an
+    unusable reply yields the fixed SDK ``notice`` and only bridges the
+    transcript. Nothing is yielded or folded if the task was sealed during the
+    await — the caller re-checks ``is_sealed()``. The notice never carries
+    provider text (SI-2)."""
+    if not policies.final_summary:
+        bridge_trailing_user(messages)
+        return
+    segments: list[str] = []
+    if max_tokens > 0:
+        try:
+            response = await model.converse(
+                system=system,
+                messages=_summary_request_messages(messages),
+                tools=tool_specs,
+                max_tokens=max_tokens,
+                tool_choice="none",
+            )
+        except Exception as exc:
+            logger.warning(
+                "final summary call failed error_type=%s frames=%s",
+                type(exc).__name__, frame_locations(exc),
+            )
+            response = None
+        if is_sealed():
+            return
+        if response is not None:
+            yield UsageEvent(
+                input_tokens=response.input_tokens, output_tokens=response.output_tokens
+            )
+            segments = [seg for seg in response.text_segments if seg.strip()]
+    if segments:
+        yield TextEvent(text="\n\n".join(segments))
+        append_assistant_turn(messages, [{"text": seg} for seg in segments])
+        return
+    yield TextEvent(text=notice)
+    bridge_trailing_user(messages)
 
 
 # RT-003 (debug round 4): fixed, SDK-authored — never derived from model or
@@ -1131,8 +1231,29 @@ async def run_loop(
             yield DoneEvent(ok=False, error="task deadline exceeded")
             return
         if total_tokens > policies.token_budget:
-            bridge_trailing_user(messages)
-            yield DoneEvent(ok=False, error="task token budget exceeded")
+            summary_tokens = _summary_max_tokens(policies)
+            summary = ""
+            async for ev in _final_summary(
+                model=model,
+                system=system,
+                messages=messages,
+                tool_specs=tool_specs,
+                policies=policies,
+                max_tokens=summary_tokens,
+                notice=_FINAL_SUMMARY_NOTICE_BUDGET,
+                is_sealed=is_sealed,
+            ):
+                if isinstance(ev, TextEvent):
+                    summary = ev.text
+                yield ev
+            if is_sealed():
+                yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR)
+                return
+            yield DoneEvent(
+                ok=False,
+                error="task token budget exceeded",
+                summary=summary or None,
+            )
             return
 
         yield TurnStartedEvent(turn=turn, max_turns=policies.max_turns)
@@ -1658,5 +1779,30 @@ async def run_loop(
         messages.append({"role": "user", "content": list(result_blocks)})
         result_blocks.clear()
 
-    bridge_trailing_user(messages)
-    yield DoneEvent(ok=False, error=f"max turns ({policies.max_turns}) exceeded")
+    if deadline.exceeded():
+        bridge_trailing_user(messages)
+        yield DoneEvent(ok=False, error="task deadline exceeded")
+        return
+    turns_summary_tokens = _summary_max_tokens(policies)
+    summary = ""
+    async for ev in _final_summary(
+        model=model,
+        system=system,
+        messages=messages,
+        tool_specs=tool_specs,
+        policies=policies,
+        max_tokens=turns_summary_tokens,
+        notice=_FINAL_SUMMARY_NOTICE_TURNS,
+        is_sealed=is_sealed,
+    ):
+        if isinstance(ev, TextEvent):
+            summary = ev.text
+        yield ev
+    if is_sealed():
+        yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR)
+        return
+    yield DoneEvent(
+        ok=False,
+        error=f"max turns ({policies.max_turns}) exceeded",
+        summary=summary or None,
+    )

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from ..agent.model_client import ModelResponse, ModelToolCall
 from ..models.errors import AgentError, ErrorCategory
@@ -64,6 +64,7 @@ class FakeModelClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         max_tokens: int = 4096,
+        tool_choice: Literal["auto", "none"] = "auto",
     ) -> ModelResponse:
         self.calls.append(
             {
@@ -71,6 +72,7 @@ class FakeModelClient:
                 "messages": [dict(m) for m in messages],
                 "tools": tools,
                 "max_tokens": max_tokens,
+                "tool_choice": tool_choice,
             }
         )
         if not self.responses:

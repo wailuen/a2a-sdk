@@ -151,6 +151,7 @@ async def test_max_turns_exceeded_after_tool_round_bridges_trailing_user():
     assert done and done[-1].ok is False
     assert "max turns" in (done[-1].error or "")
     assert messages[-1]["role"] == "assistant"
+    assert done[-1].summary  # GH-155: notice (script exhausted) folded/bridged, not skipped
     assert roles_have_no_adjacent_duplicate([m["role"] for m in messages])
 
 

@@ -112,6 +112,9 @@ class TaskRecord:
     # never serialised, cleared by ``run_loop`` at each turn boundary and by
     # ``repair_dangling_tool_use`` once consumed.
     pending_tool_results: list[dict[str, Any]] = field(default_factory=list)
+    # GH-154: the task's own ``Today is ...`` line, fixed on first run so a
+    # resumed/continued turn keeps the original date.
+    date_line: str | None = None
 
 
 class TaskStore(abc.ABC):

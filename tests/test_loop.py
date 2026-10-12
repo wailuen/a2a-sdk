@@ -60,18 +60,26 @@ async def test_max_turns_exhaustion():
     done = events[-1]
     assert isinstance(done, DoneEvent) and not done.ok
     assert "max turns (3)" in done.error
+    # GH-155: the summary call finds the script exhausted -> fixed notice, still failed
+    assert done.summary and done.summary.startswith("I reached my step limit")
 
 
 async def test_token_budget_exceeded():
     model = FakeModelClient(
         [
             tool_call("counted", {"text": "a"}, input_tokens=600, output_tokens=600),
-            reply("never reached"),
+            reply("summary of work so far"),
         ]
     )
     events = await collect(model, policies=LoopPolicies(token_budget=1000))
     done = events[-1]
     assert not done.ok and "token budget" in done.error
+    # GH-155: no further normal turn; one tools-disabled summary call with
+    # the default output cap, and the run still ends failed.
+    assert len(model.calls) == 2
+    assert model.calls[-1]["tool_choice"] == "none"
+    assert model.calls[-1]["max_tokens"] == 1024
+    assert done.summary == "summary of work so far"
 
 
 async def test_result_cache_identical_call():

@@ -32,7 +32,8 @@ class ArtifactLoader:
     Pre-SDK agents — call-time:
         # module level (compiles templates once)
         _artifacts = ArtifactLoader(Path(__file__).parent.parent / "artifacts")
-        # per request
+        # per request (superseded for SDK agents: GH-154 appends a per-task
+        # ``Today is ...`` line automatically — see DESIGN.md §2)
         text = _artifacts.render("system", today=today_iso, user_tz="Asia/Singapore")
     """
 

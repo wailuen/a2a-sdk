@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 
 @dataclass(slots=True)
@@ -31,6 +31,7 @@ class ModelClient(Protocol):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         max_tokens: int = 4096,
+        tool_choice: Literal["auto", "none"] = "auto",
     ) -> ModelResponse: ...
 
     # reserved (non-breaking to add): async def converse_stream(...)

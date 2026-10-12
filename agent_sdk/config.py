@@ -12,7 +12,7 @@ import re
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
@@ -127,6 +127,17 @@ class BaseAgentSettings(BaseSettings):
     openai_timeout: float | None = Field(
         default=None, alias="AGENT_SDK_OPENAI_TIMEOUT"
     )
+    # GH-155: OpenAIModelClient already accepts these; without settings an
+    # env-configured agent could not reach them. ``reasoning_effort`` is sent
+    # verbatim on every call (only set it for a reasoning deployment such as
+    # gpt-5 / o-series); ``max_completion_tokens`` is the reasoning-inclusive
+    # hard ceiling on every call, including the cap-exit summary call.
+    openai_reasoning_effort: str | None = Field(
+        default=None, alias="AGENT_SDK_OPENAI_REASONING_EFFORT"
+    )
+    openai_max_completion_tokens: int | None = Field(
+        default=None, gt=0, alias="AGENT_SDK_OPENAI_MAX_COMPLETION_TOKENS"
+    )
 
     # ── Azure Storage ──
     # Use EITHER connection_string (shared-key / SAS) OR account_name (managed
@@ -152,6 +163,10 @@ class BaseAgentSettings(BaseSettings):
     trusted_proxies: list[str] = Field(
         default_factory=list, alias="AGENT_SDK_TRUSTED_PROXIES"
     )
+    inject_current_date: bool = Field(
+        default=True, alias="AGENT_SDK_INJECT_CURRENT_DATE"
+    )
+    timezone: str = Field(default="UTC", alias="AGENT_SDK_TIMEZONE")
     interrupt_ttl_seconds: int = Field(default=1800, alias="AGENT_SDK_INTERRUPT_TTL")
     max_interrupted_tasks: int = Field(default=100, alias="AGENT_SDK_MAX_INTERRUPTED")
     task_ttl_seconds: int = Field(default=3600, alias="AGENT_SDK_TASK_TTL")
@@ -210,7 +225,11 @@ class BaseAgentSettings(BaseSettings):
         default=False, alias="AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS"
     )
     max_turns: int = Field(default=20, alias="AGENT_SDK_MAX_TURNS")
+    final_summary: bool = Field(default=True, alias="AGENT_SDK_FINAL_SUMMARY")
     max_output_tokens: int = Field(default=8192, alias="AGENT_SDK_MAX_OUTPUT_TOKENS")
+    final_summary_max_tokens: int = Field(
+        default=1024, alias="AGENT_SDK_FINAL_SUMMARY_MAX_TOKENS"
+    )
 
     # RT-001 (GH-143 follow-up): routes/mcp.py's per-identity GET-stream cap
     # is keyed on Identity.subject, which is an OAuth client_id or API-key id
@@ -251,6 +270,28 @@ class BaseAgentSettings(BaseSettings):
     a2ui_allowed_components: list[str] | None = Field(
         default=None, alias="AGENT_SDK_A2UI_ALLOWED_COMPONENTS"
     )
+
+    @field_validator("timezone")
+    @classmethod
+    def _valid_timezone(cls, v: str, info: ValidationInfo) -> str:
+        # GH-154: the zone is only used for the date line. With injection off
+        # nothing loads it, so a host without zone data must still boot.
+        if not info.data.get("inject_current_date", True):
+            return v
+        from zoneinfo import ZoneInfoNotFoundError
+
+        from .common.tz import load_zone
+
+        try:
+            load_zone(v)
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            # Fixed text only: the operator's value is never echoed (SI-2).
+            raise ValueError(
+                "AGENT_SDK_TIMEZONE must be a valid IANA time zone name "
+                "(e.g. 'UTC', 'Asia/Singapore'); if the name is valid, this "
+                "host has no time zone data: install the 'tzdata' package"
+            ) from None
+        return v
 
     @field_validator("cors_origins")
     @classmethod

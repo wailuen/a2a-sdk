@@ -15,6 +15,14 @@ for it. gpt-5 is a reasoning model: temperature is left at its only supported
 value (default) and the token cap is applied ONLY when explicitly configured —
 a small ``max_completion_tokens`` would be consumed by reasoning and yield an
 empty completion, so by default we let the model manage its own budget.
+The GH-155 tools-disabled summary call is the one bounded call: it sends
+``min(max_tokens, max_completion_tokens)`` (the AC formula; the maintainer
+ruling asks for a small output cap). That fits every chat model the client
+accepts, including non-reasoning deployments capped at 16,384 completion
+tokens. On a reasoning deployment the summary's reasoning counts against the
+same cap: raise ``AGENT_SDK_FINAL_SUMMARY_MAX_TOKENS`` or lower
+``AGENT_SDK_OPENAI_REASONING_EFFORT`` if the summary comes back empty (a fixed
+warning is logged when that happens).
 
 Errors are wrapped to ``AgentError(UPSTREAM, "model invocation failed")`` with
 no provider detail — request content never leaks into logs or errors.
@@ -31,7 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from ..common.redact import frame_locations
 from ..models.errors import AgentError, ErrorCategory
@@ -106,6 +114,7 @@ class OpenAIModelClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         max_tokens: int = 4096,
+        tool_choice: Literal["auto", "none"] = "auto",
     ) -> ModelResponse:
         request: dict[str, Any] = {
             "model": self._model,
@@ -113,11 +122,21 @@ class OpenAIModelClient:
         }
         if tools:
             request["tools"] = self._to_openai_tools(tools)
-            request["tool_choice"] = "auto"
+            request["tool_choice"] = tool_choice
         if self._reasoning_effort:
             request["reasoning_effort"] = self._reasoning_effort
         if self._max_completion_tokens is not None:
             request["max_completion_tokens"] = self._max_completion_tokens
+        if tool_choice == "none":
+            # GH-155 bounded summary call (AC: min(max_tokens,
+            # max_completion_tokens)). No provider-specific widening: a larger
+            # value is rejected outright by non-reasoning deployments (e.g.
+            # gpt-4o allows at most 16,384) and is not a "small output cap".
+            # We never invent a ``reasoning_effort`` either.
+            summary_cap = max_tokens
+            if self._max_completion_tokens is not None:
+                summary_cap = min(summary_cap, self._max_completion_tokens)
+            request["max_completion_tokens"] = summary_cap
 
         try:
             # Deferred import INSIDE the try: when the optional `openai` extra
@@ -175,7 +194,20 @@ class OpenAIModelClient:
             raise AgentError(
                 ErrorCategory.UPSTREAM, "model invocation failed", source="openai"
             ) from exc
-        return self._parse(raw)
+        response = self._parse(raw)
+        if (
+            tool_choice == "none"
+            and not response.text_segments
+            and response.stop_reason == "max_tokens"
+        ):
+            # Fixed text only (SI-2): no provider content is logged.
+            logger.warning(
+                "openai summary call returned no text: max_completion_tokens "
+                "reached (reasoning likely used the budget); raise "
+                "AGENT_SDK_FINAL_SUMMARY_MAX_TOKENS or lower "
+                "AGENT_SDK_OPENAI_REASONING_EFFORT"
+            )
+        return response
 
     # ── Converse → OpenAI ──
     @staticmethod

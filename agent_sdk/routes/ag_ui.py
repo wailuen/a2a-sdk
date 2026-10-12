@@ -423,6 +423,13 @@ def _capabilities(body: dict[str, Any]) -> A2uiCapabilities:
     return A2uiCapabilities.gated(True, forwarded["a2uiClientCapabilities"])
 
 
+def _user_timezone(body: dict[str, Any]) -> str | None:
+    forwarded = body.get("forwardedProps")
+    if not isinstance(forwarded, dict):
+        return None
+    return forwarded.get("timezone")
+
+
 def _parse_body(raw: bytes) -> dict[str, Any]:
     try:
         body = json.loads(raw)
@@ -483,6 +490,7 @@ def _start_worker(
     capabilities: A2uiCapabilities,
     *,
     extra_resolved_messages: Sequence[dict[str, Any]] | None = None,
+    user_timezone: str | None = None,
 ) -> None:
     state = request.app.state
     # Bind per-call forwarded credentials BEFORE create_task so the worker
@@ -500,6 +508,9 @@ def _start_worker(
             capabilities=capabilities,
             policies=state.loop_policies,
             extra_resolved_messages=extra_resolved_messages,
+            inject_date=state.inject_current_date,
+            timezone_name=state.timezone,
+            user_timezone=user_timezone,
         )
     )
 
@@ -628,7 +639,9 @@ async def ag_ui_run(
                 # or shown to the model.
                 prior = store.context_reusable_messages(thread_id, identity)
                 _start_worker(
-                    request, record, mapper.capabilities, extra_resolved_messages=prior
+                    request, record, mapper.capabilities,
+                    extra_resolved_messages=prior,
+                    user_timezone=_user_timezone(body),
                 )
 
             while not mapper.terminal_sent:

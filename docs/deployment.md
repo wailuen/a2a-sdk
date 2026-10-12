@@ -100,6 +100,16 @@ the interrupted call is still logically in flight, not abandoned.
 See the `TaskStore` docstrings in `agent_sdk/tasks/store.py` for the full
 rationale.
 
+### Current date in the system prompt (GH-154)
+
+- `AGENT_SDK_INJECT_CURRENT_DATE` (default `true`): append `Today is YYYY-MM-DD (<tz>).` to each task's system prompt.
+- `AGENT_SDK_FINAL_SUMMARY` (default `true`): when a task hits the turn limit or token budget, make one last model call with tools off so the user gets an answer from the work so far. The task still ends as failed. That last call re-sends the whole conversation and its answer is capped at `AGENT_SDK_FINAL_SUMMARY_MAX_TOKENS` (default 1024) tokens. It is made on both a turn-limit stop and a token-budget stop, so total spend can end above the budget by that one call. A fixed notice is sent only if the call fails or returns nothing usable. Set `AGENT_SDK_FINAL_SUMMARY_MAX_TOKENS=0` for notice-only. On the OpenAI/Azure backend, gpt-5 and other reasoning models count hidden "thinking" tokens against the same limit. If the summary comes back empty because thinking used the limit up, a warning is logged; raise `AGENT_SDK_FINAL_SUMMARY_MAX_TOKENS` (it is also capped by `AGENT_SDK_MAX_OUTPUT_TOKENS`) or lower `AGENT_SDK_OPENAI_REASONING_EFFORT`. Set `false` to skip the call.
+- `AGENT_SDK_TIMEZONE` (default `UTC`): IANA zone used for that date. An invalid name fails boot (not checked when the date line is off). `UTC` needs no zone data; other names use the host's zone files or the `tzdata` package the SDK installs.
+- `AGENT_SDK_OPENAI_REASONING_EFFORT` (default unset): `reasoning_effort` sent on every OpenAI/Azure call. Set it only for a reasoning deployment (gpt-5, o-series); other models reject it.
+- `AGENT_SDK_OPENAI_MAX_COMPLETION_TOKENS` (default unset): hard ceiling on `max_completion_tokens` for every OpenAI/Azure call, including the summary call.
+
+Clients may override the zone per request (AG-UI `forwardedProps.timezone`, A2A `message.metadata.timezone`).
+
 ### `AGENT_SDK_MAX_TURNS` vs. context continuation's message cap
 
 `InMemoryTaskStore.MAX_CONTEXT_MESSAGES` (default 50) bounds how much of the

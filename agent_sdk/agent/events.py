@@ -129,3 +129,5 @@ class InterruptEvent(LoopEvent):
 class DoneEvent(LoopEvent):
     ok: bool = True
     error: str | None = None  # human-safe message; never an AgentError object
+    # GH-155: user-facing summary/notice of a cap-exit failure (also streamed as TextEvent)
+    summary: str | None = None

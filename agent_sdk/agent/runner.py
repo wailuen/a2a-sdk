@@ -23,6 +23,7 @@ from typing import Any, Sequence
 from pydantic import BaseModel
 
 from ..a2ui.translator import A2uiCapabilities, split_a2ui_delivery, translate
+from ..common.tz import load_zone, valid_timezone
 from ..models.a2a import (
     Artifact,
     DataPart,
@@ -1138,6 +1139,16 @@ async def _run_deferred_background(
         store.close_streams(record.task.id)
 
 
+def _clock_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def current_date_line(tz: str, *, now: datetime | None = None) -> str:
+    """``Today is YYYY-MM-DD (<tz>).`` — date only, in zone ``tz`` (GH-154)."""
+    moment = now if now is not None else _clock_now()
+    return f"Today is {moment.astimezone(load_zone(tz)).date().isoformat()} ({tz})."
+
+
 # RT-A-002: fixed, SDK-authored — never derived from an AgentError's own
 # .message or str(exc) (SI-2). The synthetic toolResult content for a
 # dangling assistant toolUse repaired by run_task_worker's own terminal
@@ -1159,6 +1170,9 @@ async def run_task_worker(
     capabilities: A2uiCapabilities,
     policies: LoopPolicies,
     extra_resolved_messages: Sequence[dict[str, Any]] | None = None,
+    inject_date: bool = False,
+    timezone_name: str = "UTC",
+    user_timezone: str | None = None,
 ) -> None:
     """Consume the loop until DoneEvent or interrupt-expiry/cancellation.
     ``record.messages`` must already contain the folded user turn.
@@ -1168,6 +1182,12 @@ async def run_task_worker(
     whose ``record.messages`` does not itself carry a prior run's
     ``__resolved__`` markers. See ``run_loop``'s own docstring."""
     task = record.task
+    if inject_date:
+        if record.date_line is None:
+            record.date_line = current_date_line(
+                valid_timezone(user_timezone) or timezone_name
+            )
+        system = f"{system}\n\n{record.date_line}"
     text_segments: list[str] = []
     # GH-87: set to True when a DeferredEvent is received; prevents the
     # `else: store.close_streams(task.id)` from closing the stream before
@@ -1373,10 +1393,13 @@ async def run_task_worker(
                     set_task_status(record, TaskState.COMPLETED, message, store=store)
                 else:
                     error_msg = event.error or "task failed"
+                    status_text = (
+                        f"{event.summary}\n\n{error_msg}" if event.summary else error_msg
+                    )
                     set_task_status(
                         record,
                         TaskState.FAILED,
-                        _agent_message(record, error_msg),
+                        _agent_message(record, status_text),
                         error=WireError(code=-32603, message=error_msg),
                         store=store,
                     )

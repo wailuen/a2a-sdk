@@ -383,6 +383,8 @@ class Agent:
                 azure_endpoint=s.azure_openai_endpoint,
                 azure_api_version=s.azure_api_version,
                 azure_deployment=s.azure_openai_deployment,
+                reasoning_effort=s.openai_reasoning_effort,
+                max_completion_tokens=s.openai_max_completion_tokens,
                 max_retries=s.openai_max_retries,
                 timeout=s.openai_timeout,
             )
@@ -617,6 +619,8 @@ class Agent:
             deadline_seconds=float(settings.task_deadline_seconds),
             token_budget=settings.task_token_budget,
             max_output_tokens=settings.max_output_tokens,
+            final_summary=settings.final_summary,
+            final_summary_max_tokens=settings.final_summary_max_tokens,
         )
 
         if self.artifacts_dir is not None:
@@ -822,6 +826,8 @@ class Agent:
         app.state.loop_policies = policies
         app.state.persona = persona_str
         app.state.system_prompt = system_prompt
+        app.state.inject_current_date = settings.inject_current_date
+        app.state.timezone = settings.timezone
         app.state.agent_card = build_agent_card(
             settings, registry, app.state.credential_fields,
             allowed_components=allowed_components,

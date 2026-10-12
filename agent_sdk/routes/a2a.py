@@ -429,7 +429,12 @@ async def _parse_send(request: Request) -> MessageSendParams | JSONResponse:
     return params
 
 
-def _start_worker(request: Request, record: TaskRecord, capabilities: A2uiCapabilities) -> None:
+def _start_worker(
+    request: Request,
+    record: TaskRecord,
+    capabilities: A2uiCapabilities,
+    user_timezone: str | None = None,
+) -> None:
     state = request.app.state
     # Bind any per-call forwarded credentials BEFORE create_task so the worker
     # snapshots them (contextvars copy at task creation). Bound to the original
@@ -447,6 +452,9 @@ def _start_worker(request: Request, record: TaskRecord, capabilities: A2uiCapabi
             system=state.system_prompt,
             capabilities=capabilities,
             policies=state.loop_policies,
+            inject_date=state.inject_current_date,
+            timezone_name=state.timezone,
+            user_timezone=user_timezone,
         )
     )
 
@@ -560,7 +568,10 @@ async def message_send(
             )
             return JSONResponse(bare_msg.wire())
     record = _create_task_record(request, params, identity)
-    _start_worker(request, record, _capabilities(params.message, request))
+    _start_worker(
+            request, record, _capabilities(params.message, request),
+            (params.message.metadata or {}).get("timezone"),
+        )
     # RT-005: the sole path on this route that can activate either
     # extension — echoed only now that _capabilities()/_start_worker have
     # actually run.
@@ -812,7 +823,10 @@ async def message_stream(
         slot = await _admit(request, identity, None)
         record = _create_task_record(request, params, identity)
         stream, abort = await _open_stream(request, record, identity, slot=slot)
-        _start_worker(request, record, _capabilities(params.message, request))
+        _start_worker(
+            request, record, _capabilities(params.message, request),
+            (params.message.metadata or {}).get("timezone"),
+        )
         # RT-005: the sole path on this route that can activate either
         # extension — echoed only now that _capabilities()/_start_worker
         # have actually run.

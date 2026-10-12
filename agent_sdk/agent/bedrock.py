@@ -71,13 +71,23 @@ import asyncio
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, Literal
 
 from ..common.redact import frame_locations
 from ..models.errors import AgentError, ErrorCategory
 from .model_client import ModelResponse, ModelToolCall
 
 logger = logging.getLogger(__name__)
+
+
+def _has_tool_blocks(messages: list[dict[str, Any]]) -> bool:
+    """Converse rejects a request carrying toolUse/toolResult blocks without toolConfig."""
+    return any(
+        isinstance(block, dict) and ("toolUse" in block or "toolResult" in block)
+        for msg in messages
+        if isinstance(msg, dict) and isinstance(msg.get("content"), list)
+        for block in msg["content"]
+    )
 
 _EXECUTOR_MAX_WORKERS = 8
 # botocore ClientError codes that mean "retry later", not a fatal upstream
@@ -288,6 +298,7 @@ class BedrockModelClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         max_tokens: int = 4096,
+        tool_choice: Literal["auto", "none"] = "auto",
     ) -> ModelResponse:
         request: dict[str, Any] = {
             "modelId": self._model_arn,
@@ -295,7 +306,7 @@ class BedrockModelClient:
             "messages": messages,
             "inferenceConfig": {"maxTokens": max_tokens},
         }
-        if tools:
+        if tools and (tool_choice == "auto" or _has_tool_blocks(messages)):
             request["toolConfig"] = {
                 "tools": [
                     {
@@ -401,7 +412,10 @@ class BedrockModelClient:
                 "model invocation failed",
                 source="bedrock",
             ) from exc
-        return self._parse(raw)
+        response = self._parse(raw)
+        if tool_choice == "none":
+            response.tool_calls = []
+        return response
 
     @staticmethod
     def _parse(raw: dict[str, Any]) -> ModelResponse:
