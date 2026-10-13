@@ -166,6 +166,14 @@ persona_text = _artifacts.render("system", today=today_iso, now_utc=..., ...)
   template uses — cheap because templates are already compiled.
 - Delete `src/agent/prompts.py` (or the inline template variable in `loop.py`).
 
+### Optional: MCP instructions (GH-157)
+
+`system.md` never reaches MCP client models. To send them agent rules, add
+`src/artifacts/mcp_instructions.md` (same variables as `system`; max 4000
+characters). `persona=` agents use `Agent(mcp_instructions="...")` instead;
+setting both is a build error. The text is shown to every MCP client model:
+put no secrets in it.
+
 ## Phase 4 — Verify no regression
 
 10. Run the agent's test suite:

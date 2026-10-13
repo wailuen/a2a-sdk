@@ -63,7 +63,7 @@ Locate by search, not hardcoded paths: the **SSE endpoint** (any path — common
 | `TEXT_MESSAGE_START` | `messageId`, `role` | `role` must be a valid value |
 | `TEXT_MESSAGE_CONTENT` | `messageId`, `delta` | Empty `delta` |
 | `TEXT_MESSAGE_END` | `messageId` | Mismatched `messageId` |
-| `TOOL_CALL_START` | `toolCallId`, `toolCallName` | Missing `parentMessageId` |
+| `TOOL_CALL_START` | `toolCallId`, `toolCallName` | Sending `parentMessageId: null` (optional: string or absent; omit when no parent) |
 | `TOOL_CALL_ARGS` | `toolCallId`, `delta` | |
 | `TOOL_CALL_END` | `toolCallId` | |
 | `TOOL_CALL_RESULT` | `messageId`, `toolCallId`, `content` | |
@@ -80,7 +80,7 @@ Locate by search, not hardcoded paths: the **SSE endpoint** (any path — common
 - **`CUSTOM` event `name` undocumented** — frontend consumers need to know what names to expect. Undocumented names are silently dropped. Agent should document (in the agent card or README) what CUSTOM names it emits and their `value` schema.
 - **Unbounded SSE queue** — if fan-out is used (`asyncio.Queue`), queues must be `asyncio.Queue(maxsize=N)` with sentinel overflow eviction. `grep "asyncio.Queue()" src/routes/` must return zero hits (only `asyncio.Queue(maxsize=N)` allowed).
 - **`STATE_DELTA` without prior snapshot** — clients cannot apply RFC 6902 patches to undefined state.
-- **Missing `parent_message_id` on tool calls** — tools emitted without linking to an assistant message lose context in the UI.
+- **`parentMessageId` is optional (string or absent)** — flag it only when a text message preceded the tool call in the same turn and the id is missing, or when it is sent as `null`. Tool-first and resume `TOOL_CALL_START` frames legitimately omit it.
 - **Interrupt flow incomplete** — `RUN_FINISHED` with `outcome.type="interrupt"` must carry non-empty `interrupts[]`; client must send `resume[]` in the next `RunAgentInput`.
 
 ### C5 — GenUI mode wiring (if applicable)

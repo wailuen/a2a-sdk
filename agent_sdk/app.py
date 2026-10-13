@@ -23,7 +23,7 @@ from typing import Any, AsyncIterator, Callable
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
 from .a2ui.translator import A2uiCapabilities
 from .agent.bedrock import BedrockModelClient, require_bearer_auth_botocore
@@ -60,6 +60,8 @@ _AZURITE_MARKERS = ("UseDevelopmentStorage=true", "devstoreaccount1", "127.0.0.1
 
 logger = logging.getLogger(__name__)
 
+_MCP_INSTRUCTIONS_MAX_CHARS = 4000
+
 
 def _is_azurite_emulator_connection_string(value: str) -> bool:
     return any(marker in value for marker in _AZURITE_MARKERS)
@@ -82,6 +84,7 @@ class Agent:
         persona: str | None = None,
         artifacts_dir: Path | None = None,
         artifact_vars: dict[str, Any] | None = None,
+        mcp_instructions: str | None = None,
         skills_dir: Path | None = None,
         exclude_from_catalog: list[str] | None = None,
         toolsets: list[ToolSet] | None = None,
@@ -99,6 +102,13 @@ class Agent:
             artifacts_dir: Directory containing Jinja2 artifact files
                 (``system.md``, …).  Mutually exclusive with ``persona``.
             artifact_vars: Extra variables rendered into artifact templates.
+            mcp_instructions: Text sent to every MCP client model in
+                ``initialize.instructions`` (GH-157), after the credential
+                note. For ``persona=`` agents; ``artifacts_dir=`` agents use
+                an ``mcp_instructions.md`` artifact instead, and setting both
+                raises ``ValueError`` at build. Rendered once, stripped, max
+                4000 characters. Shown to every MCP client model: put no
+                secrets in it.
             skills_dir: Directory of ``SKILL.md`` files added to the system
                 prompt's skill catalog.
             exclude_from_catalog: Names of skills (from ``skills_dir``) to
@@ -181,6 +191,7 @@ class Agent:
         self.persona = persona
         self.artifacts_dir = artifacts_dir
         self.artifact_vars = artifact_vars or {}
+        self.mcp_instructions = mcp_instructions
         self.skills_dir = skills_dir
         self.exclude_from_catalog = list(exclude_from_catalog or [])
         self.toolsets = list(toolsets or [])
@@ -625,14 +636,45 @@ class Agent:
 
         if self.artifacts_dir is not None:
             from .agent.artifacts import ArtifactLoader
-            persona_str = ArtifactLoader(self.artifacts_dir).render(
-                "system",
-                agent_name=settings.agent_name,
-                agent_version=settings.agent_version,
+            loader = ArtifactLoader(self.artifacts_dir)
+            render_vars = {
+                "agent_name": settings.agent_name,
+                "agent_version": settings.agent_version,
                 **self.artifact_vars,
-            )
+            }
+            persona_str = loader.render("system", **render_vars)
+            if "mcp_instructions" in loader.names:
+                if self.mcp_instructions is not None:
+                    raise ValueError(
+                        "mcp_instructions= and an mcp_instructions artifact "
+                        "are both set; use only one"
+                    )
+                mcp_instructions = loader.render("mcp_instructions", **render_vars)
+            else:
+                mcp_instructions = self.mcp_instructions or ""
         else:
             persona_str = self.persona  # type: ignore[assignment]
+            mcp_instructions = self.mcp_instructions or ""
+        mcp_instructions = mcp_instructions.strip()
+        secret_values = {
+            name: value.get_secret_value()
+            for name, value in [
+                *((n, getattr(settings, n, None)) for n in type(settings).model_fields),
+                *self.artifact_vars.items(),
+            ]
+            if isinstance(value, SecretStr)
+        }
+        for name, secret in secret_values.items():
+            if secret and secret in mcp_instructions:
+                raise ValueError(
+                    f"mcp_instructions contains the value of secret field {name!r}; "
+                    "remove it (the text is shown to every MCP client)"
+                )
+        if len(mcp_instructions) > _MCP_INSTRUCTIONS_MAX_CHARS:
+            raise ValueError(
+                f"mcp_instructions is {len(mcp_instructions)} characters; "
+                f"the limit is {_MCP_INSTRUCTIONS_MAX_CHARS}"
+            )
 
         system_prompt = persona_str.strip()
         catalog = skills.catalog_text(exclude=self.exclude_from_catalog)
@@ -803,6 +845,7 @@ class Agent:
         }
         app.state.task_store = task_store
         app.state.skills = skills
+        app.state.mcp_instructions = mcp_instructions
         app.state.model_client = model_client
         app.state.oauth = oauth_store
         app.state.idp_rp = None

@@ -252,14 +252,32 @@ async def test_control_chars_in_list_content_are_stripped(client, fake_model):
     assert types[-1] == "RUN_FINISHED"
 
 
-async def test_dict_shaped_content_is_coerced_and_sanitized(client, fake_model):
-    # RT-001: an unexpected content shape (e.g. a dict) is str()-coerced by
-    # _fold_history and folded into the model input; control chars in it are
-    # stripped there. _validate must NOT hard-reject it — rejecting content
-    # bricks the session on replay. The run proceeds normally.
-    fake_model.script(reply("ok"))
+async def test_dict_shaped_user_content_is_rejected_not_coerced(client, fake_model):
+    # GH-159 (supersedes the old RT-001 "str()-coerce any shape" contract): a
+    # user message whose content is a bare object, not a string or list of
+    # parts, is rejected with RUN_ERROR. str()-coercing it would hand the
+    # whole object — binary payload included — to the model as text. The
+    # bundled console (chat.js) always sends user content as a list of text
+    # parts, so this can never brick a replayed session.
     body = run_body()
     body["messages"] = [{"id": "m1", "role": "user", "content": {"text": "bad\x07control"}}]
+    frames = await run(client, body)
+    types = [f["type"] for f in frames]
+    assert types[-1] == "RUN_ERROR"
+    assert "RUN_FINISHED" not in types
+
+
+async def test_dict_shaped_assistant_content_is_dropped_not_errored(client, fake_model):
+    # A replayed assistant turn in an unexpected shape must not brick the
+    # session (RT-001), and must not be str()-ed into model input either: it
+    # folds to empty and is skipped as a blank assistant turn.
+    fake_model.script(reply("ok"))
+    body = run_body("again")
+    body["messages"] = [
+        {"id": "m1", "role": "user", "content": "hello"},
+        {"id": "a1", "role": "assistant", "content": {"text": "bad\x07control"}},
+        {"id": "m2", "role": "user", "content": "again"},
+    ]
     frames = await run(client, body)
     types = [f["type"] for f in frames]
     assert "RUN_ERROR" not in types

@@ -33,7 +33,9 @@ Collect, then echo back a summary for confirmation before touching disk:
 1. **Name** — kebab-case (`acme-research`). Derive `{{AGENT_MODULE}}` = snake_case
    (`acme_research`); reject names that aren't valid once snake-cased.
 2. **Domain / persona** — one or two sentences: what the agent does and its voice.
-   Becomes `src/persona.py`'s `PERSONA`.
+   Becomes `src/persona.py`'s `PERSONA`. MCP client models do not see it; to give
+   them rules, pass `Agent(mcp_instructions="...")` (max 4000 chars, no secrets,
+   shown to every MCP client model; GH-157).
 3. **Upstream sources** — for each external API the agent will call: a short name
    (snake_case → `source_name`), its base host(s) (→ `allowed_hosts`), and its auth
    shape (bearer token / api-key header / OAuth client-credentials / none). Each

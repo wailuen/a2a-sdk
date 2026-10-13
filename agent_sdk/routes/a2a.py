@@ -364,6 +364,20 @@ def _message_text(message: Message) -> str:
     return "\n".join(p.text for p in message.parts if isinstance(p, TextPart))
 
 
+def _unsupported_input_error(message: Message) -> JSONResponse | None:
+    """GH-159: input is text only. Reject (never drop) any non-TextPart and
+    any message with no text. Names the part kind only, never content (SI-2)."""
+    kinds = sorted({p.kind for p in message.parts if not isinstance(p, TextPart)})
+    if kinds:
+        return a2a_error(
+            A2A_CONTENT_TYPE_NOT_SUPPORTED,
+            "unsupported message part kind: " + ", ".join(kinds) + "; only text parts are accepted",
+        )
+    if not _message_text(message).strip():
+        return a2a_invalid_params("message must contain non-empty text")
+    return None
+
+
 def _capabilities(message: Message, request: Request) -> A2uiCapabilities:
     # Gate A2UI on the opt-in header — clients that never sent X-A2A-Extensions
     # containing A2UI_EXTENSION_URI must not receive A2UI DataParts. The
@@ -426,6 +440,8 @@ async def _parse_send(request: Request) -> MessageSendParams | JSONResponse:
         )
         detail = f"invalid message params (check: {fields})" if fields else "invalid message params"
         return a2a_invalid_params(detail)
+    if (err := _unsupported_input_error(params.message)) is not None:
+        return err
     return params
 
 
@@ -477,7 +493,7 @@ def _create_task_record(request: Request, params: MessageSendParams, identity: I
     # one call site, inside agent/runner.py::repair_dangling_tool_use).
     prior = request.app.state.task_store.context_messages(task.context_id, identity)
     record.messages.extend(bridge_context_messages(prior))
-    record.messages.append({"role": "user", "content": [{"text": _message_text(msg) or " "}]})
+    record.messages.append({"role": "user", "content": [{"text": _message_text(msg)}]})
     return record
 
 

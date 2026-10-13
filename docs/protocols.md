@@ -26,6 +26,17 @@ access is
 **identity-bound**: someone else's task id returns 404 `-32001` —
 existence is never leaked (admin keys bypass).
 
+Input is text only (`defaultInputModes: ["text/plain"]`). A2A rejects any
+`FilePart`/`DataPart` with `-32005` (HTTP 415) and a message with no text with
+`-32602`, before a task is created; AG-UI rejects non-text user content parts
+in the current turn (the user messages after the last assistant message) with
+`RUN_ERROR` (maintainer ruling on GH-159).
+User `content` must be a string or a list of `text` parts; any other shape (for
+example a bare part object) is also rejected with `RUN_ERROR`, never stringified
+into model input. New input is never silently dropped. Earlier history is not re-checked: a rejected
+message the client keeps in its history does not lock the thread, and its non-text
+parts are left out of the model input.
+
 Supported output modes: `text`, `text/plain`, `application/json`,
 `application/a2ui+json`. `X-A2A-Extensions` is echoed with only the
 activated subset (the A2UI extension URI).
@@ -100,6 +111,11 @@ never `RUN_ERROR`.
   metadata. Discovery: both PRM variants + AS metadata, S256 PKCE only.
 - `tools/list` exposes **Tier 1 tools only**; `emits` becomes
   `outputSchema` and results carry `structuredContent`.
+- `initialize.instructions` carries the credential note, then your own text
+  from `Agent(mcp_instructions=...)` (persona agents) or
+  `artifacts/mcp_instructions.md` (artifact agents; same variables as
+  `system`). Max 4000 characters; setting both is a build error. Every MCP
+  client model sees this text, so it must contain no secrets.
 - Sessions via `Mcp-Session-Id`; CORS preflight is an exact-origin table.
 - **Concurrent-stream cap.** `GET /mcp` and the legacy `GET /mcp/sse` both
   hold an indefinite `text/event-stream` and share one admission budget —

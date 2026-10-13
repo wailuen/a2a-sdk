@@ -351,7 +351,11 @@ async def test_inbound_data_part_bare_array_rejected_as_invalid_params(client):
     validation and is rejected as -32602 (Invalid Params) rather than
     silently coerced. Pins the CURRENT behavior; if inbound A2UI actions
     are ever supported, they must be parsed through a bare-array-tolerant
-    path, not this tightened DataPart model (see CHANGELOG 0.5.44)."""
+    path, not this tightened DataPart model (see CHANGELOG 0.5.44).
+
+    GH-159 ordering: model validation runs BEFORE the text-only part check, so
+    a malformed bare-array DataPart stays -32602; a well-formed object
+    DataPart is rejected afterwards with -32005 (tests/test_gh159_*)."""
     r = await client.post(
         "/v1/message:send",
         json={

@@ -539,3 +539,29 @@ No runtime change in either state: `ContentModel.metadata` and wire output are u
 
 Registry note (C-021 StandardProfileV1Contract): C-021 must follow the state this entry
 records (v1.1: no typed `TimeSeriesChart.metadata` row; `metadata` is cross-cutting free-form).
+
+## Round 12 — AG-UI `parentMessageId` omitted when absent (GH-158, 2026-10-13)
+
+**SIGNED OFF** (maintainer wailuen, 2026-10-13, recorded in the GH-158 ruling comment).
+
+Checkable reference: https://github.com/wailuen/a2a-sdk/issues/158#issuecomment-6128073645
+
+This ruling **supersedes Round 2**'s "Always emit (as null)" for `parentMessageId`. `TOOL_CALL_START` omits
+`parentMessageId` when there is no parent message id; AG-UI optional event fields are never sent as `null`
+(the reference encoder uses `exclude_none=True`). `CUSTOM.value` payloads are free-form and exempt.
+
+| Scope | Sev | Decision (applied 2026-10-13) |
+|---|---|---|
+| AG-UI `TOOL_CALL_START` | HIGH | Both builders (normal and resume-synthetic) in `ag_ui.py` omit the key when `last_message_id` is None. The `ag-ui-check` skill (`.claude` and `harness`) no longer treats a missing optional `parentMessageId` as a defect. Tests: `tests/test_gh158_agui_no_null_fields.py`. |
+
+## Round 13 — GH-159 AG-UI rejection scope (2026-10-13)
+
+The earlier narrowing (reject only after the last assistant message, drop earlier non-text parts) was an unapproved change to the maintainer ruling and is REVERTED. Implemented as written in the GH-159 maintainer ruling (issue comment 6128074134, https://github.com/wailuen/a2a-sdk/issues/159): non-text user content parts are rejected before a run starts, no silent drop, in every user message. Resume runs are skipped. Known consequence: a client that keeps a rejected message in its history gets `RUN_ERROR` on every later run until it removes that message. Earlier claim that this "cannot brick a thread" was false and is withdrawn. Tests: `tests/test_gh159_reject_non_text_parts.py`.
+
+## Round 14 — GH-159 AG-UI rejection scope, maintainer refinement (2026-10-13)
+
+**SIGNED OFF** (maintainer wailuen, 2026-10-13).
+
+Checkable reference: https://github.com/wailuen/a2a-sdk/issues/159#issuecomment-6135432947
+
+Supersedes the AG-UI scope in Round 13. AG-UI checks for non-text content parts only in the current turn (the user messages after the last assistant message). Earlier history is not re-checked, because those parts were already rejected on their own turn; their non-text parts are dropped from model input. A client that keeps a rejected message in its history is therefore not locked out of the thread. A2A rule unchanged. Tests: `tests/test_gh159_reject_non_text_parts.py` (`test_agui_non_text_in_earlier_history_is_skipped_not_rejected`, `test_agui_non_text_in_current_turn_after_assistant_rejected`).

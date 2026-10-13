@@ -640,7 +640,7 @@ def test_content_model_plain_text_unaffected_when_metadata_unset():
     fp = FundPerformance(irr=0.18)
     assert fp.to_plain_text() == "IRR=18.0%"
     docs = DocumentList(documents=[DocumentItem(id="1", name="Q4 Report")])
-    assert docs.to_plain_text() == "1 document(s)\n  Q4 Report"
+    assert docs.to_plain_text() == "1 document(s)\n  Q4 Report (id: 1)"
 
 
 # ── RT-A06: metadata reaching to_plain_text() is sanitized and bounded ──────
@@ -1065,3 +1065,255 @@ def test_market_briefing_title_ansi_escape_stripped():
     briefing = MarketBriefing(title="Brief\x1b[2J", as_of="2026-01-01")
     text = briefing.to_plain_text()
     assert "\x1b" not in text
+
+
+# ── GH-156: identifiers needed for follow-up calls reach the text fallback ───
+
+_NAME_EMAIL = NameEmail(name="N", email="n@x.com")
+
+
+def _id_sample_instances() -> dict[str, ContentModel]:
+    return {
+        "EntityList": EntityList(
+            entity_type="company", items=[EntityItem(id="ent-59199-40", name="Databricks")]
+        ),
+        "EmailList": EmailList(
+            messages=[
+                EmailMessage(
+                    id="msg-id-1",
+                    conversation_id="conv-id-1",
+                    subject="S",
+                    preview="",
+                    from_=_NAME_EMAIL,
+                    to_recipients=[_NAME_EMAIL],
+                    received_at="2026-01-01T00:00:00Z",
+                    is_read=True,
+                    web_link="https://x.test",
+                )
+            ],
+            total_count=1,
+            has_more=False,
+        ),
+        "CalendarEvents": CalendarEvents(
+            events=[
+                CalendarEvent(
+                    id="evt-id-1",
+                    subject="S",
+                    start="2026-01-01T00:00:00Z",
+                    end="2026-01-01T01:00:00Z",
+                    organizer=_NAME_EMAIL,
+                    web_link="https://x.test",
+                )
+            ],
+            date_range=DateRange(start="2026-01-01", end="2026-01-02"),
+            total_count=1,
+            has_more=False,
+        ),
+        "UserProfile": UserProfile(
+            id="usr-id-1",
+            display_name="D",
+            email="d@x.com",
+            manager={"id": "mgr-id-1", "display_name": "M", "email": "m@x.com"},
+        ),
+        "UserList": UserList(
+            users=[UserSummary(id="usr-id-2", display_name="D", email="d@x.com")],
+            total_count=1,
+            has_more=False,
+        ),
+        "DocumentList": DocumentList(documents=[DocumentItem(id="doc-id-1", name="Q4")]),
+        "FundPerformance": FundPerformance(irr=0.1, pb_id="pb-id-1"),
+    }
+
+
+def _collect_id_values(obj: Any) -> list[str]:
+    """Walk model fields (LRN-241: derived from the model, not a hand list)
+    and return every non-empty string value of an ``id`` / ``*_id`` field."""
+    found: list[str] = []
+    if isinstance(obj, BaseModel):
+        for name in type(obj).model_fields:
+            value = getattr(obj, name)
+            if (name == "id" or name.endswith("_id")) and isinstance(value, str) and value:
+                found.append(value)
+            else:
+                found.extend(_collect_id_values(value))
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            found.extend(_collect_id_values(v))
+    return found
+
+
+# Documented exemptions: "Type" (whole type) or "Type.field.path" (one id
+# field) -> reason that id is deliberately not in the text fallback.
+_ID_TEXT_EXEMPT: dict[str, str] = {}
+
+
+def _is_id_field(name: str) -> bool:
+    return name == "id" or name.endswith("_id")
+
+
+def _model_types(annotation: Any) -> list[type[BaseModel]]:
+    import typing
+
+    out: list[type[BaseModel]] = []
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        out.append(annotation)
+    for arg in typing.get_args(annotation):
+        out.extend(_model_types(arg))
+    return out
+
+
+def _id_field_paths(
+    cls: type[BaseModel], _ancestors: tuple[type, ...] = ()
+) -> list[tuple[str, ...]]:
+    """Every ``id`` / ``*_id`` field path the SCHEMA declares (LRN-241: derived
+    from ``model_fields``, recursing through nested and list-item models), not
+    just the ids a hand-built sample happens to populate. Cycle guard is per
+    path (ancestors), so a model reused under two fields yields both paths."""
+    if cls in _ancestors:
+        return []
+    paths: list[tuple[str, ...]] = []
+    for name, info in cls.model_fields.items():
+        if _is_id_field(name):
+            paths.append((name,))
+        for sub in _model_types(info.annotation):
+            for tail in _id_field_paths(sub, _ancestors + (cls,)):
+                paths.append((name, *tail))
+    return paths
+
+
+def _values_at_path(obj: Any, path: tuple[str, ...]) -> list[Any]:
+    """Resolve a field path on an instance, fanning out over lists/dicts."""
+    if isinstance(obj, (list, tuple)):
+        return [v for item in obj for v in _values_at_path(item, path)]
+    if isinstance(obj, dict):
+        return [v for item in obj.values() for v in _values_at_path(item, path)]
+    if not path:
+        return [obj]
+    if not isinstance(obj, BaseModel):
+        return []
+    return _values_at_path(getattr(obj, path[0]), path[1:])
+
+
+def test_id_field_paths_sees_optional_and_nested_fields():
+    """Guard the guard: the path walk must report an OPTIONAL id field and a
+    list-item id field even when a sample leaves them unset (RT-001)."""
+
+    class _Item(BaseModel):
+        id: str
+        thread_id: str | None = None
+
+    class _Card(BaseModel):
+        owner_id: str | None = None
+        items: list[_Item] = []
+
+    assert sorted(_id_field_paths(_Card)) == [
+        ("items", "id"),
+        ("items", "thread_id"),
+        ("owner_id",),
+    ]
+    assert _values_at_path(_Card(items=[_Item(id="a")]), ("items", "thread_id")) == [None]
+    assert _values_at_path(_Card(), ("items", "id")) == []
+
+
+def test_entity_list_text_carries_id_in_documented_shape():
+    el = EntityList(entity_type="company", items=[EntityItem(id="59199-40", name="Databricks")])
+    assert "  - Databricks (59199-40)" in el.to_plain_text()
+
+
+@pytest.mark.parametrize("name", sorted(_id_sample_instances()))
+def test_plain_text_carries_every_id_field(name):
+    card = _id_sample_instances()[name]
+    ids = _collect_id_values(card)
+    assert ids
+    text = card.to_plain_text()
+    for value in ids:
+        assert value in text, f"{name}: id {value!r} missing from text fallback"
+
+
+def test_email_list_text_omits_conversation_id_when_absent():
+    msg = _id_sample_instances()["EmailList"].messages[0].model_copy(  # type: ignore[attr-defined]
+        update={"conversation_id": None}
+    )
+    text = EmailList(messages=[msg], total_count=1, has_more=False).to_plain_text()
+    assert "msg-id-1" in text and "conversation" not in text
+
+
+def test_registry_wide_every_id_field_reaches_text():
+    """Every registered SDK content type whose model (or nested items) has an
+    ``id`` / ``*_id`` field must have a sample here (or a documented
+    exemption) and render every such id in its text."""
+    samples = _id_sample_instances()
+    for name, cls in content_types_module.registered_content_types().items():
+        if not cls.__module__.startswith("agent_sdk.models.content_types"):
+            continue
+        paths = _id_field_paths(cls)
+        if not paths:
+            continue
+        key = cls.__name__
+        if key in _ID_TEXT_EXEMPT:
+            continue
+        assert key in samples, f"{key} has id fields but no sample/exemption (GH-156)"
+        sample = samples[key]
+        text = sample.to_plain_text()
+        for path in paths:
+            dotted = ".".join(path)
+            if f"{key}.{dotted}" in _ID_TEXT_EXEMPT:
+                continue
+            values = _values_at_path(sample, path)
+            # Coverage: the sample must POPULATE every schema id field, or an
+            # optional id added later (left None) would pass unchecked.
+            assert values, f"{key}.{dotted}: sample has no instance of this id field"
+            for value in values:
+                assert isinstance(value, str) and value, (
+                    f"{key}.{dotted}: sample leaves this id field unset; set it in "
+                    "_id_sample_instances() or add an _ID_TEXT_EXEMPT entry"
+                )
+                assert value in text, f"{key}.{dotted}: id {value!r} missing from text"
+
+
+def test_fund_performance_pb_id_already_in_text():
+    assert "pb-9" in FundPerformance(irr=0.1, pb_id="pb-9").to_plain_text()
+
+
+def test_ids_are_sanitized_and_capped_in_text():
+    el = EntityList(
+        entity_type="c",
+        items=[EntityItem(id="a\x1b[31m | b" + "x" * 1000, name="N")],
+    )
+    text = el.to_plain_text()
+    assert "\x1b" not in text
+    assert "x" * 300 not in text
+
+
+_HOSTILE_ID = "a\x1b[31m|(b) c\n" + "x" * 1000
+
+
+def _with_hostile_ids(obj: Any) -> Any:
+    if isinstance(obj, BaseModel):
+        update: dict[str, Any] = {}
+        for name in type(obj).model_fields:
+            value = getattr(obj, name)
+            if (name == "id" or name.endswith("_id")) and isinstance(value, str) and value:
+                update[name] = _HOSTILE_ID
+            else:
+                update[name] = _with_hostile_ids(value)
+        return obj.model_copy(update=update)
+    if isinstance(obj, list):
+        return [_with_hostile_ids(v) for v in obj]
+    return obj
+
+
+@pytest.mark.parametrize("name", sorted(_id_sample_instances()))
+def test_every_id_site_is_sanitized_and_capped(name):
+    card = _with_hostile_ids(_id_sample_instances()[name])
+    assert _collect_id_values(card), f"{name}: no id fields were made hostile"
+    text = card.to_plain_text()
+    assert "\x1b" not in text
+    assert "x" * 300 not in text
+    for raw in ("|(b)", "(b) c", "c\n"):
+        assert raw not in text, f"{name}: raw id fragment {raw!r} leaked into text"
+    assert _safe_id_for_test(_HOSTILE_ID) in text
+
+
+def _safe_id_for_test(value: str) -> str:
+    return content_types_module._safe_id(value)

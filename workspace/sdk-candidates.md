@@ -1,75 +1,105 @@
-# SDK issue candidates — w045 (2026-10-11)
+# SDK issue candidates — w046 (2026-10-13)
 
 Run `/sdk-issue-scan` to review and file as GitHub issues on `wailuen/a2a-sdk`.
 
-## Candidate 1: GH-155 token-budget exit: the 'at most final_summary_max_tokens beyond the budget' allowance is enforced on summary OUTPUT only; the full-transcript input re-send is not counted, so a capped run can overshoot token_budget by a whole extra context call. The accounting change (total spend -> output-only) was made by the wave without a recorded maintainer ratification on GH-155, and docs/deployment.md, DESIGN.md:469 and CHANGELOG describe it inconsistently. Merges RT-001 duplicates (input-not-counted / unratified-AC-change variants).
+## Candidate 1: GH-156 _safe_id routes ids through _sanitize_cell (safe_cell_text), which rewrites '=', ':', ',' to fullwidth forms, so Graph base64 ids and URN ids in EmailList/CalendarEvents MCP text fallback are corrupted and cannot be copied back into tool calls.
 - Severity: high
-- Component: sdk/loop
-- File: agent_sdk/agent/loop.py
-- Rationale: SDK loop cost guard (DESIGN.md section 8). Current working tree _summary_max_tokens (loop.py:432) is output-only and its docstring claims a maintainer ruling; needs a GH-155 comment URL ratifying it or a revert to the AC as written. Earlier rounds flipped between input-charging (which made the feature dead) and output-only, so this is a genuine spec decision for the maintainer, not a code fix the wave can sign off.
+- Component: protocol/mcp
+- File: agent_sdk/models/content_types.py
+- Rationale: SDK content_types model rendering used by MCP text fallback; fix needs an id-preserving C-007 helper in agent_sdk/common/redact.py.
 
-## Candidate 2: GH-155 budget-exit summary was unreachable with default LoopPolicies when the transcript re-send was charged against the 1024-token allowance (always yielded the fixed notice); tests only passed with hand-tuned final_summary_max_tokens/max_output_tokens, and final_summary_max_tokens had no settings/env field despite docs telling operators to raise it. Merges the 'never fires by default' RT-001 duplicates.
+## Candidate 2: GH-158 fix only changed the table row; the conformance-traps list (line 83) in both .claude and harness copies still flags missing parent_message_id on tool calls as a defect, which will flag the SDK's new wire shape.
 - Severity: high
-- Component: sdk/loop
-- File: agent_sdk/agent/loop.py
-- Rationale: SDK loop behaviour and BaseAgentSettings wiring. Current tree appears to have addressed it (output-only cap; config.py:230 and app.py:623 now wire final_summary_max_tokens), but a default-policy end-to-end test proving a budget-exit summary fires should be confirmed. Resolution is coupled to the ratification question in the previous candidate.
+- Component: harness/skill
+- File: .claude/skills/ag-ui-check/SKILL.md
+- Rationale: Harness skill content shipped with the SDK.
 
-## Candidate 3: Max-turns exit (loop.py ~1769-1790) makes the new GH-155 summary call without re-checking the token budget or the task deadline; a run already past budget or deadline makes one more unbounded full-transcript call and reports 'max turns exceeded' instead of 'task deadline exceeded'.
+## Candidate 3: Template mirrors of ag-ui-check, add-artifact and new-agent skills were not updated for GH-157/GH-158; template repo has no pending commit, so scaffolded agents keep the stale rule and never learn about mcp_instructions.
 - Severity: high
-- Component: sdk/loop
-- File: agent_sdk/agent/loop.py
-- Rationale: Adding a model call to an exit path that previously made none bypasses SDK spend/time guards; affects every agent using run_loop.
+- Component: harness/template
+- File: template/.claude/skills/ag-ui-check/SKILL.md
+- Rationale: Template scaffold is SDK-owned; AC requires all copies identical.
 
-## Candidate 4: _final_summary used a bare 'except Exception:' with no log, silently swallowing summary-call failures, including TypeError from third-party ModelClient implementations that do not accept the new required 'tool_choice' keyword. CHANGELOG does not tell custom ModelClient authors they must add the parameter.
+## Candidate 4: GH-156 sanitization tests cover only EntityList; other renderers (EmailList, CalendarEvents, UserList, UserProfile, DocumentList, FundPerformance) only check id presence, and the renderer-wide guard only greps for _sanitize_cell, so a raw {x.id} regression would pass (LRN-152).
 - Severity: high
-- Component: sdk/loop
-- File: agent_sdk/agent/loop.py
-- Rationale: ModelClient is a public SDK extension seam. Current tree binds the exception (loop.py:470); verify it logs type + frame_locations without str(exc) and that the CHANGELOG custom-client note was added.
+- Component: protocol/mcp
+- File: tests/test_content_types.py
+- Rationale: SDK test coverage for content_types renderers that feed MCP/A2A text.
 
-## Candidate 5: OpenAI/Azure summary call (tool_choice='none') cap handling went through several broken iterations: (a) a small max_completion_tokens on gpt-5 reasoning models is consumed by reasoning and returns empty output, contradicting the module's own docstring; (b) a fix forced reasoning_effort='minimal' even when the operator set none, breaking gpt-4o/o-series/compatible endpoints with HTTP 400; (c) a later fix added +25,000 headroom, exceeding gpt-4o's 16,384 limit and uncapping visible output, with max_completion_tokens/reasoning_effort not wired from settings. Every failure is masked by the summary fallback to the fixed notice.
-- Severity: high
-- Component: sdk/loop
-- File: agent_sdk/agent/openai_client.py
-- Rationale: Built-in SDK model client. Current tree (openai_client.py:126-139) reverts to min(max_tokens, configured cap) with no invented reasoning_effort and logs an empty-text warning, so (b) and (c) look fixed; (a) remains a known trade-off on reasoning models that should be documented in DESIGN section 8 and covered by a finish_reason='length' test.
-
-## Candidate 6: GH-155 changed public surface outside the todo scope without CHANGELOG entries: new DoneEvent.summary field (events.py), app.py final_summary wiring, and FakeModelClient.calls gaining a 'tool_choice' key (testing/fake_model.py).
-- Severity: high
-- Component: sdk/loop
-- File: agent_sdk/agent/events.py
-- Rationale: DoneEvent is a public loop event type read by custom translators; scope/changelog drift on SDK public API (LRN-202).
-
-## Candidate 7: GH-154 adds public field TaskRecord.date_line (TaskRecord is in agent_sdk.tasks.__all__) without listing store.py in the todo scope, without a CHANGELOG Added line, and without a DESIGN.md section 5 note on whether durable TaskStore subclasses must persist it.
-- Severity: high
-- Component: sdk/loop
-- File: agent_sdk/tasks/store.py
-- Rationale: Public SDK task-store surface; durable store implementers need to know whether a resumed task keeps its original date (LRN-202).
-
-## Candidate 8: _final_summary adds two new bridge_trailing_user call sites (final_summary=False path and notice fallback) but LRN-144's Check, which pins the allowed callers, was not amended, turning it into a permanently failing audit (LRN-249).
-- Severity: high
-- Component: sdk/loop
-- File: agent_sdk/agent/loop.py
-- Rationale: SDK transcript-integrity invariant and its learning record; harness audits rely on the pinned call-site list.
-
-## Candidate 9: New default-on timezone validator calls ZoneInfo('UTC') on every BaseAgentSettings build even when AGENT_SDK_INJECT_CURRENT_DATE=false; without the tzdata package, hosts with no system zone files (Windows, Alpine, distroless) fail to boot with an error that wrongly blames the operator's zone name.
-- Severity: high
-- Component: sdk/build
-- File: agent_sdk/config.py
-- Rationale: SDK packaging/boot. Current pyproject.toml now lists tzdata>=2024.1, so the main fix landed; confirm a UTC fast path or skip-when-disabled and a reset_tzpath([]) boot test.
-
-## Candidate 10: SI-2 no-leak coverage for hostile timezone values is missing or vacuous: the original tests never used a control-char/newline marker or inspected logs; the later test_hostile_zone_never_leaks asserts absence on root caplog after build_app() sets agent_sdk.propagate=False, so when run in isolation caplog captures nothing and the negative assertion passes trivially.
-- Severity: high
-- Component: security
-- File: tests/test_gh154_current_date.py
-- Rationale: SDK security invariant SI-2 (untrusted input must not reach logs/prompt). Fix: use sdk_caplog or a positive control, and cover both A2A message.metadata.timezone and AG-UI forwardedProps.timezone (LRN-106/LRN-128).
-
-## Candidate 11: _message_text (a2a.py:363-364) keeps only TextPart text; a Message with only FilePart/DataPart parts (e.g. an A2UI userAction DataPart) is accepted and the model is fed a placeholder ' ', silently dropping the parts instead of processing them or returning -32005 ContentTypeNotSupported (HTTP 415).
-- Severity: high
-- Component: protocol/a2a
-- File: agent_sdk/routes/a2a.py
-- Rationale: A2A v0.3.0 protocol route conformance in the SDK; affects every agent and the A2UI-over-A2A action path.
-
-## Candidate 12: TOOL_CALL_START frames (ag_ui.py:238 and :273) always include parentMessageId, emitting "parentMessageId":null on tool-first turns and resume runs; the AG-UI reference encoder uses exclude_none, so strict schema-validating clients can reject the event or abort the stream.
+## Candidate 5: _validate rejected non-text parts in any user message of replayed history, so one rejected binary turn bricks every later turn and blocks resume; also scans beyond the 50-message fold window.
 - Severity: high
 - Component: protocol/ag-ui
 - File: agent_sdk/routes/ag_ui.py
-- Rationale: AG-UI wire-format conformance in the SDK protocol route; the in-code comment calling it deliberate contradicts the published schema.
+- Rationale: SDK AG-UI protocol route behavior.
+
+## Candidate 6: Client-supplied content[i].type is echoed into RUN_ERROR.message after only isidentifier(); unbounded length (200 KB probe) and no C-007 safe_error_text or allowlist.
+- Severity: high
+- Component: security
+- File: agent_sdk/routes/ag_ui.py
+- Rationale: SDK route echoes untrusted input into wire error text (SI-2).
+
+## Candidate 7: _validate skips GH-159 rejection when body['resume'] is merely truthy, but the route treats resume only as a non-empty list; resume=true/'x'/{} bypasses rejection and binary parts are silently dropped with RUN_FINISHED.
+- Severity: high
+- Component: protocol/ag-ui
+- File: agent_sdk/routes/ag_ui.py
+- Rationale: SDK AG-UI route validation bypass.
+
+## Candidate 8: AG-UI rejection checks only the newest user message; non-text parts in other current-turn user messages are silently dropped, narrowing the GH-159 'no silent drop' ruling without record; CHANGELOG overstates the fix.
+- Severity: high
+- Component: protocol/ag-ui
+- File: agent_sdk/routes/ag_ui.py
+- Rationale: SDK AG-UI route conformance to maintainer ruling.
+
+## Candidate 9: GH-157 mcp_instructions lacks the SI-6 build-time secret check (or a recorded docs-only decision) and the SI-2 test that unauthenticated initialize gets no instructions.
+- Severity: high
+- Component: protocol/mcp
+- File: agent_sdk/app.py
+- Rationale: SDK app build path for MCP initialize instructions; security annotations unmet.
+
+## Candidate 10: GH-158 (parentMessageId key removal) and GH-159 (new 415/-32602 rejections) wire changes are filed under Fixed with inline 'Behavior change' instead of Breaking changes with Migration callouts and spec citations, forfeiting the DESIGN.md §4.0 conformance exemption.
+- Severity: high
+- Component: sdk/build
+- File: CHANGELOG.md
+- Rationale: SDK release changelog governance.
+
+## Candidate 11: New C-007 helper safe_id_text/_ID_NEUTRALISE and the FundPerformance.pb_id rendering change are not declared in any todo Creates/Modifies or the CHANGELOG, so the wave review scope excluded redact.py and related files (LRN-202).
+- Severity: high
+- Component: security
+- File: agent_sdk/common/redact.py
+- Rationale: SDK security helper and scope tracking.
+
+## Candidate 12: AG-UI GH-159 narrowing (reject only after last assistant message) is recorded in REVIEWS.md Round 13 as pending ratification with no maintainer reference; its 'cannot brick a thread' claim is false since a kept rejected message fails every later run. Must not release unapproved.
+- Severity: high
+- Component: protocol/ag-ui
+- File: agent_sdk/routes/ag_ui.py
+- Rationale: SDK protocol route diverges from maintainer ruling; release blocker.
+
+## Candidate 13: harness/skills/new-agent/SKILL.md differs from template/.claude/skills/new-agent/SKILL.md (uv vs pip, several hunks), failing the GH-157 'all copies identical' AC and LRN-208.
+- Severity: high
+- Component: harness/template
+- File: harness/skills/new-agent/SKILL.md
+- Rationale: Harness skill / template mirror drift.
+
+## Candidate 14: test_skills_have_no_stale_parent_message_id_trap uses 'if p.exists()', so an absent template mirror passes silently (LRN-157); misplaced in GH-156 file and never checks copies are identical.
+- Severity: high
+- Component: harness/skill
+- File: tests/test_gh156_mcp_text_ids.py
+- Rationale: SDK test guarding harness skill copies.
+
+## Candidate 15: Registry-wide GH-156 meta-test only collects ids the hand-built sample populates; a new optional id field left None passes unchecked (LRN-241).
+- Severity: high
+- Component: protocol/mcp
+- File: tests/test_content_types.py
+- Rationale: SDK content_types test coverage.
+
+## Candidate 16: GH-156 AC requires MCP tools/call content[0].text checks per model, but only EntityList and DocumentList are tested; EmailList, CalendarEvents, UserList, UserProfile lack MCP-level tests.
+- Severity: high
+- Component: protocol/mcp
+- File: tests/test_gh156_mcp_text_ids.py
+- Rationale: SDK MCP route test coverage gap against AC.
+
+## Candidate 17: Dict-shaped user content ({type:'binary',data:...}) skips _validate's list check and _fold_history str()s the whole dict, including base64 data, into model input, bypassing GH-159 rejection.
+- Severity: high
+- Component: protocol/ag-ui
+- File: agent_sdk/routes/ag_ui.py
+- Rationale: SDK AG-UI route validation bypass; unmet AC.

@@ -176,19 +176,28 @@ def test_validate_coerces_non_string_text(bad_text: Any) -> None:
 @pytest.mark.parametrize(
     "content",
     [
+        "bad\x07control",                              # plain string
         [{"type": "text", "text": "bad\x07control"}],  # multimodal list part
-        {"text": "bad\x07control"},                     # dict shape → str()-coerced
-        42,
-        False,
     ],
 )
 def test_validate_never_hard_rejects_content(content: Any) -> None:
-    """_validate rejects only the structural shape of `messages`, never
-    content. Hard-rejecting a control char (or an odd content shape) would let
-    one char anywhere in the replayed history permanently brick the AG-UI
-    session on the next turn — content is sanitized by _fold_history instead."""
+    """_validate never rejects a control char inside well-shaped content.
+    Hard-rejecting one would let a single char anywhere in the replayed
+    history permanently brick the AG-UI session on the next turn — content is
+    sanitized by _fold_history instead."""
     body = {"messages": [{"role": "user", "content": content}]}
     assert _validate(body) is None
+
+
+@pytest.mark.parametrize("content", [{"text": "bad\x07control"}, 42, False])
+def test_validate_rejects_unsupported_user_content_shape(content: Any) -> None:
+    """GH-159 / RT-001 (round 5): user content that is neither a string nor a
+    list of parts is rejected. The old contract str()-coerced it into model
+    input, which let a bare `{"type": "binary", ...}` object bypass the
+    non-text part rejection. The console (chat.js) never sends these shapes,
+    so rejecting them cannot brick a replayed session."""
+    body = {"messages": [{"role": "user", "content": content}]}
+    assert _validate(body) == "user message content must be a string or a list of parts"
 
 
 @pytest.mark.parametrize(
@@ -201,9 +210,9 @@ def test_validate_never_hard_rejects_content(content: Any) -> None:
 )
 def test_fold_history_strips_control_chars(content: Any) -> None:
     """No raw control char from any content shape may survive into the folded
-    model input (RT-001). str()-coercion of a dict/list already escapes an
-    embedded control char via repr(); a raw char in a str/list-part is stripped
-    by the _CONTROL_CHARS sub — either way nothing unsafe reaches the model."""
+    model input (RT-001). A raw char in a str/list-part is stripped by the
+    _CONTROL_CHARS sub; any other shape folds to "" and is never str()-ed
+    (GH-159) — either way nothing unsafe reaches the model."""
     folded = _fold_history([{"role": "user", "content": content}])
     assert folded is not None
     text = folded[0]["content"][0]["text"]

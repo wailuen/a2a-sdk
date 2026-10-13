@@ -453,7 +453,11 @@ def _handle_initialize(app: Any, params: dict[str, Any]) -> dict[str, Any]:
     # source declares credentials, so the handshake stays minimal otherwise.
     from ..credentials.card import forwarding_instructions
 
-    instructions = forwarding_instructions(getattr(app.state, "credential_fields", {}))
+    parts = [
+        forwarding_instructions(getattr(app.state, "credential_fields", {})),
+        getattr(app.state, "mcp_instructions", None),
+    ]
+    instructions = "\n\n".join(p for p in parts if p)
     if instructions:
         result["instructions"] = instructions
     return result

@@ -94,7 +94,7 @@ from pydantic import (
     model_validator,
 )
 
-from ..common.redact import safe_block_text, safe_cell_text, sanitize_text
+from ..common.redact import safe_block_text, safe_cell_text, safe_id_text, sanitize_text
 
 # Punctuation a renderer template may legitimately emit around a sanitized
 # value without it being a structural delimiter — "+"/"%" in a numeric
@@ -115,6 +115,13 @@ def _sanitize_cell(value: str) -> str:
     reimplement it here; a second copy is the exact drift this promotion
     exists to prevent."""
     return safe_cell_text(value)
+
+
+def _safe_id(value: str) -> str:
+    """Identifier for the text fallback (GH-156, SI-2): byte-exact for real id
+    alphabets (``=``, ``:``), but unable to forge a separator or flood the
+    text block (``safe_id_text``)."""
+    return safe_id_text(value, max_len=_METADATA_SUFFIX_FIELD_MAX_LEN)
 
 
 def _sanitize_block(value: str) -> str:
@@ -743,7 +750,7 @@ class EntityList(ContentModel):
         lines = [title]
         lines.append(f"  showing {self.showing or len(self.items)} of {self.total_count}")
         for item in self.items:
-            lines.append(f"  - {_sanitize_cell(item.name)}")
+            lines.append(f"  - {_sanitize_cell(item.name)} ({_safe_id(item.id)})")
             if item.summary:
                 lines.append(f"      {_sanitize_cell(item.summary)}")
         return "\n".join(lines)
@@ -1044,9 +1051,7 @@ class FundPerformance(ContentModel):
         # separators (_sanitize_cell) — reversing the order would let a
         # fullwidth substitution's byte growth outrun the cap.
         if self.pb_id:
-            safe_pb_id = _sanitize_cell(
-                sanitize_text(self.pb_id, max_len=_METADATA_SUFFIX_FIELD_MAX_LEN)
-            )
+            safe_pb_id = _safe_id(self.pb_id)
             bits.append(f"source {safe_pb_id}")
         return (" | ".join(bits) or "fund performance (no data)")
 
@@ -1084,7 +1089,10 @@ class EmailList(ContentModel):
             received_at = _sanitize_cell(m.received_at)
             from_email = _sanitize_cell(m.from_.email)
             subject = _sanitize_cell(m.subject)
-            lines.append(f"  {unread}{received_at} | {from_email} | {subject}")
+            ids = f"id: {_safe_id(m.id)}"
+            if m.conversation_id:
+                ids += f", conversation: {_safe_id(m.conversation_id)}"
+            lines.append(f"  {unread}{received_at} | {from_email} | {subject} ({ids})")
             if m.preview:
                 lines.append(f"    {_sanitize_cell(m.preview)}")
         return "\n".join(lines)
@@ -1138,7 +1146,7 @@ class CalendarEvents(ContentModel):
             e_start = _sanitize_cell(e.start)
             e_end = _sanitize_cell(e.end)
             subject = _sanitize_cell(e.subject)
-            lines.append(f"  {e_start} – {e_end}: {subject}{loc}{online}")
+            lines.append(f"  {e_start} – {e_end}: {subject}{loc}{online} (id: {_safe_id(e.id)})")
         return "\n".join(lines)
 
 
@@ -1193,7 +1201,7 @@ class UserProfile(ContentModel):
     def _body_text(self) -> str:
         name = _sanitize_cell(self.display_name)
         email = _sanitize_cell(self.email)
-        lines = [f"{name} <{email}>"]
+        lines = [f"{name} <{email}> (id: {_safe_id(self.id)})"]
         if self.job_title:
             dept = f", {_sanitize_cell(self.department)}" if self.department else ""
             lines.append(f"  {_sanitize_cell(self.job_title)}{dept}")
@@ -1202,7 +1210,9 @@ class UserProfile(ContentModel):
         if self.manager:
             manager_name = _sanitize_cell(self.manager.display_name)
             manager_email = _sanitize_cell(self.manager.email)
-            lines.append(f"  manager: {manager_name} <{manager_email}>")
+            lines.append(
+                f"  manager: {manager_name} <{manager_email}> (id: {_safe_id(self.manager.id)})"
+            )
         return "\n".join(lines)
 
 
@@ -1231,7 +1241,7 @@ class UserList(ContentModel):
             title = f" — {_sanitize_cell(u.job_title)}" if u.job_title else ""
             name = _sanitize_cell(u.display_name)
             email = _sanitize_cell(u.email)
-            lines.append(f"  {name} <{email}>{title}")
+            lines.append(f"  {name} <{email}> (id: {_safe_id(u.id)}){title}")
         return "\n".join(lines)
 
 
@@ -1270,7 +1280,7 @@ class DocumentList(ContentModel):
             when = d.last_modified or d.modified
             date_suffix = f"  {_sanitize_cell(when)}" if when else ""
             name = _sanitize_cell(d.name)
-            lines.append(f"  {name}{type_suffix}{date_suffix}")
+            lines.append(f"  {name}{type_suffix}{date_suffix} (id: {_safe_id(d.id)})")
         return "\n".join(lines)
 
 

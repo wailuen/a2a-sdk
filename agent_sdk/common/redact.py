@@ -178,6 +178,30 @@ def safe_cell_text(value: str) -> str:
     return _SPACED_SEPARATOR_AT_RE.sub(lambda m: _SPACED_SEPARATORS[m.group()], text)
 
 
+_ID_NEUTRALISE = str.maketrans({
+    "|": "/",
+    "│": "/",
+    "｜": "/",
+    "<": "＜",
+    ">": "＞",
+    "(": "（",
+    ")": "）",
+    "[": "［",
+    "]": "］",
+})
+
+
+def safe_id_text(value: str, *, max_len: int | None = 256) -> str:
+    """Render an upstream identifier for a text fallback a model may copy back
+    into a tool call (GH-156). Unlike :func:`safe_cell_text`, keeps
+    ``= + / : , . _ - ! ~ @`` byte-exact (base64 padding, URNs); strips control
+    characters, caps length, turns whitespace into ``_`` and neutralises only
+    ``()[]<>|`` so an id cannot forge ``(id: ...)`` or ``, conversation: ...``."""
+    text = safe_error_text(value, max_len=max_len)
+    text = "_".join(text.split())
+    return text.translate(_ID_NEUTRALISE)
+
+
 def safe_block_text(value: str) -> str:
     """Strip control/escape characters from an untrusted string whose
     contract is a MULTI-LINE block (a markdown document), preserving

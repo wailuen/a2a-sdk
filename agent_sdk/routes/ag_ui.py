@@ -88,8 +88,11 @@ def _fold_history(raw_messages: list[Any]) -> list[dict[str, Any]] | None:
     content could hard-reject the run, one ESC/NUL/BEL emitted in the model's
     own output would turn every subsequent turn into RUN_ERROR and permanently
     brick the session. Stripping here — the one function that builds the model
-    input, covering str/list/coerced shapes uniformly — guarantees nothing
-    unsafe reaches the model, mirroring the loop.py unknown-tool sanitizer."""
+    input, covering every content shape uniformly — guarantees nothing
+    unsafe reaches the model, mirroring the loop.py unknown-tool sanitizer.
+
+    Content that is neither a string nor a list folds to "" — a structured
+    value is never stringified into model input (GH-159)."""
     folded: list[dict[str, Any]] = []
     for raw in raw_messages[-MAX_HISTORY_MESSAGES:]:
         if not isinstance(raw, dict):
@@ -104,7 +107,12 @@ def _fold_history(raw_messages: list[Any]) -> list[dict[str, Any]] | None:
                 if isinstance(p, dict) and p.get("type") == "text"
             )
         elif not isinstance(content, str):
-            content = str(content)
+            # Never str() a structured value into model input (GH-159): a
+            # dict-shaped part would otherwise reach the model verbatim,
+            # binary payload included. User messages in this shape are
+            # rejected by _validate (_user_content_problem) in the current turn;
+            # this is the backstop for earlier history and every other role.
+            content = ""
         content = _CONTROL_CHARS.sub("", content)
         if role == "assistant" and not content.strip():
             continue
@@ -124,11 +132,49 @@ def _fold_history(raw_messages: list[Any]) -> list[dict[str, Any]] | None:
     return folded or None
 
 
+_KNOWN_PART_TYPES = frozenset({"binary", "image", "audio", "file", "document"})
+
+
+def _user_content_problem(content: Any) -> str | None:
+    """GH-159 shape + part-type check for ONE user message's ``content``.
+
+    Every shape the payload can arrive in is classified here, not only the
+    expected list: absent/string content is accepted, a list must hold only
+    ``text`` parts, and ANY other shape (a bare part object, a number, ...) is
+    rejected outright. Skipping an unexpected shape would let it fall through
+    to _fold_history unchecked — the allowlist must be total."""
+    if content is None or isinstance(content, str):
+        return None
+    if not isinstance(content, list):
+        return "user message content must be a string or a list of parts"
+    for part in content:
+        kind = part.get("type") if isinstance(part, dict) else None
+        if kind != "text":
+            label = kind if isinstance(kind, str) and kind in _KNOWN_PART_TYPES else "unknown"
+            return f"unsupported user content part type: {label}; only text parts are accepted"
+    return None
+
+
+def _is_resume(body: dict[str, Any]) -> bool:
+    resume_raw = body.get("resume")
+    return isinstance(resume_raw, list) and bool(resume_raw)
+
+
 def _validate(body: dict[str, Any]) -> str | None:
     """Returns an error message (→ RUN_ERROR) or None.
 
-    Only the STRUCTURAL shape of ``messages`` is rejected here. Message CONTENT
-    is never hard-rejected — not on control characters, not on unexpected part
+    The non-text part rejection (GH-159, maintainer ruling: no silent drop)
+    applies to the CURRENT turn only — the user message(s) after the last
+    assistant message (every content shape, see ``_user_content_problem``) —
+    and is skipped on resume runs. Earlier history is not re-checked: those
+    parts were already rejected on their own turn, and re-rejecting them would
+    lock a client that keeps a rejected message in its history out of the
+    thread (ruling refinement, issue 159 comment 6135432947); _fold_history
+    drops their non-text parts. The part type echoed in the error is mapped to
+    a fixed allowlist (SI-2), never the client's raw string.
+
+    Apart from the GH-159 non-text part check, only the STRUCTURAL shape of
+    ``messages`` is rejected here. Message CONTENT is never hard-rejected — not on control characters, not on unexpected part
     shapes (RT-001). The AG-UI client re-submits the full conversation history
     every turn (its own user turns AND the model's streamed assistant turns,
     folded back in by chat.js), so rejecting content would let a single control
@@ -146,6 +192,18 @@ def _validate(body: dict[str, Any]) -> str | None:
     messages = body.get("messages")
     if messages is not None and not isinstance(messages, list):
         return "messages must be a list"
+    if _is_resume(body):
+        return None
+    msgs = messages or []
+    last_assistant = max(
+        (i for i, m in enumerate(msgs) if isinstance(m, dict) and m.get("role") == "assistant"),
+        default=-1,
+    )
+    for m in msgs[last_assistant + 1:]:
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        if (problem := _user_content_problem(m.get("content"))) is not None:
+            return problem
     return None
 
 
@@ -233,10 +291,9 @@ class _RunMapper:
                 "type": "TOOL_CALL_START",
                 "toolCallId": event.tool_call_id,
                 "toolCallName": event.tool_name,
-                # always present so consumers can key on the field; null when no
-                # preceding text turn has established an assistant message id
-                "parentMessageId": self.last_message_id,
             }
+            if self.last_message_id is not None:
+                start["parentMessageId"] = self.last_message_id
             return self._ensure_step() + [
                 start,
                 {
@@ -270,8 +327,9 @@ class _RunMapper:
                     "type": "TOOL_CALL_START",
                     "toolCallId": event.tool_call_id,
                     "toolCallName": event.tool_name,
-                    "parentMessageId": self.last_message_id,
                 }
+                if self.last_message_id is not None:
+                    synthetic_start["parentMessageId"] = self.last_message_id
                 frames += [
                     synthetic_start,
                     # AG-UI spec requires ≥1 TOOL_CALL_ARGS between START and END.
