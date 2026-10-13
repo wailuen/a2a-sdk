@@ -8,6 +8,20 @@ internals, `contrib/`) may change in minors with notice here.
 
 _Nothing yet._
 
+## [0.11.0] — 2026-10-13
+
+Resolves GH-156 (ids in text fallbacks), GH-157 (agent MCP instructions), GH-158 (AG-UI omits null `parentMessageId`) and GH-159 (non-text input rejected). GH-158 and GH-159 change wire behavior; see Breaking changes.
+
+### Added
+- GH-157: agent rules can now reach MCP client models. New `Agent(mcp_instructions=...)` (for `persona=` agents) or an optional `artifacts/mcp_instructions.md` artifact (for `artifacts_dir=` agents) is rendered once at build with the same variables as `system`, stripped, capped at 4000 characters, and sent in `initialize.instructions` after the credential note (blank line between). Setting both, going over the cap, or using an undefined template variable fails the build. The text is shown to every MCP client model: put no secrets in it. No env setting.
+
+### 🔴 Breaking changes
+- GH-159: A2A and AG-UI no longer silently drop non-text input. A2A `message/send`, `message/stream` and the interrupted-task resume reject any message containing a `FilePart` or `DataPart` (even mixed with text) with `-32005` ContentTypeNotSupported (HTTP 415) before any task is created; the error names the part kind only. A message with no text is rejected with `-32602`; the `" "` fallback is removed. AG-UI user messages with non-text content parts (in the current turn, i.e. the user messages after the last assistant message) now end in `RUN_ERROR` naming the part type, before a task is created; user `content` that is neither a string nor a list of parts (e.g. a bare part object) is also rejected with `RUN_ERROR` instead of being stringified into model input, and non-string, non-list assistant `content` folds to empty rather than being stringified; earlier history is not re-checked, so a rejected message a client keeps in its history does not lock the thread (its non-text parts are left out of the model input). Text-only input is unchanged; the card still advertises `text/plain` input only. **Migration:** send only `TextPart`s (A2A) or text content (AG-UI); clients that sent `FilePart`/`DataPart` now get 415. Spec: A2A v0.3.0 `defaultInputModes` and `ContentTypeNotSupportedError` (-32005).
+- GH-158: AG-UI `TOOL_CALL_START` (normal and resume-synthetic) now omits `parentMessageId` when there is no parent message id, instead of sending `null` (tool-first turns, resume runs). A text-then-tool turn still carries the string id. **Migration:** treat `parentMessageId` as optional; do not read the key unconditionally. Spec: matches the AG-UI reference encoder (`exclude_none`).
+
+### Fixed
+- GH-156: the text fallback (`to_plain_text()`: MCP `tools/call` text, A2A `TextPart`, admin try-tool) of `EntityList`, `EmailList`, `CalendarEvents`, `UserList`, `UserProfile` and `DocumentList` now includes the ids follow-up tools need (e.g. `- Databricks (59199-40)`; `(id: ...)` elsewhere; email `conversation` id; manager id). Ids are sanitized and capped at 256 chars. Adds the shared helper `safe_id_text` (C-007, `agent_sdk/common/redact.py`); `FundPerformance.pb_id` now renders through it instead of `_sanitize_cell`, so `=`, `:`, `,` and `@` pass through verbatim instead of becoming fullwidth characters. Text-parsing callers of these cards will see the extra `(id: ...)` suffix; the MCP text block is still `to_plain_text()`, not JSON.
+
 ## [0.10.0] — 2026-10-12
 
 Resolves GH-154 (per-task current date) and GH-155 (summary before a cap failure). Both new behaviors are on by default. Known pre-existing protocol issues filed for a follow-up: GH-158, GH-159.
