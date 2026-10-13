@@ -257,6 +257,17 @@ the explicit opt-out `AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS=true` is set. T
 WARNING at boot (every account at the issuer is admitted) and is refused when `oauth_idp != oidc`.
 Messages name settings only, never values (SI-2).
 
+### D14 — Role, group or opt-out required for every issuer (GH-161 ruling)
+
+Ruling: https://github.com/wailuen/a2a-sdk/issues/161#issuecomment-6137224867
+
+**Supersedes the Entra exemption in D13.** An Entra tenant with no role or group admits every member
+and guest unless the tenant admin turned on "Assignment required", which the SDK cannot see. Boot now
+refuses `AGENT_SDK_OAUTH_IDP=oidc` for every issuer unless `AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE`,
+`AGENT_SDK_OAUTH_IDP_REQUIRED_GROUP` or `AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS=true` is set.
+The opt-out keeps its single boot WARNING. The personal-account tenant GUID refusal is unchanged.
+Messages name settings only, never values (SI-2). `oauth_idp=none` is unchanged.
+
 ## Settings summary
 
 | Setting | Default | Notes |
@@ -268,7 +279,7 @@ Messages name settings only, never values (SI-2).
 | `AGENT_SDK_OAUTH_IDP_REQUIRED_GROUP` | unset | optional `groups` claim value; overage denied |
 | `AGENT_SDK_OAUTH_IDP_SESSION_HOURS` | `720` | 1-2160; absolute token-family lifetime |
 | `AGENT_SDK_OAUTH_IDP_DISABLE_API_KEYS` | `false` | D3 |
-| `AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS` | `false` | D13; only with `oidc` |
+| `AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS` | `false` | D13, D14; only with `oidc` |
 | `__oauth_idp__/client_secret` | — | credential store only |
 
 ## Consequences
@@ -277,6 +288,7 @@ Messages name settings only, never values (SI-2).
   OAuth test files passing unedited).
 - Per-person attribution, task isolation, rate limits and stream caps when sign-in is on.
 - Removal in Entra takes effect within `SESSION_HOURS` (default 720 h = 30 days), not instantly.
+  Mitigation (GH-163): an admin can revoke a user at once from the console "Signed-in users" panel or `DELETE /admin/api/oauth/identities/{user}`. Refresh is refused on all workers; a live access token survives on other workers until it expires (per-process memory, GH-162).
 - Claude.ai connectors re-authorize (IdP sign-in + one consent click) once per session.
 - With the API-key switch on, console chat and protocol-level harness probes need it off.
 - PRM and AS metadata documents are unchanged; `/agent-verify` OAuth probes are unaffected.

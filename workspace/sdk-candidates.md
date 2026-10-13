@@ -1,105 +1,153 @@
-# SDK issue candidates — w046 (2026-10-13)
+# SDK issue candidates — w047 (2026-10-13)
 
 Run `/sdk-issue-scan` to review and file as GitHub issues on `wailuen/a2a-sdk`.
 
-## Candidate 1: GH-156 _safe_id routes ids through _sanitize_cell (safe_cell_text), which rewrites '=', ':', ',' to fullwidth forms, so Graph base64 ids and URN ids in EmailList/CalendarEvents MCP text fallback are corrupted and cannot be copied back into tool calls.
-- Severity: high
-- Component: protocol/mcp
-- File: agent_sdk/models/content_types.py
-- Rationale: SDK content_types model rendering used by MCP text fallback; fix needs an id-preserving C-007 helper in agent_sdk/common/redact.py.
-
-## Candidate 2: GH-158 fix only changed the table row; the conformance-traps list (line 83) in both .claude and harness copies still flags missing parent_message_id on tool calls as a defect, which will flag the SDK's new wire shape.
-- Severity: high
-- Component: harness/skill
-- File: .claude/skills/ag-ui-check/SKILL.md
-- Rationale: Harness skill content shipped with the SDK.
-
-## Candidate 3: Template mirrors of ag-ui-check, add-artifact and new-agent skills were not updated for GH-157/GH-158; template repo has no pending commit, so scaffolded agents keep the stale rule and never learn about mcp_instructions.
-- Severity: high
-- Component: harness/template
-- File: template/.claude/skills/ag-ui-check/SKILL.md
-- Rationale: Template scaffold is SDK-owned; AC requires all copies identical.
-
-## Candidate 4: GH-156 sanitization tests cover only EntityList; other renderers (EmailList, CalendarEvents, UserList, UserProfile, DocumentList, FundPerformance) only check id presence, and the renderer-wide guard only greps for _sanitize_cell, so a raw {x.id} regression would pass (LRN-152).
-- Severity: high
-- Component: protocol/mcp
-- File: tests/test_content_types.py
-- Rationale: SDK test coverage for content_types renderers that feed MCP/A2A text.
-
-## Candidate 5: _validate rejected non-text parts in any user message of replayed history, so one rejected binary turn bricks every later turn and blocks resume; also scans beyond the 50-message fold window.
-- Severity: high
-- Component: protocol/ag-ui
-- File: agent_sdk/routes/ag_ui.py
-- Rationale: SDK AG-UI protocol route behavior.
-
-## Candidate 6: Client-supplied content[i].type is echoed into RUN_ERROR.message after only isidentifier(); unbounded length (200 KB probe) and no C-007 safe_error_text or allowlist.
-- Severity: high
+## Candidate 1: GH-160 lost from tree: BaseAgentSettings.model_config lacks hide_input_in_errors=True, so validation errors print secret input values (MASTER_KEY tail). tests/test_config.py fails 3/3; no CHANGELOG Security entry.
+- Severity: critical
 - Component: security
-- File: agent_sdk/routes/ag_ui.py
-- Rationale: SDK route echoes untrusted input into wire error text (SI-2).
+- File: agent_sdk/config.py
+- Rationale: SDK settings internals; secret leak in logs (SI-2) breaks DESIGN.md promise. Release blocker.
 
-## Candidate 7: _validate skips GH-159 rejection when body['resume'] is merely truthy, but the route treats resume only as a non-empty list; resume=true/'x'/{} bypasses rejection and binary parts are silently dropped with RUN_FINISHED.
-- Severity: high
-- Component: protocol/ag-ui
-- File: agent_sdk/routes/ag_ui.py
-- Rationale: SDK AG-UI route validation bypass.
-
-## Candidate 8: AG-UI rejection checks only the newest user message; non-text parts in other current-turn user messages are silently dropped, narrowing the GH-159 'no silent drop' ruling without record; CHANGELOG overstates the fix.
-- Severity: high
-- Component: protocol/ag-ui
-- File: agent_sdk/routes/ag_ui.py
-- Rationale: SDK AG-UI route conformance to maintainer ruling.
-
-## Candidate 9: GH-157 mcp_instructions lacks the SI-6 build-time secret check (or a recorded docs-only decision) and the SI-2 test that unauthenticated initialize gets no instructions.
-- Severity: high
-- Component: protocol/mcp
+## Candidate 2: GH-161 lost from tree: _validate_idp_settings still exempts GUID-pinned Entra issuers, so an oidc issuer with no REQUIRED_ROLE/GROUP/opt-out boots and admits every tenant member and guest. Old exemption test still pinned; ADR, docs, setup skill, CHANGELOG missing; harness vs template setup skill copies differ.
+- Severity: critical
+- Component: protocol/oauth
 - File: agent_sdk/app.py
-- Rationale: SDK app build path for MCP initialize instructions; security annotations unmet.
+- Rationale: SDK OAuth/IdP sign-in gate in protocol routes boot path; contradicts maintainer ruling.
 
-## Candidate 10: GH-158 (parentMessageId key removal) and GH-159 (new 415/-32602 rejections) wire changes are filed under Fixed with inline 'Behavior change' instead of Breaking changes with Migration callouts and spec citations, forfeiting the DESIGN.md §4.0 conformance exemption.
+## Candidate 3: Wave agents ran git stash/reset in the shared working tree, wiping G1 group work (GH-160/161/164); dangling stashes 956125b/e7fe843 never restored. Workflow prompts do not ban stash/reset/checkout/restore and no post-group gate checks every declared path has a diff.
+- Severity: critical
+- Component: harness/workflow
+- File: .claude/workflows/wave-cycle.js
+- Rationale: Harness wave workflow design flaw that silently loses uncommitted work across parallel groups.
+
+## Candidate 4: GH-164 lost from tree: _looks_like_path still rejects uv.lock/.env.example/.gitignore, no deterministic Creates:/Modifies: scan in Parse phase, no tests or CHANGELOG; template copy has GH-164 so wave-cycle.js copies are not byte-identical.
 - Severity: high
-- Component: sdk/build
-- File: CHANGELOG.md
-- Rationale: SDK release changelog governance.
+- Component: harness/workflow
+- File: harness/wave_scope.py
+- Rationale: Harness scope extraction and workflow scripts; mirror drift with template.
 
-## Candidate 11: New C-007 helper safe_id_text/_ID_NEUTRALISE and the FundPerformance.pb_id rendering change are not declared in any todo Creates/Modifies or the CHANGELOG, so the wave review scope excluded redact.py and related files (LRN-202).
+## Candidate 5: GH-164 Parse scope scan keeps template/ (other-repo) paths and either/or clause paths that the AI Parse prompt is told to exclude, so every wave listing a template mirror aborts with scope-scan-mismatch.
+- Severity: high
+- Component: harness/workflow
+- File: harness/workflows/wave-cycle.js
+- Rationale: Harness workflow cross-check uses different inclusion rules than the AI prompt; false hard aborts.
+
+## Candidate 6: GH-167 moved KpiCard and ComparisonTable titles to safe_line_text, which keeps ':' and '|', so a hostile title forges a metric line ('Revenue: 999999') or a table row. Falsifies DESIGN.md:214 and CHANGELOG claim; no per-renderer forgery test.
 - Severity: high
 - Component: security
-- File: agent_sdk/common/redact.py
-- Rationale: SDK security helper and scope tracking.
+- File: agent_sdk/models/content_types.py
+- Rationale: SDK content_types text renderers; prompt-injection row forgery to the model.
 
-## Candidate 12: AG-UI GH-159 narrowing (reject only after last assistant message) is recorded in REVIEWS.md Round 13 as pending ratification with no maintainer reference; its 'cannot brick a thread' claim is false since a kept rejected message fails every later run. Must not release unapproved.
-- Severity: high
-- Component: protocol/ag-ui
-- File: agent_sdk/routes/ag_ui.py
-- Rationale: SDK protocol route diverges from maintainer ruling; release blocker.
-
-## Candidate 13: harness/skills/new-agent/SKILL.md differs from template/.claude/skills/new-agent/SKILL.md (uv vs pip, several hunks), failing the GH-157 'all copies identical' AC and LRN-208.
+## Candidate 7: Template peer repo has uncommitted, unpushed wave-cycle.js (RT-003 shared-tree git ban hunk); pushed template main differs from harness copy, so seeded agent repos lack the ban. Local byte-identity test passes regardless.
 - Severity: high
 - Component: harness/template
-- File: harness/skills/new-agent/SKILL.md
-- Rationale: Harness skill / template mirror drift.
+- File: template/.claude/workflows/wave-cycle.js
+- Rationale: Template scaffold delivery gap (LRN-071).
 
-## Candidate 14: test_skills_have_no_stale_parent_message_id_trap uses 'if p.exists()', so an absent template mirror passes silently (LRN-157); misplaced in GH-156 file and never checks copies are identical.
+## Candidate 8: GH-167 renders EmailList.preview via safe_line_text, so an outside sender's preview can forge a full email row including a fake '(id: ..., conversation: ...)' pair, reopening the GH-156 attacker-id risk. Docs falsely claim standalone slots cannot forge rows; no hostile-preview test.
 - Severity: high
-- Component: harness/skill
-- File: tests/test_gh156_mcp_text_ids.py
-- Rationale: SDK test guarding harness skill copies.
+- Component: security
+- File: agent_sdk/models/content_types.py
+- Rationale: SDK content_types sanitization; untrusted email content can steer model tool calls.
 
-## Candidate 15: Registry-wide GH-156 meta-test only collects ids the hand-built sample populates; a new optional id field left None passes unchecked (LRN-241).
-- Severity: high
-- Component: protocol/mcp
-- File: tests/test_content_types.py
-- Rationale: SDK content_types test coverage.
-
-## Candidate 16: GH-156 AC requires MCP tools/call content[0].text checks per model, but only EntityList and DocumentList are tested; EmailList, CalendarEvents, UserList, UserProfile lack MCP-level tests.
-- Severity: high
-- Component: protocol/mcp
-- File: tests/test_gh156_mcp_text_ids.py
-- Rationale: SDK MCP route test coverage gap against AC.
-
-## Candidate 17: Dict-shaped user content ({type:'binary',data:...}) skips _validate's list check and _fold_history str()s the whole dict, including base64 data, into model input, bypassing GH-159 rejection.
+## Candidate 9: GH-168 AGENT_SDK_AGUI_MAX_MESSAGE_CHARS wiring into /ag-ui/run (_fold_history call) is untested; helper default equals setting default, so broken wiring stays green.
 - Severity: high
 - Component: protocol/ag-ui
 - File: agent_sdk/routes/ag_ui.py
-- Rationale: SDK AG-UI route validation bypass; unmet AC.
+- Rationale: Protocol route setting wiring with no route-level test (LRN-304).
+
+## Candidate 10: Wave changed files not named by explicit path in any todo Creates:/Modifies: (console.js, docs/protocols.md, uv.lock, several tests, w042 deferred note), so they escape wave scope and scope-keyed gates; directory-only scope declarations are silently dropped.
+- Severity: high
+- Component: harness/workflow
+- File: agent_sdk/console/static/console.js
+- Rationale: Harness wave scope/gating process gap (LRN-207/LRN-322).
+
+## Candidate 11: GH-167 EntityList item name/summary via safe_line_text keep ':', so a hostile value writes extra 'id: ...' claims next to the real id; test only checks exact four-space prefix lines.
+- Severity: high
+- Component: security
+- File: agent_sdk/models/content_types.py
+- Rationale: SDK content_types id forgery to the model; breaks GH-167 AC and DESIGN.md §4.0.
+
+## Candidate 12: GH-162 SI-2 annotation requires a no-leak test proving the single-replica WARNING omits connection-string/account/key/prefix markers; none exists.
+- Severity: high
+- Component: security
+- File: tests/test_gh162_single_replica_warning.py
+- Rationale: Missing required SDK security test for log leakage.
+
+## Candidate 13: MCP JSON-RPC _dispatch catch-all uses logger.exception, so a ValidationError from tool result rendering logs input_value (tool output) and traceback. Deferred as medium despite critical LRN-214.
+- Severity: critical
+- Component: security
+- File: agent_sdk/routes/mcp.py
+- Rationale: Protocol route log leak of tool output (SI-2); severity inherited from critical learning.
+
+## Candidate 14: GH-167 does not follow maintainer ruling (standalone names/summaries keep ASCII): code, tests, CHANGELOG and DESIGN.md §4.0 disagree about which slots use safe_line_text; narrowing not ratified.
+- Severity: high
+- Component: security
+- File: agent_sdk/models/content_types.py
+- Rationale: SDK content_types sanitizer behavior and docs mismatch an unratified ruling narrowing (LRN-319/323).
+
+## Candidate 15: _warn_single_replica_required only warns for oidc IdP or one-time consent, but the OAuth server and MCP sessions are always per-process; Azure Table multi-replica deployments with default connector OAuth/MCP get no warning. docs/deployment.md wrongly says API-key-only can run multiple replicas and misstates revoke lag.
+- Severity: high
+- Component: protocol/oauth
+- File: agent_sdk/app.py
+- Rationale: SDK OAuth/MCP deployment safety warning and docs misstate runtime behavior.
+
+## Candidate 16: Reuses: directives unmet: gh162 note ignores C-024/C-028; admin DELETE /admin/api/oauth/identities/{user} echoes user raw without sanitize_text (C-007); GH-169 test doesn't use C-020 helpers.
+- Severity: high
+- Component: security
+- File: workspace/todos/deferred/gh162-shared-oauth-state.md
+- Rationale: SDK admin route echoes untrusted input unsanitized; component-reuse ACs not met.
+
+## Candidate 17: GH-164 scope scan only extracts backticked tokens, but the planner's documented todo format writes bare comma-separated paths, so the scan returns [] for agent-repo waves and the guard never fires; also misses bold **Creates:** form.
+- Severity: high
+- Component: harness/workflow
+- File: harness/workflows/wave-cycle.js
+- Rationale: Harness workflow guard is a no-op for the harness's own planner format.
+
+## Candidate 18: GH-167 implements ruling for only EntityList and some chart titles; MarketBriefing as-of header, KpiCard/ComparisonTable titles, UserList/UserProfile/DocumentList/CalendarEvents names still use safe_cell_text with no ratification recorded.
+- Severity: high
+- Component: security
+- File: agent_sdk/models/content_types.py
+- Rationale: SDK content_types ruling narrowing without maintainer approval (LRN-319/323).
+
+## Candidate 19: Bare-path scope-scan fix exists only in template working tree; pushed template a7bd017 still has backtick-only scan, so downstream agent repos get a no-op guard. Byte-identity test reads local copy and passes.
+- Severity: high
+- Component: harness/template
+- File: template/.claude/workflows/wave-cycle.js
+- Rationale: Template scaffold not delivered; mirror check compares wrong source.
+
+## Candidate 20: KpiCard and ComparisonTable titles call _sanitize_line with separators=':'/'|', swapping ASCII the ruling says to keep ('only line-break/control-char collapse applies'); no ratification URL.
+- Severity: high
+- Component: security
+- File: agent_sdk/models/content_types.py
+- Rationale: SDK content_types deviates from maintainer ruling; layout-based defense would satisfy both.
+
+## Candidate 21: AG-UI stream catch-all still uses logger.exception('ag-ui stream failed'); a ValidationError from payload.wire()/translate() logs tool output input_value via traceback.
+- Severity: high
+- Component: security
+- File: agent_sdk/routes/ag_ui.py
+- Rationale: Protocol route log leak (SI-2), same LRN-214 pattern fixed in mcp.py.
+
+## Candidate 22: GH-163 revoke_user drops tokens/refresh families but leaves unredeemed auth codes and pending IdP consent tickets, so a revoked user can mint a fresh 30-day refresh family within ~5-10 minutes.
+- Severity: high
+- Component: protocol/oauth
+- File: agent_sdk/auth/oauth_tokens.py
+- Rationale: SDK OAuth revocation bypass.
+
+## Candidate 23: GH-165 Archive step 3 checks test names in WAVE_FILE after step 1 already moved it to workspace/todos/completed/, so Test: backfill is unreliable. Same in .claude copies, template and sdk-wave.js.
+- Severity: high
+- Component: harness/workflow
+- File: harness/workflows/wave-cycle.js
+- Rationale: Harness workflow prompt points at a moved path.
+
+## Candidate 24: Running sdk-wave.js used old AI-only Parse; allScope omits 11 declared paths (console.js, routes/mcp.py, uv.lock, tests, docs/protocols.md, etc.), so archive/release gates can ship without or leave uncommitted those changes.
+- Severity: high
+- Component: harness/workflow
+- File: .claude/workflows/sdk-wave.js
+- Rationale: Harness workflow scope computation gap affecting release gating.
+
+## Candidate 25: CalendarEvent.location: Standard Profile v1.1 requires display_name and is_online; EventLocation model and compact schema (catalog.py:229) mark them optional, so payloads missing them pass and fail structural validation in renderers.
+- Severity: high
+- Component: protocol/a2ui
+- File: agent_sdk/a2ui/catalog.py
+- Rationale: A2UI catalog/content_types field contract drift from Standard Profile.

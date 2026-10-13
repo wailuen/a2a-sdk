@@ -23,14 +23,44 @@ from __future__ import annotations
 
 import re
 
-_BACKTICKED_TOKEN_RE = re.compile(r"`([^`]+)`")
+# RT-001 (fresh-lens debug): a path token may be backticked OR bare. The planner agent
+# writes bare, comma-separated paths (`Creates: src/tools/x.py, tests/test_x.py`) and GH-164's
+# own repro uses a bare `(modifies a, b)` clause, so a backtick-only regex returned nothing for
+# every planner-format wave and the deterministic scan was a silent no-op. Split on prose
+# punctuation instead, then strip wrapping backticks / bold / quotes and trailing punctuation.
+_TOKEN_RE = re.compile(r"[^\s,;()\[\]]+")
+_TOKEN_LEAD_STRIP = "`*\"'"
+_TOKEN_TRAIL_STRIP = "`*.,:;\"'"
+# `- Creates:`, `* Modifies:`, `**Creates:**` (planner phase-file header), case-insensitive.
+_SCOPE_LINE_RE = re.compile(
+    r"\s*(?:[-*+]\s*)?(?:\*\*)?(Creates|Modifies)(?:\*\*)?:", re.IGNORECASE
+)
+# A heading or a todo checkbox line starts a new todo; `[~]` marks one that cannot land here.
+_TODO_START_RE = re.compile(r"\s*(?:[-*]\s*)?(?:#{1,6}\s|\[.\])")
 _KEYWORD_RE = re.compile(r"\b(modifies|adds)\b", re.IGNORECASE)
-_PATH_EXTENSIONS = (".py", ".js", ".ts", ".md", ".json", ".toml", ".yaml", ".yml")
-_ROOT_LEVEL_EXTENSIONS = (".md", ".json", ".toml", ".yaml", ".yml")
+_PATH_EXTENSIONS = (".py", ".js", ".ts", ".md", ".json", ".toml", ".yaml", ".yml", ".lock")
+_ROOT_LEVEL_EXTENSIONS = (".md", ".json", ".toml", ".yaml", ".yml", ".lock")
+# GH-164: dotfiles are real deliverables but a leading "." alone must not qualify (a bare
+# extension like `.py` is not a file), so only these exact names are accepted.
+_KNOWN_DOTFILES = frozenset(
+    {
+        ".env.example",
+        ".env.sample",
+        ".env.template",
+        ".gitignore",
+        ".gitattributes",
+        ".dockerignore",
+        ".editorconfig",
+        ".python-version",
+        ".nvmrc",
+        ".npmrc",
+        ".pre-commit-config.yaml",
+    }
+)
 
 
 def _looks_like_path(token: str) -> bool:
-    """A backticked token counts as scope only if it names exactly ONE FILE.
+    """A token (backticked or bare) counts as scope only if it names exactly ONE FILE.
 
     RT-006: rejecting only parens/quotes/whitespace (the pre-fix rule) let every
     dotted attribute chain, bare constant, and slash-command this repo's todos
@@ -54,7 +84,9 @@ def _looks_like_path(token: str) -> bool:
     - no leading "/" — repo-relative paths never start with one (a `/sdk-test`
       slash-command reference does);
     - the FINAL segment must look like a filename: not starting with "." (rules out
-      a bare extension like `.py`) and ending in a known repo file extension;
+      a bare extension like `.py`) unless it is one of the exact known dotfiles in
+      `_KNOWN_DOTFILES` (GH-164: `.env.example`, `.gitignore`, ...), and ending in a
+      known repo file extension (`.lock` included, GH-164: `uv.lock`);
     - a token with NO "/" additionally may not contain "__", which rules out a
       dunder attribute chain like `openai.AsyncOpenAI.__init__`. The guard is
       scoped to slash-less tokens on purpose: once a token has a directory
@@ -83,7 +115,7 @@ def _looks_like_path(token: str) -> bool:
         return False
     final_segment = token.rsplit("/", 1)[-1]
     if final_segment.startswith("."):
-        return False
+        return final_segment in _KNOWN_DOTFILES
     if "/" not in token:
         if "__" in token:
             return False
@@ -92,12 +124,12 @@ def _looks_like_path(token: str) -> bool:
 
 
 def extract_scope_paths(line: str) -> tuple[list[str], list[str]]:
-    """Extract every backticked path token from one todo's Creates:/Modifies: line.
+    """Extract every path token (backticked OR bare) from one Creates:/Modifies: line.
 
     RT-001 (fix round): the dominant form in this repo's todos puts every real
     deliverable inside prose, not a bare path list — e.g. a Creates: line reading
     ``Creates: (modifies `a`, `b`, `c`); adds `d`, `e``` — with no separate
-    ``Modifies:`` field at all. Every backticked path-shaped token on the line is
+    ``Modifies:`` field at all. Every path-shaped token on the line is
     extracted regardless of position, by tracking which of the two keywords
     ("modifies" / "adds") most recently preceded it — a parenthetical
     ``(modifies ...)`` clause or a bare ``modifies `path``` clause both open a MODIFY
@@ -110,10 +142,11 @@ def extract_scope_paths(line: str) -> tuple[list[str], list[str]]:
         line: One raw ``Creates:``/``Modifies:`` line from a todo body.
 
     Returns:
-        (creates, modifies) — backticked path tokens sorted into each bucket, in the
-        order they appear on the line.
+        (creates, modifies) — path tokens sorted into each bucket, in the order they
+        appear on the line.
     """
-    field_is_modifies = bool(re.match(r"\s*Modifies:", line, re.IGNORECASE))
+    field = _SCOPE_LINE_RE.match(line)
+    field_is_modifies = bool(field and field.group(1).lower() == "modifies")
     default_label = "modify" if field_is_modifies else "create"
 
     keywords = [(m.start(), m.group(1).lower()) for m in _KEYWORD_RE.finditer(line)]
@@ -128,8 +161,8 @@ def extract_scope_paths(line: str) -> tuple[list[str], list[str]]:
 
     creates: list[str] = []
     modifies: list[str] = []
-    for m in _BACKTICKED_TOKEN_RE.finditer(line):
-        token = m.group(1)
+    for m in _TOKEN_RE.finditer(line):
+        token = m.group().lstrip(_TOKEN_LEAD_STRIP).rstrip(_TOKEN_TRAIL_STRIP)
         if not _looks_like_path(token):
             continue
         (modifies if _label_at(m.start()) == "modify" else creates).append(token)
@@ -143,27 +176,24 @@ def extract_wave_scope(todo_text: str) -> tuple[list[str], list[str]]:
         todo_text: Full text of a wave markdown file.
 
     Returns:
-        (allCreates, allModifies) — every backticked path token found, in file order.
+        (allCreates, allModifies) — every path token found, in file order.
         Callers that need wave.allScope should take the union, e.g.
         ``set(all_creates) | set(all_modifies)``.
     """
     all_creates: list[str] = []
     all_modifies: list[str] = []
+    skip = False
     for raw_line in todo_text.splitlines():
-        line = raw_line.strip()
-        if line.startswith(("- Creates:", "Creates:")):
-            creates, modifies = extract_scope_paths(line)
-            all_creates.extend(creates)
-            all_modifies.extend(modifies)
-        elif line.startswith(("- Modifies:", "Modifies:")):
-            # RT-003: both buckets, exactly as the Creates: branch above.
-            # extract_scope_paths() returns two buckets because ONE line can carry
-            # both spans — a `Modifies:` line ending in "; adds `c/d.py`" opens a
-            # CREATE span. Discarding the creates bucket here dropped every such
-            # path out of allScope entirely, so a file created by that todo never
-            # reached review scope, protocol-surface classification, or the archive
-            # commit check.
-            creates, modifies = extract_scope_paths(line)
-            all_creates.extend(creates)
-            all_modifies.extend(modifies)
+        # A todo marked [~] (out-of-repo / cannot land here) contributes no scope,
+        # until the next heading or todo checkbox line (same rule as the inline scan).
+        if _TODO_START_RE.match(raw_line):
+            skip = "[~]" in raw_line
+        if skip or not _SCOPE_LINE_RE.match(raw_line):
+            continue
+        # RT-003: both buckets for Creates: AND Modifies: lines. ONE line can carry
+        # both spans — a `Modifies:` line ending in "; adds `c/d.py`" opens a CREATE
+        # span — so discarding either bucket drops real paths out of allScope.
+        creates, modifies = extract_scope_paths(raw_line.strip())
+        all_creates.extend(creates)
+        all_modifies.extend(modifies)
     return all_creates, all_modifies

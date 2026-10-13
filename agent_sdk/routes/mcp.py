@@ -402,9 +402,15 @@ async def _dispatch(app: Any, message: dict[str, Any]) -> dict[str, Any] | None:
             return _result(request_id, result)
         # SI-2: never reflect user-supplied method name in error text.
         return _error(request_id, _METHOD_NOT_FOUND, "method not found")
-    except Exception:
+    except Exception as exc:
         # Defensive: a handler bug must never leak a stack trace to the wire.
-        logger.exception("mcp dispatch internal error method=%s", method)
+        # SI-2: log class and frame locations only; an exception message can
+        # embed a rejected tool-output value (pydantic `input_value=`).
+        logger.error(
+            "mcp dispatch internal error type=%s at=%s",
+            type(exc).__name__,
+            frame_locations(exc),
+        )
         return _error(request_id, _INTERNAL_ERROR, "internal error")
 
 

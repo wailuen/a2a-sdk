@@ -110,7 +110,7 @@ def test_normal_path_tool_call_args_unaffected() -> None:
 def test_fold_history_content_coercion(content: Any, expected: str) -> None:
     """_fold_history must correctly extract text from ContentPart arrays."""
     messages = [{"role": "user", "content": content}]
-    result = _fold_history(messages)
+    result = _fold_history(messages, 32000)
     assert result is not None
     # After folding, content is stored as [{"text": ...}] dicts
     assert result[0]["content"][0]["text"] == expected
@@ -119,7 +119,7 @@ def test_fold_history_content_coercion(content: Any, expected: str) -> None:
 def test_fold_history_str_passthrough() -> None:
     """Plain string content must survive unmodified."""
     messages = [{"role": "user", "content": "plain text"}]
-    result = _fold_history(messages)
+    result = _fold_history(messages, 32000)
     assert result is not None
     assert result[0]["content"][0]["text"] == "plain text"
 
@@ -133,7 +133,7 @@ def test_fold_history_no_text_list_returns_empty_string() -> None:
     messages = [
         {"role": "user", "content": [{"type": "image_url", "url": "http://img"}]},
     ]
-    result = _fold_history(messages)
+    result = _fold_history(messages, 32000)
     # Folded result: the content["text"] should be "" (extracted from no-text list)
     # The message still has role="user" so it's included (empty strings are valid)
     # But wait: content = "" (falsy) → raw.get("content") or "" = "" — let's trace
@@ -153,7 +153,7 @@ def test_fold_history_coerces_non_string_text(bad_text: Any) -> None:
     """A malformed part (null/int/bool `text`) must not raise TypeError from
     the join — it must be coerced to a string, never crash the caller."""
     messages = [{"role": "user", "content": [{"type": "text", "text": bad_text}]}]
-    result = _fold_history(messages)
+    result = _fold_history(messages, 32000)
     assert result is not None
     assert isinstance(result[0]["content"][0]["text"], str)
 
@@ -213,7 +213,7 @@ def test_fold_history_strips_control_chars(content: Any) -> None:
     model input (RT-001). A raw char in a str/list-part is stripped by the
     _CONTROL_CHARS sub; any other shape folds to "" and is never str()-ed
     (GH-159) — either way nothing unsafe reaches the model."""
-    folded = _fold_history([{"role": "user", "content": content}])
+    folded = _fold_history([{"role": "user", "content": content}], 32000)
     assert folded is not None
     text = folded[0]["content"][0]["text"]
     assert _CONTROL_CHARS.search(text) is None

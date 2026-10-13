@@ -17,7 +17,7 @@ Entries ordered by LRN number.
 | LRN-011 | Bootstrap token goes to stderr; agent-verify boot command must use 2>&1 | [LRN-011](LRN-011--Users-wailuen-Development-a2a-sdk-harness-skills-agent-verify-SKILL-md.md) |
 | LRN-012 | wave-cycle.js A2UI audit prompt misstated Standard Profile type counts as Core 7 + Extended 11 instead of Core 6 + Extended 8 | [LRN-012](LRN-012-harness-workflows-wave-cycle-js.md) |
 | LRN-013 | AC "integration note" wording targets the Integration section, not step bodies | [LRN-013](LRN-013-harness-skills-upgrade-SKILL-md.md) |
-| LRN-014 | LRN-014 — `pytest -q tests/` bypasses `addopts` ignore exclusions | [LRN-014](LRN-014-pytest-explicit-path-bypasses-addopts.md) |
+| LRN-014 | pytest -q tests/ bypasses addopts ignore exclusions | [LRN-014](LRN-014-pytest-explicit-path-bypasses-addopts.md) |
 | LRN-015 | MCP tools/call — emits coercion failure must return isError:True, never except:pass | [LRN-015](LRN-015-mcp-coercion-failure-must-return-iserror.md) |
 | LRN-016 | SSRF IP-block logic must live in agent_sdk/common/http.py — never duplicated | [LRN-016](LRN-016-ssrf-single-predicate-common-http.md) |
 | LRN-017 | wave-cycle.js — schema-gated gate agents required at redteam and proto-fix checkpoints | [LRN-017](LRN-017-wave-cycle-gate-agents-at-checkpoints.md) |
@@ -53,10 +53,10 @@ Entries ordered by LRN number.
 | LRN-047 | Terminal re-message rule violated — _continue_from_terminal creates new task instead of returning error | [LRN-047](LRN-047-terminal-re-message-creates-task-instead-of-error.md) |
 | LRN-048 | Inbound Message mutated with server-assigned taskId/contextId before archiving in history | [LRN-048](LRN-048-inbound-message-contextid-mutation-in-history.md) |
 | LRN-049 | AG-UI CUSTOM events wrongly gated on catalog membership — must emit freely | [LRN-049](LRN-049-agui-custom-emit-freely-catalog-gate-wrong.md) |
-| LRN-050 | LRN-050 — CLAUDE.md/gitignore consistency gap | [LRN-050](LRN-050-claudemd-gitignore-consistency-gap.md) |
-| LRN-051 | LRN-051 — uv --no-dev is a silent no-op on extras-only dependency layouts | [LRN-051](LRN-051-uv-no-dev-silent-noop-on-extras-only-layouts.md) |
-| LRN-052 | LRN-052 — gitignored/untracked path cannot land in a wave todo | [LRN-052](LRN-052-gitignored-path-cannot-land-in-wave-todo.md) |
-| LRN-053 | LRN-053 — wave scope must union Creates: AND Modifies: paths | [LRN-053](LRN-053-wave-scope-must-union-creates-and-modifies.md) |
+| LRN-050 | CLAUDE.md/gitignore consistency gap | [LRN-050](LRN-050-claudemd-gitignore-consistency-gap.md) |
+| LRN-051 | uv --no-dev is a silent no-op on extras-only dependency layouts | [LRN-051](LRN-051-uv-no-dev-silent-noop-on-extras-only-layouts.md) |
+| LRN-052 | Gitignored/untracked path cannot land in a wave todo | [LRN-052](LRN-052-gitignored-path-cannot-land-in-wave-todo.md) |
+| LRN-053 | Wave scope must union Creates: AND Modifies: paths | [LRN-053](LRN-053-wave-scope-must-union-creates-and-modifies.md) |
 | LRN-054 | Dockerfile lockfile COPY requires lockfile-producer todos in same wave | [LRN-054](LRN-054-dockerfile-lockfile-producer-consumer-coupling.md) |
 | LRN-055 | gitignore placed in wrong directory fails to protect credential files | [LRN-055](LRN-055-gitignore-wrong-directory-scope.md) |
 | LRN-056 | Wave todo path under gitignored/untracked tree is silently undeliverable | [LRN-056](LRN-056-gitignored-tree-todo-path.md) |
@@ -105,10 +105,10 @@ Entries ordered by LRN number.
 | LRN-099 | A2A REST action suffix can differ from the JSON-RPC method name | [LRN-099](LRN-099-a2a-rest-suffix-differs-from-method-name.md) |
 | LRN-100 | Budget-exhausted deferred marker must be relocated once findings are resolved | [LRN-100](LRN-100-budget-exhausted-deferred-must-be-relocated.md) |
 | LRN-101 | Agent card description must never fall back to empty string | [LRN-101](LRN-101-agent-card-description-empty-string-fallback.md) |
-| LRN-102 | # What happened | [LRN-102](LRN-102-tool-progress-custom-event-parity-gap.md) |
-| LRN-103 | # What happened | [LRN-103](LRN-103-a2a-multiturn-contextid-continuation.md) |
-| LRN-104 | # What went wrong | [LRN-104](LRN-104-deferred-import-silent-wrap.md) |
-| LRN-105 | # Body | [LRN-105](LRN-105-broad-except-swallows-error-category.md) |
+| LRN-102 | TOOL_PROGRESS CUSTOM event missing from CUSTOM_EVENTS, card schema, DESIGN.md and console router | [LRN-102](LRN-102-tool-progress-custom-event-parity-gap.md) |
+| LRN-103 | A2A multi-turn contextId continuation | [LRN-103](LRN-103-a2a-multiturn-contextid-continuation.md) |
+| LRN-104 | Deferred import silently wrapped | [LRN-104](LRN-104-deferred-import-silent-wrap.md) |
+| LRN-105 | Broad except swallows error category | [LRN-105](LRN-105-broad-except-swallows-error-category.md) |
 | LRN-106 | caplog assertions on agent_sdk.* loggers false-green outside full-suite order | [LRN-106](LRN-106-caplog-propagate-false-order-dependent.md) |
 | LRN-107 | Fixed broken test idiom recurs uncaught in a sibling test | [LRN-107](LRN-107-duplicated-broken-test-idiom.md) |
 | LRN-108 | Unautomated documentation anchors drift silently | [LRN-108](LRN-108-unautomated-doc-anchor-drift.md) |
@@ -332,3 +332,23 @@ Entries ordered by LRN number.
 | LRN-326 | Registry meta-test vacuous for unset sample fields | [LRN-326](LRN-326-vacuous-sample-meta-test.md) |
 | LRN-327 | Per-model AC tested on only a sample of models for second surface | [LRN-327](LRN-327-ac-surface-coverage-gap.md) |
 | LRN-328 | Content-type allowlist skips non-list payload shapes | [LRN-328](LRN-328-allowlist-all-payload-shapes.md) |
+| LRN-329 | Wave group closed with failing AC tests (source change lost) | [LRN-329](LRN-329-group-ac-tests-unverified.md) |
+| LRN-330 | Superseded exemption test not inverted with ruling | [LRN-330](LRN-330-superseded-test-not-inverted.md) |
+| LRN-331 | Git stash/reset in shared wave tree wipes other groups | [LRN-331](LRN-331-wave-git-stash-wipes-work.md) |
+| LRN-332 | Template mirror pushed while SDK-side change was lost | [LRN-332](LRN-332-mirror-push-without-sdk-diff.md) |
+| LRN-333 | Deterministic cross-check diverges from AI parse rules | [LRN-333](LRN-333-scan-ai-rule-mismatch.md) |
+| LRN-334 | Standalone text slot can forge a sibling row | [LRN-334](LRN-334-standalone-slot-sibling-forgery.md) |
+| LRN-335 | Byte-identical local mirror is not delivery to template | [LRN-335](LRN-335-template-mirror-not-delivered.md) |
+| LRN-336 | Untrusted line in id-bearing list can forge a row | [LRN-336](LRN-336-untrusted-preview-row-forgery.md) |
+| LRN-337 | New cap setting needs a route-level wiring test | [LRN-337](LRN-337-setting-wiring-route-test.md) |
+| LRN-338 | Directory in todo scope declares no files | [LRN-338](LRN-338-directory-scope-declares-nothing.md) |
+| LRN-339 | Untrusted slot keeps ':' and forges a sibling id line | [LRN-339](LRN-339-label-line-forges-id.md) |
+| LRN-340 | SI-2 annotation landed without its named no-leak test | [LRN-340](LRN-340-si2-annotation-missing-test.md) |
+| LRN-341 | Failed LRN Check keeps severity; MCP catch-all still logs exception | [LRN-341](LRN-341-failed-check-keeps-severity.md) |
+| LRN-342 | Wave narrowed a maintainer ruling and docs claimed otherwise | [LRN-342](LRN-342-unratified-ruling-narrowing.md) |
+| LRN-343 | Ruling condition not mapped to real runtime switch | [LRN-343](LRN-343-ruling-gate-vs-runtime-switch.md) |
+| LRN-344 | Reuses directives treated as optional, not acceptance criteria | [LRN-344](LRN-344-reuses-directive-unchecked.md) |
+| LRN-345 | Scope scan accepts only backticked paths, misses planner format | [LRN-345](LRN-345-scope-scan-format-mismatch.md) |
+| LRN-346 | Maintainer ruling implemented for fewer slots than named | [LRN-346](LRN-346-ruling-narrowed-unratified.md) |
+| LRN-347 | Mirror byte-identity test compares local tree, not pushed commit | [LRN-347](LRN-347-mirror-check-local-tree.md) |
+| LRN-348 | Extra security swap added beyond ruling's only-X wording | [LRN-348](LRN-348-extra-swap-beyond-ruling.md) |

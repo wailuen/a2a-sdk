@@ -162,6 +162,25 @@ neutralisation at all, so a value it returns can still fabricate a field
 boundary. Use `safe_cell_text` for anything interpolated into a rendered
 line.
 
+**Standalone slots (GH-167).** A value that sits alone on its own line, with
+nothing joined after it (a title, a name, a summary), does not need the
+separator swap. Use `agent_sdk.common.redact.safe_line_text(value)` there: it
+collapses line breaks and control characters and caps the length at 256
+characters, but keeps `( ) [ ] < > = , :` as written, so `Toshiba (Tokyo)` and
+`Smith, John` read correctly. If anything is joined on the same line (a
+column, `label: value`, `name <email>`, `k=v`), keep `safe_cell_text`. Exception: if sibling lines are single
+delimited rows with ids (e.g. `EmailList` rows and their `preview`), keep
+`safe_cell_text`, or the value can mimic a row. If a standalone title sits
+above delimited rows (`label: value`, ` | ` columns), keep `safe_line_text` for
+the title and indent the rows instead: `safe_line_text` strips leading
+whitespace, so the title always starts at column 0 and cannot pass for an
+indented row. The SDK's `KpiCard` (`  label: value`) and `ComparisonTable`
+(`  header`, `  ---`, `  a | b`) render this way. Put
+identifiers on their own labelled line (`id: ...`) rather than joining them
+to a name, and move other joined details (email, type, date) to their own
+lines too so the name stands alone. The SDK's `UserList`, `UserProfile`,
+`DocumentList` and `CalendarEvents` render this way.
+
 The one exception is a **multi-line markdown *document* field** — where
 the field's own contract is a block of markdown, not a delimited cell
 (free-form prose that intentionally carries headings/lists/paragraphs).

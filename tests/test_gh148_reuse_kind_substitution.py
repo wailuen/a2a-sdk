@@ -753,7 +753,7 @@ def _agui_run_messages(
     ``record.messages`` itself, so leaving it out here does not change what
     this helper returns; see the route-level test near the end of this file
     for the full sequence including that call."""
-    folded = _fold_history(raw_client_messages)
+    folded = _fold_history(raw_client_messages, 32000)
     assert folded is not None
     task = new_task(thread_id)
     record = store.create(task, identity)

@@ -39,7 +39,7 @@ from pydantic import BaseModel
 from ..agent.loop import safe_validation_message
 from ..agent.registry import ToolInputValidationError
 from ..auth.middleware import AuthRuntime, _prm_challenge, require_admin, unauth_rate_limit
-from ..common.redact import frame_locations
+from ..common.redact import frame_locations, sanitize_text
 from ..credentials.fields import CredentialField, validate_credential_url
 from ..credentials.store import NS_BEDROCK, NS_MODEL, NS_OAUTH_IDP, RESERVED_NAMESPACES, CredentialStore
 from ..models.errors import AgentError, ErrorCategory
@@ -313,6 +313,26 @@ async def revoke_key(key_id: str, request: Request) -> dict[str, Any]:
         status = 404 if exc.category is ErrorCategory.NOT_FOUND else 400
         raise HTTPException(status_code=status, detail=exc.message) from exc
     return {"revoked": key_id}
+
+
+# ── signed-in users (GH-163) ──
+
+
+@router.get("/admin/api/oauth/identities", dependencies=[Depends(require_admin)])
+async def list_oauth_identities(request: Request) -> dict[str, Any]:
+    identities = request.app.state.oauth.list_identities()
+    return {"identities": identities, "count": len(identities)}
+
+
+@router.delete("/admin/api/oauth/identities/{user}", dependencies=[Depends(require_admin)])
+async def revoke_oauth_identity(user: str, request: Request) -> dict[str, Any]:
+    revoked = request.app.state.oauth.revoke_user(user)
+    flows = getattr(request.app.state, "idp_flows", None)
+    if flows is not None:
+        flows.drop_user(user)
+    safe_user = sanitize_text(user, max_len=256)
+    logger.warning("oauth user revoked by admin user=%s families=%d", safe_user, revoked)
+    return {"user": safe_user, "revoked": revoked}
 
 
 # ── overview ──

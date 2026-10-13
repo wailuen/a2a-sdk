@@ -9,7 +9,7 @@ export const meta = {
     { title: 'Phase Redteam',  detail: 'Full-wave zero-tolerance fix loop (max 8 rounds; debug fires unconditionally at round 4+ (pRound > 3) and at any round when stall is detected (same findings as previous round); round 8 exits)' },
     { title: 'Protocol Audit', detail: 'A2A/MCP/AG-UI/A2UI conformance — parallel advisors + seam check (protocol-surface waves only)' },
     { title: 'Codify',         detail: 'SDK issue scan (sequential) → parallel LRN capture for critical/high findings → README index update → sequential C-NNN registration for new component candidates' },
-    { title: 'Archive',        detail: 'Move wave file to completed/, update plan.md, backfill FR Implementation: fields' },
+    { title: 'Archive',        detail: 'Move wave file to completed/, update plan.md, backfill FR Implementation: and Test: fields' },
   ],
 }
 
@@ -112,14 +112,26 @@ const A2UI_SURFACE = ['src/a2ui/', 'src/models/content_types']
 
 // ─── schemas ──────────────────────────────────────────────────────────────────
 
+// GH-164: the Parse-phase scope scan is deterministic (a regex run by the agent, not an AI
+// reading), so a path the AI parse drops (e.g. `src/config.py`) is caught instead of silently
+// narrowing every downstream gate keyed off wave.allScope.
+const SCOPE_SCAN_SCHEMA = {
+  type: 'object',
+  required: ['paths'],
+  additionalProperties: false,
+  properties: {
+    paths: { type: 'array', items: { type: 'string' }, description: 'GH-164: the exact paths printed by the scan script, unmodified' },
+  },
+}
+
 const WAVE_SCHEMA = {
   type: 'object',
   required: ['waveId', 'allCreates', 'allModifies', 'groups', 'groupDeps', 'lrnNext', 'completedFileExists'],
   additionalProperties: false,
   properties: {
     waveId:      { type: 'string' },
-    allCreates:  { type: 'array', items: { type: 'string' }, description: 'RT-001 (fix round): every backticked path token a todo creates. A bare-path Creates: line is the MINORITY form in this repo\'s todos — the DOMINANT form declares every real path inside prose with no separate Modifies: field at all, e.g. `Creates: (modifies `a`, `b`, `c`); adds `x``, where `a`/`b`/`c` are modifies (see allModifies) and `x` alone is the create. Extraction must scan the whole Creates: line for every backticked token, not stop at the first one.' },
-    allModifies: { type: 'array', items: { type: 'string' }, description: 'RT-001 (fix round): every backticked path token a todo modifies — both a dedicated Modifies: line AND every backticked token named inside a "modifies ..." clause (parenthetical or bare) on a Creates: line, which is how most of this repo\'s todos declare their real modify-set.' },
+    allCreates:  { type: 'array', items: { type: 'string' }, description: 'RT-001 (fix round): every path token (backticked OR bare) a todo creates. A bare-path Creates: line is the MINORITY form in this repo\'s own todos but the ONLY form the planner agent writes for agent repos (RT-001 fresh-lens debug) — the DOMINANT form declares every real path inside prose with no separate Modifies: field at all, e.g. `Creates: (modifies `a`, `b`, `c`); adds `x``, where `a`/`b`/`c` are modifies (see allModifies) and `x` alone is the create. Extraction must scan the whole Creates: line for every path token, backticked or bare, not stop at the first one.' },
+    allModifies: { type: 'array', items: { type: 'string' }, description: 'RT-001 (fix round): every path token (backticked OR bare) a todo modifies — both a dedicated Modifies: line AND every token named inside a "modifies ..." clause (parenthetical or bare) on a Creates: line, which is how most of this repo\'s todos declare their real modify-set.' },
     lrnNext:     { type: 'integer' },
     completedFileExists: { type: 'boolean', description: 'RT-004: true if workspace/todos/completed/<basename of the wave file> already exists (`test -f workspace/todos/completed/<basename> && echo yes || echo no`), determined UNCONDITIONALLY while parsing — a reused wave ID whose basename collides with an already-archived wave would have its record silently overwritten by the archive step\'s mv-by-basename (and, for wave-cycle.js, the LRN-100 deferred-marker relocation sweep)' },
     groupDeps: {
@@ -648,6 +660,12 @@ let lastDispatchedLabel = 'none'
 let lastDispatchedPhase = 'Parse'
 let waveIdForBudgetNote = WAVE_FILE
 const _dispatchAgent = agent
+// RT-003: all agents share ONE working tree; a stash/reset by one silently deletes other
+// groups' uncommitted work (w043 lost GH-160/161/164 this way). Append the ban to every prompt.
+const SHARED_TREE_GIT_BAN =
+  '\n\nSHARED WORKING TREE RULE: other agents have uncommitted work in this tree. NEVER run\n' +
+  '`git stash`, `git reset`, `git checkout -- <path>`, `git restore`, `git clean` or\n' +
+  '`git checkout .`. Edit files in place. To inspect old content use `git show` / `git diff`.'
 async function callAgent(prompt, opts) {
   agentCallCount++
   if (agentCallCount > AGENT_CALL_BUDGET) {
@@ -677,7 +695,7 @@ async function callAgent(prompt, opts) {
   }
   lastDispatchedLabel = (opts && opts.label) || lastDispatchedLabel
   lastDispatchedPhase = (opts && opts.phase) || lastDispatchedPhase
-  return _dispatchAgent(prompt, opts)
+  return _dispatchAgent(prompt + SHARED_TREE_GIT_BAN, opts)
 }
 
 // ─── state ────────────────────────────────────────────────────────────────────
@@ -711,7 +729,14 @@ const wave = await callAgent(
   '(e.g. LRN-023 → lrnNext = 24; if none, lrnNext = 1).\n\n' +
   'Extract:\n' +
   '- waveId: the w[NNN] identifier from the filename\n' +
-  '- A "path token" is a backticked token that names exactly ONE FILE. RT-001\n' +
+  '- A "path token" is any token on a Creates:/Modifies: line that names exactly ONE\n' +
+  '  FILE, backticked OR BARE (RT-001, fresh-lens debug): the planner agent writes bare,\n' +
+  '  comma-separated paths (e.g. Creates: src/tools/x.py, tests/test_x.py) and bare\n' +
+  '  "(modifies a, b)" clauses, so a path is NEVER skipped for lacking backticks. Split\n' +
+  '  the line on whitespace, commas, semicolons, parens and square brackets; strip\n' +
+  '  backticks, "*" and quotes from both ends of each piece and any trailing . , : ;\n' +
+  '  then apply the rules below. A bold **Creates:** / **Modifies:** header line counts\n' +
+  '  too, and a trailing "# ..." annotation is still part of its line. RT-001\n' +
   '  (round-7 fresh-lens debug): these lines are PROSE, so they also backtick things\n' +
   '  that are NOT scope. REJECT every one of the following outright: a DIRECTORY (any\n' +
   '  token ending in "/" — `agent_sdk/`, `docs/`, `.claude/agents/`, `harness/skills/`),\n' +
@@ -724,28 +749,33 @@ const wave = await callAgent(
   '  reads it as one, so a single directory token would declare an entire subtree and\n' +
   '  silently disable the undeclared-scope check. Accept a token only if its FINAL\n' +
   '  segment is a filename ending in a real repo extension (.py .js .ts .md .json .toml\n' +
-  '  .yaml .yml): `harness/wave_scope.py`, `pyproject.toml`, and\n' +
+  '  .yaml .yml .lock) or is EXACTLY one of these known lockfiles/dotfiles (GH-164):\n' +
+  '  `uv.lock`, `package-lock.json`, `poetry.lock`, `yarn.lock`, `pnpm-lock.yaml`,\n' +
+  '  `.env.example`, `.env.sample`, `.env.template`, `.gitignore`, `.gitattributes`,\n' +
+  '  `.dockerignore`, `.editorconfig`, `.python-version`, `.nvmrc`, `.npmrc`,\n' +
+  '  `.pre-commit-config.yaml` (any other leading-dot name, like a bare `.py` or `.env`,\n' +
+  '  is still rejected). Qualifying examples: `harness/wave_scope.py`, `pyproject.toml`, and\n' +
   '  `.claude/workflows/wave-cycle.js` all qualify (a leading dot-segment is fine — the\n' +
   '  FINAL segment is what must look like a filename). RT-001 (residual fix): a token\n' +
   '  with NO "/" at all is further restricted to ROOT-LEVEL extensions (.md .json\n' +
-  '  .toml .yaml .yml) — no .py/.js/.ts source file is ever bare at this repo\'s root,\n' +
+  '  .toml .yaml .yml .lock, plus the known dotfiles above) — no .py/.js/.ts source file is ever bare at this repo\'s root,\n' +
   '  every real one is nested, so a bare `wave-cycle.js` or `test_workflow_sync.py`\n' +
   '  can never string-match the real, directory-qualified dirty path `git status`\n' +
   '  reports for it and must be REJECTED; write the full path instead. This rule is\n' +
   '  the prose twin of harness/wave_scope.py::_looks_like_path; keep the two in step.\n' +
-  '- allCreates: every backticked repo-relative path token this wave creates. RT-001\n' +
+  '- allCreates: every repo-relative path token (backticked or bare) this wave creates. RT-001\n' +
   '  (fix round): a "Creates:" line is NOT always a bare path — this repo\'s dominant\n' +
   '  todo form puts every real deliverable inside prose with NO separate "Modifies:"\n' +
   '  field at all, e.g. a todo line reading: Creates: (modifies `a`, `b`, `c`); adds\n' +
-  '  `d`, `e`. Scan the FULL "Creates:" line for EVERY backticked path token, wherever\n' +
+  '  `d`, `e`. Scan the FULL "Creates:" line for EVERY path token (backticked or bare), wherever\n' +
   '  it sits — inside a parenthetical "(modifies ...)" clause, after a trailing "adds\n' +
   '  ..." / "adds/updates ..." clause, or bare. NEVER stop at the first backticked\n' +
   '  token on the line: a Creates: line naming six modified files inside one\n' +
   '  parenthetical, followed by a trailing "adds `x`" clause, has SEVEN real paths, not\n' +
   '  one. A path token belongs in allCreates UNLESS it sits inside a "modifies ..."\n' +
   '  clause (parenthetical or bare) naming it — those belong in allModifies instead.\n' +
-  '- allModifies: every backticked repo-relative path token this wave modifies. This\n' +
-  '  includes BOTH a dedicated "Modifies:" line\'s paths AND every backticked path\n' +
+  '- allModifies: every repo-relative path token (backticked or bare) this wave modifies. This\n' +
+  '  includes BOTH a dedicated "Modifies:" line\'s paths AND every (backticked or bare) path\n' +
   '  token named inside a "modifies ..." clause on a Creates: line, parenthetical or\n' +
   '  bare — e.g. Creates: (modifies `a`); modifies `b` names TWO modifies, not one. Do\n' +
   '  NOT assume a todo\'s real modify-set appears only on its own "Modifies:" line: most\n' +
@@ -805,6 +835,56 @@ for (const g of wave.groups) {
   g.modifies = uniq(g.modifies)
   g.scope    = uniq(g.creates.concat(g.modifies))
 }
+
+// GH-164 (A): allScope came only from the AI parse above, with no deterministic check, so it
+// could silently drop a path such as `src/config.py`. Run a plain regex scan of every
+// Creates:/Modifies: line (through the same agent-call channel used for the file read), union it
+// with the AI result, and fail Parse if the AI missed anything the scan found. Fail-closed: a
+// null scan response is unknown state, not "nothing found". RT-001 (w047 fresh-lens debug): the
+// scan reads BARE paths as well as backticked ones (the planner agent writes bare comma-separated
+// paths); a backtick-only scan printed [] for every planner-format wave, making this gate a no-op.
+const scopeScan = await callAgent(
+  'Run this script exactly as written (do not edit it) and return the JSON list it prints as ' +
+  '`paths`, unmodified. It is a deterministic regex scan of the Creates:/Modifies: lines of the ' +
+  'wave file; do not add, remove or reinterpret any path.\n\n' +
+  'python3 - ' + WAVE_FILE + ' <<\'PY\'\n' +
+  'import json,re,sys\n' +
+  'EXT=(".py",".js",".ts",".md",".json",".toml",".yaml",".yml",".lock")\n' +
+  'ROOT=(".md",".json",".toml",".yaml",".yml",".lock")\n' +
+  'DOT={".env.example",".env.sample",".env.template",".gitignore",".gitattributes",".dockerignore",".editorconfig",".python-version",".nvmrc",".npmrc",".pre-commit-config.yaml"}\n' +
+  'BAD=" ()"+chr(34)+chr(39)\n' +
+  'def ok(t):\n' +
+  '    if not t or any(c in t for c in BAD) or "*" in t or "?" in t: return False\n' +
+  '    if t.startswith("/") or t.endswith("/") or t.startswith("template/"): return False\n' +
+  '    f=t.rsplit("/",1)[-1]\n' +
+  '    if f.startswith("."): return f in DOT\n' +
+  '    if "/" not in t: return "__" not in t and f.endswith(ROOT)\n' +
+  '    return f.endswith(EXT)\n' +
+  'out=[]; skip=False\n' +
+  'for l in open(sys.argv[1],encoding="utf-8"):\n' +
+  '    if re.match(r"\\s*(?:[-*]\\s*)?(?:#{1,6}\\s|\\[.\\])",l): skip="[~]" in l\n' +
+  '    if skip or not re.match(r"\\s*(?:[-*+]\\s*)?(?:\\*\\*)?(?:Creates|Modifies)(?:\\*\\*)?:",l,re.I): continue\n' +
+  '    for t in re.split(r"[\\s,;()\\[\\]]+",l):\n' +
+  '        t=t.lstrip("`*"+chr(34)+chr(39)).rstrip("`*.,:;"+chr(34)+chr(39))\n' +
+  '        if ok(t): out.append(t)\n' +
+  'print(json.dumps(sorted(set(out))))\n' +
+  'PY',
+  { schema: SCOPE_SCAN_SCHEMA, label: 'parse:scope-scan', phase: 'Parse' }
+)
+if (!scopeScan || !Array.isArray(scopeScan.paths)) {
+  log('ERROR: wave ' + wave.waveId + ' deterministic scope scan returned no result — aborting Parse')
+  return { error: 'scope-scan-failed', waveId: wave.waveId }
+}
+const scannedScope = uniq(scopeScan.paths)
+const scopeMissedByParse = scannedScope.filter(function (p) { return wave.allScope.indexOf(p) === -1 })
+if (scopeMissedByParse.length > 0) {
+  log('ERROR: wave ' + wave.waveId + ' Parse missed ' + scopeMissedByParse.length + ' path(s) the ' +
+      'deterministic Creates:/Modifies: scan found: ' + scopeMissedByParse.join(', ') +
+      ' — aborting rather than running with a narrowed scope. Fix the wave file wording or re-run.')
+  return { error: 'scope-scan-mismatch', waveId: wave.waveId, missed: scopeMissedByParse }
+}
+wave.allScope = uniq(wave.allScope.concat(scannedScope))
+log('allScope (final, ' + wave.allScope.length + '): ' + wave.allScope.join(', '))
 
 // RT-006 (AGENT_CALL_BUDGET recompute): now that wave.groups.length is known, widen the hard
 // backstop to track the wave's own shape rather than the flat constant used for the handful of
@@ -2374,6 +2454,12 @@ if (!protocolBlocked) {
     '   `template/` + that path (e.g. template/.claude/workflows/wave-cycle.js) to\n' +
     '   offendingHarnessPaths. This is the only way this gate can see an uncommitted\n' +
     '   template mirror — the mirror lives in a repo the top-level git status cannot see.\n' +
+    '   RT-001 (w047 round-5 debug): a COMMITTED but UNPUSHED mirror is just as unsynced —\n' +
+    '   agent repos pull the template from origin, not this working tree. Also run:\n' +
+    '   git -C template rev-list --count @{upstream}..HEAD\n' +
+    '   If it prints anything other than 0 (or fails, e.g. no upstream), add\n' +
+    '   template/.claude/workflows/wave-cycle.js to offendingHarnessPaths with the note\n' +
+    '   "template/ has unpushed commits: run git -C template push".\n' +
     '5. GH-118 import cross-check (LRN-119 — mid-wave module extraction). RT-001: this step\n' +
     '   MUST resolve RELATIVE intra-package imports (`from . import X`, `from .mod import Y`,\n' +
     '   `from ..pkg.mod import Z`) in addition to ABSOLUTE `src.*` imports (`src` is THIS\n' +
@@ -2641,6 +2727,9 @@ if (protocolBlocked) {
     '     Adjust the Slices column if you can determine the count from the file.\n\n' +
     '3. For each path in the scope list, find the matching FR in workspace/prd/ if any.\n' +
     '   If Implementation: says [pending], replace with the real src/path:symbol.\n' +
+    '   If Test: says [pending], replace with `tests/<file>.py::<test_name>` ONLY for a test that exists and passed in this wave: ' +
+    'the file must be a tests/ path in the scope list below and the test name must be cited in the wave file (now at workspace/todos/completed/' + WAVE_BASENAME + ' after step 1) and defined in that file. ' +
+    'Otherwise leave Test: as [pending].\n' +
     '   Scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n\n' +
     '4. LRN-100 relocation sweep: for every `*-budget-exhausted.md` file in\n' +
     '   `workspace/todos/deferred/` (including this wave\'s own, if any), check whether\n' +

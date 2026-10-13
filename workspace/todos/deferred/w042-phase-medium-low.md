@@ -219,6 +219,7 @@ round is folded in. The IDs below are renumbered for this note; they do not matc
 - sdkCandidate: true
 
 ### RT-027
+- status: RESOLVED (GH-166): uvicorn.access filter strips /oauth/ query strings; proxy and ingress logs documented as not covered
 - severity: low
 - file: agent_sdk/routes/oauth.py
 - description: The SI-2 AC says the IdP code and state never appear in logs. But response_mode=query puts both in the /oauth/idp/callback URL, which the standard uvicorn access log records in full. test_no_idp_secrets_in_logs_or_responses watches only the agent_sdk logger.

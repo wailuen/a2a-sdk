@@ -94,7 +94,14 @@ from pydantic import (
     model_validator,
 )
 
-from ..common.redact import safe_block_text, safe_cell_text, safe_id_text, sanitize_text
+from ..common.redact import (
+    LINE_TEXT_MAX_LEN,
+    safe_block_text,
+    safe_cell_text,
+    safe_id_text,
+    safe_line_text,
+    sanitize_text,
+)
 
 # Punctuation a renderer template may legitimately emit around a sanitized
 # value without it being a structural delimiter — "+"/"%" in a numeric
@@ -115,6 +122,14 @@ def _sanitize_cell(value: str) -> str:
     reimplement it here; a second copy is the exact drift this promotion
     exists to prevent."""
     return safe_cell_text(value)
+
+
+def _sanitize_line(value: str, *, max_len: int | None = LINE_TEXT_MAX_LEN) -> str:
+    """Alias for :func:`agent_sdk.common.redact.safe_line_text` — for a value
+    that sits ALONE on its line (GH-167). Joined values keep
+    :func:`_sanitize_cell`. The result always starts at column 0, so a
+    renderer keeps it out of a delimited row grammar by indenting the rows."""
+    return safe_line_text(value, max_len=max_len)
 
 
 def _safe_id(value: str) -> str:
@@ -308,6 +323,17 @@ class ContentModel(_Wire, abc.ABC):
     concrete instead, so the base class renders the suffix once, for every
     subclass that will ever exist, rather than asking each one to remember
     to.
+
+    Delimiter safety (GH-130, GH-167): every untrusted ``str`` rendered into
+    the text fallback goes through one of two helpers, chosen by where the
+    value sits. A value JOINED with other text on its line (a ``" | "``
+    column, a ``"label: value"`` pair, ``name <email>``, ``(type)``,
+    ``k=v``) uses ``safe_cell_text``, which swaps the separator alphabet for
+    look-alikes. A value that sits ALONE on its own line, with nothing joined
+    after it (a title, a name, a summary), uses ``safe_line_text``, which
+    only collapses line breaks and control characters and caps the length,
+    so ``Toshiba (Tokyo)`` and ``Smith, John`` stay ASCII. Identifiers go on
+    their own labelled line (``id: ...``) via ``safe_id_text``.
     """
 
     data_type: ClassVar[str]
@@ -577,10 +603,13 @@ class KpiCard(ContentModel):
     title: str | None = None
 
     def _body_text(self) -> str:
-        lines = [_sanitize_cell(self.title)] if self.title else []
+        # GH-167: the title stands alone and keeps ASCII (ruling: only the
+        # line-break/control-char collapse applies). It cannot imitate a
+        # metric row by layout: rows are indented, the title is at column 0.
+        lines = [_sanitize_line(self.title)] if self.title else []
         for m in self.metrics:
             unit = f" {_sanitize_cell(m.unit)}" if m.unit else ""
-            lines.append(f"{_sanitize_cell(m.label)}: {_sanitize_cell(str(m.value))}{unit}")
+            lines.append(f"  {_sanitize_cell(m.label)}: {_sanitize_cell(str(m.value))}{unit}")
             if isinstance(m.trend, KpiTrend):
                 arrow = _ARROWS[m.trend.direction]
                 bits = [arrow]
@@ -590,9 +619,9 @@ class KpiCard(ContentModel):
                     bits.append(f"{m.trend.delta:+g}")
                 if m.trend.period:
                     bits.append(_sanitize_cell(m.trend.period))
-                lines.append(f"  trend: {' '.join(bits)}")
+                lines.append(f"    trend: {' '.join(bits)}")
             elif isinstance(m.trend, str):
-                lines.append(f"  trend: {_ARROWS[m.trend]}")
+                lines.append(f"    trend: {_ARROWS[m.trend]}")
         return "\n".join(lines)
 
 
@@ -659,7 +688,7 @@ class TimeSeriesChart(ContentModel):
         return values
 
     def _body_text(self) -> str:
-        lines = [_sanitize_cell(self.title)]
+        lines = [_sanitize_line(self.title)]
         if self.data:
             first, last = self.data[0], self.data[-1]
             fv = first.value if first.value is not None else "N/A"
@@ -693,11 +722,15 @@ class ComparisonTable(ContentModel):
 
     def _body_text(self) -> str:
         header = " | ".join(_sanitize_cell(c.label) for c in self.columns)
-        title = _sanitize_cell(self.title) if self.title else None
-        lines = [title, header, "-" * len(header)] if title else [header, "-" * len(header)]
+        # GH-167: the title stands alone and keeps ASCII (ruling: only the
+        # line-break/control-char collapse applies). It cannot imitate a
+        # table row by layout: header, rule and rows are indented, the title
+        # is at column 0.
+        lines = [_sanitize_line(self.title)] if self.title else []
+        lines += [f"  {header}", "  " + "-" * len(header)]
         for row in self.rows:
             lines.append(
-                " | ".join(_sanitize_cell(str(row.get(c.key, ""))) for c in self.columns)
+                "  " + " | ".join(_sanitize_cell(str(row.get(c.key, ""))) for c in self.columns)
             )
         return "\n".join(lines)
 
@@ -717,7 +750,7 @@ class BarChart(ContentModel):
     y_key: str | None = None
 
     def _body_text(self) -> str:
-        lines = [_sanitize_cell(self.title)] if self.title else []
+        lines = [_sanitize_line(self.title)] if self.title else []
         lines += [f"  {_sanitize_cell(b.category)}: {b.value:g}" for b in self.bars]
         return "\n".join(lines)
 
@@ -746,13 +779,16 @@ class EntityList(ContentModel):
         return self
 
     def _body_text(self) -> str:
-        title = _sanitize_cell(self.title) if self.title else _sanitize_cell(f"{self.entity_type} list")
+        title = (
+            _sanitize_line(self.title) if self.title else _sanitize_cell(f"{self.entity_type} list")
+        )
         lines = [title]
         lines.append(f"  showing {self.showing or len(self.items)} of {self.total_count}")
         for item in self.items:
-            lines.append(f"  - {_sanitize_cell(item.name)} ({_safe_id(item.id)})")
+            lines.append(f"  - {_sanitize_line(item.name)}")
+            lines.append(f"    id: {_safe_id(item.id)}")
             if item.summary:
-                lines.append(f"      {_sanitize_cell(item.summary)}")
+                lines.append(f"      {_sanitize_line(item.summary, max_len=None)}")
         return "\n".join(lines)
 
 
@@ -823,9 +859,8 @@ class MarketBriefing(ContentModel):
     sections: list[BriefingSection] = Field(default_factory=list)
 
     def to_markdown(self) -> str:
-        title = _sanitize_cell(self.title)
-        as_of = _sanitize_cell(self.as_of)
-        lines = [f"{title} ({as_of})"]
+        # GH-167: the title and the as-of header each sit alone on their own line.
+        lines = [_sanitize_line(self.title), f"as of: {_sanitize_line(self.as_of)}"]
         if self.prose:
             lines.append(_sanitize_block(self.prose))
         for section in self.sections:
@@ -878,7 +913,7 @@ class WaterfallChart(ContentModel):
     date_range: DateRange | None = None  # start/end — frozen; not first/last
 
     def _body_text(self) -> str:
-        lines = [_sanitize_cell(self.title)]
+        lines = [_sanitize_line(self.title)]
         lines += [
             f"  {_sanitize_cell(s.label)}: {s.value:+g} → {s.cumulative:g} ({s.type})"
             for s in self.segments
@@ -928,7 +963,7 @@ class MultiCategoryChart(ContentModel):
     chart_config: MultiCategoryChartConfig | None = None
 
     def _body_text(self) -> str:
-        lines = [_sanitize_cell(self.title)]
+        lines = [_sanitize_line(self.title)]
         for p in self.periods:
             cats = ", ".join(
                 f"{_sanitize_cell(k)}={v.value:g}" for k, v in p.categories.items()
@@ -1145,8 +1180,10 @@ class CalendarEvents(ContentModel):
             online = " [online]" if (e.is_online or (e.location and e.location.is_online)) else ""
             e_start = _sanitize_cell(e.start)
             e_end = _sanitize_cell(e.end)
-            subject = _sanitize_cell(e.subject)
-            lines.append(f"  {e_start} – {e_end}: {subject}{loc}{online} (id: {_safe_id(e.id)})")
+            # GH-167: the subject stands alone; time/place and id get their own lines.
+            lines.append(f"  - {_sanitize_line(e.subject)}")
+            lines.append(f"    {e_start} – {e_end}{loc}{online}")
+            lines.append(f"    id: {_safe_id(e.id)}")
         return "\n".join(lines)
 
 
@@ -1199,20 +1236,21 @@ class UserProfile(ContentModel):
     out_of_office: OutOfOfficeSettings | None = None
 
     def _body_text(self) -> str:
-        name = _sanitize_cell(self.display_name)
-        email = _sanitize_cell(self.email)
-        lines = [f"{name} <{email}> (id: {_safe_id(self.id)})"]
+        # GH-167: the name stands alone; email and id get their own labelled lines.
+        lines = [
+            _sanitize_line(self.display_name),
+            f"  email: {_sanitize_cell(self.email)}",
+            f"  id: {_safe_id(self.id)}",
+        ]
         if self.job_title:
             dept = f", {_sanitize_cell(self.department)}" if self.department else ""
             lines.append(f"  {_sanitize_cell(self.job_title)}{dept}")
         if self.presence:
             lines.append(f"  presence: {self.presence.availability}")
         if self.manager:
-            manager_name = _sanitize_cell(self.manager.display_name)
-            manager_email = _sanitize_cell(self.manager.email)
-            lines.append(
-                f"  manager: {manager_name} <{manager_email}> (id: {_safe_id(self.manager.id)})"
-            )
+            lines.append(f"  manager: {_sanitize_line(self.manager.display_name)}")
+            lines.append(f"    email: {_sanitize_cell(self.manager.email)}")
+            lines.append(f"    id: {_safe_id(self.manager.id)}")
         return "\n".join(lines)
 
 
@@ -1238,10 +1276,12 @@ class UserList(ContentModel):
     def _body_text(self) -> str:
         lines = [f"{self.total_count} user(s)"]
         for u in self.users:
-            title = f" — {_sanitize_cell(u.job_title)}" if u.job_title else ""
-            name = _sanitize_cell(u.display_name)
-            email = _sanitize_cell(u.email)
-            lines.append(f"  {name} <{email}> (id: {_safe_id(u.id)}){title}")
+            # GH-167: the name stands alone; email, job title and id get their own lines.
+            lines.append(f"  - {_sanitize_line(u.display_name)}")
+            lines.append(f"    email: {_sanitize_cell(u.email)}")
+            if u.job_title:
+                lines.append(f"    title: {_sanitize_cell(u.job_title)}")
+            lines.append(f"    id: {_safe_id(u.id)}")
         return "\n".join(lines)
 
 
@@ -1275,12 +1315,14 @@ class DocumentList(ContentModel):
     def _body_text(self) -> str:
         lines = [f"{self.total_count} document(s)"]
         for d in self.documents:
-            doc_type = _sanitize_cell(d.type) if d.type else ""
-            type_suffix = f" ({doc_type})" if doc_type else ""
+            # GH-167: the name stands alone; type, date and id get their own lines.
+            lines.append(f"  - {_sanitize_line(d.name)}")
+            if d.type:
+                lines.append(f"    type: {_sanitize_cell(d.type)}")
             when = d.last_modified or d.modified
-            date_suffix = f"  {_sanitize_cell(when)}" if when else ""
-            name = _sanitize_cell(d.name)
-            lines.append(f"  {name}{type_suffix}{date_suffix} (id: {_safe_id(d.id)})")
+            if when:
+                lines.append(f"    modified: {_sanitize_cell(when)}")
+            lines.append(f"    id: {_safe_id(d.id)}")
         return "\n".join(lines)
 
 

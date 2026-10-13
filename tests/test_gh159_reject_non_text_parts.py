@@ -205,6 +205,7 @@ def test_fold_never_stringifies_structured_content():
         [
             {"role": "user", "content": "q"},
             {"role": "assistant", "content": {"type": "binary", "data": "SECRETBYTES"}},
-        ]
+        ],
+        32000,
     )
     assert "SECRETBYTES" not in repr(folded)

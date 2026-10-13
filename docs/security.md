@@ -47,7 +47,7 @@ Off by default (`AGENT_SDK_OAUTH_IDP=none`). With `oidc`:
 - **Per-source flow limit:** each client IP (same derivation as the unauthenticated rate limit, so `AGENT_SDK_TRUSTED_PROXIES` applies; an IPv6 address counts as its /64) may hold at most 50 in-flight sign-ins in a 1,000-entry table. No source can push out another source's sign-ins. What a caller sees: (a) a source at its 50 limit replaces its own oldest sign-in, with no error; that oldest sign-in just stops working ("sign-in link is invalid or has expired"). (b) When the table is full, a source already holding sign-ins also replaces its own oldest; a source holding none is refused, and the client gets an `error=temporarily_unavailable` redirect (generic, nothing echoed but the client's own `state`). (c) Past the unauthenticated rate limit the caller gets the usual 429. Residual risk: about 20 IPs (or IPv6 /64s) holding 50 sign-ins each can keep the table full and block new sign-ins for the whole tenant until their sign-ins expire (10 minutes). The per-IP rate limit is the only bound on that.
 - **Removal lag:** the SDK keeps no IdP token. A person removed in Entra keeps access until their token family expires, at most `AGENT_SDK_OAUTH_IDP_SESSION_HOURS` (default 720 hours, 30 days). Lower it for faster cut-off.
 - `AGENT_SDK_OAUTH_IDP_DISABLE_API_KEYS=true` rejects non-admin API keys on A2A, AG-UI and `/mcp`. Admin keys still work everywhere, so protect them.
-- **Who may sign in (fail-closed):** with a non-Entra issuer the SDK cannot pin a tenant, so any account at that IdP would otherwise pass. Boot therefore refuses `oidc` unless the issuer is an Entra tenant pinned by GUID (the Microsoft personal-account tenant `9188040d-6c67-4c5b-b112-36a304b66dad` does not count and is refused), OR `AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE` / `_REQUIRED_GROUP` is set, OR you set the explicit opt-out `AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS=true`. The opt-out admits every account at the issuer and logs one WARNING at boot. It is valid only with `AGENT_SDK_OAUTH_IDP=oidc` (boot refuses it otherwise). Entra GUID issuers and setups with a role/group are unchanged.
+- **Who may sign in (fail-closed):** the SDK cannot see whether an Entra tenant requires assignment ("Assignment required"), so without a claim check every member and guest of the tenant could sign in. Boot therefore refuses `oidc` for every issuer, Entra included, unless `AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE` / `_REQUIRED_GROUP` is set, OR you set the explicit opt-out `AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS=true`. The opt-out admits every account the issuer signs in and logs one WARNING at boot. It is valid only with `AGENT_SDK_OAUTH_IDP=oidc` (boot refuses it otherwise). The Microsoft personal-account tenant `9188040d-6c67-4c5b-b112-36a304b66dad` is still refused. Ruling: GH-161 (ADR a003 D14, supersedes the D13 Entra exemption).
 - Cannot combine with `AGENT_SDK_OAUTH_ONE_TIME_CONSENT=true` (boot refuses).
 - A user clicking Allow is recorded as `user_consented_at`, never as admin approval (`consented`). Switching sign-in back off with one-time consent on therefore never auto-approves a client that only a directory user allowed; the admin-key page is shown again.
 
@@ -65,6 +65,11 @@ No credential values, tokens, or user input values in error messages or
 logs — ever. `AgentError` messages are generic by convention; the JSON log
 formatter additionally redacts known secret patterns; upstream response
 bodies never reach error text.
+
+The SDK strips the query string from every `/oauth/` path in uvicorn's access
+log only (the IdP callback URL carries `code` and `state`). Reverse proxy and
+ingress logs are not covered: scrub them there, or run uvicorn with
+`--no-access-log`.
 
 ## Rate limiting and proxies
 

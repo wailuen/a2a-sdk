@@ -65,10 +65,10 @@ def frame_locations(exc: BaseException, *, limit: int = 5) -> str:
     are used, never ``.line``, which echoes source text that could itself
     embed a caller-derived literal.
 
-    Not yet wired into any local dispatch catch-all (that is
-    ``origin/main``'s GH-129-era LRN-044 work, still ahead of this lineage);
-    exported here so the eventual merge finds this symbol already defined,
-    not colliding."""
+    The one sanctioned way for a catch-all ``except Exception`` to stay
+    diagnosable without ``logger.exception``/``exc_info=True`` (LRN-214):
+    used by routes/mcp.py, routes/admin.py, routes/ag_ui.py, agent/loop.py
+    and the model clients."""
     return "|".join(
         f"{frame.filename}:{frame.lineno}"
         for frame in traceback.extract_tb(exc.__traceback__)[-limit:]
@@ -176,6 +176,29 @@ def safe_cell_text(value: str) -> str:
     text = safe_error_text(value, max_len=None).translate(_BARE_SEPARATORS)
     text = _SPACED_SEPARATOR_DIGIT_RE.sub(lambda m: _SPACED_SEPARATORS[m.group()], text)
     return _SPACED_SEPARATOR_AT_RE.sub(lambda m: _SPACED_SEPARATORS[m.group()], text)
+
+
+LINE_TEXT_MAX_LEN = 256
+
+
+def safe_line_text(value: str, *, max_len: int | None = LINE_TEXT_MAX_LEN) -> str:
+    """Render an untrusted string that sits ALONE on its own line of a text
+    fallback, with nothing joined after it (a title, a name on its own line,
+    a summary, an ``as of:`` header) (GH-167).
+
+    Collapses every line break and control character to a space (so the
+    value cannot start a second line), strips surrounding whitespace (so it
+    cannot mimic an indented sibling line) and caps the length, but leaves
+    ``( ) [ ] < > = , : |`` byte-exact: with no delimiter or ``k=v`` pair
+    around it, the value cannot forge structure, and ``Toshiba (Tokyo)`` or
+    ``Smith, John`` should read as written. Per the GH-167 ruling only the
+    line-break/control-char collapse applies — no look-alike swap. A renderer
+    whose sibling rows are delimited (``label: value``, `` | `` columns)
+    keeps the title out of the row grammar by LAYOUT instead: it indents
+    those rows, and a value from this helper always starts at column 0.
+    Use :func:`safe_cell_text` for any value that is joined with other text
+    on the same line (GH-130)."""
+    return safe_error_text(value, max_len=max_len)
 
 
 _ID_NEUTRALISE = str.maketrans({

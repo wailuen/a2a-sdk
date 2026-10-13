@@ -7,7 +7,8 @@
    hard-codes `--workers 1`; the SDK refuses `WEB_CONCURRENCY > 1` at boot
    (best-effort — `uvicorn --workers N` bypasses the env var; the
    Dockerfile is the real control). Multi-replica support arrives only
-   with a shared `TaskStore` backend.
+   with a shared `TaskStore` backend. With OAuth or IdP sign-in on, run
+   **exactly one replica** (see Known limitations).
 
 2. **One origin (subdomain) per agent.** RFC 8615 well-known URIs are
    origin-rooted: the agent card, the protected-resource metadata
@@ -104,6 +105,7 @@ rationale.
 
 - `AGENT_SDK_INJECT_CURRENT_DATE` (default `true`): append `Today is YYYY-MM-DD (<tz>).` to each task's system prompt.
 - `AGENT_SDK_FINAL_SUMMARY` (default `true`): when a task hits the turn limit or token budget, make one last model call with tools off so the user gets an answer from the work so far. The task still ends as failed. That last call re-sends the whole conversation and its answer is capped at `AGENT_SDK_FINAL_SUMMARY_MAX_TOKENS` (default 1024) tokens. It is made on both a turn-limit stop and a token-budget stop, so total spend can end above the budget by that one call. A fixed notice is sent only if the call fails or returns nothing usable. Set `AGENT_SDK_FINAL_SUMMARY_MAX_TOKENS=0` for notice-only. On the OpenAI/Azure backend, gpt-5 and other reasoning models count hidden "thinking" tokens against the same limit. If the summary comes back empty because thinking used the limit up, a warning is logged; raise `AGENT_SDK_FINAL_SUMMARY_MAX_TOKENS` (it is also capped by `AGENT_SDK_MAX_OUTPUT_TOKENS`) or lower `AGENT_SDK_OPENAI_REASONING_EFFORT`. Set `false` to skip the call.
+- `AGENT_SDK_AGUI_MAX_MESSAGE_CHARS` (default `32000`, minimum `1000`): longest replayed AG-UI history message sent to the model. A longer one keeps its start and end, with `[... N chars omitted ...]` in the middle (the marker counts within the limit). A value below 1000 fails boot.
 - `AGENT_SDK_TIMEZONE` (default `UTC`): IANA zone used for that date. An invalid name fails boot (not checked when the date line is off). `UTC` needs no zone data; other names use the host's zone files or the `tzdata` package the SDK installs.
 - `AGENT_SDK_OPENAI_REASONING_EFFORT` (default unset): `reasoning_effort` sent on every OpenAI/Azure call. Set it only for a reasoning deployment (gpt-5, o-series); other models reject it.
 - `AGENT_SDK_OPENAI_MAX_COMPLETION_TOKENS` (default unset): hard ceiling on `max_completion_tokens` for every OpenAI/Azure call, including the summary call.
@@ -216,21 +218,23 @@ production.
 
 ### Replicas
 
-Set `replicas: 2` (or higher) in your ACA YAML or Bicep definition. Each replica runs one
-Uvicorn process:
+**Anything that serves `/mcp` or OAuth connectors requires exactly one replica.**
+Set `minReplicas: 1` and `maxReplicas: 1`. The OAuth server is always mounted.
+Its flows, consent tickets, auth codes and access tokens, and all MCP sessions,
+live in the memory of one process. A sign-in or session that starts on one
+replica fails if the next call lands on another. The SDK logs one WARNING at
+boot whenever a shared (Azure Table) store is configured.
 
 ```yaml
 scale:
-  minReplicas: 2
-  maxReplicas: 5
+  minReplicas: 1
+  maxReplicas: 1
 ```
 
-Keep `WEB_CONCURRENCY=1` (one process per replica container). The in-process task store and
-SSE subscriber queues are still per-replica. Tasks are short-lived (seconds to minutes);
-users may land on any replica for follow-up turns within a task, which is acceptable because
-A2A task state is not shared across replicas (see Known Limitations below). Increasing
-`WEB_CONCURRENCY` beyond 1 within a replica reintroduces the per-process store isolation
-problem and is unsupported.
+Only pure A2A or AG-UI traffic with API keys (no `/mcp`, no OAuth connectors)
+can use more than one replica, and even then task state is per-replica (see
+Known limitations). Keep `WEB_CONCURRENCY=1`;
+raising it reintroduces per-process isolation and is unsupported.
 
 ### Security
 
@@ -253,6 +257,18 @@ problem and is unsupported.
   different replica, the task will not be found. This is acceptable for short-lived tasks
   (the common case); sticky sessions or a shared `TaskStore` backend (not yet shipped)
   would be required for long-running tasks that survive replica restarts.
+
+- **Access logs keep no sign-in secrets only inside uvicorn.** The SDK strips the
+  query string from `/oauth/` paths in uvicorn's access log, so the IdP callback's
+  `code` and `state` are not logged there. Proxy and ingress logs are not covered;
+  scrub them or use `--no-access-log`.
+- **OAuth and MCP state is per-process.** IdP flows, consent tickets, auth codes,
+  access tokens and MCP sessions are held in process memory, not in the shared store.
+  With more than one replica, connector sign-in and MCP calls break when requests hit
+  different replicas. Run one replica when you serve `/mcp` or OAuth connectors.
+- **Revoking is slow across replicas for some items.** Revoked API keys and refresh
+  tokens take effect at once on every replica. Only in-memory access tokens (at most
+  1 hour) and MCP sessions stay valid on the other replicas until they expire or restart.
 
 ## Key rotation
 

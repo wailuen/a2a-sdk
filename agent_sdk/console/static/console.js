@@ -513,6 +513,74 @@ async function renderKeys(pane, ctx) {
   });
 
   await refresh();
+  await renderSignedInUsers(pane, ctx);
+}
+
+async function renderSignedInUsers(pane, ctx) {
+  const wrap = el("div", { class: "loading" }, "Loading…");
+  pane.appendChild(section("Signed-in users", wrap));
+
+  async function refresh() {
+    const data = await api("/admin/api/oauth/identities");
+    clear(wrap);
+    wrap.className = "";
+    const items = data.identities || [];
+    if (!items.length) {
+      wrap.appendChild(el("p", { class: "muted" }, "No signed-in users."));
+      return;
+    }
+    const rows = items.map((u) => {
+      const revokeBtn = el("button", { type: "button", class: "btn btn-sm btn-danger" }, "Revoke");
+      revokeBtn.addEventListener("click", async () => {
+        try {
+          const res = await api(`/admin/api/oauth/identities/${encodeURIComponent(u.user)}`, { method: "DELETE" });
+          ctx.toast(`Revoked ${res.revoked} session(s) for ${u.user}.`, "ok");
+          await refresh();
+        } catch (err) {
+          if (!ctx.onAuthError(err)) ctx.toast(String(err.message || err), "err");
+        }
+      });
+      return el(
+        "tr",
+        null,
+        el("td", { class: "mono" }, u.user),
+        el("td", { class: "mono dim" }, (u.client_ids || []).join(", ")),
+        el("td", null, String(u.families)),
+        el("td", { class: "dim" }, fmtTime(u.earliest_created)),
+        el("td", { class: "dim" }, fmtTime(u.latest_expiry)),
+        el("td", null, revokeBtn)
+      );
+    });
+    wrap.appendChild(
+      el(
+        "table",
+        { class: "tbl" },
+        el(
+          "thead",
+          null,
+          el(
+            "tr",
+            null,
+            el("th", null, "User"),
+            el("th", null, "Clients"),
+            el("th", null, "Sessions"),
+            el("th", null, "First sign-in"),
+            el("th", null, "Expires"),
+            el("th", null, "")
+          )
+        ),
+        el("tbody", null, rows)
+      )
+    );
+  }
+
+  try {
+    await refresh();
+  } catch (err) {
+    clear(wrap);
+    wrap.className = "";
+    if (!ctx.onAuthError(err)) wrap.appendChild(el("p", { class: "muted" }, String(err.message || err)));
+  }
 }
 
 /* ── Tools tab ── */

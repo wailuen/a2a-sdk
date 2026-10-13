@@ -34,6 +34,8 @@ def _idp(tmp_path, **extra):
         "AGENT_SDK_OAUTH_IDP_CLIENT_ID": "client-id",
     }
     base.update(extra)
+    if not {"AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE", "AGENT_SDK_OAUTH_IDP_REQUIRED_GROUP"} & base.keys():
+        base.setdefault("AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS", True)
     return _settings(tmp_path, **base)
 
 
@@ -106,7 +108,7 @@ def test_boot_refuses_multi_tenant_issuer_aliases(tmp_path, issuer):
 
 
 def test_boot_accepts_good_entra_issuer(tmp_path):
-    _build(_idp(tmp_path))
+    _build(_idp(tmp_path, AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE="agent-users"))
 
 
 def test_boot_refuses_one_time_consent_with_idp(tmp_path):
@@ -225,7 +227,7 @@ def test_allow_all_default_false(tmp_path):
 
 def test_boot_refuses_non_entra_issuer_without_gate(tmp_path):
     with pytest.raises(ValueError) as exc:
-        _build(_idp(tmp_path, AGENT_SDK_OAUTH_IDP_ISSUER=OKTA_ISSUER))
+        _build(_idp(tmp_path, AGENT_SDK_OAUTH_IDP_ISSUER=OKTA_ISSUER, **{OPT_OUT: False}))
     msg = str(exc.value)
     assert OPT_OUT in msg
     assert "AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE" in msg
@@ -257,7 +259,30 @@ def test_boot_refuses_opt_out_without_oidc(tmp_path):
         _build(_settings(tmp_path, **{OPT_OUT: True}))
 
 
-def test_entra_guid_issuer_boots_without_gate_or_warning(tmp_path, sdk_caplog):
+def test_entra_guid_issuer_without_gate_refuses_boot(tmp_path):
+    with pytest.raises(ValueError) as exc:
+        _build(_idp(tmp_path, **{OPT_OUT: False}))
+    msg = str(exc.value)
+    assert OPT_OUT in msg
+    assert "AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE" in msg
+    assert "AGENT_SDK_OAUTH_IDP_REQUIRED_GROUP" in msg
+    assert TENANT not in msg
+
+
+@pytest.mark.parametrize(
+    "gate",
+    [
+        {"AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE": "agent-users"},
+        {"AGENT_SDK_OAUTH_IDP_REQUIRED_GROUP": "agent-group"},
+    ],
+)
+def test_entra_guid_issuer_with_role_or_group_boots_without_warning(tmp_path, sdk_caplog, gate):
     with sdk_caplog("agent_sdk", logging.WARNING) as records:
-        _build(_idp(tmp_path))
+        _build(_idp(tmp_path, **gate))
     assert not [r for r in records if OPT_OUT in r.getMessage()]
+
+
+def test_entra_guid_issuer_opt_out_boots_with_one_warning(tmp_path, sdk_caplog):
+    with sdk_caplog("agent_sdk", logging.WARNING) as records:
+        _build(_idp(tmp_path, **{OPT_OUT: True}))
+    assert len([r for r in records if OPT_OUT in r.getMessage()]) == 1

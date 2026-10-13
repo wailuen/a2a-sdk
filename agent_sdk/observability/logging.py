@@ -44,3 +44,25 @@ def configure_logging(level: int = logging.INFO) -> None:
     root.addHandler(handler)
     root.setLevel(level)
     root.propagate = False
+
+
+class _OAuthQueryFilter(logging.Filter):
+    """Drops the query string of /oauth/ paths from uvicorn access records."""
+
+    _agent_sdk = True
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            path = args[2]
+            if path.startswith("/oauth/") and "?" in path:
+                record.args = (*args[:2], path.split("?", 1)[0], *args[3:])
+        return True
+
+
+def configure_access_log_filter() -> None:
+    """Idempotent: strip /oauth/ query strings (code, state) from uvicorn.access."""
+    access = logging.getLogger("uvicorn.access")
+    if any(getattr(f, "_agent_sdk", False) for f in access.filters):
+        return
+    access.addFilter(_OAuthQueryFilter())

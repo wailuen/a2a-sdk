@@ -258,20 +258,20 @@ def get_system_prompt_section(allowed_components: list[str] | None = None) -> st
     lines = [
         "## A2UI Output Format",
         "",
-        "When a tool returns structured data, wrap it as an A2UI Standard Profile"
-        " component.",
-        "Use PascalCase component names exactly as specified."
-        " Required fields must be present.",
+        "Tools deliver these A2UI cards to the user automatically when they"
+        " return structured data.",
+        "Do not write component JSON in your reply. Describe tool results in"
+        " prose, using only values the tools returned.",
         "",
-        "Registered components (required fields shown, ? = optional):",
+        "Components tools can emit (required fields shown, ? = optional):",
     ]
     for cls in sorted(types.values(), key=lambda c: c.component):
         tier = " [extended]" if cls.extended else ""
         schema = _COMPACT_SCHEMAS.get(cls.component) or _field_summary(cls)
         if cls.component == "MarketBriefing":
             schema += (
-                " [prose — return MarketBriefing(title=..., as_of=..., prose='...markdown...')"
-                " — rendered as plain markdown, not a structured card]"
+                " [prose card — a tool emits title, as_of and markdown prose;"
+                " rendered as plain markdown, not a structured card]"
             )
         if cls.component == "FundPerformance":
             schema += (
@@ -288,7 +288,7 @@ def get_system_prompt_section(allowed_components: list[str] | None = None) -> st
         if name in registered_names
     ]
     if examples:
-        lines += ["", "Examples:"]
+        lines += ["", "Reference shapes of tool output (not for you to write):"]
         for name, ex in examples:
             lines.append(f"  {name}: {ex}")
 

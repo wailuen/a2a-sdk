@@ -462,6 +462,77 @@ class OAuthTokenStore:
         ]:
             self._access.pop(token_hash, None)
 
+    # ── operator view / revocation by user (GH-163) ──
+
+    def _user_records(self) -> list[tuple[str, dict[str, Any]]]:
+        out: list[tuple[str, dict[str, Any]]] = []
+        for token_hash in list(self._store.list_fields(NS_OAUTH_REFRESH)):
+            record = self._get_refresh(token_hash)
+            if record is not None and record.get("user"):
+                out.append((token_hash, record))
+        return out
+
+    def list_identities(self) -> list[dict[str, Any]]:
+        """Per-user summaries of live refresh families. Carries no token
+        values and no hashes."""
+        now = _now()
+        users: dict[str, dict[str, Any]] = {}
+        for _, record in self._user_records():
+            if record.get("rotated"):
+                continue
+            expiry = float(record.get("family_expires_at") or record.get("expires_at") or 0.0)
+            if expiry <= now:
+                continue
+            user = str(record["user"])
+            row = users.setdefault(
+                user,
+                {
+                    "user": user,
+                    "client_ids": set(),
+                    "families": set(),
+                    "earliest_created": None,
+                    "latest_expiry": 0.0,
+                },
+            )
+            row["client_ids"].add(str(record.get("client_id") or ""))
+            row["families"].add(str(record.get("family_id") or ""))
+            created = float(record.get("created_at") or 0.0)
+            if row["earliest_created"] is None or created < row["earliest_created"]:
+                row["earliest_created"] = created
+            row["latest_expiry"] = max(row["latest_expiry"], expiry)
+        return [
+            {
+                "user": row["user"],
+                "client_ids": sorted(row["client_ids"]),
+                "families": len(row["families"]),
+                "earliest_created": row["earliest_created"],
+                "latest_expiry": row["latest_expiry"],
+            }
+            for row in sorted(users.values(), key=lambda r: r["user"])
+        ]
+
+    def revoke_user(self, user: str) -> int:
+        """Revoke every refresh family for ``user`` and drop their access
+        tokens and unredeemed auth codes held by this process. Returns the number of families revoked.
+        Access tokens live in memory per process (GH-162): other workers keep
+        honouring theirs until they expire."""
+        families: set[str] = set()
+        for token_hash, record in self._user_records():
+            if record.get("user") != user:
+                continue
+            self._store.delete(NS_OAUTH_REFRESH, token_hash)
+            families.add(str(record.get("family_id") or ""))
+        for family_id in families:
+            if family_id:
+                self.revoke_family(family_id)
+        for token_hash in [h for h, rec in self._access.items() if rec.user == user]:
+            self._access.pop(token_hash, None)
+        # Unredeemed auth codes would otherwise mint a fresh family after the
+        # revoke (w047 RT-001).
+        for code_hash in [h for h, rec in self._codes.items() if rec.user == user]:
+            self._codes.pop(code_hash, None)
+        return len(families)
+
     # ── verification (TokenVerifier protocol) ──
 
     def verify(self, token: str) -> Identity | None:

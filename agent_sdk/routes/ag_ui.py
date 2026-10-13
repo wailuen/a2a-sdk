@@ -38,6 +38,7 @@ from ..auth.identity import Identity
 from ..auth.middleware import require_identity
 from ..common.iso8601 import iso_utc
 from ..common.origin import guard_origin
+from ..common.redact import frame_locations
 from ..common.sse import HEARTBEAT, SSE_HEADERS, sse_data
 from ..credentials import forwarding
 from ..models.content_types import ContentModel
@@ -68,7 +69,7 @@ logger = logging.getLogger("agent_sdk.ag_ui")
 router = APIRouter()
 
 MAX_HISTORY_MESSAGES = 50
-MAX_MESSAGE_CHARS = 4000
+MAX_MESSAGE_CHARS = 32000
 _MAX_BODY_BYTES = 1 * 1024 * 1024  # 1 MB — mirrors MCP/OAuth caps
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
@@ -76,8 +77,26 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 # ── history fold (processing, not rejection — §5.3) ──
 
 
-def _fold_history(raw_messages: list[Any]) -> list[dict[str, Any]] | None:
-    """AG-UI messages → Converse format. Truncates (50 msgs / 4000 chars),
+def _cut_middle(content: str, limit: int) -> str:
+    """Keep head and tail; the marker counts within ``limit`` (GH-168)."""
+    omitted = len(content)
+    while True:
+        marker = f"\n[... {omitted} chars omitted ...]\n"
+        keep = limit - len(marker)
+        new_omitted = len(content) - keep
+        if new_omitted == omitted:
+            break
+        omitted = new_omitted
+    head = keep - keep // 2
+    tail = keep // 2
+    return content[:head] + marker + content[len(content) - tail :]
+
+
+def _fold_history(
+    raw_messages: list[Any], max_chars: int
+) -> list[dict[str, Any]] | None:
+    """AG-UI messages → Converse format. Truncates (50 msgs; messages over
+    ``max_chars`` keep head and tail with an omission marker),
     skips blank assistant turns, merges consecutive same-role turns, drops
     a leading assistant prefix. None when no user content survives.
 
@@ -116,13 +135,13 @@ def _fold_history(raw_messages: list[Any]) -> list[dict[str, Any]] | None:
         content = _CONTROL_CHARS.sub("", content)
         if role == "assistant" and not content.strip():
             continue
-        if len(content) > MAX_MESSAGE_CHARS:
+        if len(content) > max_chars:
             logger.warning(
                 "ag-ui history message truncated from %d to %d chars",
                 len(content),
-                MAX_MESSAGE_CHARS,
+                max_chars,
             )
-            content = content[:MAX_MESSAGE_CHARS]
+            content = _cut_middle(content, max_chars)
         if folded and folded[-1]["role"] == role:
             folded[-1]["content"].append({"text": content})
         else:
@@ -666,7 +685,10 @@ async def ag_ui_run(
                         yield sse_data(frame)
                     return
             else:
-                folded = _fold_history(body.get("messages") or [])
+                folded = _fold_history(
+                    body.get("messages") or [],
+                    request.app.state.settings.agui_max_message_chars,
+                )
                 if folded is None:
                     for frame in mapper.run_error("no user message in input"):
                         yield sse_data(frame)
@@ -716,8 +738,21 @@ async def ag_ui_run(
                     break
         except StreamTerminated:
             pass
-        except Exception:
-            logger.exception("ag-ui stream failed")
+        except Exception as exc:
+            # SI-2 / LRN-214 (RT-001): mapper.map() runs payload.wire(),
+            # translate() and to_plain_text() inside this try, so a domain
+            # ContentModel or custom translator that raises a pydantic
+            # ValidationError lands here with `input_value='<tool output>'`
+            # in its message. `logger.exception`/`exc_info=True` would format
+            # that message (and any chained cause) into the log. Log the
+            # exception TYPE plus frame_locations() (file:line only, never
+            # source text) — the same contract as routes/mcp.py's dispatch
+            # catch-all and routes/admin.py's try-tool.
+            logger.error(
+                "ag-ui stream failed error_type=%s frames=%s",
+                type(exc).__name__,
+                frame_locations(exc),
+            )
             if not mapper.terminal_sent:
                 for frame in mapper.run_error("internal error"):
                     yield sse_data(frame)

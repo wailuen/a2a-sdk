@@ -80,7 +80,10 @@ def _is_local(url: str) -> bool:
 
 class BaseAgentSettings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        hide_input_in_errors=True,
     )
 
     # ── identity ──
@@ -231,6 +234,12 @@ class BaseAgentSettings(BaseSettings):
         default=1024, alias="AGENT_SDK_FINAL_SUMMARY_MAX_TOKENS"
     )
 
+    # GH-168: replayed AG-UI history messages longer than this keep their start
+    # and end with an omission marker. ge=1000 so the marker always fits.
+    agui_max_message_chars: int = Field(
+        default=32000, ge=1000, alias="AGENT_SDK_AGUI_MAX_MESSAGE_CHARS"
+    )
+
     # RT-001 (GH-143 follow-up): routes/mcp.py's per-identity GET-stream cap
     # is keyed on Identity.subject, which is an OAuth client_id or API-key id
     # — a *registration*, never an end user (auth/oauth_tokens.py,
@@ -303,10 +312,11 @@ class BaseAgentSettings(BaseSettings):
     @model_validator(mode="after")
     def _deployment_invariants(self) -> "BaseAgentSettings":
         # Best-effort guard; the template's `--workers 1` is the real control.
-        # With Azure Table Storage backends for credential/commitment/subscription
-        # stores, multi-replica deployments are supported; WEB_CONCURRENCY > 1
-        # remains unsupported within a single process (uvicorn worker model).
-        # Use Azure Container Apps replicas instead.
+        # Azure Table Storage backends share credentials, commitments and
+        # subscriptions across replicas, but IdP flows, consent tickets, auth
+        # codes, access tokens, MCP sessions and the task store stay
+        # per-process. With OAuth/IdP sign-in on, run exactly one replica
+        # (GH-162). WEB_CONCURRENCY > 1 is unsupported within a process.
         if self.web_concurrency > 1:
             raise ValueError(
                 "WEB_CONCURRENCY > 1 is unsupported: the task store, SSE queues and "

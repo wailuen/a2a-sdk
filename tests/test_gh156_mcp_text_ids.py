@@ -105,11 +105,13 @@ async def _call(client: httpx.AsyncClient, name: str) -> str:
 
 
 async def test_mcp_text_entity_list_has_id(gh156_client) -> None:
-    assert "- Databricks (59199-40)" in await _call(gh156_client, "gh156_entities")
+    text = await _call(gh156_client, "gh156_entities")
+    assert "- Databricks" in text
+    assert "    id: 59199-40" in text
 
 
 async def test_mcp_text_document_list_has_id(gh156_client) -> None:
-    assert "(id: doc-77)" in await _call(gh156_client, "gh156_docs")
+    assert "\n    id: doc-77" in await _call(gh156_client, "gh156_docs")
 
 
 GRAPH_ID = "AAMkAGI2TAAA="
@@ -123,7 +125,7 @@ async def gh156_real_ids() -> EntityList:
 
 
 async def test_mcp_text_preserves_urn_id(gh156_client) -> None:
-    assert f"({URN_ID})" in await _call(gh156_client, "gh156_real_ids")
+    assert f"    id: {URN_ID}" in await _call(gh156_client, "gh156_real_ids")
 
 
 def test_email_list_plain_text_preserves_graph_id() -> None:

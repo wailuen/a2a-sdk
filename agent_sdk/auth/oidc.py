@@ -503,3 +503,11 @@ class IdpFlowStore:
     def pop_consent(self, ticket: str, binding: str) -> ConsentTicket | None:
         found: ConsentTicket | None = self._take(self._tickets, ticket, binding)
         return found
+
+    def drop_user(self, user: str) -> int:
+        """Drop every pending consent ticket for ``user`` (operator revoke,
+        GH-163). Returns how many were dropped."""
+        keys = [k for k, t in self._tickets.items() if t.user == user]
+        for key in keys:
+            self._tickets.pop(key, None)
+        return len(keys)

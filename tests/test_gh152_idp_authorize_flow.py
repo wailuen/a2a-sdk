@@ -95,6 +95,8 @@ class FakeIdp:
 
 
 def idp_settings(tmp_path, **extra):
+    if not {"AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE", "AGENT_SDK_OAUTH_IDP_REQUIRED_GROUP"} & extra.keys():
+        extra.setdefault("AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS", True)
     return BaseAgentSettings(
         DEV_MODE=True, DATA_DIR=str(tmp_path / "data"), AGENT_NAME="test-agent",
         AGENT_SDK_OAUTH_IDP="oidc",

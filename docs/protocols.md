@@ -99,8 +99,8 @@ The two are merged REJECT-WINS (a contradictory pair always denies); an
 unrecognized `status` with no `payload.decision` is UNCLEAR → default-deny,
 without aborting the run.
 
-Inbound history is processed, not rejected: >50 messages or >4000-char
-messages truncate, blank assistant turns are skipped, consecutive
+Inbound history is processed, not rejected: >50 messages or messages over
+`AGENT_SDK_AGUI_MAX_MESSAGE_CHARS` (default 32000) keep head and tail with an omission marker, blank assistant turns are skipped, consecutive
 same-role messages merge. Control characters are stripped, not rejected —
 never `RUN_ERROR`.
 

@@ -42,6 +42,7 @@ from .credentials.store import NS_BEDROCK, NS_MODEL, NS_OAUTH_IDP, CredentialSto
 from .credentials.encrypted_sqlite import EncryptedSqliteStore
 from .models.content_types import ContentModel, content_type_for
 from .observability import configure_logging, request_id_middleware
+from .observability.logging import configure_access_log_filter
 from .routes.agent_card import build_agent_card
 from .sources import SourceAdapter
 from .tasks.memory import InMemoryTaskStore
@@ -524,20 +525,17 @@ class Agent:
             raise ValueError("AGENT_SDK_OAUTH_IDP=oidc requires AGENT_SDK_OAUTH_IDP_ISSUER.")
         if not settings.oauth_idp_client_id:
             raise ValueError("AGENT_SDK_OAUTH_IDP=oidc requires AGENT_SDK_OAUTH_IDP_CLIENT_ID.")
-        tenant_id = parse_idp_issuer(settings.oauth_idp_issuer)
+        parse_idp_issuer(settings.oauth_idp_issuer)
         if settings.oauth_idp_allow_all_issuer_users:
             logger.warning(
                 "AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS is set: every account at the "
                 "configured issuer is admitted to sign in and approve consent."
             )
-        elif (
-            tenant_id is None
-            and not settings.oauth_idp_required_role
-            and not settings.oauth_idp_required_group
-        ):
+        elif not settings.oauth_idp_required_role and not settings.oauth_idp_required_group:
             raise ValueError(
-                "AGENT_SDK_OAUTH_IDP_ISSUER is not an Entra tenant, so any account at that "
-                "issuer could sign in. Set AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE or "
+                "AGENT_SDK_OAUTH_IDP=oidc without a role or group check lets every account "
+                "the issuer signs in (for Entra, every member and guest unless the tenant "
+                "admin requires assignment). Set AGENT_SDK_OAUTH_IDP_REQUIRED_ROLE or "
                 "AGENT_SDK_OAUTH_IDP_REQUIRED_GROUP, or set "
                 "AGENT_SDK_OAUTH_IDP_ALLOW_ALL_ISSUER_USERS=true to admit every account."
             )
@@ -558,6 +556,21 @@ class Agent:
                 "applies to every authorize flow."
             )
 
+    def _warn_single_replica_required(self) -> None:
+        s = self.settings
+        shared = (
+            s.azure_storage_connection_string is not None
+            or s.azure_storage_account_name is not None
+        )
+        if shared:
+            logger.warning(
+                "A shared (Azure Table) store is configured. The OAuth server is "
+                "always mounted and its state (IdP flows, consent tickets, auth codes, "
+                "access tokens) and MCP sessions are per-process: serving /mcp or OAuth "
+                "connectors requires exactly one replica (single replica required, "
+                "GH-162; see docs/deployment.md)."
+            )
+
     def _warn_idp_secret_missing(self, credential_store: CredentialStore) -> None:
         if self.settings.oauth_idp == "none":
             return
@@ -572,6 +585,7 @@ class Agent:
         base_url = settings.resolved_base_url
 
         configure_logging()
+        configure_access_log_filter()
         self._check_agent_name()
 
         registry = ToolRegistry(self.toolsets, dict(self._sources))
@@ -585,6 +599,7 @@ class Agent:
                     entry.name,
                 )
 
+        self._warn_single_replica_required()
         self._validate_idp_settings()
         credential_store = self._build_credential_store()
         self._warn_idp_secret_missing(credential_store)

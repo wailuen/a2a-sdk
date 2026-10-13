@@ -44,7 +44,7 @@ class LegacyKpiSubclass(KpiCard):
 def test_super_to_plain_text_from_concrete_subclass_does_not_recurse():
     card = LegacyKpiSubclass(metrics=[MetricItem(label="a", value=1)])
     text = card.to_plain_text()  # previously: RecursionError
-    assert text == "a: 1\nextra"
+    assert text == "  a: 1\nextra"
 
 
 def test_super_to_plain_text_from_concrete_subclass_still_carries_metadata_once():
@@ -53,7 +53,7 @@ def test_super_to_plain_text_from_concrete_subclass_still_carries_metadata_once(
         metadata={"coverage_note": "x"},
     )
     text = card.to_plain_text()
-    assert text == "a: 1\nextra\ncoverage_note=x"
+    assert text == "  a: 1\nextra\ncoverage_note=x"
     # exactly one suffix, not appended once per recursion level
     assert text.count("coverage_note=x") == 1
 
@@ -71,7 +71,7 @@ class DoublyNestedLegacySubclass(LegacyKpiSubclass):
 
 def test_two_chained_adopted_overrides_do_not_recurse():
     card = DoublyNestedLegacySubclass(metrics=[MetricItem(label="a", value=1)])
-    assert card.to_plain_text() == "a: 1\nextra\nmore"
+    assert card.to_plain_text() == "  a: 1\nextra\nmore"
 
 
 class DirectAbcSubclassLegacyOverride(ContentModel):
@@ -131,7 +131,7 @@ class NewStyleKpiSubclass(KpiCard):
 
 def test_new_style_body_text_super_to_plain_text_does_not_recurse():
     card = NewStyleKpiSubclass(metrics=[MetricItem(label="a", value=1)])
-    assert card.to_plain_text() == "a: 1\nextra"  # previously: RecursionError
+    assert card.to_plain_text() == "  a: 1\nextra"  # previously: RecursionError
 
 
 def test_new_style_body_text_super_call_carries_metadata_exactly_once():
@@ -140,7 +140,7 @@ def test_new_style_body_text_super_call_carries_metadata_exactly_once():
         metadata={"coverage_note": "x"},
     )
     text = card.to_plain_text()
-    assert text == "a: 1\nextra\ncoverage_note=x"
+    assert text == "  a: 1\nextra\ncoverage_note=x"
     assert text.count("coverage_note=x") == 1
 
 
@@ -179,7 +179,7 @@ class NewStyleNestedSubclass(NewStyleKpiSubclass):
 
 def test_two_chained_new_style_overrides_do_not_recurse():
     card = NewStyleNestedSubclass(metrics=[MetricItem(label="a", value=1)])
-    assert card.to_plain_text() == "a: 1\nextra\nmore"
+    assert card.to_plain_text() == "  a: 1\nextra\nmore"
 
 
 class RendersAnotherCard(KpiCard):
@@ -202,4 +202,4 @@ def test_nested_other_instance_keeps_its_own_metadata_suffix():
     card = RendersAnotherCard(
         metrics=[MetricItem(label="a", value=1)], metadata={"outer": "yes"}
     )
-    assert card.to_plain_text() == "a: 1 [n: 2\nnested=yes]\nouter=yes"
+    assert card.to_plain_text() == "  a: 1 [  n: 2\nnested=yes]\nouter=yes"

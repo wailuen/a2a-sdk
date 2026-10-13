@@ -143,3 +143,39 @@ async def test_idp_secret_rotation_needs_no_restart(ic, idp):
         r = await callback(ic, idp, q, cookie)
         assert r.status_code == 200
         assert idp.last_token_form["client_secret"] == [secret]
+
+
+def _access_record(path: str) -> logging.LogRecord:
+    return logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        __file__,
+        1,
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:1234", "GET", path, "1.1", 302),
+        None,
+    )
+
+
+def _render_access(path: str) -> str:
+    record = _access_record(path)
+    access = logging.getLogger("uvicorn.access")
+    assert all(f.filter(record) for f in access.filters)
+    return record.getMessage()
+
+
+def test_uvicorn_access_log_strips_oauth_query(idp_app):
+    line = _render_access("/oauth/idp/callback?code=XSECRETCODE&state=YSECRETSTATE")
+    assert "XSECRETCODE" not in line and "YSECRETSTATE" not in line
+    assert "/oauth/idp/callback" in line
+    other = _render_access("/v1/tasks?limit=5")
+    assert "/v1/tasks?limit=5" in other
+
+
+def test_uvicorn_access_filter_installed_once(idp_app):
+    from agent_sdk.observability.logging import configure_access_log_filter
+
+    configure_access_log_filter()
+    configure_access_log_filter()
+    access = logging.getLogger("uvicorn.access")
+    assert sum(1 for f in access.filters if getattr(f, "_agent_sdk", False)) == 1

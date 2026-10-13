@@ -464,3 +464,272 @@ def test_parse_prompt_still_routes_parenthetical_modifies_to_all_modifies(wf_pat
         "'(modifies ...)' tokens on a Creates: line into allModifies — "
         "harness/wave_scope.py still does."
     )
+
+
+# ---------------------------------------------------------------------------
+# GH-164: lockfiles and known dotfiles are real deliverables; and Parse must
+# deterministically scan Creates:/Modifies: lines instead of trusting the AI alone.
+# ---------------------------------------------------------------------------
+
+_GH164_LINE = "Creates: (modifies `uv.lock`, `.env.example`, `src/config.py`)"
+
+
+def test_gh164_lockfile_dotfile_and_config_all_extracted():
+    creates, modifies = extract_scope_paths(_GH164_LINE)
+    assert creates == []
+    assert modifies == ["uv.lock", ".env.example", "src/config.py"]
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "uv.lock",
+        "package-lock.json",
+        "poetry.lock",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        ".env.example",
+        ".gitignore",
+        ".gitattributes",
+        ".dockerignore",
+        ".python-version",
+        "template/.gitignore",
+        "template/uv.lock",
+    ],
+)
+def test_gh164_known_lockfiles_and_dotfiles_are_scope(token):
+    assert _looks_like_path(token)
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        ".py",
+        ".lock",
+        ".env",
+        ".secret",
+        "src/.py",
+        "agent_sdk/",
+        ".claude/",
+        "tests/*.lock",
+        "*.lock",
+        "/uv.lock",
+        "/sdk-test",
+        "wave.allScope",
+        "my.lock.file",
+        "src/.hidden",
+    ],
+)
+def test_gh164_still_rejected(token):
+    assert not _looks_like_path(token)
+
+
+@pytest.mark.parametrize(
+    "wf_path",
+    _WAVE_CYCLE_COPIES + [_REPO_ROOT / ".claude" / "workflows" / "sdk-wave.js"],
+    ids=_WAVE_CYCLE_IDS + ["sdk-wave.js"],
+)
+def test_gh164_parse_has_deterministic_scan_and_widened_rule(wf_path: Path) -> None:
+    content = wf_path.read_text(encoding="utf-8")
+    assert "SCOPE_SCAN_SCHEMA" in content
+    assert "scope-scan-mismatch" in content
+    assert "allScope (final" in content
+    prompt = _parse_prompt(wf_path)
+    assert "uv.lock" in prompt and ".env.example" in prompt
+    assert content.find("label: 'parse:scope-scan'") != -1
+    assert content.find("scope-scan-mismatch") < content.find("empty-scope")
+
+
+def test_gh164_workflow_copies_are_byte_identical():
+    a = (_REPO_ROOT / "harness" / "workflows" / "wave-cycle.js").read_bytes()
+    assert a == (_REPO_ROOT / ".claude" / "workflows" / "wave-cycle.js").read_bytes()
+    tpl = _REPO_ROOT / "template" / ".claude" / "workflows" / "wave-cycle.js"
+    if tpl.exists():
+        assert a == tpl.read_bytes()
+
+
+def _template_git(*args: str) -> "subprocess.CompletedProcess[bytes]":
+    import subprocess
+
+    return subprocess.run(
+        ["git", "-C", str(_REPO_ROOT / "template"), *args], capture_output=True, check=False
+    )
+
+
+@pytest.mark.skipif(
+    not (_REPO_ROOT / "template" / ".git").exists(), reason="template/ peer repo not checked out"
+)
+def test_gh164_template_mirror_is_committed_and_pushed():
+    """RT-001 (w047 round-5 fresh-lens debug): the template copy is only 'synced' once it is
+    PUBLISHED. Comparing the local working tree let an uncommitted, unpushed edit pass as
+    synced while agent repos still pulled the old backtick-only scan from origin/main. This
+    compares the harness copy against the template's upstream-tracking commit, and fails on a
+    dirty mirror or unpushed local commits. Uses the last-fetched tracking ref (no network)."""
+    rel = ".claude/workflows/wave-cycle.js"
+    harness_copy = (_REPO_ROOT / "harness" / "workflows" / "wave-cycle.js").read_bytes()
+    dirty = _template_git("status", "--porcelain", "--", ".claude/workflows/")
+    assert dirty.returncode == 0, dirty.stderr
+    assert dirty.stdout.strip() == b"", (
+        "template/ has uncommitted workflow mirror changes; commit and push them:\n"
+        + dirty.stdout.decode()
+    )
+    ahead = _template_git("rev-list", "--count", "@{upstream}..HEAD")
+    assert ahead.returncode == 0, ahead.stderr  # no upstream = cannot prove it is pushed
+    assert ahead.stdout.strip() == b"0", "template/ has unpushed commits; run git -C template push"
+    published = _template_git("show", f"@{{upstream}}:{rel}")
+    assert published.returncode == 0, published.stderr
+    assert published.stdout == harness_copy, (
+        "template's pushed wave-cycle.js differs from harness/workflows/wave-cycle.js"
+    )
+
+
+def test_gh164_inline_scan_excludes_template_mirror_paths(tmp_path):
+    import json
+    import subprocess
+    import sys
+
+    js = (_REPO_ROOT / "harness" / "workflows" / "wave-cycle.js").read_text(encoding="utf-8")
+    start = js.index("'python3 - ' + WAVE_FILE")
+    block = js[start : js.index("'PY',", start)]
+    lines = re.findall(r"^\s*'(.*)\\n' \+$", block, re.M)
+    body = [ln for ln in lines if not ln.startswith("python3 -") and not ln.startswith("python3 ")]
+    script = "\n".join(body).replace("\\\\", "\\").replace("\\'", "'")
+    wave = tmp_path / "w.md"
+    wave.write_text(
+        "Modifies: `harness/workflows/wave-cycle.js`, "
+        "`template/.claude/workflows/wave-cycle.js`, `tests/test_x.py`\n",
+        encoding="utf-8",
+    )
+    out = subprocess.run(
+        [sys.executable, "-", str(wave)], input=script, capture_output=True, text=True, check=True
+    ).stdout
+    assert json.loads(out) == ["harness/workflows/wave-cycle.js", "tests/test_x.py"]
+
+
+# ---------------------------------------------------------------------------
+# RT-001 (w047 fresh-lens debug): the GH-164 deterministic scan must accept every todo
+# format the harness itself writes. The planner agent (harness/agents/core/planner.md)
+# writes BARE comma-separated paths, and GH-164's own repro uses a bare
+# "(modifies a, b)" clause. The pre-fix scan only read backticked tokens, so on a
+# planner-format wave it printed [] and the mismatch gate could never fire — exactly the
+# pitchbook w009 case (src/config.py dropped). These tests run the scan script extracted
+# verbatim from EVERY workflow copy, so a copy that drifts back to backtick-only fails.
+# ---------------------------------------------------------------------------
+
+_SCAN_COPIES = [
+    _REPO_ROOT / "harness" / "workflows" / "wave-cycle.js",
+    _REPO_ROOT / ".claude" / "workflows" / "wave-cycle.js",
+    _REPO_ROOT / ".claude" / "workflows" / "sdk-wave.js",
+]
+_TEMPLATE_COPY = _REPO_ROOT / "template" / ".claude" / "workflows" / "wave-cycle.js"
+if _TEMPLATE_COPY.exists():
+    _SCAN_COPIES.append(_TEMPLATE_COPY)
+
+_PLANNER_WAVE = """# Wave w009 — Core data fetch
+**Depends:** (none)
+**Creates:** src/tools/fetch_data.py, tests/test_fetch_data.py
+
+## Todos
+
+- [ ] `P1-01` Implement data-fetch tool ‖ group:A
+  - Creates: src/tools/fetch_data.py, tests/test_fetch_data.py
+  - Modifies: src/config.py (modifies uv.lock, .env.example)
+  - Reads: src/sources/my_source.py
+  - AC: Tool returns MyContentType on success.
+
+- [~] `P1-02` out-of-repo deliverable ‖ group:A
+  - Creates: src/elsewhere.py
+
+- [ ] `P1-03` mixed forms ‖ group:B
+  * **Modifies:** `src/main.py`, "src/q.py". (see README.md; src/x.py's helper `foo()`)
+  - Creates: (modifies `src/routes/mcp.py`); adds tests/test_mcp_x.py  # RT-001: also docs/notes.md
+"""
+
+_PLANNER_EXPECTED = {
+    "src/tools/fetch_data.py",
+    "tests/test_fetch_data.py",
+    "src/config.py",
+    "uv.lock",
+    ".env.example",
+    "src/main.py",
+    "src/q.py",
+    "README.md",
+    "src/routes/mcp.py",
+    "tests/test_mcp_x.py",
+    "docs/notes.md",
+}
+
+
+def _run_inline_scan(wf_path: Path, wave_file: Path) -> list[str]:
+    import json
+    import subprocess
+    import sys
+
+    js = wf_path.read_text(encoding="utf-8")
+    start = js.index("'python3 - ' + WAVE_FILE")
+    block = js[start : js.index("'PY',", start)]
+    lines = re.findall(r"^\s*'(.*)\\n' \+$", block, re.M)
+    body = [ln for ln in lines if not ln.startswith("python3 ")]
+    script = "\n".join(body).replace("\\\\", "\\").replace("\\'", "'")
+    out = subprocess.run(
+        [sys.executable, "-", str(wave_file)],
+        input=script,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return json.loads(out)
+
+
+@pytest.mark.parametrize("wf_path", _SCAN_COPIES, ids=lambda p: str(p.relative_to(_REPO_ROOT)))
+def test_rt001_inline_scan_reads_planner_bare_paths(wf_path: Path, tmp_path: Path) -> None:
+    wave = tmp_path / "w009.md"
+    wave.write_text(_PLANNER_WAVE, encoding="utf-8")
+    found = set(_run_inline_scan(wf_path, wave))
+    assert found == _PLANNER_EXPECTED
+    assert "src/elsewhere.py" not in found  # [~] todo skipped
+    assert "src/sources/my_source.py" not in found  # Reads: is not scope
+
+
+@pytest.mark.parametrize("wf_path", _SCAN_COPIES, ids=lambda p: str(p.relative_to(_REPO_ROOT)))
+def test_rt001_inline_scan_gh164_bare_modifies_clause(wf_path: Path, tmp_path: Path) -> None:
+    wave = tmp_path / "w.md"
+    wave.write_text("- Creates: (modifies uv.lock, .env.example, src/config.py)\n", encoding="utf-8")
+    assert _run_inline_scan(wf_path, wave) == [".env.example", "src/config.py", "uv.lock"]
+
+
+@pytest.mark.parametrize("wf_path", _SCAN_COPIES, ids=lambda p: str(p.relative_to(_REPO_ROOT)))
+def test_rt001_inline_scan_still_reads_backticked_prose_form(wf_path: Path) -> None:
+    creates, modifies = extract_wave_scope(FIXTURE.read_text(encoding="utf-8"))
+    assert set(_run_inline_scan(wf_path, FIXTURE)) == set(creates) | set(modifies)
+
+
+def test_rt001_reference_matches_inline_scan_on_planner_format() -> None:
+    creates, modifies = extract_wave_scope(_PLANNER_WAVE)
+    assert set(creates) | set(modifies) == _PLANNER_EXPECTED
+    assert set(modifies) >= {"src/config.py", "uv.lock", ".env.example", "src/routes/mcp.py"}
+    assert "src/tools/fetch_data.py" in creates
+
+
+@pytest.mark.parametrize("token_line", [
+    "Creates: src/tools/fetch_data.py, tests/test_fetch_data.py",
+    "**Creates:** src/tools/fetch_data.py, tests/test_fetch_data.py",
+    "- Creates: `src/tools/fetch_data.py`, `tests/test_fetch_data.py`.",
+])
+def test_rt001_reference_accepts_bare_bold_and_backticked(token_line: str) -> None:
+    creates, modifies = extract_wave_scope(token_line)
+    assert creates == ["src/tools/fetch_data.py", "tests/test_fetch_data.py"]
+    assert modifies == []
+
+
+@pytest.mark.parametrize(
+    "wf_path",
+    _WAVE_CYCLE_COPIES + [_REPO_ROOT / ".claude" / "workflows" / "sdk-wave.js"],
+    ids=_WAVE_CYCLE_IDS + ["sdk-wave.js"],
+)
+def test_rt001_parse_prompt_accepts_bare_paths(wf_path: Path) -> None:
+    """The AI parse and the deterministic scan must agree on what a path token is, or
+    every planner-format wave aborts Parse with scope-scan-mismatch."""
+    prompt = _parse_prompt(wf_path)
+    assert "backticked OR BARE" in prompt
+    assert "**Creates:**" in prompt

@@ -342,7 +342,9 @@ def test_get_system_prompt_section_includes_examples():
     section = get_system_prompt_section()
     if not registered_content_types():
         return  # registry empty in bare test env — skip
-    assert "Examples:" in section, f"section must contain 'Examples:'; got:\n{section}"
+    assert "Reference shapes of tool output" in section, (
+        f"section must contain the reference-shapes heading; got:\n{section}"
+    )
     assert "KpiCard" in section
 
 
@@ -1512,3 +1514,47 @@ def test_field_summary_includes_own_declared_metadata_field_without_future_annot
         f"its module has no `from __future__ import annotations`; got {summary!r}"
     )
     assert "title" in summary
+
+
+def test_system_prompt_forbids_model_written_component_json():
+    """GH-169: cards come only from tools with emits=; the section must not
+    tell the model to wrap data itself, and must say not to write JSON."""
+    from agent_sdk.a2ui.catalog import get_system_prompt_section
+
+    section = get_system_prompt_section()
+    assert "wrap it as" not in section.lower()
+    assert "do not write component json" in section.lower()
+    assert "automatically" in section
+    assert "only values" in section
+    assert "Examples:" not in section
+    assert "never invent" in section
+
+
+def test_system_prompt_component_shapes_match_registered_models():
+    """GH-169 / C-020: every component line in the reworded section teaches only
+    keys the registered ContentModel declares."""
+    from agent_sdk.a2ui.catalog import get_system_prompt_section
+    from agent_sdk.models.content_types import registered_content_types
+
+    by_component = {cls.component: cls for cls in registered_content_types().values()}
+    seen = 0
+    for line in get_system_prompt_section().splitlines():
+        if not line.startswith("- "):
+            continue
+        name = line[2:].split(":", 1)[0].split(" [", 1)[0].strip()
+        cls = by_component.get(name)
+        assert cls is not None, f"section lists {name!r} with no registered model"
+        schema = line.split(": ", 1)[1].strip()
+        declared = _declared_wire_keys(cls)
+        for key in _compact_schema_top_level_keys(schema):
+            assert key in declared, f"{name} section teaches undeclared key {key!r}"
+        seen += 1
+    assert seen >= len(by_component) - 1
+
+
+def test_system_prompt_allowed_components_still_filters():
+    from agent_sdk.a2ui.catalog import get_system_prompt_section
+
+    section = get_system_prompt_section(["KpiCard"])
+    assert "- KpiCard" in section
+    assert "- FundPerformance" not in section
