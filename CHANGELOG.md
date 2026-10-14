@@ -8,6 +8,13 @@ internals, `contrib/`) may change in minors with notice here.
 
 _Nothing yet._
 
+## [0.12.1] — 2026-10-14
+
+Resolves GH-170 (A2UI `CalendarEvent.location` always carries `display_name` and `is_online`). No breaking change.
+
+### Fixed
+- GH-170: `EventLocation.display_name` now defaults to `""` and `is_online` to `False` (were `None`), so `CalendarEvents` wire output always carries both keys that Standard Profile v1.1 requires on `CalendarEvent.location`. Before, `EventLocation(join_url="u")` emitted only `{"join_url": "u"}` and failed the Profile's required-key check. Per the maintainer ruling (https://github.com/wailuen/a2a-sdk/issues/170#issuecomment-6143894937) the fields are not made required: input that omits them stays valid, and `EventLocation()` still validates. Additive, not breaking: the wire gains two keys and removes none, and an explicit `None` for `display_name` or `is_online` is treated as the default (`""` / `False`) so callers that pass upstream nulls keep validating. The compact schema taught to the model now reads `location?:{display_name:str,is_online:bool,join_url?:str}`. Plain text is unchanged (no ` @ ` for an empty `display_name`, no `[online]` for `is_online=False`). New `tests/test_gh170_profile_required_keys.py` compares the required keys in every Standard Profile compact schema (nested objects included) with the Profile field contracts and with what `wire()` emits for a minimal instance. It found no other mismatched card type, so `CalendarEvents` is the only type changed.
+
 ## [0.12.0] — 2026-10-13
 
 Resolves GH-160 to GH-169. GH-161 is breaking: every `oidc` sign-in now needs a role, a group or the explicit opt-out. Known pre-existing protocol issue filed for a follow-up: GH-170.
