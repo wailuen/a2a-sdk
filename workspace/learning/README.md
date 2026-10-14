@@ -352,3 +352,5 @@ Entries ordered by LRN number.
 | LRN-346 | Maintainer ruling implemented for fewer slots than named | [LRN-346](LRN-346-ruling-narrowed-unratified.md) |
 | LRN-347 | Mirror byte-identity test compares local tree, not pushed commit | [LRN-347](LRN-347-mirror-check-local-tree.md) |
 | LRN-348 | Extra security swap added beyond ruling's only-X wording | [LRN-348](LRN-348-extra-swap-beyond-ruling.md) |
+| LRN-349 | Narrowing Optional field to non-None default rejects explicit null | [LRN-349](LRN-349-narrowed-field-explicit-null.md) |
+| LRN-350 | Reuses directive ignored, second test parser written | [LRN-350](LRN-350-reuse-directive-second-parser.md) |

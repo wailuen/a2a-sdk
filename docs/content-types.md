@@ -23,6 +23,12 @@ extension API for domain cards.
 | `user_list` | `UserList` |
 | `document_list` | `DocumentList` |
 
+`CalendarEvents` events may carry a `location`. Its `display_name` (default
+`""`) and `is_online` (default `False`) are always sent, because the Standard
+Profile requires both. `join_url` is sent only when set. You may leave all
+three out when you build it. An explicit `null` for
+`display_name` or `is_online` is treated as the default.
+
 Import from `agent_sdk.models.content_types`. The standard catalog is
 **closed**: you cannot add types to it, and the reserved component names
 (`TradeActivity`, `CompanyInfo`, `DealList`, `InvestorProfile`) cannot be

@@ -1134,9 +1134,16 @@ class EmailList(ContentModel):
 
 
 class EventLocation(_Wire):
-    display_name: str | None = None
-    is_online: bool | None = None
+    display_name: str = ""
+    is_online: bool = False
     join_url: str | None = None
+
+    @field_validator("display_name", "is_online", mode="before")
+    @classmethod
+    def _none_means_default(cls, v: Any, info: Any) -> Any:
+        if v is None:
+            return cls.model_fields[info.field_name].default
+        return v
 
 
 class CalendarEvent(_Wire):

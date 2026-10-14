@@ -17,6 +17,8 @@ from typing import ClassVar
 
 import pytest
 
+from tests._compact_schema import top_level_keys
+
 from agent_sdk.a2ui.translator import A2uiCapabilities, split_a2ui_delivery, translate
 from agent_sdk.models.content_types import (
     ContentModel,
@@ -1280,49 +1282,6 @@ def test_compact_schemas_cover_every_registered_component():
         )
 
 
-def _compact_schema_top_level_keys(schema: str) -> set[str]:
-    """Extract the top-level ``"key":`` names from a _COMPACT_SCHEMAS value,
-    stripping the trailing '?' optional marker and skipping over nested
-    object/array/string bodies without descending into them.
-
-    Returns an empty set for a non-object schema string (the MarketBriefing
-    prose-exception entry, which is prose guidance, not a wire shape)."""
-    if not schema.startswith("{"):
-        return set()
-    keys: set[str] = set()
-    i = 1
-    n = len(schema)
-    while i < n:
-        c = schema[i]
-        if c == "}":
-            break
-        if c == '"':
-            close = schema.index('"', i + 1)
-            keys.add(schema[i + 1 : close].rstrip("?"))
-            i = close + 1
-            assert schema[i] == ":", f"malformed compact schema (expected ':'): {schema!r}"
-            i += 1
-            depth = 0
-            while i < n:
-                vc = schema[i]
-                if vc == '"':
-                    i = schema.index('"', i + 1) + 1
-                    continue
-                if vc in "{[":
-                    depth += 1
-                elif vc in "}]":
-                    if depth == 0:
-                        break
-                    depth -= 1
-                elif vc == "," and depth == 0:
-                    i += 1
-                    break
-                i += 1
-            continue
-        i += 1
-    return keys
-
-
 def test_compact_schemas_keys_match_registered_model_fields():
     """RT-007: every top-level key taught by a _COMPACT_SCHEMAS string must be
     a declared field name or alias on that component's registered
@@ -1344,7 +1303,7 @@ def test_compact_schemas_keys_match_registered_model_fields():
             f"ContentModel is registered under that component name"
         )
         declared = _declared_wire_keys(cls)
-        for key in _compact_schema_top_level_keys(schema):
+        for key in top_level_keys(schema):
             assert key in declared, (
                 f"_COMPACT_SCHEMAS[{component!r}] teaches key {key!r} which "
                 f"is not a declared field or alias on {cls.__name__} "
@@ -1546,7 +1505,7 @@ def test_system_prompt_component_shapes_match_registered_models():
         assert cls is not None, f"section lists {name!r} with no registered model"
         schema = line.split(": ", 1)[1].strip()
         declared = _declared_wire_keys(cls)
-        for key in _compact_schema_top_level_keys(schema):
+        for key in top_level_keys(schema):
             assert key in declared, f"{name} section teaches undeclared key {key!r}"
         seen += 1
     assert seen >= len(by_component) - 1
