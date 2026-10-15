@@ -8,6 +8,20 @@ internals, `contrib/`) may change in minors with notice here.
 
 _Nothing yet._
 
+## [0.15.0] — 2026-10-15
+
+Resolves GH-181 (neutral A2UI prompt wording) and GH-182 (new `service` API key kind).
+
+### Added
+- GH-182: `service` API key kind. An admin mints one with `POST /admin/api/keys` (`service: true`, mutually exclusive with `admin`; the bootstrap mint stays admin-only). A service key passes `require_identity` on A2A, AG-UI and MCP even with `AGENT_SDK_OAUTH_IDP_DISABLE_API_KEYS=true`, and is refused wherever `require_admin` applies. `GET /admin/api/keys` and the console show the kind; stored records without the field load as normal keys. `/acceptance` and `/agent-verify` mint a service key, use only it for protocol calls, and revoke it at teardown. Ruling: https://github.com/wailuen/a2a-sdk/issues/182#issuecomment-6193941983
+- `agent_sdk.auth.Identity.service` (public, trailing field, default `False`).
+- New tests: `tests/test_gh182_service_key.py`.
+
+### Changed
+- GH-182 (security): `POST /oauth/revoke` — a service key no longer revokes another client's OAuth token; it gets the usual silent HTTP 200 and nothing is revoked (RFC 7009 §2.2). Admin and normal API keys keep today's behaviour. oauth-kind callers still revoke only their own tokens.
+- GH-181: the A2UI system-prompt section no longer tells the model to describe tool results "in prose". It now says to summarise tool results for the user in the format the agent's instructions ask for, so persona format rules (e.g. markdown tables) are respected. The safety rules (cards delivered automatically, no component JSON, only values the tools returned) are unchanged, as are the MarketBriefing prose-card notes. No new setting.
+- New tests: `tests/test_gh181_prompt_format_neutral.py`.
+
 ## [0.14.1] — 2026-10-15
 
 Resolves GH-180 (A2A catalog negotiation). Ruling: https://github.com/wailuen/a2a-sdk/issues/180#issuecomment-6192926900
