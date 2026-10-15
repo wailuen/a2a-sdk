@@ -39,7 +39,10 @@ When planning any AG-UI CUSTOM event emit path:
 2. The only valid server-side suppression is `tier == "none"` (agent has opted out
    of A2UI entirely).
 3. Catalog opt-in (`self.catalogs`) is the correct gate ONLY for A2A DataPart
-   delivery where the client must have sent `X-A2A-Extensions: a2ui`.
+   delivery where the client must have sent `X-A2A-Extensions: a2ui`. Since
+   GH-180, `allows()` on the A2A path DOES gate domain types on declared
+   catalogs (ruling: issue 180 comment 6192926900). The AG-UI "emit freely"
+   rule lives only in `for_custom_emit()`, never in `allows()`.
 4. Add a test that confirms a CUSTOM event for a type NOT in `self.catalogs` is
    still emitted when `tier != "none"`.
 
@@ -58,7 +61,12 @@ into `translate()`, which applies `allows()` internally. `for_custom_emit()`
 must return `self` unchanged when `tier == "none"` (preserving the suppression)
 and otherwise force `tier="core+extended"` (catalogs preserved), so `allows()`
 downstream can only ever gate on `tier == "none"` for the AG-UI path — never on
-catalog membership. The `allows()` method in `translator.py` must return
-`False` only when `self.tier == "none"`, and must emit domain types freely
-(consumers silently ignore unknown CUSTOM events per the AG-UI spec) — never
-suppress based on catalog membership.
+catalog membership. Concretely, `for_custom_emit()` returns `self` for
+`tier == "none"`, otherwise `core+extended` with `any_catalog=True`, so the
+catalog check in `allows()` is bypassed on AG-UI (consumers silently ignore
+unknown CUSTOM events per the AG-UI spec).
+
+`allows()` itself is NOT required to emit domain types freely. On the A2A path
+it gates domain types on declared catalogs (GH-180, issue 180 ruling comment
+6192926900). Pin:
+`tests/test_gh180_a2a_catalog_negotiation.py::test_custom_emit_ignores_declared_catalogs`.

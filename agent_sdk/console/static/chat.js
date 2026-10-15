@@ -175,6 +175,8 @@ const state = {
   threadId: uuid(),
   aguiMessages: [],
   busy: false,
+  // GH-180: every catalog ID the agent card advertises (data only, never HTML)
+  catalogIds: ["urn:a2ui-profile:standard:v1"],
 };
 
 export function render(pane, ctx) {
@@ -338,13 +340,34 @@ export function render(pane, ctx) {
 
   /* ── A2A mode (§5.1) ── */
 
+  async function loadCatalogIds() {
+    try {
+      const resp = await fetch("/.well-known/agent-card.json");
+      if (!resp.ok) return;
+      const card = await resp.json();
+      const exts = (card.capabilities && card.capabilities.extensions) || [];
+      const ext = exts.find((e) => e && typeof e.uri === "string" && e.uri.indexOf("a2ui.org/a2a-extension/a2ui/") !== -1);
+      const ids = ext && ext.params && ext.params.supportedCatalogIds;
+      if (Array.isArray(ids)) {
+        const std = "urn:a2ui-profile:standard:v1";
+        const clean = ids
+          .filter((i) => typeof i === "string" && i && i.length <= 256 && i !== std)
+          .slice(0, 31);
+        state.catalogIds = [std, ...clean];
+      }
+    } catch (_e) {
+      /* keep the Standard Profile default */
+    }
+  }
+  loadCatalogIds();
+
   async function sendA2a(text) {
     const message = {
       kind: "message",
       role: "user",
       parts: [{ kind: "text", text }],
       messageId: uuid(),
-      metadata: { a2uiClientCapabilities: { version: "v0.9.1", catalogs: ["urn:a2ui-profile:standard:v1"], tier: "core+extended" } },
+      metadata: { a2uiClientCapabilities: { version: "v0.9.1", catalogs: state.catalogIds, tier: "core+extended" } },
     };
     if (state.contextId) message.contextId = state.contextId;
 
@@ -462,7 +485,7 @@ export function render(pane, ctx) {
         state: {},
         tools: [],
         context: [],
-        forwardedProps: { a2uiClientCapabilities: { version: "v0.9.1", catalogs: ["urn:a2ui-profile:standard:v1"], tier: "core+extended" } },
+        forwardedProps: { a2uiClientCapabilities: { version: "v0.9.1", catalogs: state.catalogIds, tier: "core+extended" } },
         // payload must be an object carrying `decision` — gate.py's parse_decision()
         // only reads a decision out of a dict payload; a bare string payload is
         // discarded and the resume lands on Outcome.UNCLEAR regardless of intent.
@@ -477,7 +500,7 @@ export function render(pane, ctx) {
         state: {},
         tools: [],
         context: [],
-        forwardedProps: { a2uiClientCapabilities: { version: "v0.9.1", catalogs: ["urn:a2ui-profile:standard:v1"], tier: "core+extended" } },
+        forwardedProps: { a2uiClientCapabilities: { version: "v0.9.1", catalogs: state.catalogIds, tier: "core+extended" } },
       };
     }
 

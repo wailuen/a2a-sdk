@@ -388,3 +388,6 @@ Entries ordered by LRN number.
 | LRN-382 | Removal guard must catch the documented declaration form | [LRN-382](LRN-382-removal-guard-declaration-form.md) |
 | LRN-383 | Reuses-driven helper still needs scope and CHANGELOG entry | [LRN-383](LRN-383-reuses-helper-scope-declaration.md) |
 | LRN-384 | Breaking CHANGELOG bullet and fail-loud guard need a ruling | [LRN-384](LRN-384-breaking-change-needs-ruling.md) |
+| LRN-385 | Gate semantics change left old-ruling tests red | [LRN-385](LRN-385-stale-tests-after-gate-change.md) |
+| LRN-386 | Remote card values copied into requests without caps or fixed source | [LRN-386](LRN-386-untrusted-remote-value-caps.md) |
+| LRN-387 | Existing LRN Check clause contradicts a landed fix | [LRN-387](LRN-387-stale-lrn-check-vs-fix.md) |

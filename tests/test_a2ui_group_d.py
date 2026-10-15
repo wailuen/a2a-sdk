@@ -563,21 +563,16 @@ def _register_gh56_card():
 
 
 def test_gh56_ac1_domain_type_allowed_when_tier_core_catalog_standard(_register_gh56_card):
-    """GH-56 AC1: A2uiCapabilities(tier="core", catalogs=["urn:a2ui-profile:standard:v1"])
-    + domain ContentModel subclass → translate() returns non-None.
-
-    Consumers silently ignore unknown CUSTOM events (AG-UI spec); the server
-    must emit domain types freely when tier is active, regardless of the
-    client's catalog list."""
+    """GH-56 AC1 as narrowed by GH-180: a domain type is not emitted on the A2A
+    path when the declared catalogs omit its catalog; the AG-UI CUSTOM path
+    (for_custom_emit) still emits it."""
     from agent_sdk.a2ui.translator import translate
 
     payload = _GH56DomainCard(label="test-ac1")
     caps = A2uiCapabilities(tier="core", catalogs=["urn:a2ui-profile:standard:v1"])
-    result = translate(payload, capabilities=caps)
-    assert result is not None, (
-        "translate() must return non-None for domain types when tier='core', "
-        "even if the domain catalog is not in caps.catalogs"
-    )
+    assert translate(payload, capabilities=caps) is None
+    result = translate(payload, capabilities=caps.for_custom_emit())
+    assert result is not None
     assert isinstance(result, list)
     assert len(result) == 4
 
@@ -596,15 +591,14 @@ def test_gh56_ac2_domain_type_suppressed_when_tier_none(_register_gh56_card):
 
 
 def test_gh56_allows_domain_type_core_plus_extended_catalog_omitted(_register_gh56_card):
-    """GH-56: tier='core+extended' also allows domain types regardless of catalog."""
+    """GH-56 as narrowed by GH-180: tier='core+extended' with a catalog list that
+    omits the domain catalog suppresses the A2A emit; AG-UI CUSTOM still emits."""
     from agent_sdk.a2ui.translator import translate
 
     payload = _GH56DomainCard(label="test-extended")
     caps = A2uiCapabilities(tier="core+extended", catalogs=["urn:a2ui-profile:standard:v1"])
-    result = translate(payload, capabilities=caps)
-    assert result is not None, (
-        "translate() must return non-None for domain types when tier='core+extended'"
-    )
+    assert translate(payload, capabilities=caps) is None
+    assert translate(payload, capabilities=caps.for_custom_emit()) is not None
 
 
 def test_gh56_standard_core_tier_gating_unaffected(_register_gh56_card):

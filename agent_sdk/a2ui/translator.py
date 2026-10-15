@@ -74,6 +74,9 @@ class A2uiCapabilities:
 
     tier: str = "core"
     catalogs: list[str] = field(default_factory=lambda: [CATALOG_ID])
+    # Set only by for_custom_emit(): AG-UI CUSTOM emission skips catalog
+    # negotiation (LRN-049).
+    any_catalog: bool = False
 
     @classmethod
     def from_metadata(cls, raw: Any) -> "A2uiCapabilities":
@@ -109,10 +112,10 @@ class A2uiCapabilities:
         if self.tier == "none":
             return False
         if model_cls.catalog_id != CATALOG_ID:
-            # Domain types: emit freely when tier is active — consumers silently
-            # ignore unknown CUSTOM events (AG-UI spec).  Catalog gating only
-            # applied when tier=="none" (already returned False above).
-            return True
+            # GH-180: A2UI v0.9.1 negotiation — a domain surface is only sent
+            # when the client declared its catalog. A2A has no silent-ignore
+            # safety net. AG-UI CUSTOM goes through for_custom_emit() instead.
+            return self.any_catalog or model_cls.catalog_id in self.catalogs
         if model_cls.extended:
             return self.extended
         return True
@@ -141,7 +144,9 @@ class A2uiCapabilities:
         """
         if self.tier == "none":
             return self
-        return A2uiCapabilities(tier="core+extended", catalogs=list(self.catalogs))
+        return A2uiCapabilities(
+            tier="core+extended", catalogs=list(self.catalogs), any_catalog=True
+        )
 
 
 def translate(

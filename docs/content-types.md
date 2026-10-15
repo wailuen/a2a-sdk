@@ -80,8 +80,11 @@ name ignoring case (`KPICard` next to `KpiCard` is refused), component not
 equal to a Basic Catalog primitive ignoring case (`Card`, `Text`, `Textfield`,
 `checkbox` are refused; see `BASIC_CATALOG_COMPONENTS`), `data_type`
 globally unique, and rejects new types claiming the standard catalog. The agent card
-advertises every catalog id in the A2UI extension `params.catalogIds`, so
-clients know which catalogs they must render.
+advertises every catalog id in the A2UI extension `params.supportedCatalogIds`, so
+clients know which catalogs they must render. On A2A a domain card is sent as
+an A2UI surface only when the client lists its catalog id in
+`a2uiClientCapabilities.catalogs` (GH-180); otherwise the DataPart carries the
+text and raw-data fallback. AG-UI CUSTOM events are not gated by catalog.
 
 ### How the model is taught your card's fields (GH-171)
 
