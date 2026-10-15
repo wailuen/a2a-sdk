@@ -8,6 +8,14 @@ internals, `contrib/`) may change in minors with notice here.
 
 _Nothing yet._
 
+## [0.14.1] — 2026-10-15
+
+Resolves GH-180 (A2A catalog negotiation). Ruling: https://github.com/wailuen/a2a-sdk/issues/180#issuecomment-6192926900
+
+### Changed
+- GH-180 (behaviour change for A2A clients): `A2uiCapabilities.allows()` now returns False for a domain model whose `catalog_id` is not in the client's declared `catalogs`, so the A2A DataPart carries only the text and raw-data fallback for it. A client that opts in without a usable `catalogs` list gets the Standard Profile only, so it no longer receives undeclared domain catalogs. **Migration:** list the domain catalog IDs from the agent card (`supportedCatalogIds`) in `a2uiClientCapabilities.catalogs`. AG-UI CUSTOM emission is unchanged (`for_custom_emit()`). The admin console now declares every catalog ID on the agent card. `A2uiCapabilities` gains an optional `any_catalog` field (default False).
+- New tests: `tests/test_gh180_a2a_catalog_negotiation.py`.
+
 ## [0.14.0] — 2026-10-15
 
 Resolves GH-174 through GH-177, GH-179 (pre-existing items from the w049 protocol audit) and the code part of GH-178. GH-176, GH-177 and GH-179 (3, 5) are breaking; see Breaking changes.
