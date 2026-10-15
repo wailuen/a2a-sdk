@@ -107,7 +107,7 @@ from ..common.admission import (
     slot_table,
 )
 from ..common.origin import guard_origin
-from ..common.json_strict import loads_strict
+from ..common.json_strict import dumps_strict, loads_strict, scrub_unencodable
 from ..common.sse import SSE_HEADERS, sse_data
 from ..common.wire_errors import a2a_error, a2a_invalid_params, a2a_parse_error
 from ..models.a2a import (
@@ -537,6 +537,50 @@ def _resume_or_error(
     return record
 
 
+def _strict_json_response(
+    content: Any, headers: dict[str, str] | None = None
+) -> Response:
+    """GH-179: the one place a non-stream A2A body is serialized. Starlette's
+    ``dumps_strict`` refuses non-finite values explicitly; answer with a fixed
+    -32006 instead of a bare HTTP 500 (SI-2: no value is echoed)."""
+    try:
+        body = dumps_strict(content)
+    except ValueError:
+        # w050 RT-001 (round 6): a record stored before the status-commit
+        # scrub (or by a durable store) may still hold a lone surrogate.
+        # Replace it with U+FFFD rather than fail every read of the task.
+        try:
+            body = dumps_strict(scrub_unencodable(content))
+        except ValueError:
+            logger.error("a2a response body not serializable")
+            return a2a_error(
+                A2A_INVALID_AGENT_RESPONSE, "invalid agent response", headers=headers
+            )
+        logger.warning("a2a response body held unencodable text; replaced")
+    return Response(content=body, media_type="application/json", headers=headers)
+
+
+def _list_entry(task: Task) -> dict[str, Any] | None:
+    """One tasks/list entry, serialized on its own (w050 RT-001 round 6) so
+    a single unwritable record cannot fail the whole page for the identity.
+    Unencodable text is replaced with U+FFFD; a record that still cannot be
+    written (a non-finite value that bypassed validation) is left out and
+    logged by id only (SI-2)."""
+    wire = task.model_dump(by_alias=True, mode="json", exclude_none=True)
+    try:
+        dumps_strict(wire)
+        return wire
+    except ValueError:
+        pass
+    wire = scrub_unencodable(wire)
+    try:
+        dumps_strict(wire)
+        return wire
+    except ValueError:
+        logger.error("tasks/list: task %s not serializable; left out", task.id)
+        return None
+
+
 def _task_wire(record: TaskRecord, history_length: int | None = None) -> dict[str, Any]:
     wire = record.task.wire()
     if history_length is not None and "history" in wire:
@@ -569,7 +613,7 @@ async def message_send(
         # only A2UI can ever be echoed here, and only when the resumed
         # Task's OWN artifacts genuinely carry an A2UI part.
         _echo_a2ui_if_present([record.task], request, response)
-        return JSONResponse(_task_wire(record), headers=dict(response.headers))
+        return _strict_json_response(_task_wire(record), dict(response.headers))
     # SC-A1: bare-Message quick-response path (A2A v0.3.0 §2).
     # Call the optional sync_reply hook BEFORE task creation; if it returns a
     # non-empty string, skip task creation and return a bare Message directly.
@@ -586,7 +630,7 @@ async def message_send(
                 contextId=ctx_id,
                 parts=[TextPart(kind="text", text=reply_text)],
             )
-            return JSONResponse(bare_msg.wire())
+            return _strict_json_response(bare_msg.wire())
     record = _create_task_record(request, params, identity)
     _start_worker(
             request, record, _capabilities(params.message, request),
@@ -599,7 +643,7 @@ async def message_send(
     history_length = (
         params.configuration.history_length if params.configuration else None
     )
-    return JSONResponse(_task_wire(record, history_length), headers=dict(response.headers))
+    return _strict_json_response(_task_wire(record, history_length), dict(response.headers))
 
 
 async def _admit(
@@ -907,12 +951,12 @@ async def tasks_list(
     )
     _echo_a2ui_if_present(tasks, request, response)
     body: dict[str, Any] = {
-        "tasks": [t.model_dump(by_alias=True, mode="json", exclude_none=True) for t in tasks],
+        "tasks": [e for e in (_list_entry(t) for t in tasks) if e is not None],
         "totalSize": total,
         "pageSize": size,
         "nextPageToken": next_token or "",
     }
-    return JSONResponse(body, headers=dict(response.headers))
+    return _strict_json_response(body, dict(response.headers))
 
 
 @router.get("/v1/tasks/{task_id}")
@@ -939,7 +983,7 @@ async def tasks_get(
     # RT-B-203: echo only if THIS task actually carries an A2UI part — see
     # _echo_a2ui_if_present and the module docstring.
     _echo_a2ui_if_present([record.task], request, response)
-    return JSONResponse(_task_wire(record, historyLength), headers=dict(response.headers))
+    return _strict_json_response(_task_wire(record, historyLength), dict(response.headers))
 
 
 @router.post("/v1/tasks/{task_id}:cancel")
@@ -1041,7 +1085,7 @@ async def tasks_cancel(
     finally:
         store.close_streams(task_id)
     # spec-required: HTTP 200 with the full canceled Task (§5.1)
-    return JSONResponse(body, headers=hdrs)
+    return _strict_json_response(body, hdrs)
 
 
 # Handler name reflects JSON-RPC method tasks/resubscribe; REST path is :subscribe per A2A v0.3.0 §2 binding table (see LRN-099).

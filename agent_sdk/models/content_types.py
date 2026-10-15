@@ -25,7 +25,10 @@ enforced once on the base class too (RT-003/RT-006, round 4) — none of the
 three below is a per-subclass obligation, so a domain card gets all three for
 free and cannot silently opt out of them:
 
-1. ``wire()`` emits it when set.
+1. ``wire()`` emits it when set. (``MarketBriefing`` is the one carve-out:
+   its ``wire()`` is the bare markdown string and cannot carry it; the AG-UI
+   ``AGENT_ARTIFACT`` frame sends ``{"markdown", "metadata"?}`` instead and
+   the A2A/MCP text fallback carries the ``to_plain_text()`` suffix.)
 2. ``to_plain_text()`` appends it as a trailing ``key=value`` suffix. That
    method is CONCRETE on ``ContentModel`` (``self._body_text() +
    self._metadata_suffix()``); subclasses implement ``_body_text()``. Before
@@ -89,6 +92,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializationInfo,
     SerializerFunctionWrapHandler,
     field_serializer,
     field_validator,
@@ -98,9 +102,11 @@ from pydantic import (
 
 from ..common.redact import (
     LINE_TEXT_MAX_LEN,
+    TITLE_TEXT_MAX_LEN,
     safe_block_text,
     safe_cell_text,
     safe_id_text,
+    safe_label_text,
     safe_line_text,
     sanitize_text,
 )
@@ -155,6 +161,12 @@ A2UI_EXTENSION_URI = "https://a2ui.org/a2a-extension/a2ui/v0.9.1"
 A2UI_MIME_TYPE = "application/a2ui+json"
 
 RESERVED_COMPONENTS = ("TradeActivity", "CompanyInfo", "DealList", "InvestorProfile")
+
+BASIC_CATALOG_COMPONENTS = (
+    "Text", "Card", "Column", "Row", "List", "Tabs", "Button", "Image", "Icon",
+    "Video", "AudioPlayer", "Divider", "Modal", "CheckBox", "TextField",
+    "DateTimeInput", "ChoicePicker", "Slider",
+)
 
 _ARROWS = {"up": "▲", "down": "▼", "flat": "→"}
 
@@ -284,8 +296,21 @@ def _assert_finite(value: Any, _depth: int = 0) -> None:
             _assert_finite(v, _depth + 1)
 
 
-@functools.cache
+# GH-179: weak-keyed like _NEXT_BODY_TEXT. A class-keyed ``functools.cache``
+# would pin every model subclass (including dynamically built ones) forever.
+# The cached values are plain tuples of str, so they never reference the class.
+_NULLABLE_NUMERIC_KEYS: "weakref.WeakKeyDictionary[type, tuple[str, ...]]" = (
+    weakref.WeakKeyDictionary()
+)
+_FLOAT_FIELD_PLAN: "weakref.WeakKeyDictionary[type, tuple[tuple[str, bool], ...]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
 def _nullable_numeric_keys(cls: type[BaseModel]) -> tuple[str, ...]:
+    cached = _NULLABLE_NUMERIC_KEYS.get(cls)
+    if cached is not None:
+        return cached
     keys: list[str] = []
     for name, info in cls.model_fields.items():
         parts: list[Any] = []
@@ -298,11 +323,15 @@ def _nullable_numeric_keys(cls: type[BaseModel]) -> tuple[str, ...]:
             keys.append(name)
             if info.alias:
                 keys.append(info.alias)
-    return tuple(keys)
+    result = tuple(keys)
+    _NULLABLE_NUMERIC_KEYS[cls] = result
+    return result
 
 
-@functools.cache
 def _float_field_plan(cls: type[BaseModel]) -> tuple[tuple[str, bool], ...]:
+    cached = _FLOAT_FIELD_PLAN.get(cls)
+    if cached is not None:
+        return cached
     plan = []
     for name, info in cls.model_fields.items():
         parts: list[Any] = []
@@ -313,21 +342,22 @@ def _float_field_plan(cls: type[BaseModel]) -> tuple[tuple[str, bool], ...]:
             stack.extend(typing.get_args(tp))
         if float in parts:
             plan.append((name, type(None) in parts))
-    return tuple(plan)
+    result = tuple(plan)
+    _FLOAT_FIELD_PLAN[cls] = result
+    return result
 
 
 class _Wire(BaseModel):
     # hide_input_in_errors: a rejected non-finite value must never be echoed
     # back in the error text (GH-173).
     model_config = ConfigDict(populate_by_name=True, hide_input_in_errors=True)
-    _rejects_non_finite: ClassVar[bool] = False
 
     @model_validator(mode="before")
     @classmethod
     def _nullable_non_finite_to_none(cls, data: Any) -> Any:
         """GH-173: pydantic rejects a non-finite float for an ``int | None``
         field before any after-validator runs, so coerce it first."""
-        if not isinstance(data, dict) or cls._rejects_non_finite:
+        if not isinstance(data, dict):
             return data
         bad = [
             k
@@ -670,10 +700,10 @@ class KpiCard(ContentModel):
         # GH-167: the title stands alone and keeps ASCII (ruling: only the
         # line-break/control-char collapse applies). It cannot imitate a
         # metric row by layout: rows are indented, the title is at column 0.
-        lines = [_sanitize_line(self.title)] if self.title else []
+        lines = [_sanitize_line(self.title, max_len=TITLE_TEXT_MAX_LEN)] if self.title else []
         for m in self.metrics:
             unit = f" {_sanitize_cell(m.unit)}" if m.unit else ""
-            lines.append(f"  {_sanitize_cell(m.label)}: {_sanitize_cell(str(m.value))}{unit}")
+            lines.append(f"  {safe_label_text(m.label, neutralise=':')}: {_sanitize_cell(str(m.value))}{unit}")
             if isinstance(m.trend, KpiTrend):
                 arrow = _ARROWS[m.trend.direction]
                 bits = [arrow]
@@ -752,7 +782,7 @@ class TimeSeriesChart(ContentModel):
         return values
 
     def _body_text(self) -> str:
-        lines = [_sanitize_line(self.title)]
+        lines = [_sanitize_line(self.title, max_len=TITLE_TEXT_MAX_LEN)]
         if self.data:
             first, last = self.data[0], self.data[-1]
             fv = first.value if first.value is not None else "N/A"
@@ -767,6 +797,10 @@ class TimeSeriesChart(ContentModel):
 
 
 class ColumnDef(_Wire):
+    """Column descriptor. ``unit`` and ``highlight`` are SDK extensions: they
+    are not in the Standard Profile v1 ``ComparisonTable`` column contract
+    (``key``, ``label``, ``type``) but stay on the wire (GH-179)."""
+
     key: str
     label: str
     type: str | None = None
@@ -775,6 +809,13 @@ class ColumnDef(_Wire):
 
 
 class ComparisonTable(ContentModel):
+    """``sort_by`` and ``sort_order`` are SDK extensions: not in the Standard
+    Profile v1 contract, kept on the wire (GH-179). ``ColumnDef.unit`` and
+    ``ColumnDef.highlight`` are SDK extensions too.
+
+    ``rows`` values must be finite: a ``nan``/``inf`` cell is rejected at
+    construction (GH-173 rule) so ``wire()`` and ``to_plain_text()`` agree."""
+
     data_type: ClassVar[str] = "comparison_table"
     component: ClassVar[str] = "ComparisonTable"
 
@@ -784,13 +825,19 @@ class ComparisonTable(ContentModel):
     sort_by: str | None = None
     sort_order: Literal["asc", "desc"] | None = None
 
+    @field_validator("rows")
+    @classmethod
+    def _rows_finite(cls, v: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        _assert_finite(v)
+        return v
+
     def _body_text(self) -> str:
-        header = " | ".join(_sanitize_cell(c.label) for c in self.columns)
+        header = " | ".join(safe_label_text(c.label, neutralise="|") for c in self.columns)
         # GH-167: the title stands alone and keeps ASCII (ruling: only the
         # line-break/control-char collapse applies). It cannot imitate a
         # table row by layout: header, rule and rows are indented, the title
         # is at column 0.
-        lines = [_sanitize_line(self.title)] if self.title else []
+        lines = [_sanitize_line(self.title, max_len=TITLE_TEXT_MAX_LEN)] if self.title else []
         lines += [f"  {header}", "  " + "-" * len(header)]
         for row in self.rows:
             lines.append(
@@ -814,7 +861,7 @@ class BarChart(ContentModel):
     y_key: str | None = None
 
     def _body_text(self) -> str:
-        lines = [_sanitize_line(self.title)] if self.title else []
+        lines = [_sanitize_line(self.title, max_len=TITLE_TEXT_MAX_LEN)] if self.title else []
         lines += [f"  {_sanitize_cell(b.category)}: {b.value:g}" for b in self.bars]
         return "\n".join(lines)
 
@@ -826,6 +873,9 @@ class EntityItem(_Wire):
 
 
 class EntityList(ContentModel):
+    """``title`` and ``showing`` are SDK extensions: not in the Standard
+    Profile v1 ``EntityList`` contract, kept on the wire (GH-179)."""
+
     data_type: ClassVar[str] = "entity_list"
     component: ClassVar[str] = "EntityList"
 
@@ -844,7 +894,7 @@ class EntityList(ContentModel):
 
     def _body_text(self) -> str:
         title = (
-            _sanitize_line(self.title) if self.title else _sanitize_cell(f"{self.entity_type} list")
+            _sanitize_line(self.title, max_len=TITLE_TEXT_MAX_LEN) if self.title else _sanitize_cell(f"{self.entity_type} list")
         )
         lines = [title]
         lines.append(f"  showing {self.showing or len(self.items)} of {self.total_count}")
@@ -924,7 +974,7 @@ class MarketBriefing(ContentModel):
 
     def to_markdown(self) -> str:
         # GH-167: the title and the as-of header each sit alone on their own line.
-        lines = [_sanitize_line(self.title), f"as of: {_sanitize_line(self.as_of)}"]
+        lines = [_sanitize_line(self.title, max_len=TITLE_TEXT_MAX_LEN), f"as of: {_sanitize_line(self.as_of)}"]
         if self.prose:
             lines.append(_sanitize_block(self.prose))
         for section in self.sections:
@@ -947,6 +997,11 @@ class MarketBriefing(ContentModel):
                 table_title = _sanitize_cell(str(section.data.get("title", "")))
                 lines.append(f"  TABLE: {table_title}")
         return "\n".join(lines)
+
+    def wire(self) -> str:  # type: ignore[override]
+        """The prose exception: the wire value is the markdown string, not a
+        field dump (GH-179). ``mcp.py`` and the translator special-case it too."""
+        return self.to_markdown()
 
     def _body_text(self) -> str:
         return self.to_markdown()
@@ -977,7 +1032,7 @@ class WaterfallChart(ContentModel):
     date_range: DateRange | None = None  # start/end — frozen; not first/last
 
     def _body_text(self) -> str:
-        lines = [_sanitize_line(self.title)]
+        lines = [_sanitize_line(self.title, max_len=TITLE_TEXT_MAX_LEN)]
         lines += [
             f"  {_sanitize_cell(s.label)}: {s.value:+g} → {s.cumulative:g} ({s.type})"
             for s in self.segments
@@ -989,6 +1044,12 @@ class CategoryValue(_Wire):
     value: float
     count: int | None = None
     metadata: dict[str, Any] | None = None
+
+    @field_validator("metadata")
+    @classmethod
+    def _metadata_finite(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        _assert_finite(v)
+        return v
 
 
 class MultiCategoryPeriod(_Wire):
@@ -1027,7 +1088,7 @@ class MultiCategoryChart(ContentModel):
     chart_config: MultiCategoryChartConfig | None = None
 
     def _body_text(self) -> str:
-        lines = [_sanitize_line(self.title)]
+        lines = [_sanitize_line(self.title, max_len=TITLE_TEXT_MAX_LEN)]
         for p in self.periods:
             cats = ", ".join(
                 f"{_sanitize_cell(k)}={v.value:g}" for k, v in p.categories.items()
@@ -1211,6 +1272,9 @@ class EventLocation(_Wire):
 
 
 class CalendarEvent(_Wire):
+    """The event-level ``is_online`` is an SDK extension: the Standard Profile
+    carries it on ``location`` only. It stays on the wire (GH-179)."""
+
     id: str
     subject: str
     start: str  # UTC ISO 8601, trailing Z; renderer owns locale
@@ -1356,6 +1420,11 @@ class UserList(ContentModel):
         return "\n".join(lines)
 
 
+# Serialization-context key for the model's own transcript copy of a tool
+# result. Wire-only reshaping (DocumentItem's contract keys) is skipped there.
+TRANSCRIPT_DUMP_CONTEXT = "agent_sdk.transcript"
+
+
 class DocumentItem(_Wire):
     id: str
     name: str
@@ -1366,6 +1435,29 @@ class DocumentItem(_Wire):
     web_url: str | None = None
     last_modified: str | None = None
     modified_by: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _wire_contract_keys(
+        self, handler: SerializerFunctionWrapHandler, info: SerializationInfo
+    ) -> dict[str, Any]:
+        """GH-177: the frozen DocumentItem contract is id/name/type/modified/
+        link/size. ``web_url`` and ``last_modified`` stay model-side aliases:
+        they fill an empty ``link``/``modified`` and are never emitted.
+
+        Exception: a dump with ``context={TRANSCRIPT_DUMP_CONTEXT: True}``
+        (``agent/loop.py::fold_result_content``, the model's own copy of a
+        tool result) keeps both keys, so the agent's model still sees a
+        ``last_modified`` that differs from ``modified`` (w050 RT-001 r8)."""
+        data = handler(self)
+        if isinstance(info.context, dict) and info.context.get(TRANSCRIPT_DUMP_CONTEXT):
+            return data
+        if self.web_url and not data.get("link"):
+            data["link"] = self.web_url
+        if self.last_modified and not data.get("modified"):
+            data["modified"] = self.last_modified
+        data.pop("web_url", None)
+        data.pop("last_modified", None)
+        return data
 
 
 class DocumentList(ContentModel):
@@ -1390,9 +1482,17 @@ class DocumentList(ContentModel):
             lines.append(f"  - {_sanitize_line(d.name)}")
             if d.type:
                 lines.append(f"    type: {_sanitize_cell(d.type)}")
-            when = d.last_modified or d.modified
+            # GH-177: ``modified`` matches the wire (``last_modified`` only
+            # fills it when empty). When both are set and differ, the wire
+            # drops ``last_modified``, so this text is the one place its
+            # value still shows (e.g. an upload date next to a period end).
+            when = d.modified or d.last_modified
             if when:
                 lines.append(f"    modified: {_sanitize_cell(when)}")
+            if d.modified and d.last_modified and d.last_modified != d.modified:
+                lines.append(f"    last modified: {_sanitize_cell(d.last_modified)}")
+            if d.modified_by:
+                lines.append(f"    modified by: {_sanitize_cell(d.modified_by)}")
             lines.append(f"    id: {_safe_id(d.id)}")
         return "\n".join(lines)
 
@@ -1404,6 +1504,21 @@ _PROFILE_SEALED = False
 _COMPONENT_NAME_RE = re.compile(r"[A-Z][A-Za-z0-9]*")
 
 
+def _case_clash_hint(cls: type[ContentModel], component: object) -> str:
+    if not isinstance(component, str):
+        return ""
+    folded = component.casefold()
+    for kind, names in (
+        ("RESERVED name", RESERVED_COMPONENTS),
+        ("Basic Catalog primitive", BASIC_CATALOG_COMPONENTS),
+        ("registered name", [o.component for o in _REGISTRY.values() if o is not cls]),
+    ):
+        for name in names:
+            if isinstance(name, str) and name.casefold() == folded:
+                return f"; it also collides with {kind} {name!r} ignoring case"
+    return ""
+
+
 def register_content_type(cls: type[ContentModel]) -> type[ContentModel]:
     """Register a card type (SDK profile types at import; agents for domain
     cards). Validates the frozen-name and uniqueness rules."""
@@ -1413,6 +1528,12 @@ def register_content_type(cls: type[ContentModel]) -> type[ContentModel]:
     component = getattr(cls, "component", None)
     if not data_type or not component:
         raise TypeError(f"{cls.__name__} must declare data_type and component")
+    if not isinstance(component, str) or not _COMPONENT_NAME_RE.fullmatch(component):
+        raise ValueError(
+            f"component name {component!r} is invalid — A2UI wire names must be "
+            f"PascalCase (^[A-Z][A-Za-z0-9]*$); rename the card"
+            f"{_case_clash_hint(cls, component)}"
+        )
     if component in RESERVED_COMPONENTS:
         raise ValueError(
             f"component name {component!r} is RESERVED in Standard Profile v1 "
@@ -1444,6 +1565,13 @@ def register_content_type(cls: type[ContentModel]) -> type[ContentModel]:
                 f"component name {component!r} differs only in case from the "
                 f"RESERVED name {reserved!r}; pick a distinct name"
             )
+    for primitive in BASIC_CATALOG_COMPONENTS:
+        if primitive.casefold() == folded:
+            raise ValueError(
+                f"component name {component!r} equals the Basic Catalog "
+                f"primitive {primitive!r} ignoring case; a client would "
+                f"shadow or drop one of them — pick a distinct name"
+            )
     for owner in _REGISTRY.values():
         if owner is not cls and owner.component.casefold() == folded:
             raise ValueError(
@@ -1451,11 +1579,6 @@ def register_content_type(cls: type[ContentModel]) -> type[ContentModel]:
                 f"existing name {owner.component!r} ({owner.__name__}); "
                 f"a case-sensitive client would drop one of them"
             )
-    if not isinstance(component, str) or not _COMPONENT_NAME_RE.fullmatch(component):
-        raise ValueError(
-            f"component name {component!r} is invalid — A2UI wire names must be "
-            f"PascalCase (^[A-Z][A-Za-z0-9]*$); rename the card"
-        )
     existing = _REGISTRY.get(data_type)
     if existing is not None and existing is not cls:
         raise ValueError(f"data_type {data_type!r} already registered by {existing.__name__}")

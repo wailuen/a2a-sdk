@@ -27,6 +27,7 @@ def _card(name: str, data_type: str) -> type[ContentModel]:
     ("name", "match"),
     [
         ("KPICard", "KpiCard"),
+        ("tradeactivity", "PascalCase"),
         ("tradeactivity", "TradeActivity"),
         ("my_card", "my_card"),
         ("kpiCard", "kpiCard"),

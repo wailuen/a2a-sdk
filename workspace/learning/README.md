@@ -368,3 +368,23 @@ Entries ordered by LRN number.
 | LRN-362 | Strict JSON parser misses overflowing floats (1e999) | [LRN-362](LRN-362-strict-json-overflow-floats.md) |
 | LRN-363 | Stricter SSE serializer needs terminal-frame guard in every generator | [LRN-363](LRN-363-strict-serializer-sse-guard.md) |
 | LRN-364 | MCP writer lacks non-finite output guard after strict serializer | [LRN-364](LRN-364-mcp-nonfinite-output-guard.md) |
+| LRN-365 | Todo AC requiring a CHANGELOG entry shipped without one | [LRN-365](LRN-365-changelog-entry-missing.md) |
+| LRN-366 | New sanitizer bypasses canonical cut-and-marker helper | [LRN-366](LRN-366-sanitizer-truncation-divergence.md) |
+| LRN-367 | Release gate lacks per-issue CHANGELOG coverage check | [LRN-367](LRN-367-release-gate-changelog-coverage.md) |
+| LRN-368 | Sanitizer defines its own look-alike table | [LRN-368](LRN-368-duplicate-lookalike-table.md) |
+| LRN-369 | SI note lands without a hostile-input test | [LRN-369](LRN-369-si-note-without-hostile-test.md) |
+| LRN-370 | Validation-order AC half-implemented; old tests pin old order | [LRN-370](LRN-370-validation-reorder-half-done.md) |
+| LRN-371 | Wire key removal and wire() type change filed outside Breaking | [LRN-371](LRN-371-wire-break-outside-breaking.md) |
+| LRN-372 | Text fallback alias order differs from wire serializer | [LRN-372](LRN-372-text-wire-alias-order-mismatch.md) |
+| LRN-373 | Test named for a field never asserts it; text drops wire field | [LRN-373](LRN-373-test-name-overclaims-field.md) |
+| LRN-374 | Shared wire() return-type change breaks AG-UI schema and metadata | [LRN-374](LRN-374-wire-return-type-transport-split.md) |
+| LRN-375 | Return-type change leaves caller files off the todo Modifies line | [LRN-375](LRN-375-callers-missing-from-modifies.md) |
+| LRN-376 | Green pytest does not prove mypy gate passes after route change | [LRN-376](LRN-376-mypy-gate-after-route-change.md) |
+| LRN-377 | Model wire() fix silently changes protocol frame shape | [LRN-377](LRN-377-wire-override-breaks-frame.md) |
+| LRN-378 | Removed base-class opt-out flag must be Breaking and fail loud | [LRN-378](LRN-378-removed-optout-flag-silent.md) |
+| LRN-379 | Wave CHANGELOG omits changed files and new public symbols | [LRN-379](LRN-379-changelog-names-files-symbols.md) |
+| LRN-380 | SI AC naming "every route" needs a test per route | [LRN-380](LRN-380-every-route-needs-test.md) |
+| LRN-381 | Reuses directive means the named shared helper, not a private one | [LRN-381](LRN-381-reuses-directive-shared-helper.md) |
+| LRN-382 | Removal guard must catch the documented declaration form | [LRN-382](LRN-382-removal-guard-declaration-form.md) |
+| LRN-383 | Reuses-driven helper still needs scope and CHANGELOG entry | [LRN-383](LRN-383-reuses-helper-scope-declaration.md) |
+| LRN-384 | Breaking CHANGELOG bullet and fail-loud guard need a ruling | [LRN-384](LRN-384-breaking-change-needs-ruling.md) |

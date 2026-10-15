@@ -67,7 +67,7 @@ def test_many_fields_keep_every_required_field_and_mark_drop():
 
 
 def test_builtin_compact_schemas_unchanged():
-    assert _COMPACT_SCHEMAS["KpiCard"] == '{"metrics":[{label,value,unit?,trend?}],"title?":str}'
+    assert _COMPACT_SCHEMAS["KpiCard"] == '{"metrics":[{label,value,unit?,trend?,change_pct?}],"title?":str}'
 
 
 def test_prompt_section_keeps_every_required_field():

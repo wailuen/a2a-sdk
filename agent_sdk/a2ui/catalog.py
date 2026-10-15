@@ -76,16 +76,19 @@ def _annotation_str(ann: object, required: bool) -> tuple[str, bool]:
         non_none = [a for a in args if a is not type(None)]
         if not non_none:
             return "null", required
-        name, _ = _annotation_str(non_none[0], required)
+        name = "|".join(_annotation_str(a, required)[0] for a in non_none)
         if len(non_none) < len(args):
             name += "|null"
         return name, required
 
     if origin is list:
+        targs = getattr(ann, "__args__", ())
+        if targs:
+            return f"[{_annotation_str(targs[0], required)[0]}]", required
         return "list", required
 
     if origin is _typing.Literal:
-        return "Literal", required
+        return '"' + "|".join(str(v) for v in ann.__args__) + '"', required  # type: ignore[attr-defined]
 
     cls_name = getattr(ann, "__name__", None)
     if cls_name:
@@ -176,16 +179,16 @@ def _field_summary(cls: type[ContentModel]) -> str:
 
 _FEW_SHOT_EXAMPLES: dict[str, str] = {
     "KpiCard": (
-        '{"component":"KpiCard","metrics":[{"label":"Revenue","value":1200000,'
+        '{"metrics":[{"label":"Revenue","value":1200000,'
         '"unit":"USD","trend":"up"}],"title":"Q1 Summary"}'
     ),
     "TimeSeriesChart": (
-        '{"component":"TimeSeriesChart","chart_type":"line","title":"Price History",'
+        '{"chart_type":"line","title":"Price History",'
         '"x_key":"date","y_key":"value","total_count":2,'
         '"data":[{"date":"2026-01-01","value":100.0},{"date":"2026-02-01","value":105.0}]}'
     ),
     "ComparisonTable": (
-        '{"component":"ComparisonTable","columns":[{"key":"name","label":"Name"},'
+        '{"columns":[{"key":"name","label":"Name"},'
         '{"key":"value","label":"Value"}],"rows":[{"name":"Alpha","value":1.2}]}'
     ),
     # FundPerformance uses camelCase aliases on the wire (snake_case Python fields
@@ -195,7 +198,7 @@ _FEW_SHOT_EXAMPLES: dict[str, str] = {
     # and must never be fabricated; see the pbId note appended to the
     # FundPerformance line in get_system_prompt_section().
     "FundPerformance": (
-        '{"component":"FundPerformance",'
+        '{'
         '"irr":0.182,"tvpi":1.74,"dpi":0.95,"rvpi":0.79,'
         '"netIrr":0.164,"grossIrr":0.211,"moic":1.74,'
         '"asOfDate":"2025-12-31","nav":{"amount":320000000,"currency":"USD"},'
@@ -204,8 +207,8 @@ _FEW_SHOT_EXAMPLES: dict[str, str] = {
 }
 
 _COMPACT_SCHEMAS: dict[str, str] = {
-    "KpiCard": '{"metrics":[{label,value,unit?,trend?}],"title?":str}',
-    "TimeSeriesChart": '{"chart_type":"line|area|bar","title":str,"x_key":str,"y_key":str,"total_count":int,"data":[{date,value,label?}]}',
+    "KpiCard": '{"metrics":[{label,value,unit?,trend?,change_pct?}],"title?":str}',
+    "TimeSeriesChart": '{"chart_type":"line|area|bar","title":str,"subtitle?":str,"x_key":str,"y_key":str,"total_count":int,"data":[{date:str,value:num|null,label?:str}]}',
     "ComparisonTable": '{"columns":[{key,label,type?}],"rows":[{...}],"title?":str}',
     "BarChart": '{"bars":[{category:str,value:float}],"title?":str,"x_key?":str,"y_key?":str}',
     "EntityList": '{"entity_type":str,"items":[{id,name,summary?}],"total_count?":int,"has_more?":bool,"title?":str,"showing?":int}',
@@ -228,8 +231,8 @@ _COMPACT_SCHEMAS: dict[str, str] = {
     # OutOfOfficeSettings sub-shape: {is_enabled,start_date?,end_date?,internal_message?,external_message?}
     "UserProfile": '{"id":str,"display_name":str,"email":str,"given_name?":str,"surname?":str,"job_title?":str,"department?":str,"office_location?":str,"mobile_phone?":str,"business_phones":list,"manager?":{"id":str,"display_name":str,"email":str,"job_title?":str},"presence?":{"availability":str,"activity":str},"photo_url?":str,"out_of_office?":{"is_enabled":bool}}',
     "UserList": '{"users":[{id:str,display_name:str,email:str,job_title?:str,department?:str,presence?:{availability,activity}}],"total_count":int,"has_more":bool,"query?":str}',
-    # DocumentItem sub-shape: {id,name,type?,modified?,link?,size?,web_url?,last_modified?,modified_by?}
-    "DocumentList": '{"documents":[{id:str,name:str,type?:str,modified?:str,link?:str,size?:float,web_url?:str,last_modified?:str,modified_by?:str}],"total_count?":int,"has_more?":bool}',
+    # DocumentItem sub-shape: {id,name,type?,modified?,link?,size?}
+    "DocumentList": '{"documents":[{id:str,name:str,type?:str,modified?:str,link?:str,size?:float}],"total_count?":int,"has_more?":bool}',
 }
 
 
@@ -260,7 +263,8 @@ def get_system_prompt_section(allowed_components: list[str] | None = None) -> st
         "Do not write component JSON in your reply. Describe tool results in"
         " prose, using only values the tools returned.",
         "",
-        "Components tools can emit (required fields shown, ? = optional):",
+        "Components tools can emit (required fields shown, ? = optional,"
+        " |null = the value may be null):",
     ]
     for cls in sorted(types.values(), key=lambda c: c.component):
         tier = " [extended]" if cls.extended else ""
@@ -285,7 +289,11 @@ def get_system_prompt_section(allowed_components: list[str] | None = None) -> st
         if name in registered_names
     ]
     if examples:
-        lines += ["", "Reference shapes of tool output (not for you to write):"]
+        lines += [
+            "",
+            "Reference shapes of tool output (the resolved data object only,"
+            " no `component` key; not for you to write):",
+        ]
         for name, ex in examples:
             lines.append(f"  {name}: {ex}")
 

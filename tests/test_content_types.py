@@ -280,7 +280,10 @@ def test_market_briefing_metadata_wire_round_trip():
         as_of="2026-06-18",
         metadata={"coverage_note": "final"},
     )
-    assert mb.wire()["metadata"] == {"coverage_note": "final"}
+    # GH-179: wire() is the markdown string; metadata stays on the model dump.
+    assert mb.model_dump(mode="json", exclude_none=True)["metadata"] == {
+        "coverage_note": "final"
+    }
 
 
 def test_waterfall_chart_metadata_wire_round_trip():
@@ -819,12 +822,13 @@ def test_waterfall_segment_rejects_non_finite_value():
         WaterfallSegment(label="Start", value=float("inf"), type="initial", cumulative=0.0)
 
 
-def test_comparison_table_accepts_non_finite_row_value_outside_scope():
-    table = ComparisonTable(
-        columns=[ColumnDef(key="v", label="Value")],
-        rows=[{"v": float("inf")}],
-    )
-    assert table.rows[0]["v"] == float("inf")
+def test_comparison_table_rejects_non_finite_row_value():
+    """GH-179 (3): inverted. A row cell reaches wire() and the text fallback."""
+    with pytest.raises(ValidationError):
+        ComparisonTable(
+            columns=[ColumnDef(key="v", label="Value")],
+            rows=[{"v": float("inf")}],
+        )
 
 
 # RT-006 (round 4): `metadata` is now scoped IN. This previously asserted the
@@ -1385,7 +1389,9 @@ def test_joined_slots_still_neutralised():
         columns=[ColumnDef(key="n", label="N (x)")], rows=[{"n": "a | b (c)"}]
     )
     text = table.to_plain_text()
-    assert "(" not in text and "|" not in text
+    # GH-174: the author-written header keeps ASCII; the data cell is swapped.
+    assert "N (x)" in text
+    assert "a / b （c）" in text and "|" not in text
 
 
 def test_kpi_title_cannot_forge_metric_row():

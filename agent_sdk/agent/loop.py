@@ -42,6 +42,7 @@ from pydantic_core import to_jsonable_python
 
 from ..common.redact import frame_locations
 from ..common.redact import sanitize_text
+from ..models.content_types import TRANSCRIPT_DUMP_CONTEXT
 from ..models.errors import AgentError
 from .deferred import DeferredEvent, DeferredResult
 from .events import (
@@ -283,7 +284,12 @@ def fold_result_content(result: Any) -> dict[str, Any]:
     drops the key rather than renaming it.
     """
     if isinstance(result, BaseModel):
-        dump = result.model_dump(mode="json", by_alias=True, exclude_none=True)
+        dump = result.model_dump(
+            mode="json",
+            by_alias=True,
+            exclude_none=True,
+            context={TRANSCRIPT_DUMP_CONTEXT: True},
+        )
         # RT-A-04: model_dump() is not guaranteed to return a dict — a
         # RootModel or a custom @model_serializer can legitimately dump to a
         # list or a scalar. Only a dict dump can carry a forged

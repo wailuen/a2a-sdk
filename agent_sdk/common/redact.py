@@ -179,6 +179,8 @@ def safe_cell_text(value: str) -> str:
 
 
 LINE_TEXT_MAX_LEN = 256
+TITLE_TEXT_MAX_LEN = 1024
+LINE_TEXT_CUT_MARKER = "…"
 
 
 def safe_line_text(value: str, *, max_len: int | None = LINE_TEXT_MAX_LEN) -> str:
@@ -197,8 +199,39 @@ def safe_line_text(value: str, *, max_len: int | None = LINE_TEXT_MAX_LEN) -> st
     keeps the title out of the row grammar by LAYOUT instead: it indents
     those rows, and a value from this helper always starts at column 0.
     Use :func:`safe_cell_text` for any value that is joined with other text
-    on the same line (GH-130)."""
-    return safe_error_text(value, max_len=max_len)
+    on the same line (GH-130).
+
+    A value longer than ``max_len`` is cut so the result is exactly
+    ``max_len`` characters ending in ``…`` (the marker counts within the cap),
+    so a cut is always visible (GH-175). Names and other standalone slots use
+    ``LINE_TEXT_MAX_LEN`` (256); titles use ``TITLE_TEXT_MAX_LEN`` (1024)."""
+    text = safe_error_text(value, max_len=None)
+    if max_len is None or len(text) <= max_len:
+        return text
+    if max_len <= 0:
+        return ""
+    return text[: max_len - len(LINE_TEXT_CUT_MARKER)] + LINE_TEXT_CUT_MARKER
+
+
+def safe_label_text(
+    value: str, *, neutralise: str, max_len: int | None = LINE_TEXT_MAX_LEN
+) -> str:
+    """Render an AUTHOR-WRITTEN label (a column header, a metric name), not
+    data, for a delimited text fallback (GH-174).
+
+    Line breaks and control characters always collapse (via
+    :func:`safe_line_text`) and the length is capped with a visible ``…``. ``( ) [ ] < > = ,``
+    stay as written, so ``IRR (%)`` reads as typed. Only the characters named
+    in ``neutralise`` are swapped for a look-alike: pass ``"|"`` for a cell in
+    a ``" | "``-joined header row, ``":"`` for the name in a ``label: value``
+    row. Use :func:`safe_cell_text` for values that come from data."""
+    text = safe_line_text(value, max_len=max_len)
+    swap: dict[int, str] = {}
+    if "|" in neutralise:
+        swap.update({cp: _BARE_SEPARATORS[cp] for cp in map(ord, "|│｜")})
+    if ":" in neutralise:
+        swap[ord(":")] = _SPACED_SEPARATORS[":"]
+    return text.translate(swap)
 
 
 _ID_NEUTRALISE = str.maketrans({

@@ -42,7 +42,7 @@ from ..common.redact import frame_locations
 from ..common.json_strict import loads_strict
 from ..common.sse import HEARTBEAT, SSE_HEADERS, sse_data
 from ..credentials import forwarding
-from ..models.content_types import ContentModel
+from ..models.content_types import ContentModel, MarketBriefing
 from ..tasks.store import StreamTerminated, TaskRecord
 # RT-002: POST /ag-ui/run is the THIRD authenticated, indefinitely-held
 # text/event-stream on the same single-process connection pool, and it
@@ -384,7 +384,11 @@ class _RunMapper:
 
         if isinstance(event, ArtifactEvent):
             payload = event.model
-            if isinstance(payload, ContentModel):
+            if isinstance(payload, MarketBriefing):
+                # GH-179: wire() is a bare string now; the frame keeps the
+                # pre-existing field-dict shape (same as the A2A DataPart).
+                data: Any = payload.model_dump(mode="json", by_alias=True, exclude_none=True)
+            elif isinstance(payload, ContentModel):
                 data = payload.wire()
             elif isinstance(payload, BaseModel):
                 data = payload.model_dump(mode="json", by_alias=True, exclude_none=True)
@@ -668,7 +672,13 @@ async def ag_ui_run(
         # generator was ever constructed. From here on, RUN_STARTED is ALWAYS
         # first; every failure after it becomes a RUN_ERROR frame, not an
         # HTTP error (§5.3)
-        yield sse_data({"type": "RUN_STARTED", "threadId": thread_id, "runId": run_id})
+        # threadId/runId come from loads_strict (which refuses any string a
+        # writer cannot encode) or uuid4, so this cannot fail today; it still
+        # goes through the guarded _emit so no sse_data call here is unguarded
+        # (LRN-363).
+        yield _emit([{"type": "RUN_STARTED", "threadId": thread_id, "runId": run_id}])
+        if mapper.terminal_sent:
+            return
         yield _emit(
             [{"type": "STATE_SNAPSHOT", "snapshot": body.get("state") or {}}],
             what="invalid state",

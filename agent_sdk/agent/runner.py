@@ -12,7 +12,6 @@ protocols.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 import uuid
@@ -23,6 +22,7 @@ from typing import Any, Sequence
 from pydantic import BaseModel
 
 from ..a2ui.translator import A2uiCapabilities, split_a2ui_delivery, translate
+from ..common.json_strict import dumps_strict, scrub_unencodable
 from ..common.tz import load_zone, valid_timezone
 from ..models.a2a import (
     Artifact,
@@ -91,6 +91,15 @@ def _now() -> str:
 def _agent_message(
     record: TaskRecord, text: str, metadata: dict[str, Any] | None = None
 ) -> Message:
+    # w050 RT-001 (round 6): every agent Message the runner builds lands in
+    # task status and/or history, and every later read serializes it with
+    # dumps_strict. Model text, progress/note/tool-progress messages and
+    # interrupt metadata can all carry a lone surrogate (an upstream API that
+    # cut an emoji in half), so replace those code points with U+FFFD here,
+    # before the message exists. set_task_status re-applies the rule for any
+    # message built elsewhere.
+    text = scrub_unencodable(text)
+    metadata = scrub_unencodable(metadata)
     return Message(
         role="agent",
         parts=[TextPart(text=text)],
@@ -115,6 +124,18 @@ def _status_frame(record: TaskRecord, *, final: bool = False) -> dict[str, Any]:
         status=record.task.status,
         final=final,
     ).wire()
+
+
+def _scrub_model(model: Any) -> Any:
+    """Rebuild a pydantic ``model`` with every surrogate code point replaced
+    by U+FFFD; return it unchanged (same object) when it has none."""
+    if model is None:
+        return None
+    dumped = model.model_dump(by_alias=True, mode="python")
+    scrubbed = scrub_unencodable(dumped)
+    if scrubbed is dumped:
+        return model
+    return type(model).model_validate(scrubbed)
 
 
 def set_task_status(
@@ -231,6 +252,13 @@ def set_task_status(
     """
     # stateTransitionHistory (A2A v0.3.0 §2) is not implemented: the Task
     # model has no such field and the card advertises stateTransitionHistory=false.
+    # w050 RT-001 (round 6): this is the one place status is committed, so
+    # the "every stored string must encode as UTF-8" rule is applied here,
+    # not only at ingress and the artifact gate. Otherwise a single bad
+    # status message made GET /v1/tasks/{id} and GET /v1/tasks answer 502
+    # for the whole identity.
+    message = _scrub_model(message)
+    error = _scrub_model(error)
     record.task.status = TaskStatus(state=state, message=message, timestamp=_now(), error=error)
     if store is None:
         return
@@ -281,6 +309,7 @@ def _validate_a2ui_wire(payload: "ContentModel", a2ui_messages: list[Any]) -> No
     once here and again in ``build_artifact`` (RT-002).
     """
     from ..models.content_types import CATALOG_ID as _CATALOG_ID  # local to avoid circulars
+    from ..models.content_types import MarketBriefing
 
     cls = type(payload)
     label = f"{cls.__name__!r} ({payload.data_type!r})"
@@ -315,7 +344,13 @@ def _validate_a2ui_wire(payload: "ContentModel", a2ui_messages: list[Any]) -> No
             raise ValueError(
                 f"Domain card {label}: wire() raised {type(exc).__name__}"
             ) from None
-        if not isinstance(wire_val, dict) or not wire_val:
+        if isinstance(payload, MarketBriefing):
+            if not isinstance(wire_val, str) or not wire_val:
+                raise ValueError(
+                    f"Domain card {label}: wire() must return a non-empty str; "
+                    f"got {type(wire_val).__name__!r}"
+                )
+        elif not isinstance(wire_val, dict) or not wire_val:
             # SI-2: only the type name — never a repr of the payload itself.
             raise ValueError(
                 f"Domain card {label}: wire() must return a non-empty dict; "
@@ -460,8 +495,12 @@ def build_artifact(
     # true for a non-serializable resolved value, not just a build_artifact
     # raise. SI-2: this ValueError's text never reaches the wire (both call
     # sites emit fixed strings), so no payload detail is echoed.
+    # w050 RT-001: use dumps_strict, the SAME helper every writer uses, so a
+    # string that is not UTF-8-encodable (a lone surrogate) fails HERE too.
+    # A plain json.dumps let it through, the task committed COMPLETED, and
+    # every later read of it (GET /v1/tasks/{id}, GET /v1/tasks) failed.
     try:
-        json.dumps(artifact.wire(), ensure_ascii=False, allow_nan=False)
+        dumps_strict(artifact.wire())
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"artifact for {event.data_type!r} is not JSON-serializable"

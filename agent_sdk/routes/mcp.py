@@ -100,7 +100,7 @@ from ..common.admission import (
     resolve_per_identity_limit,
     slot_table,
 )
-from ..common.json_strict import loads_strict
+from ..common.json_strict import dumps_strict, loads_strict
 from ..common.origin import guard_origin
 from ..common.redact import frame_locations
 from ..common.sse import HEARTBEAT, SSE_HEADERS
@@ -356,9 +356,10 @@ def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
 def _is_writable(payload: Any) -> bool:
     """True when ``payload`` survives the strict writers both transports use
     (Starlette ``JSONResponse`` and the legacy queue both refuse non-finite
-    floats, GH-173). Never raises."""
+    floats, GH-173, and both encode to UTF-8, so a lone surrogate must fail
+    here, not mid-stream: ``dumps_strict`` checks both). Never raises."""
     try:
-        json.dumps(payload, allow_nan=False)
+        dumps_strict(payload)
     except (ValueError, TypeError):
         return False
     return True
@@ -1197,7 +1198,7 @@ async def mcp_messages(
         # RTGA-003: put_nowait matches the SDK pattern in tasks/store.py (lines 44-54);
         # await queue.put() would block indefinitely when the SSE consumer is slow or gone.
         try:
-            queue.put_nowait(json.dumps(_writable_response(response), allow_nan=False))
+            queue.put_nowait(dumps_strict(_writable_response(response)))
         except asyncio.QueueFull:
             return Response(status_code=503, content=b"session queue full")
     return Response(status_code=202)

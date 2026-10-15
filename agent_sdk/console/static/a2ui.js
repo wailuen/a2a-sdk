@@ -864,20 +864,41 @@ function renderUserList(data) {
   );
 }
 
+// GH-177 (SI console-href): a DocumentItem link is a model-controlled URL in
+// the admin console. Only an absolute http: or https: URL becomes an href;
+// anything else (javascript:, data:, relative, unparsable) returns null and
+// the name renders as plain text.
+function safeHttpUrl(value) {
+  if (typeof value !== "string" || !value) return null;
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
+}
+
 function renderDocumentList(data) {
   const documents = data.documents || [];
   const list = el(
     "div",
     { class: "a2ui-list" },
     documents.map((d) => {
-      const when = d.last_modified || d.modified;
+      // GH-177: contract keys first (modified, link); the pre-GH-177 keys
+      // (last_modified, web_url) are only a fallback for older payloads.
+      const when = d.modified || d.last_modified;
       const meta = [d.type, when ? `modified ${when}` : null, d.modified_by, d.size ? `${fmtNum(d.size)} bytes` : null]
         .filter(Boolean)
         .join(" · ");
+      const name = String(d.name !== undefined ? d.name : "");
+      const href = safeHttpUrl(d.link) || safeHttpUrl(d.web_url);
       return el(
         "div",
         { class: "a2ui-list-row" },
-        el("div", { class: "a2ui-list-name" }, String(d.name !== undefined ? d.name : "")),
+        href
+          ? el("a", { class: "a2ui-list-name", href, target: "_blank", rel: "noopener noreferrer" }, name)
+          : el("div", { class: "a2ui-list-name" }, name),
         meta ? el("div", { class: "dim" }, meta) : null
       );
     })

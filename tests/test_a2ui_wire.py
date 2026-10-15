@@ -1250,9 +1250,9 @@ def test_few_shot_examples_keys_match_registered_model_fields():
             f"ContentModel is registered under that component name"
         )
         payload = json.loads(example)
-        assert payload.get("component") == component, (
-            f"_FEW_SHOT_EXAMPLES[{component!r}] example's 'component' field "
-            f"must equal {component!r}; got {payload.get('component')!r}"
+        assert "component" not in payload, (
+            f"_FEW_SHOT_EXAMPLES[{component!r}] must show the resolved data "
+            f"object only, with no sibling 'component' key (GH-179)"
         )
         declared = _declared_wire_keys(cls)
         for key in payload:

@@ -76,7 +76,9 @@ class ClimateRiskReport(ContentModel):
 `register_content_type` validates: `ContentModel` subclass, `data_type` +
 `component` declared, `component` is PascalCase (`^[A-Z][A-Za-z0-9]*$`),
 component not reserved and not equal to a reserved or already-registered
-name ignoring case (`KPICard` next to `KpiCard` is refused), `data_type`
+name ignoring case (`KPICard` next to `KpiCard` is refused), component not
+equal to a Basic Catalog primitive ignoring case (`Card`, `Text`, `Textfield`,
+`checkbox` are refused; see `BASIC_CATALOG_COMPONENTS`), `data_type`
 globally unique, and rejects new types claiming the standard catalog. The agent card
 advertises every catalog id in the A2UI extension `params.catalogIds`, so
 clients know which catalogs they must render.
@@ -91,15 +93,40 @@ left out). A field with no default is never marked `?`, even if its type allows
 characters, whole optional fields are dropped from the end and `...` is added.
 Required fields are never dropped.
 
+The type column shows a `Literal` as `"a|b"`, a list as `[str]`, and every arm
+of a union (`int|str`). The legend line in the prompt explains that `|null`
+means the value may be null.
+
 ### Non-finite numbers (GH-173)
 
 Built-in content models never carry `nan`, `inf` or `-inf` on the wire. A
 float field that may be `None` turns such a value into `None`. A float field
 that must have a value (`BarItem.value`, `WaterfallSegment.value`/`cumulative`,
-`CategoryValue.value`, a numeric `MetricItem.value`) raises a `ValidationError`
-naming the field; the bad value is not echoed. `BriefingKpiItem` (the
-`MarketBriefing` family) keeps rejecting in both cases. Your own `_Wire` models
-get the same rule for free.
+`CategoryValue.value`, a numeric `MetricItem.value`, `BriefingKpiItem.value`)
+raises a `ValidationError` naming the field; the bad value is not echoed.
+`BriefingKpiItem.delta` is a nullable float like any other, so a non-finite
+`delta` becomes `None`. Your own `_Wire` models get the same rule for free.
+
+Free-form values follow the same rule where they reach both the wire and the
+text fallback: a `nan`/`inf` inside `ComparisonTable.rows` or
+`CategoryValue.metadata` raises a `ValidationError` (GH-179), as `metadata`
+on every card already did.
+
+## SDK extensions on Profile types (GH-179)
+
+These keys are not in the Standard Profile v1 field contracts. They stay on the
+wire and are documented here as SDK extensions. Clients that follow the
+Profile strictly can ignore them.
+
+| Type | SDK extension keys |
+|---|---|
+| `EntityList` | `title`, `showing` |
+| `CalendarEvent` | event-level `is_online` (the Profile has it on `location`) |
+| `ColumnDef` (in `ComparisonTable`) | `unit`, `highlight` |
+| `ComparisonTable` | `sort_by`, `sort_order` |
+
+`MarketBriefing.wire()` returns the `to_markdown()` string, the same value the
+A2UI, AG-UI and MCP surfaces already carry.
 
 ### The `metadata` envelope — you get it for free
 
@@ -190,12 +217,24 @@ neutralisation at all, so a value it returns can still fabricate a field
 boundary. Use `safe_cell_text` for anything interpolated into a rendered
 line.
 
+**Author-written labels (GH-174).** A column header or a metric name that
+you wrote (not data) keeps `( ) ,` as written. Use
+`agent_sdk.common.redact.safe_label_text(value, neutralise="|")` for a header
+cell or `neutralise=":"` for the name in a `label: value` row. It always
+collapses line breaks and control characters, and swaps only the characters you
+name. Values that come from data keep `safe_cell_text`.
+
 **Standalone slots (GH-167).** A value that sits alone on its own line, with
 nothing joined after it (a title, a name, a summary), does not need the
 separator swap. Use `agent_sdk.common.redact.safe_line_text(value)` there: it
-collapses line breaks and control characters and caps the length at 256
-characters, but keeps `( ) [ ] < > = , :` as written, so `Toshiba (Tokyo)` and
-`Smith, John` read correctly. If anything is joined on the same line (a
+collapses line breaks and control characters and caps the length, but keeps `( ) [ ] < > = , :` as written, so `Toshiba (Tokyo)` and
+`Smith, John` read correctly. Caps (GH-175): names and other standalone slots
+are capped at `LINE_TEXT_MAX_LEN` (256); titles (card titles and other
+title/header slots) at `TITLE_TEXT_MAX_LEN` (1024); both are public constants
+in `agent_sdk.common.redact`. Pass `max_len=TITLE_TEXT_MAX_LEN` for a title.
+A cut value ends with a visible `…` that counts within the cap, so a
+256-char name cut from 300 chars is 255 characters plus `…`. The structured
+output (`wire()`) always keeps the full value. If anything is joined on the same line (a
 column, `label: value`, `name <email>`, `k=v`), keep `safe_cell_text`. Exception: if sibling lines are single
 delimited rows with ids (e.g. `EmailList` rows and their `preview`), keep
 `safe_cell_text`, or the value can mimic a row. If a standalone title sits
@@ -287,3 +326,22 @@ which method you're writing it in. A single-value field like
 even though nothing is joined next to it — it reaches the same
 model-facing and MCP-facing surface as a delimited render and can still
 carry control/escape characters.
+
+## DocumentItem wire keys (GH-177)
+
+`DocumentItem` emits the Profile v1.1 keys: `id, name, type, modified, link, size`.
+The model also accepts `web_url` and `last_modified`; they fill an empty `link`
+and `modified` on the wire and are never emitted. A contract key that is set
+wins. `modified_by` is emitted as an SDK extension and is not in the compact schema.
+
+When both `modified` and `last_modified` are set to different values, only
+`modified` reaches the wire (and the A2UI value). `last_modified` stays
+readable on the model and appears in the plain-text fallback
+(`content[0].text`) on its own `    last modified: <value>` line under
+`    modified: <value>`. A producer that uses the two fields for different
+dates (for example a period end and an upload date) should put the date the
+client must see in `modified`.
+
+The admin console renders `link` (falling back to `web_url`) as the document
+name's link only when it is an absolute `http:` or `https:` URL; any other
+scheme (`javascript:`, `data:`) or a relative URL renders as plain text.
