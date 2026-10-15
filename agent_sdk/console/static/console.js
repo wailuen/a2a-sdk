@@ -432,12 +432,14 @@ async function renderKeys(pane, ctx) {
   revealBox.hidden = true;
   const labelInput = el("input", { class: "input", type: "text", placeholder: "key label", value: "console", autocomplete: "off" });
   const adminCheck = el("input", { type: "checkbox", id: "key-admin-check" });
+  const serviceCheck = el("input", { type: "checkbox", id: "key-service-check" });
   const mintBtn = el("button", { type: "button", class: "btn btn-primary" }, "Mint key");
   const mintForm = el(
     "div",
     { class: "mint-form" },
     labelInput,
     el("label", { class: "check-label", for: "key-admin-check" }, adminCheck, " admin"),
+    el("label", { class: "check-label", for: "key-service-check" }, serviceCheck, " service"),
     mintBtn
   );
   pane.appendChild(section("Mint a new key", mintForm, revealBox));
@@ -466,7 +468,11 @@ async function renderKeys(pane, ctx) {
         null,
         el("td", { class: "mono" }, `${k.prefix}…`),
         el("td", null, k.label),
-        el("td", null, k.admin ? el("span", { class: "badge badge-ok" }, "admin") : el("span", { class: "badge" }, "standard")),
+        el("td", null, k.admin
+            ? el("span", { class: "badge badge-ok" }, "admin")
+            : k.service
+              ? el("span", { class: "badge" }, "service")
+              : el("span", { class: "badge" }, "standard")),
         el("td", { class: "dim" }, fmtTime(k.created_at)),
         el("td", { class: "dim" }, fmtTime(k.last_used)),
         el("td", null, revokeBtn)
@@ -497,9 +503,13 @@ async function renderKeys(pane, ctx) {
 
   mintBtn.addEventListener("click", async () => {
     try {
+      if (adminCheck.checked && serviceCheck.checked) {
+        ctx.toast("A key cannot be both admin and service.", "err");
+        return;
+      }
       const data = await api("/admin/api/keys", {
         method: "POST",
-        body: { label: labelInput.value.trim() || "console", admin: adminCheck.checked },
+        body: { label: labelInput.value.trim() || "console", admin: adminCheck.checked, service: serviceCheck.checked },
       });
       clear(revealBox);
       revealBox.hidden = false;

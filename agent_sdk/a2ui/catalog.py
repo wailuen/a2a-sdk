@@ -260,8 +260,9 @@ def get_system_prompt_section(allowed_components: list[str] | None = None) -> st
         "",
         "Tools deliver these A2UI cards to the user automatically when they"
         " return structured data.",
-        "Do not write component JSON in your reply. Describe tool results in"
-        " prose, using only values the tools returned.",
+        "Do not write component JSON in your reply. Summarise tool results for"
+        " the user in the format your instructions ask for, using only values"
+        " the tools returned.",
         "",
         "Components tools can emit (required fields shown, ? = optional,"
         " |null = the value may be null):",

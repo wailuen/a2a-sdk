@@ -18,6 +18,10 @@ class Identity:
     # Signed-in end user behind an OAuth client (GH-152); None keeps every key
     # byte-identical to a userless identity.
     user: str | None = None
+    # Non-admin automation key (GH-182): passes require_identity even with
+    # idp_disable_api_keys; never passes require_admin. Trailing so positional
+    # callers keep working.
+    service: bool = False
 
     @property
     def binding(self) -> tuple[str, str]:

@@ -133,11 +133,16 @@ async def _resolve_identity(request: Request) -> Identity:
 
 async def require_identity(request: Request) -> Identity:
     """Any authenticated caller (api_key or oauth kind). With
-    ``idp_disable_api_keys`` non-admin API keys are refused (admin keys stay
-    valid so the console and probes keep working)."""
+    ``idp_disable_api_keys`` non-admin API keys are refused (admin and service
+    keys stay valid so the console and automated runs keep working)."""
     identity = await _resolve_identity(request)
     runtime = _runtime(request)
-    if runtime.idp_disable_api_keys and identity.kind == "api_key" and not identity.admin:
+    if (
+        runtime.idp_disable_api_keys
+        and identity.kind == "api_key"
+        and not identity.admin
+        and not identity.service
+    ):
         if not runtime.unauth_limiter.allow(_client_key(request, runtime)):
             raise _rate_limited()
         raise _unauthorized(request, runtime, "invalid credentials")

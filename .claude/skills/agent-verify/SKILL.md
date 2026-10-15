@@ -57,6 +57,12 @@ All subsequent `<port>` references in this skill use this resolved value.
    surface the boot error, not a timeout).
 3. Mint a throwaway admin API key from the bootstrap token for the authenticated
    probes. Record `BASE=http://localhost:<port>`.
+4. Mint a **service key** with that admin key (GH-182):
+   `POST /admin/api/keys` with `{"label":"agent-verify","service":true}`. Use
+   **only the service key** for every protocol call (A2A, AG-UI, MCP, the
+   `--live` umbrella); the admin key is kept for `/admin` probes and for
+   revoking the service key at teardown. A service key works with
+   `AGENT_SDK_OAUTH_IDP_DISABLE_API_KEYS=true` and is refused on `/admin`.
 
 ## Phase 2 — Conformance umbrella (delegate, don't re-derive)
 
@@ -114,7 +120,8 @@ this is an optional leg, brittle on headless runners by design).
 ## Phase 5 — Report + teardown
 
 Consolidate the three legs into one advisory report; then **tear the booted agent
-down** (kill the uvicorn process) and remove any throwaway key/data dir created for
+down**: revoke the service key (`DELETE /admin/api/keys/<key_id>` with the admin
+key), kill the uvicorn process, and remove any throwaway key/data dir created for
 the run.
 
 ## Steps
@@ -129,7 +136,7 @@ the run.
    SDK candidates for `/sdk-issue`; agent-domain findings go to `/codify` only.
 6. **Codify** — for each critical/high finding, invoke `/codify <finding-summary>`
    so the root cause becomes a permanent LRN check wired into future redteam runs.
-7. Synthesize the report (Phase 5); **tear down the agent**; hand findings to the
+7. Synthesize the report (Phase 5); **revoke the service key and tear down the agent**; hand findings to the
    user. **Do not fix** — point each finding at `/add-tool`, `/add-source`,
    `sdk-advisor`, or the owning `/<p>-check` for remediation.
 

@@ -40,6 +40,7 @@ class ApiKeyInfo:
     prefix: str
     label: str
     admin: bool
+    service: bool
     created_at: float
     last_used: float | None
 
@@ -64,6 +65,7 @@ class ApiKeyStore:
                         prefix=record["prefix"],
                         label=record["label"],
                         admin=record["admin"],
+                        service=bool(record.get("service", False)),
                         created_at=record["created_at"],
                         last_used=record.get("last_used"),
                     )
@@ -76,8 +78,14 @@ class ApiKeyStore:
 
     # ── mint / verify / revoke ──
 
-    def mint(self, label: str, *, admin: bool = False) -> tuple[str, str]:
+    def mint(
+        self, label: str, *, admin: bool = False, service: bool = False
+    ) -> tuple[str, str]:
         """Returns (key_id, plaintext). Plaintext is shown exactly once."""
+        if admin and service:
+            raise AgentError(
+                ErrorCategory.VALIDATION, "a key cannot be both admin and service"
+            )
         key_id = secrets.token_hex(8)
         plaintext = f"ak_{key_id}_{secrets.token_urlsafe(32)}"
         record = {
@@ -85,6 +93,7 @@ class ApiKeyStore:
             "prefix": plaintext[:11],  # "ak_" + key_id[:8]
             "label": label,
             "admin": admin,
+            "service": service,
             "created_at": time.time(),
             "last_used": None,
         }
@@ -108,6 +117,7 @@ class ApiKeyStore:
                     kind="api_key",
                     subject=key_id,
                     admin=bool(record["admin"]),
+                    service=bool(record.get("service", False)),
                     label=record["label"],
                 )
         return None

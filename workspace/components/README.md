@@ -38,6 +38,7 @@
 | C-041 | weak_class_cache (class-keyed memo decorator backed by weakref.WeakKeyDictionary) | agent_sdk/common/ (new) or agent_sdk/models/content_types.py helper (today hand-rolled `_NEXT_BODY_TEXT` / `_NULLABLE_NUMERIC_KEYS` / `_FLOAT_FIELD_PLAN`) | planned |
 | C-042 | safe_label_text (author-label renderer; C-034 sibling, fourth slot type cell / line / id / label) | agent_sdk/common/redact.py::safe_label_text | present |
 | C-043 | BASIC_CATALOG_COMPONENTS (18 A2UI v0.9.1 Basic Catalog primitive names; fold into C-021 planned) | agent_sdk/models/content_types.py::BASIC_CATALOG_COMPONENTS (move to agent_sdk/a2ui/catalog.py or agent_sdk/a2ui/profile.py planned) | present |
+| C-045 | is_admin_identity (single admin-power check: kind == 'api_key' and admin and not service) | agent_sdk/auth/identity.py (Identity property or helper) | planned |
 
 ## Descriptions
 
@@ -227,3 +228,6 @@ w050 registration (GH-176). Verified against current code: the 18-name tuple (`T
 
 **C-044 consoleA2uiClientCapabilities (planned)** (`agent_sdk/console/static/chat.js`, C-021 consumer-side sibling)
 w051 registration (GH-180). Verified against current code: the catalog half already exists as `loadCatalogIds()` (fetches `/.well-known/agent-card.json` once, finds the A2UI extension, takes `params.supportedCatalogIds`, keeps only non-empty strings of 256 characters or fewer, caps at 31 extras, and always puts `urn:a2ui-profile:standard:v1` first; on any failure it keeps the Standard Profile default in `state.catalogIds`). The builder itself does not exist yet: the `{ version: "v0.9.1", catalogs: state.catalogIds, tier: "core+extended" }` literal is still written out three times (in `sendA2a()` for A2A `metadata.a2uiClientCapabilities`, and twice in the AG-UI request builders for `forwardedProps.a2uiClientCapabilities`). Planned: one `a2uiClientCapabilities()` helper returning that object, used at all three call sites so the A2A and AG-UI declarations cannot drift. Agent repos with their own test consoles should copy this as the reference client-side catalog negotiation pattern.
+
+**C-045 is_admin_identity (planned)** (`agent_sdk/auth/identity.py`, Identity property or module helper)
+w052 registration (GH-182). Verified against current code: no helper exists. `Identity` has `kind`, `admin` and (new in GH-182) a trailing `service` flag. The admin check is hand-written at `agent_sdk/auth/middleware.py` (`require_identity`/`require_admin`), `agent_sdk/routes/oauth.py` (consent approval), `agent_sdk/tasks/memory.py` (task identity binding) and `agent_sdk/auth/oauth_tokens.py` (`revoke_by_value`). Planned: one shared check, true only for `kind == "api_key"` with `admin` set and `service` not set, used at all four sites so a new key kind (e.g. service) cannot gain or lose admin power one surface at a time (see LRN-390). Each call site still needs its own test.

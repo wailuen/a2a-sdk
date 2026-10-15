@@ -560,13 +560,13 @@ class OAuthTokenStore:
     # ── revocation (RFC 7009) ──
 
     def revoke_by_value(self, token: str, *, caller: Identity) -> None:
-        """Revoke an access or refresh token by value. oauth-kind callers may
-        revoke only tokens minted to their own client_id; api_key identities
-        may revoke any. Silent no-op otherwise — RFC 7009 §2.2: the caller
+        """Revoke an access or refresh token by value. oauth-kind and service-key callers may
+        revoke only tokens minted to their own client_id; other api_key
+        identities may revoke any. Silent no-op otherwise — RFC 7009 §2.2: the caller
         never learns whether the token existed or who owned it."""
 
         def _owned(owner_client_id: str, owner_user: str | None) -> bool:
-            if caller.kind == "api_key":
+            if caller.kind == "api_key" and not caller.service:
                 return True
             return owner_client_id == caller.subject and owner_user == caller.user
 

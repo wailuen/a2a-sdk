@@ -26,7 +26,7 @@ The Claude.ai-connector-compatible chain, mounted at the app root:
 - ``POST /oauth/token`` — PKCE S256 exchange + single-use refresh rotation.
   RFC 8707 ``resource`` is NOT re-required here (Claude.ai omits it); the
   audience bound at authorize travels via the code/refresh metadata.
-- ``POST /oauth/revoke`` — RFC 7009; oauth-kind self-revoke only.
+- ``POST /oauth/revoke`` — RFC 7009; oauth-kind self-revoke only; admin api_key callers may revoke any token.
 
 Every advertised URL derives from PUBLIC_URL via the OAuthTokenStore's
 ``issuer``/``canonical_resource`` (one-origin topology, §10.3) — never from
@@ -1033,7 +1033,8 @@ async def oauth_token(request: Request) -> JSONResponse:
 @router.post("/oauth/revoke", dependencies=[Depends(unauth_rate_limit)])
 async def oauth_revoke(request: Request) -> JSONResponse:
     """RFC 7009 revocation — authenticated and public-client paths.
-    api_key callers may revoke any token; oauth-kind callers self-revoke;
+    admin api_key callers may revoke any token; oauth-kind, user and service
+    callers self-revoke (silent no-op for tokens they do not own);
     public clients (no Bearer) authenticate via client_id in the body.
     Always 200 for a well-formed request — existence never disclosed."""
     runtime = _runtime(request)

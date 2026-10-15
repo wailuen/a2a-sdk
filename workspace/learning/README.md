@@ -391,3 +391,14 @@ Entries ordered by LRN number.
 | LRN-385 | Gate semantics change left old-ruling tests red | [LRN-385](LRN-385-stale-tests-after-gate-change.md) |
 | LRN-386 | Remote card values copied into requests without caps or fixed source | [LRN-386](LRN-386-untrusted-remote-value-caps.md) |
 | LRN-387 | Existing LRN Check clause contradicts a landed fix | [LRN-387](LRN-387-stale-lrn-check-vs-fix.md) |
+| LRN-388 | Raw user value logged despite Reuses component | [LRN-388](LRN-388-reuse-component-skipped-log.md) |
+| LRN-389 | SI-2 no-leak test covered only one named path | [LRN-389](LRN-389-si2-per-path-caplog-tests.md) |
+| LRN-390 | New key kind inherits operator power via kind check | [LRN-390](LRN-390-new-key-kind-inherits-admin-power.md) |
+| LRN-391 | SI-5 listed surfaces left without tests | [LRN-391](LRN-391-si5-surface-each-needs-test.md) |
+| LRN-392 | Skill credential switch left stale admin placeholders | [LRN-392](LRN-392-stale-credential-placeholder-skill.md) |
+| LRN-393 | Teardown step placed before later loop rounds | [LRN-393](LRN-393-teardown-inside-loop.md) |
+| LRN-394 | Authz narrowing missing changelog, docs and per-kind tests | [LRN-394](LRN-394-silent-authz-narrowing.md) |
+| LRN-395 | Mirrored SKILL.md copies diverge on security rules | [LRN-395](LRN-395-mirrored-skill-divergence.md) |
+| LRN-396 | New field inserted mid-dataclass shifts positional args | [LRN-396](LRN-396-dataclass-field-order.md) |
+| LRN-397 | Hardening beyond ruled scope shipped without ruling | [LRN-397](LRN-397-unruled-breaking-hardening.md) |
+| LRN-398 | Template skill edits left uncommitted in peer repo | [LRN-398](LRN-398-peer-repo-uncommitted-edits.md) |

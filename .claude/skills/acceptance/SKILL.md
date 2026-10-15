@@ -58,6 +58,18 @@ not return until all scenarios pass or the round budget is exhausted.
    `--url` was passed) and `admin_key`. If the file does not exist, stop:
    "Run `/provision` first — ADR-000-<env>-credentials.md not found."
 
+   **Mint a service key (GH-182).** The admin key is used only for this step
+   and for teardown. Mint a non-admin service key and use it for every
+   protocol call (A2A, AG-UI, MCP); a service key keeps working with
+   `AGENT_SDK_OAUTH_IDP_DISABLE_API_KEYS=true` but cannot open `/admin`:
+   ```bash
+   curl -sf -X POST <base_url>/admin/api/keys \
+     -H "Authorization: Bearer <admin_key>" -H "Content-Type: application/json" \
+     -d '{"label":"acceptance-<run-id>","service":true}'
+   ```
+   Keep `plaintext` as `<service_key>` and `key_id` as `<service_key_id>`
+   (never print them). Do not pass the admin key to sub-agents.
+
 3. **Confirm server is alive.**
    ```bash
    curl -sf <base_url>/health
@@ -143,7 +155,7 @@ when **both** paths score ≥ 7. Use `--transport a2a|agui` to restrict to one.
 
 Drive each scenario via `POST /v1/message:stream` (colon, SSE) or
 `POST /v1/message:send` (colon, non-streaming), authenticated with
-`Authorization: Bearer <admin_key>`. The body is a **flat** `MessageSendParams`
+`Authorization: Bearer <service_key>`. The body is a **flat** `MessageSendParams`
 object — there is **no** JSON-RPC envelope (`jsonrpc`/`method`/`id`/`params`).
 The path separator is a colon (`:stream`), not a slash; the slash form is not
 a routed endpoint and returns 404/405. (See `tests/test_gh71_acceptance_api_stream.py`.)
@@ -151,7 +163,7 @@ a routed endpoint and returns 404/405. (See `tests/test_gh71_acceptance_api_stre
 **Turn 1 — A2A request:**
 ```json
 POST /v1/message:stream
-Authorization: Bearer <admin_key>
+Authorization: Bearer <service_key>
 Content-Type: application/json
 
 {
@@ -211,13 +223,13 @@ determine which field to send.
 ### AG-UI transport (per scenario, parallel)
 
 Drive each scenario via `POST /ag-ui/run` SSE, authenticated with
-`Authorization: Bearer <admin_key>`. Start a **fresh** conversation — do not
+`Authorization: Bearer <service_key>`. Start a **fresh** conversation — do not
 reuse A2A task state.
 
 **Turn 1 — AG-UI request:**
 ```json
 POST /ag-ui/run
-Authorization: Bearer <admin_key>
+Authorization: Bearer <service_key>
 Content-Type: application/json
 Accept: text/event-stream
 
@@ -261,14 +273,14 @@ and an incremented `runId`.
 // before Workflow() is invoked.  Pass only the file path; never pass the raw key.
 const _runId  = require('crypto').randomUUID()
 const _keyFile = `/tmp/acc-key-${_runId}.txt`
-require('fs').writeFileSync(_keyFile, <admin_key>, { mode: 0o600 })
+require('fs').writeFileSync(_keyFile, <service_key>, { mode: 0o600 })
 
 Workflow({
   scriptPath: `${require('child_process').execSync('git rev-parse --show-toplevel').toString().trim()}/harness/workflows/acceptance-api.js`,
   args: {
     scenarios: <parsed scenarios array>,
     baseUrl: <base_url>,
-    keyFile: _keyFile,   // path to chmod-600 temp file containing the admin key
+    keyFile: _keyFile,   // path to chmod-600 temp file containing the service key
     agentContext: {name, description, tools: [{name, emits, description}]},
     onlyIds: <[] for full run, or list of IDs for --rerun-failing>,
     transports: ["a2a", "agui"],  // or ["a2a"] / ["agui"] with --transport flag
@@ -279,6 +291,10 @@ Workflow({
 // Clean up the temp key file after the workflow returns.
 try { require('fs').unlinkSync(_keyFile) } catch (_e) { /* already gone — ignore */ }
 ```
+
+**Teardown:** do NOT revoke the service key here. It must stay valid for the
+Phase 3 fix-loop rounds and Phase 2B, and across server restarts. Revoke it only
+at the true exit points (see "Service key teardown" below).
 
 The workflow fans out all scenarios × transports in parallel. Each scenario
 agent runs both transport legs and returns a `SCENARIO_RESULT` with
@@ -399,8 +415,9 @@ until curl -sf <base_url>/health > /dev/null; do sleep 1; done
 rm -f "$tmplog"
 ```
 
-Admin key from ADR-000 remains valid across restarts (it's stored in the
-credential store, not in memory).
+Admin key from ADR-000 and the service key both remain valid across restarts
+(they are stored in the credential store, not in memory). Do not revoke the
+service key between rounds.
 
 ### Phase 3b — Escalation (round 5 exhausted)
 
@@ -580,11 +597,21 @@ Next:  /acceptance --ux (if dual-path API just passed)
 
 ---
 
+## Service key teardown (always, even on failure)
+
+Revoke the service key with the admin key only at the true exit points: after
+the final report, on Phase 3b escalation, and on any abort:
+`curl -sf -X DELETE <base_url>/admin/api/keys/<service_key_id> -H "Authorization: Bearer <admin_key>"`.
+Never revoke between fix-loop rounds or before Phase 2B.
+
 ## Rules
+
+- **Protocol calls use the service key only.** The admin key mints and revokes
+  the service key and does nothing else (GH-182).
 
 - **Never exit with open failures.** The fix loop runs until all scenarios pass
   or 5 rounds are exhausted. Partial success is not a success.
-- **No secrets in output.** The admin key is read from ADR-000 and written to
+- **No secrets in output.** The service key (minted in Phase 0) is written to
   a chmod-600 temp file (`/tmp/acc-key-<random>.txt`) by the workflow before
   sub-agents are spawned. Sub-agents receive the path to that file, not the key
   value itself. The key is therefore absent from the prompt strings that appear

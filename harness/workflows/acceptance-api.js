@@ -10,7 +10,7 @@ export const meta = {
 // args.scenarios   : array of {id, name, category, seedQuery, expectedTools,
 //                    expectedContentTypes, maxTurns, followUpTurns?}
 // args.baseUrl     : e.g. "http://localhost:8000"
-// args.keyFile     : path to a temp file containing the admin API key (written by
+// args.keyFile     : path to a temp file containing the service API key (written by
 //                    the skill caller using require('fs') before invoking this
 //                    workflow; the workflow itself cannot use require() in the sandbox)
 // args.agentContext: {name, description, tools: [{name, emits, description}]}
@@ -95,7 +95,7 @@ function buildScenarioPrompt(s, a) {
 
     '━━━ SERVER ━━━\n' +
     'Base URL:    ' + a.baseUrl + '\n' +
-    'Admin key:   read from ' + a._keyFile + ' (do NOT log or echo the value)\n\n' +
+    'Service key: read from ' + a._keyFile + ' (do NOT log or echo the value)\n\n' +
 
     '━━━ INSTRUCTIONS ━━━\n\n' +
     'Run this scenario on ' + (runA2A && runAGUI ? 'BOTH transports in sequence' : transports[0].toUpperCase() + ' transport only') + '.\n' +
@@ -295,7 +295,7 @@ const scenarios = (args.onlyIds && args.onlyIds.length > 0)
 log('Running ' + scenarios.length + ' scenario(s) in parallel  |  transports: ' + transports.join(' + ') + '  |  ' + args.baseUrl)
 
 // ── Secret externalisation ────────────────────────────────────────────────────
-// The admin key is NOT passed as args.adminKey.  Instead the skill caller (which
+// The service key is NOT passed as args.adminKey.  Instead the skill caller (which
 // runs outside the workflow sandbox and has access to require('fs') / require('crypto'))
 // writes the key to a per-run chmod-600 temp file and passes only the file path
 // as args.keyFile.  Sub-agents read the key from disk; it never appears in the

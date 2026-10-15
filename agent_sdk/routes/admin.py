@@ -39,7 +39,7 @@ from pydantic import BaseModel
 from ..agent.loop import safe_validation_message
 from ..agent.registry import ToolInputValidationError
 from ..auth.middleware import AuthRuntime, _prm_challenge, require_admin, unauth_rate_limit
-from ..common.redact import frame_locations, sanitize_text
+from ..common.redact import frame_locations, safe_line_text, sanitize_text
 from ..credentials.fields import CredentialField, validate_credential_url
 from ..credentials.store import NS_BEDROCK, NS_MODEL, NS_OAUTH_IDP, RESERVED_NAMESPACES, CredentialStore
 from ..models.errors import AgentError, ErrorCategory
@@ -161,6 +161,7 @@ _jinja = Environment(
 class KeyMintRequest(BaseModel):
     label: str = "console"
     admin: bool = False
+    service: bool = False
 
 
 class CredentialValue(BaseModel):
@@ -256,11 +257,17 @@ async def mint_key(request: Request, body: KeyMintRequest) -> dict[str, Any]:
     """Mint an API key. First-run special case (§6): a valid
     ``X-Bootstrap-Token`` mints without an identity — that key is admin.
     Plaintext is returned exactly once and never stored."""
+    if body.admin and body.service:
+        raise HTTPException(status_code=422, detail="a key cannot be both admin and service")
     auth = _auth(request)
     bootstrap_token = request.headers.get("x-bootstrap-token")
     if bootstrap_token is not None:
         # Unauthenticated path: per-IP rate limit before touching the token.
         unauth_rate_limit(request)
+        if body.service:
+            raise HTTPException(
+                status_code=422, detail="the bootstrap token mints an admin key only"
+            )
         logger.warning("bootstrap-path key mint attempted (label=%r)", body.label)
         if not auth.bootstrap.consume(bootstrap_token):
             logger.warning("bootstrap token rejected (expired, used, or wrong)")
@@ -274,13 +281,18 @@ async def mint_key(request: Request, body: KeyMintRequest) -> dict[str, Any]:
         admin = True
     else:
         await require_admin(request)
-        key_id, plaintext = auth.api_keys.mint(body.label, admin=body.admin)
+        key_id, plaintext = auth.api_keys.mint(
+            body.label, admin=body.admin, service=body.service
+        )
         admin = body.admin
+        if body.service:
+            logger.warning("service key %s minted (label=%s)", key_id, safe_line_text(body.label))
     return {
         "key_id": key_id,
         "prefix": plaintext[:11],
         "label": body.label,
         "admin": admin,
+        "service": body.service and not admin,
         "plaintext": plaintext,  # shown once — the store keeps only the hash
     }
 
@@ -295,6 +307,7 @@ async def list_keys(request: Request) -> dict[str, Any]:
                 "prefix": k.prefix,  # prefix-only display (§6)
                 "label": k.label,
                 "admin": k.admin,
+                "service": k.service,
                 "created_at": k.created_at,
                 "last_used": k.last_used,
             }
