@@ -54,7 +54,7 @@ class _StubContentModel(ContentModel):
     instance without exercising any real domain card logic."""
 
     data_type: ClassVar[str] = "_stub"
-    component: ClassVar[str] = "_Stub"
+    component: ClassVar[str] = "Stub"
     catalog_id: ClassVar[str] = _DOMAIN_CATALOG
 
     def to_plain_text(self) -> str:
@@ -70,7 +70,7 @@ class _BadDomainCard(_DomainBase):
     """Domain card whose wire() returns {} (empty dict) — non-conformant."""
 
     data_type: ClassVar[str] = "_test_bad_domain_card_d1"
-    component: ClassVar[str] = "_TestBadDomainCardD1"
+    component: ClassVar[str] = "TestBadDomainCardD1"
 
     def wire(self) -> dict[str, Any]:  # type: ignore[override]
         # Returns an empty dict — must trigger ValueError in _validate_a2ui_wire
@@ -81,7 +81,7 @@ class _GoodDomainCard(_DomainBase):
     """Domain card whose wire() returns a valid non-empty dict."""
 
     data_type: ClassVar[str] = "_test_good_domain_card_d1"
-    component: ClassVar[str] = "_TestGoodDomainCardD1"
+    component: ClassVar[str] = "TestGoodDomainCardD1"
     value: str = "ok"
 
     def wire(self) -> dict[str, Any]:  # type: ignore[override]
@@ -215,7 +215,7 @@ class _WireRaisesDomainCard(_DomainBase):
     that ended up embedded in the exception by the domain card author)."""
 
     data_type: ClassVar[str] = "_test_wire_raises_d1"
-    component: ClassVar[str] = "_TestWireRaisesD1"
+    component: ClassVar[str] = "TestWireRaisesD1"
 
     def wire(self) -> dict[str, Any]:  # type: ignore[override]
         raise RuntimeError(f"upstream payload dump: {_SENSITIVE_SUBSTRING}")
@@ -227,7 +227,7 @@ class _WireNonDictDomainCard(_DomainBase):
     branch rather than the ``not wire_val`` (falsy) branch."""
 
     data_type: ClassVar[str] = "_test_wire_nondict_d1"
-    component: ClassVar[str] = "_TestWireNonDictD1"
+    component: ClassVar[str] = "TestWireNonDictD1"
 
     def wire(self) -> dict[str, Any]:  # type: ignore[override]
         return [_SENSITIVE_SUBSTRING]  # type: ignore[return-value]
@@ -548,7 +548,7 @@ class _GH56DomainCard(_DomainBase):
     """Domain card used for GH-56 AC1/AC2 tests."""
 
     data_type: ClassVar[str] = "_test_gh56_domain_card"
-    component: ClassVar[str] = "_TestGH56DomainCard"
+    component: ClassVar[str] = "TestGH56DomainCard"
     label: str = "gh56"
 
     def wire(self) -> dict[str, Any]:  # type: ignore[override]

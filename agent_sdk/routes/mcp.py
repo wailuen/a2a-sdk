@@ -100,6 +100,7 @@ from ..common.admission import (
     resolve_per_identity_limit,
     slot_table,
 )
+from ..common.json_strict import loads_strict
 from ..common.origin import guard_origin
 from ..common.redact import frame_locations
 from ..common.sse import HEARTBEAT, SSE_HEADERS
@@ -350,6 +351,33 @@ def _result(request_id: Any, payload: Any) -> dict[str, Any]:
 
 def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+
+def _is_writable(payload: Any) -> bool:
+    """True when ``payload`` survives the strict writers both transports use
+    (Starlette ``JSONResponse`` and the legacy queue both refuse non-finite
+    floats, GH-173). Never raises."""
+    try:
+        json.dumps(payload, allow_nan=False)
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def _writable_response(response: dict[str, Any]) -> dict[str, Any]:
+    """Writer backstop for both MCP transports (GH-173): a response the strict
+    writer would refuse becomes a fixed -32603 error for the same id, so the
+    client always gets exactly one reply and the route never raises a bare
+    HTTP 500 (Streamable HTTP) or drops the reply (legacy SSE). tools/call
+    output is caught earlier, as an isError result (§5.5); this covers any
+    other path. SI-2: never log the payload."""
+    if _is_writable(response):
+        return response
+    logger.error("mcp response not serializable has_result=%s", "result" in response)
+    request_id = response.get("id")
+    if not _is_writable(request_id):
+        request_id = None
+    return _error(request_id, _INTERNAL_ERROR, "internal error")
 
 
 def _negotiated_version(request: Request) -> "str | object | None":
@@ -717,6 +745,17 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
             if isinstance(artifact, ContentModel)
             else artifact.model_dump(mode="json", exclude_none=True)
         )
+    # GH-173: a value that bypassed validation (model_construct, assignment
+    # after construction, a domain list[float]) can still hold nan/inf here.
+    # The strict writers would refuse it and the route would 500 or drop the
+    # reply. A tool fault is a RESULT on this surface (§5.5), so report it as
+    # isError with fixed text; log the tool name only, never the value (SI-2).
+    if not _is_writable(result):
+        logger.error("mcp tool output not serializable tool=%s", name)
+        return {
+            "content": [{"type": "text", "text": "tool output not serializable"}],
+            "isError": True,
+        }
     return result
 
 
@@ -755,7 +794,7 @@ async def mcp_post(
             headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
         )
     try:
-        message = json.loads(raw.decode("utf-8")) if raw else {}
+        message = loads_strict(raw.decode("utf-8")) if raw else {}
     except (UnicodeDecodeError, json.JSONDecodeError):
         return JSONResponse(
             content=_error(None, _PARSE_ERROR, "parse error"),
@@ -833,6 +872,7 @@ async def mcp_post(
     if response is None or message.get("id") is None:
         return Response(status_code=202, headers=base_headers)
 
+    response = _writable_response(response)
     headers = dict(base_headers)
     if is_initialize and "result" in response:
         # RTGA-010: evict any existing sessions for this owner before allocating
@@ -1119,7 +1159,7 @@ async def mcp_messages(
             headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
         )
     try:
-        message = json.loads(raw.decode("utf-8")) if raw else {}
+        message = loads_strict(raw.decode("utf-8")) if raw else {}
     except (UnicodeDecodeError, json.JSONDecodeError):
         # RTGA-003: use put_nowait to avoid blocking indefinitely on a full/dead queue.
         try:
@@ -1157,7 +1197,7 @@ async def mcp_messages(
         # RTGA-003: put_nowait matches the SDK pattern in tasks/store.py (lines 44-54);
         # await queue.put() would block indefinitely when the SSE consumer is slow or gone.
         try:
-            queue.put_nowait(json.dumps(response))
+            queue.put_nowait(json.dumps(_writable_response(response), allow_nan=False))
         except asyncio.QueueFull:
             return Response(status_code=503, content=b"session queue full")
     return Response(status_code=202)

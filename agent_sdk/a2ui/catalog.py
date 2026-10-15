@@ -63,52 +63,37 @@ def _own_annotation_names(klass: type) -> frozenset[str]:
 def _annotation_str(ann: object, required: bool) -> tuple[str, bool]:
     """Return a (short_type_name, is_required) pair for a Pydantic field annotation.
 
-    Handles the ``X | None`` / ``Optional[X]`` patterns that Pydantic uses for
-    optional fields and strips module-path noise so the result is a readable
-    one-word type name.
+    ``required`` is passed through unchanged: whether a field is required comes
+    from ``FieldInfo.is_required()`` only, never from the annotation. A union
+    containing ``None`` makes the type read ``X|null`` instead.
     """
     import types as _types
     import typing as _typing
 
-    # UnionType covers the native `X | Y` syntax (Python 3.10+)
-    if isinstance(ann, _types.UnionType):
-        args = ann.__args__
-        non_none = [a for a in args if a is not type(None)]
-        if len(non_none) < len(args):
-            required = False  # None is one of the union members
-        if len(non_none) == 1:
-            return _annotation_str(non_none[0], required)
-        # Multiple non-None: return the first arg name
-        return getattr(non_none[0], "__name__", str(non_none[0])), required
-
-    # typing.Union / typing.Optional
     origin = getattr(ann, "__origin__", None)
-    if origin is _typing.Union:
+    if isinstance(ann, _types.UnionType) or origin is _typing.Union:
         args = ann.__args__  # type: ignore[attr-defined]
         non_none = [a for a in args if a is not type(None)]
+        if not non_none:
+            return "null", required
+        name, _ = _annotation_str(non_none[0], required)
         if len(non_none) < len(args):
-            required = False
-        if len(non_none) == 1:
-            return _annotation_str(non_none[0], required)
-        return getattr(non_none[0], "__name__", str(non_none[0])), required
+            name += "|null"
+        return name, required
 
-    # list[X] → "list"
     if origin is list:
         return "list", required
 
-    # typing.Literal → keep as "Literal"
     if origin is _typing.Literal:
         return "Literal", required
 
-    # Plain class
-    name = getattr(ann, "__name__", None)
-    if name:
-        return name, required
+    cls_name = getattr(ann, "__name__", None)
+    if cls_name:
+        return cls_name, required
 
-    # Fallback: use str() and strip obvious noise
     raw = str(ann)
     if raw.startswith("Optional[") and raw.endswith("]"):
-        return raw[9:-1], False
+        return raw[9:-1] + "|null", required
     return raw, required
 
 
@@ -116,11 +101,12 @@ def _field_summary(cls: type[ContentModel]) -> str:
     """Return a compact one-liner describing the required/notable fields of *cls*.
 
     Reads the Pydantic model's ``model_fields`` to enumerate field names and
-    their annotation strings.  Optional fields are suffixed with ``?``.  The
-    summary is truncated with ``...`` if it would exceed 250 characters.
+    their annotation strings.  Optional fields (``not is_required()``) are suffixed
+    with ``?``; nullable types read ``X|null``.  Over 250 characters, whole
+    optional fields are dropped (never a required one) and ``...`` is appended.
     """
     try:
-        parts: list[str] = []
+        parts: list[tuple[str, bool]] = []
         for name, info in cls.model_fields.items():
             if name.startswith("_"):
                 continue
@@ -161,13 +147,24 @@ def _field_summary(cls: type[ContentModel]) -> str:
             else:
                 type_str, required = _annotation_str(ann, required)
             suffix = "" if required else "?"
-            parts.append(f"{name}: {type_str}{suffix}")
+            parts.append((f"{name}{suffix}: {type_str}", required))
 
-        summary = ", ".join(parts)
-        # Truncate to keep system-prompt tokens manageable
-        if len(summary) > 250:
-            summary = summary[:247] + "..."
-        return f"{{{summary}}}"
+        # Keep system-prompt tokens manageable: drop whole optional fields from
+        # the end first; a required field is never dropped or cut.
+        kept = list(parts)
+        dropped = False
+        while len(", ".join(p for p, _ in kept)) > 250:
+            for i in range(len(kept) - 1, -1, -1):
+                if not kept[i][1]:
+                    del kept[i]
+                    dropped = True
+                    break
+            else:
+                break
+        texts = [p for p, _ in kept]
+        if dropped:
+            texts.append("...")
+        return f"{{{', '.join(texts)}}}"
     except Exception:
         logger.warning(
             "a2ui catalog: field summary generation failed for %s; using "

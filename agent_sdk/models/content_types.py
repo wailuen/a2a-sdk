@@ -80,6 +80,8 @@ import abc
 import contextvars
 import functools
 import math
+import re
+import typing
 import weakref
 from typing import Annotated, Any, ClassVar, Literal, Union
 
@@ -253,17 +255,15 @@ def _assert_finite(value: Any, _depth: int = 0) -> None:
     split a dual-part artifact into two different values.
 
     Scope (GH-95, MarketBriefing family — see that issue's AC): the field
-    validators on ``BriefingKpiItem.value``/``.delta`` and
+    validators on ``BriefingKpiItem.value`` and
     ``ChartSection.data``/``TableSection.data``. Plus ONE cross-cutting caller
     added when ``metadata`` was hoisted onto ``ContentModel`` (RT-006, round 4):
     ``ContentModel._metadata_finite``. ``metadata`` earns it on GH-95's own
     stated criterion — it is the only free-form dict on every card that reaches
     BOTH ``wire()`` and the text fallback, so it is exactly the divergence this
-    guard exists for. Still not a general SDK-wide guard: other
-    ``_Wire``/``ContentModel`` fields (``MetricItem.value``, ``BarItem.value``,
-    ``WaterfallSegment.value``, ``ComparisonTable.rows``, ``FundPerformance``'s
-    numerics) intentionally accept non-finite floats unless a future issue
-    scopes them in explicitly.
+    guard exists for. Float-typed fields elsewhere are handled by ``_Wire._finite_floats``
+    (GH-173): nullable ones coerce to None, non-nullable ones reject.
+    ``BriefingKpiItem.delta`` is nullable, so it coerces to None like every other nullable field (GH-173 ruling).
 
     ``_depth`` bounds worst-case recursion (RT-003): a cyclic or pathologically
     deep dict/list/tuple/BaseModel structure surfaces as a clean ValueError
@@ -272,7 +272,7 @@ def _assert_finite(value: Any, _depth: int = 0) -> None:
     if _depth > _ASSERT_FINITE_MAX_DEPTH:
         raise ValueError("value nesting too deep to validate (possible cyclic structure)")
     if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError(f"non-finite float not allowed: {value!r}")
+        raise ValueError("non-finite float not allowed")
     if isinstance(value, BaseModel):
         for v in value.__dict__.values():
             _assert_finite(v, _depth + 1)
@@ -284,8 +284,72 @@ def _assert_finite(value: Any, _depth: int = 0) -> None:
             _assert_finite(v, _depth + 1)
 
 
+@functools.cache
+def _nullable_numeric_keys(cls: type[BaseModel]) -> tuple[str, ...]:
+    keys: list[str] = []
+    for name, info in cls.model_fields.items():
+        parts: list[Any] = []
+        stack = [info.annotation]
+        while stack:
+            tp = stack.pop()
+            parts.append(tp)
+            stack.extend(typing.get_args(tp))
+        if type(None) in parts and (int in parts or float in parts):
+            keys.append(name)
+            if info.alias:
+                keys.append(info.alias)
+    return tuple(keys)
+
+
+@functools.cache
+def _float_field_plan(cls: type[BaseModel]) -> tuple[tuple[str, bool], ...]:
+    plan = []
+    for name, info in cls.model_fields.items():
+        parts: list[Any] = []
+        stack = [info.annotation]
+        while stack:
+            tp = stack.pop()
+            parts.append(tp)
+            stack.extend(typing.get_args(tp))
+        if float in parts:
+            plan.append((name, type(None) in parts))
+    return tuple(plan)
+
+
 class _Wire(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    # hide_input_in_errors: a rejected non-finite value must never be echoed
+    # back in the error text (GH-173).
+    model_config = ConfigDict(populate_by_name=True, hide_input_in_errors=True)
+    _rejects_non_finite: ClassVar[bool] = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _nullable_non_finite_to_none(cls, data: Any) -> Any:
+        """GH-173: pydantic rejects a non-finite float for an ``int | None``
+        field before any after-validator runs, so coerce it first."""
+        if not isinstance(data, dict) or cls._rejects_non_finite:
+            return data
+        bad = [
+            k
+            for k in _nullable_numeric_keys(cls)
+            if isinstance(data.get(k), float) and not math.isfinite(data[k])
+        ]
+        if not bad:
+            return data
+        return {**data, **dict.fromkeys(bad)}
+
+    @model_validator(mode="after")
+    def _finite_floats(self) -> Any:
+        """GH-173: nullable float fields coerce nan/inf/-inf to None;
+        non-nullable ones reject. Both stop ``wire()`` (json.dumps ->
+        invalid ``NaN``) disagreeing with ``model_dump_json()`` (null)."""
+        for name, nullable in _float_field_plan(type(self)):
+            value = self.__dict__.get(name)
+            if isinstance(value, float) and not math.isfinite(value):
+                if not nullable:
+                    raise ValueError(f"{type(self).__name__}.{name} must be a finite number")
+                self.__dict__[name] = None
+        return self
 
     def wire(self) -> dict[str, Any]:
         return self.model_dump(mode="json", by_alias=True, exclude_none=True)
@@ -799,7 +863,7 @@ class BriefingKpiItem(_Wire):
     trend: Literal["up", "down", "flat"] | None = None
     delta: float | None = None
 
-    @field_validator("value", "delta")
+    @field_validator("value")
     @classmethod
     def _reject_non_finite(cls, v: Any) -> Any:
         _assert_finite(v)
@@ -1337,6 +1401,7 @@ class DocumentList(ContentModel):
 
 _REGISTRY: dict[str, type[ContentModel]] = {}
 _PROFILE_SEALED = False
+_COMPONENT_NAME_RE = re.compile(r"[A-Z][A-Za-z0-9]*")
 
 
 def register_content_type(cls: type[ContentModel]) -> type[ContentModel]:
@@ -1371,6 +1436,25 @@ def register_content_type(cls: type[ContentModel]) -> type[ContentModel]:
             f"component name {component!r} already registered by "
             f"{component_owner.__name__} — wire component names must be globally "
             f"unique (A2UI resolves by bare componentType, not by catalogId)"
+        )
+    folded = component.casefold()
+    for reserved in RESERVED_COMPONENTS:
+        if reserved.casefold() == folded:
+            raise ValueError(
+                f"component name {component!r} differs only in case from the "
+                f"RESERVED name {reserved!r}; pick a distinct name"
+            )
+    for owner in _REGISTRY.values():
+        if owner is not cls and owner.component.casefold() == folded:
+            raise ValueError(
+                f"component name {component!r} differs only in case from the "
+                f"existing name {owner.component!r} ({owner.__name__}); "
+                f"a case-sensitive client would drop one of them"
+            )
+    if not isinstance(component, str) or not _COMPONENT_NAME_RE.fullmatch(component):
+        raise ValueError(
+            f"component name {component!r} is invalid — A2UI wire names must be "
+            f"PascalCase (^[A-Z][A-Za-z0-9]*$); rename the card"
         )
     existing = _REGISTRY.get(data_type)
     if existing is not None and existing is not cls:

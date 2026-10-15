@@ -461,7 +461,7 @@ def build_artifact(
     # raise. SI-2: this ValueError's text never reaches the wire (both call
     # sites emit fixed strings), so no payload detail is echoed.
     try:
-        json.dumps(artifact.wire(), ensure_ascii=False)
+        json.dumps(artifact.wire(), ensure_ascii=False, allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"artifact for {event.data_type!r} is not JSON-serializable"

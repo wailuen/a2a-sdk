@@ -34,7 +34,7 @@ class _SimpleCard(ContentModel):
     """
 
     data_type: ClassVar[str] = "_test_simple_card_w6"
-    component: ClassVar[str] = "_TestSimpleCardW6"
+    component: ClassVar[str] = "TestSimpleCardW6"
     catalog_id: ClassVar[str] = "urn:test-sdk-w6:v1"  # domain catalog — emitted freely when tier active; only tier="none" suppresses
     value: str = "test"
 

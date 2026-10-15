@@ -74,10 +74,32 @@ class ClimateRiskReport(ContentModel):
 ```
 
 `register_content_type` validates: `ContentModel` subclass, `data_type` +
-`component` declared, component not reserved, `data_type` globally unique,
-and rejects new types claiming the standard catalog. The agent card
+`component` declared, `component` is PascalCase (`^[A-Z][A-Za-z0-9]*$`),
+component not reserved and not equal to a reserved or already-registered
+name ignoring case (`KPICard` next to `KpiCard` is refused), `data_type`
+globally unique, and rejects new types claiming the standard catalog. The agent card
 advertises every catalog id in the A2UI extension `params.catalogIds`, so
 clients know which catalogs they must render.
+
+### How the model is taught your card's fields (GH-171)
+
+A domain card has no hand-written compact schema, so the prompt lists its
+fields as `name: type`. A trailing `?` means the field has a default (it can be
+left out). A field with no default is never marked `?`, even if its type allows
+`None`: `a: str | None` reads `a: str|null` (required, may be null) and
+`b: str | None = None` reads `b?: str|null`. If the list is longer than 250
+characters, whole optional fields are dropped from the end and `...` is added.
+Required fields are never dropped.
+
+### Non-finite numbers (GH-173)
+
+Built-in content models never carry `nan`, `inf` or `-inf` on the wire. A
+float field that may be `None` turns such a value into `None`. A float field
+that must have a value (`BarItem.value`, `WaterfallSegment.value`/`cumulative`,
+`CategoryValue.value`, a numeric `MetricItem.value`) raises a `ValidationError`
+naming the field; the bad value is not echoed. `BriefingKpiItem` (the
+`MarketBriefing` family) keeps rejecting in both cases. Your own `_Wire` models
+get the same rule for free.
 
 ### The `metadata` envelope — you get it for free
 

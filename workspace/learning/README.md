@@ -354,3 +354,17 @@ Entries ordered by LRN number.
 | LRN-348 | Extra security swap added beyond ruling's only-X wording | [LRN-348](LRN-348-extra-swap-beyond-ruling.md) |
 | LRN-349 | Narrowing Optional field to non-None default rejects explicit null | [LRN-349](LRN-349-narrowed-field-explicit-null.md) |
 | LRN-350 | Reuses directive ignored, second test parser written | [LRN-350](LRN-350-reuse-directive-second-parser.md) |
+| LRN-351 | Test inspects raw strings instead of calling shared parser verdict | [LRN-351](LRN-351-test-skips-shared-parser.md) |
+| LRN-352 | Validator message formats the rejected value despite hide_input_in_errors | [LRN-352](LRN-352-validator-message-echoes-value.md) |
+| LRN-353 | Non-finite coercion misses nullable int fields and runs too late | [LRN-353](LRN-353-nullable-int-nonfinite-coercion.md) |
+| LRN-354 | Wire validity enforced only in validators, not at serialization | [LRN-354](LRN-354-wire-guard-at-serialization.md) |
+| LRN-355 | Wave kept legacy behaviour that conflicts with new maintainer ruling | [LRN-355](LRN-355-ruling-vs-legacy-field-behaviour.md) |
+| LRN-356 | Base-class validator is a breaking change for downstream models | [LRN-356](LRN-356-base-class-validator-breaking-changelog.md) |
+| LRN-357 | Breaking CHANGELOG entries must cite their authority | [LRN-357](LRN-357-breaking-entry-needs-authority.md) |
+| LRN-358 | Strict serializer kills AG-UI stream on raw client JSON | [LRN-358](LRN-358-strict-serializer-agui-ingress.md) |
+| LRN-359 | Shared serializer edits must be declared in todo scope | [LRN-359](LRN-359-shared-serializer-todo-scope.md) |
+| LRN-360 | Reject non-finite JSON at every protocol ingress | [LRN-360](LRN-360-nonfinite-ingress-all-surfaces.md) |
+| LRN-361 | Mid-wave ingress hardening missing from todo Modifies and CHANGELOG | [LRN-361](LRN-361-midwave-scope-drift.md) |
+| LRN-362 | Strict JSON parser misses overflowing floats (1e999) | [LRN-362](LRN-362-strict-json-overflow-floats.md) |
+| LRN-363 | Stricter SSE serializer needs terminal-frame guard in every generator | [LRN-363](LRN-363-strict-serializer-sse-guard.md) |
+| LRN-364 | MCP writer lacks non-finite output guard after strict serializer | [LRN-364](LRN-364-mcp-nonfinite-output-guard.md) |

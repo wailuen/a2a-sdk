@@ -41,7 +41,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import html
-import json
 import logging
 import re
 import secrets
@@ -60,6 +59,7 @@ from ..auth.middleware import (
 from ..auth.oauth_tokens import OAuthTokenStore
 from ..auth.oidc import IdpDenied, IdpFlowStore, IdpUnavailable, OidcRelyingParty
 from ..common.etag import etag_for, matches
+from ..common.json_strict import loads_strict
 from ..credentials.store import NS_OAUTH_IDP
 from ..models.errors import AgentError
 
@@ -334,7 +334,7 @@ async def oauth_register(request: Request) -> JSONResponse:
     if len(raw) > _MAX_BODY_BYTES:
         return _reg_error("invalid_client_metadata", "request body too large")
     try:
-        body = json.loads(raw.decode("utf-8")) if raw else {}
+        body = loads_strict(raw.decode("utf-8")) if raw else {}
     except (UnicodeDecodeError, ValueError):
         return _reg_error("invalid_client_metadata", "request body must be valid JSON")
     if not isinstance(body, dict):

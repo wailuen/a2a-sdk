@@ -107,6 +107,7 @@ from ..common.admission import (
     slot_table,
 )
 from ..common.origin import guard_origin
+from ..common.json_strict import loads_strict
 from ..common.sse import SSE_HEADERS, sse_data
 from ..common.wire_errors import a2a_error, a2a_invalid_params, a2a_parse_error
 from ..models.a2a import (
@@ -116,6 +117,7 @@ from ..models.a2a import (
     MessageSendParams,
     Task,
     TaskState,
+    TaskStatus,
     TaskStatusUpdateEvent,
     TextPart,
 )
@@ -123,10 +125,12 @@ from ..credentials.card import EXTENSION_URI as CREDENTIAL_FORWARDING_EXTENSION_
 from ..models.content_types import A2UI_EXTENSION_URI, A2UI_MIME_TYPE
 from ..models.errors import (
     A2A_CONTENT_TYPE_NOT_SUPPORTED,
+    A2A_INVALID_AGENT_RESPONSE,
     A2A_PUSH_NOTIFICATION_NOT_SUPPORTED,
     A2A_TASK_NOT_CANCELABLE,
     A2A_TASK_NOT_FOUND,
     A2A_UNSUPPORTED_OPERATION,
+    WireError,
 )
 from ..tasks.store import StreamTerminated, Subscription, TaskRecord
 
@@ -425,7 +429,7 @@ async def _parse_send(request: Request) -> MessageSendParams | JSONResponse:
     if len(raw) > _MAX_BODY_BYTES:
         return a2a_invalid_params("request body too large")
     try:
-        body = json.loads(raw)
+        body = loads_strict(raw)
     except json.JSONDecodeError:
         return a2a_parse_error("request body is not valid JSON")
     except ValueError:
@@ -755,9 +759,37 @@ async def _open_stream(
     snapshot = record.task.wire()
     terminal = record.task.status.state in TERMINAL_STATES
 
+    def _unserializable_tail() -> bytes:
+        # GH-173: sse_data refuses non-finite floats (allow_nan=False). Ingress
+        # rejects them (loads_strict), but a frame can still carry one from a
+        # path that bypassed validation. Never let that ValueError kill the
+        # stream mid-body without final:true (§5.2): close it with a fixed,
+        # value-free failed status-update instead (SI-2).
+        logger.error(
+            "a2a stream frame not serializable task_id=%s", record.task.id
+        )
+        return sse_data(
+            TaskStatusUpdateEvent(
+                taskId=record.task.id,
+                contextId=record.task.context_id,
+                status=TaskStatus(
+                    state=TaskState.FAILED,
+                    error=WireError(
+                        code=A2A_INVALID_AGENT_RESPONSE,
+                        message="invalid agent response",
+                    ),
+                ),
+                final=True,
+            ).wire()
+        )
+
     async def gen() -> AsyncIterator[bytes]:
         try:
-            yield sse_data(snapshot)
+            try:
+                yield sse_data(snapshot)
+            except ValueError:
+                yield _unserializable_tail()
+                return
             if terminal:
                 # already terminal: emit the closing status-update so the
                 # consumer sees final:true and stops, never a bare snapshot (§5.2).
@@ -778,7 +810,12 @@ async def _open_stream(
                 if item is None:
                     return
                 if item.frame is not None:
-                    yield sse_data(item.frame)
+                    try:
+                        chunk = sse_data(item.frame)
+                    except ValueError:
+                        yield _unserializable_tail()
+                        return
+                    yield chunk
                 if item.final:
                     return
         finally:

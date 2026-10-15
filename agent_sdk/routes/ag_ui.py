@@ -39,6 +39,7 @@ from ..auth.middleware import require_identity
 from ..common.iso8601 import iso_utc
 from ..common.origin import guard_origin
 from ..common.redact import frame_locations
+from ..common.json_strict import loads_strict
 from ..common.sse import HEARTBEAT, SSE_HEADERS, sse_data
 from ..credentials import forwarding
 from ..models.content_types import ContentModel
@@ -509,7 +510,7 @@ def _user_timezone(body: dict[str, Any]) -> str | None:
 
 def _parse_body(raw: bytes) -> dict[str, Any]:
     try:
-        body = json.loads(raw)
+        body = loads_strict(raw)
     except (json.JSONDecodeError, ValueError):
         return {}
     return body if isinstance(body, dict) else {}
@@ -636,6 +637,31 @@ async def ag_ui_run(
     store = request.app.state.task_store
     mapper = _RunMapper(thread_id, run_id, _capabilities(body))
 
+    def _emit(frames: list[dict[str, Any]], *, what: str = "invalid agent response") -> bytes:
+        # GH-173 (RT-002): sse_data refuses non-finite floats (allow_nan=False).
+        # Ingress rejects them (loads_strict), but a frame can still carry one
+        # from a path that bypassed validation. Serialize frame by frame; on the
+        # first frame that cannot be written, drop it and close the run with
+        # exactly one fixed-text RUN_ERROR (§5.3, SI-2) — never let the
+        # ValueError cut the stream with no terminal frame. Any already-
+        # serialized frames in the batch are kept, so a STEP_FINISHED that
+        # preceded a bad RUN_FINISHED still reaches the client.
+        out: list[bytes] = []
+        for frame in frames:
+            try:
+                out.append(sse_data(frame))
+            except ValueError:
+                logger.error(
+                    "ag-ui frame not serializable frame_type=%s run_id=%s",
+                    frame.get("type"),
+                    run_id,
+                )
+                # the bad frame may itself have been the terminal one
+                mapper.terminal_sent = False
+                out.extend(sse_data(f) for f in mapper.run_error(what))
+                break
+        return b"".join(out)
+
     async def _run() -> AsyncIterator[bytes]:
         # Transport-level rejections (Origin 403, Content-Type 415, body
         # size 413, admission 429) already happened above, before this
@@ -643,30 +669,32 @@ async def ag_ui_run(
         # first; every failure after it becomes a RUN_ERROR frame, not an
         # HTTP error (§5.3)
         yield sse_data({"type": "RUN_STARTED", "threadId": thread_id, "runId": run_id})
-        yield sse_data({"type": "STATE_SNAPSHOT", "snapshot": body.get("state") or {}})
+        yield _emit(
+            [{"type": "STATE_SNAPSHOT", "snapshot": body.get("state") or {}}],
+            what="invalid state",
+        )
+        if mapper.terminal_sent:
+            return
 
         sub = None
         record: TaskRecord | None = None
         try:
             if (problem := _validate(body)) is not None:
-                for frame in mapper.run_error(problem):
-                    yield sse_data(frame)
+                yield _emit(mapper.run_error(problem))
                 return
 
             resume_raw = body.get("resume")
             resume = resume_raw if isinstance(resume_raw, list) else []
             if resume:
                 if not isinstance(resume[0], dict):
-                    for frame in mapper.run_error("invalid resume entry"):
-                        yield sse_data(frame)
+                    yield _emit(mapper.run_error("invalid resume entry"))
                     return
                 entry = resume[0]
                 # accept both casings; emit camelCase (interruptId) ourselves
                 interrupt_id = _resume_interrupt_id(body)
                 record = store.find_interrupt(interrupt_id, identity)
                 if record is None:
-                    for frame in mapper.run_error("unknown or expired interrupt"):
-                        yield sse_data(frame)
+                    yield _emit(mapper.run_error("unknown or expired interrupt"))
                     return
                 # RT-001 (round 6): subscribe THROUGH the admission slot, never
                 # against the store directly. That is what registers this task
@@ -681,8 +709,7 @@ async def ag_ui_run(
                     {"status": entry.get("status"), "payload": entry.get("payload")},
                 )
                 if not delivered:
-                    for frame in mapper.run_error("interrupt is no longer resumable"):
-                        yield sse_data(frame)
+                    yield _emit(mapper.run_error("interrupt is no longer resumable"))
                     return
             else:
                 folded = _fold_history(
@@ -690,8 +717,7 @@ async def ag_ui_run(
                     request.app.state.settings.agui_max_message_chars,
                 )
                 if folded is None:
-                    for frame in mapper.run_error("no user message in input"):
-                        yield sse_data(frame)
+                    yield _emit(mapper.run_error("no user message in input"))
                     return
                 task = new_task(thread_id)
                 record = store.create(task, identity)
@@ -732,8 +758,8 @@ async def ag_ui_run(
                     continue
                 if item is None:
                     break
-                for frame in mapper.map(item.event):
-                    yield sse_data(frame)
+                if chunk := _emit(mapper.map(item.event)):
+                    yield chunk
                 if item.final:
                     break
         except StreamTerminated:
@@ -754,15 +780,13 @@ async def ag_ui_run(
                 frame_locations(exc),
             )
             if not mapper.terminal_sent:
-                for frame in mapper.run_error("internal error"):
-                    yield sse_data(frame)
+                yield _emit(mapper.run_error("internal error"))
         finally:
             if sub is not None and record is not None:
                 store.unsubscribe(record.task.id, sub)
 
         if not mapper.terminal_sent:
-            for frame in mapper.run_error("stream ended unexpectedly"):
-                yield sse_data(frame)
+            yield _emit(mapper.run_error("stream ended unexpectedly"))
 
     async def stream() -> AsyncIterator[bytes]:
         # RT-002: release the admission slot however the run ends. Layered

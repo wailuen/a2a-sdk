@@ -22,5 +22,5 @@ def sse_data(obj: Any) -> bytes:
     """One SSE frame. ``obj`` must already be wire-shaped (camelCase done
     by the caller's model dump)."""
     if not isinstance(obj, str):
-        obj = json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
+        obj = json.dumps(obj, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     return f"data: {obj}\n\n".encode()

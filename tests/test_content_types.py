@@ -743,9 +743,8 @@ def test_briefing_kpi_item_rejects_infinite_value():
         BriefingKpiItem(title="Revenue", value=float("inf"))
 
 
-def test_briefing_kpi_item_rejects_nan_delta():
-    with pytest.raises((ValueError, ValidationError)):
-        BriefingKpiItem(title="Revenue", value=100.0, delta=float("nan"))
+def test_briefing_kpi_item_coerces_nan_delta_to_none():
+    assert BriefingKpiItem(title="Revenue", value=100.0, delta=float("nan")).delta is None
 
 
 def test_briefing_kpi_item_rejects_negative_infinite_value():
@@ -800,27 +799,24 @@ def test_market_briefing_with_finite_sections_round_trips_consistently():
     assert "Revenue" in json_dump
 
 
-# ── finite-float validation is scoped to GH-95's AC, not SDK-wide (RT-001) ─
-# GH-95's AC (workspace/todos/active/w029-gh-issues.md) names exactly four
-# fields: BriefingKpiItem.value/.delta and ChartSection.data/TableSection.data.
-# An earlier revision broadened the guard onto a _Wire-wide model_validator,
-# which shipped a self-declared breaking change as a patch release — reverted
-# here. Fields outside this family intentionally still accept inf/nan.
+# ── non-finite floats outside the GH-95 family (GH-173) ───────────────────
+# GH-173 ruling: non-nullable float fields reject, nullable ones coerce to
+# None. Full walk in tests/test_gh173_non_finite_values.py.
 
 
-def test_metric_item_accepts_infinite_value_outside_market_briefing_scope():
-    item = MetricItem(label="price", value=float("inf"))
-    assert item.value == float("inf")
+def test_metric_item_rejects_infinite_value():
+    with pytest.raises(ValidationError):
+        MetricItem(label="price", value=float("inf"))
 
 
-def test_bar_item_accepts_non_finite_value_outside_scope():
-    bar = BarItem(category="Q1", value=float("-inf"))
-    assert bar.value == float("-inf")
+def test_bar_item_rejects_non_finite_value():
+    with pytest.raises(ValidationError):
+        BarItem(category="Q1", value=float("-inf"))
 
 
-def test_waterfall_segment_accepts_non_finite_value_outside_scope():
-    seg = WaterfallSegment(label="Start", value=float("inf"), type="initial", cumulative=0.0)
-    assert seg.value == float("inf")
+def test_waterfall_segment_rejects_non_finite_value():
+    with pytest.raises(ValidationError):
+        WaterfallSegment(label="Start", value=float("inf"), type="initial", cumulative=0.0)
 
 
 def test_comparison_table_accepts_non_finite_row_value_outside_scope():
@@ -872,9 +868,8 @@ def test_kpi_card_accepts_finite_metadata_value():
     assert "confidence=0.93" in card.to_plain_text()
 
 
-def test_fund_performance_accepts_non_finite_irr_outside_scope():
-    fp = FundPerformance(irr=float("inf"))
-    assert fp.irr == float("inf")
+def test_fund_performance_coerces_non_finite_irr_to_none():
+    assert FundPerformance(irr=float("inf")).irr is None
 
 
 def test_metric_item_accepts_finite_value_and_round_trips():
