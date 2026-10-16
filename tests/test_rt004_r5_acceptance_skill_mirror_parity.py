@@ -57,8 +57,8 @@ def test_neither_half_interpolates_the_resolved_admin_key():
         assert "mode: 0o600" in text, (
             f"{path.relative_to(REPO)} writes the key file without chmod-600"
         )
-        assert "unlinkSync" in text, (
-            f"{path.relative_to(REPO)} never cleans up the temp key file"
+        assert 'rm -f "$SERVICE_KEY_FILE"' in text, (
+            f"{path.relative_to(REPO)} never cleans up the temp key file at teardown"
         )
 
 

@@ -402,3 +402,11 @@ Entries ordered by LRN number.
 | LRN-396 | New field inserted mid-dataclass shifts positional args | [LRN-396](LRN-396-dataclass-field-order.md) |
 | LRN-397 | Hardening beyond ruled scope shipped without ruling | [LRN-397](LRN-397-unruled-breaking-hardening.md) |
 | LRN-398 | Template skill edits left uncommitted in peer repo | [LRN-398](LRN-398-peer-repo-uncommitted-edits.md) |
+| LRN-399 | Cleanup step deletes the only copy of a secret | [LRN-399](LRN-399-cleanup-destroys-sole-copy.md) |
+| LRN-400 | SI annotation marked done with call sites left | [LRN-400](LRN-400-incomplete-si-annotation-coverage.md) |
+| LRN-401 | Skill says load secret without showing how | [LRN-401](LRN-401-secret-load-command-missing.md) |
+| LRN-402 | Fixing one secret-printing step, sibling left leaking | [LRN-402](LRN-402-sibling-mint-step-unfixed.md) |
+| LRN-403 | Test fixture hand-copies the banner it parses | [LRN-403](LRN-403-handwritten-banner-fixture.md) |
+| LRN-404 | Secret temp file path built from placeholder or guessable name | [LRN-404](LRN-404-secret-tempfile-placeholder-path.md) |
+| LRN-405 | Whole-file skill sync to template wipes per-repo lines | [LRN-405](LRN-405-whole-file-mirror-overwrite.md) |
+| LRN-406 | Mirror guard skips or checks only a fragment | [LRN-406](LRN-406-partial-mirror-guard-skips.md) |

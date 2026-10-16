@@ -61,14 +61,54 @@ not return until all scenarios pass or the round budget is exhausted.
    **Mint a service key (GH-182).** The admin key is used only for this step
    and for teardown. Mint a non-admin service key and use it for every
    protocol call (A2A, AG-UI, MCP); a service key keeps working with
-   `AGENT_SDK_OAUTH_IDP_DISABLE_API_KEYS=true` but cannot open `/admin`:
+   `AGENT_SDK_OAUTH_IDP_DISABLE_API_KEYS=true` but cannot open `/admin`.
+   Run this ONE self-contained command (GH-183/GH-184). Bash state does not
+   persist between tool calls, so the command sets its own variables and loads
+   `ADMIN_KEY` from the ADR-000 file itself; never paste the admin key into the
+   command. Replace `<base_url>`, `<run-id>` and `<env>` first. The mint response
+   is piped into the parser and never reaches the transcript. If the server is
+   an SDK older than v0.15.0 it ignores `service` and mints an ordinary key; the
+   parser then revokes that key and stops with "this SDK does not support service
+   keys; upgrade to v0.15.0+". On success it writes the key to `SERVICE_KEY_FILE`
+   (a fresh `mktemp` file, mode 600, checked before writing) and prints only the `key_id` and that file path (the path is not secret).
+
    ```bash
-   curl -sf -X POST <base_url>/admin/api/keys \
-     -H "Authorization: Bearer <admin_key>" -H "Content-Type: application/json" \
-     -d '{"label":"acceptance-<run-id>","service":true}'
+   export BASE_URL="<base_url>" KEY_LABEL="acceptance-<run-id>"
+   export SERVICE_KEY_FILE="$(mktemp "${TMPDIR:-/tmp}/acc-key-XXXXXX")"
+   export ADMIN_KEY="$(python3 -c 'import re,sys; m=re.search(r"^admin_key:\s*(\S+)", open(sys.argv[1]).read(), re.M); print(m.group(1) if m else "")' workspace/adr/ADR-000-<env>-credentials.md)"
+   (umask 077
+   printf 'Authorization: Bearer %s\n' "$ADMIN_KEY" \
+     | curl -s -X POST "$BASE_URL/admin/api/keys" -H @- -H "Content-Type: application/json" \
+         -d "{\"label\":\"$KEY_LABEL\",\"service\":true}" \
+     | python3 -c '
+   import json, os, subprocess, sys
+   try:
+       d = json.loads(sys.stdin.read())
+   except ValueError:
+       d = None
+   ok = isinstance(d, dict) and d.get("service") is True and isinstance(d.get("plaintext"), str)
+   if not ok:
+       kid = d.get("key_id") if isinstance(d, dict) else None
+       if isinstance(kid, str) and kid:
+           subprocess.run(["curl", "-s", "-o", "/dev/null", "-X", "DELETE",
+                           os.environ["BASE_URL"] + "/admin/api/keys/" + kid, "-H", "@-"],
+                          input="Authorization: Bearer " + os.environ["ADMIN_KEY"] + "\n",
+                          text=True, check=False)
+       sys.exit("this SDK does not support service keys; upgrade to v0.15.0+")
+   fd = os.open(os.environ["SERVICE_KEY_FILE"], os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+   st = os.fstat(fd)
+   if st.st_uid != os.getuid() or (st.st_mode & 0o777) != 0o600:
+       os.close(fd)
+       sys.exit("service key file is not private; refusing to write")
+   with os.fdopen(fd, "w") as f:
+       f.write(d["plaintext"])
+   print(d["key_id"], os.environ["SERVICE_KEY_FILE"])
+   ')
    ```
-   Keep `plaintext` as `<service_key>` and `key_id` as `<service_key_id>`
-   (never print them). Do not pass the admin key to sub-agents.
+
+   Keep the printed `key_id` as `<service_key_id>` and the printed path as
+   `<service_key_file>`. The key itself lives only in that file; never print it. Do not pass the
+   admin key to sub-agents.
 
 3. **Confirm server is alive.**
    ```bash
@@ -272,8 +312,7 @@ and an incremented `runId`.
 // require(), so the key file must be written HERE (in the skill caller context)
 // before Workflow() is invoked.  Pass only the file path; never pass the raw key.
 const _runId  = require('crypto').randomUUID()
-const _keyFile = `/tmp/acc-key-${_runId}.txt`
-require('fs').writeFileSync(_keyFile, <service_key>, { mode: 0o600 })
+const _keyFile = <service_key_file>  // created by the Phase 0 mint step with { mode: 0o600 }; do not rewrite it
 
 Workflow({
   scriptPath: `${require('child_process').execSync('git rev-parse --show-toplevel').toString().trim()}/harness/workflows/acceptance-api.js`,
@@ -288,8 +327,9 @@ Workflow({
   }
 })
 
-// Clean up the temp key file after the workflow returns.
-try { require('fs').unlinkSync(_keyFile) } catch (_e) { /* already gone — ignore */ }
+// Do NOT unlink _keyFile here: it is the only copy of the service key and is
+// reused by every Phase 3 re-run and Phase 2B. It is removed in the
+// 'Service key teardown' section.
 ```
 
 **Teardown:** do NOT revoke the service key here. It must stay valid for the
@@ -599,9 +639,17 @@ Next:  /acceptance --ux (if dual-path API just passed)
 
 ## Service key teardown (always, even on failure)
 
-Revoke the service key with the admin key only at the true exit points: after
-the final report, on Phase 3b escalation, and on any abort:
-`curl -sf -X DELETE <base_url>/admin/api/keys/<service_key_id> -H "Authorization: Bearer <admin_key>"`.
+Revoke the service key with the admin key, then delete the key file, only at
+the true exit points: after the final report, on Phase 3b escalation, and on any
+abort. Load `ADMIN_KEY` in the same command as the mint (never inline it):
+
+```bash
+export BASE_URL="<base_url>" SERVICE_KEY_ID="<service_key_id>" SERVICE_KEY_FILE="<service_key_file>"
+export ADMIN_KEY="$(python3 -c 'import re,sys; m=re.search(r"^admin_key:\s*(\S+)", open(sys.argv[1]).read(), re.M); print(m.group(1) if m else "")' workspace/adr/ADR-000-<env>-credentials.md)"
+printf 'Authorization: Bearer %s\n' "$ADMIN_KEY" | curl -s -o /dev/null -w '%{http_code}\n' -X DELETE "$BASE_URL/admin/api/keys/$SERVICE_KEY_ID" -H @-
+rm -f "$SERVICE_KEY_FILE"
+```
+
 Never revoke between fix-loop rounds or before Phase 2B.
 
 ## Rules
@@ -612,7 +660,7 @@ Never revoke between fix-loop rounds or before Phase 2B.
 - **Never exit with open failures.** The fix loop runs until all scenarios pass
   or 5 rounds are exhausted. Partial success is not a success.
 - **No secrets in output.** The service key (minted in Phase 0) is written to
-  a chmod-600 temp file (`/tmp/acc-key-<random>.txt`) by the workflow before
+  a chmod-600 temp file (a `mktemp` path, `acc-key-XXXXXX`) by the workflow before
   sub-agents are spawned. Sub-agents receive the path to that file, not the key
   value itself. The key is therefore absent from the prompt strings that appear
   in harness transcripts. Never print or log the resolved key value to the

@@ -305,8 +305,8 @@ log('Running ' + scenarios.length + ' scenario(s) in parallel  |  transports: ' 
 // file indirection is the closest available mechanism given the harness sandbox
 // has no CommonJS require() and therefore no direct fs/crypto access.
 //
-// Cleanup: the caller is responsible for unlinking args.keyFile after the
-// Workflow() call returns (temp files are also reclaimed by OS on reboot).
+// Cleanup: the caller must NOT unlink args.keyFile after Workflow() returns; it is
+// reused by later re-runs and removed at the skill's 'Service key teardown'.
 const _keyFile = args.keyFile
 
 const enrichedArgs = Object.assign({}, args, { transports: transports, _keyFile: _keyFile })

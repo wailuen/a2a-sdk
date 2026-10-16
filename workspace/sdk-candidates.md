@@ -1,69 +1,51 @@
-# SDK issue candidates — w052 (2026-10-15)
+# SDK issue candidates — w053 (2026-10-16)
 
 Run `/sdk-issue-scan` to review and file as GitHub issues on `wailuen/a2a-sdk`.
 
-## Candidate 1: RT-001: Service-key mint log line writes the caller-supplied label raw with %r (no length cap, control chars pass through) instead of going through safe_line_text from agent_sdk/common/redact.py as the todo's Reuses: C-034 note requires. Fix: log safe_line_text(body.label); add a test with \n, \x1b and a 5000-char label asserting capped, collapsed caplog output.
-- Severity: high
-- Component: security
-- File: agent_sdk/routes/admin.py
-- Rationale: SDK admin route logging hygiene (SI-2: no raw user input in logs); not agent-specific code.
-
-## Candidate 2: RT-002: The SI-2 hostile no-leak test only covers the mint path. Nothing checks that the service-key plaintext stays out of caplog/response bodies on list, revoke, a 401 with DISABLE_API_KEYS, or a 403 on /admin/api/*. Nothing checks that refusal bodies and WWW-Authenticate headers for a service key match a user key's byte for byte. Fix: add one DEBUG-level caplog test covering all four paths.
-- Severity: high
-- Component: security
-- File: tests/test_gh182_service_key.py
-- Rationale: SDK's own test suite for core credential/auth handling; covers SDK secret-leak guarantees, not agent domain tests.
-
-## Candidate 3: RT-003: revoke_by_value lets any kind=="api_key" caller revoke any user's OAuth access/refresh token family, and /oauth/revoke skips the DISABLE_API_KEYS check. A narrow CI service key can therefore sign out every person in the tenant. Fix: in _owned, require caller.kind=="api_key" and caller.admin for cross-owner revoke (silent no-op otherwise, RFC 7009); add a test that a service key cannot revoke another client's token.
-- Severity: high
-- Component: protocol/oauth
-- File: agent_sdk/auth/oauth_tokens.py
-- Rationale: SDK OAuth revocation route authorization (RFC 7009 /oauth/revoke) lives in agent_sdk/auth and agent_sdk/routes/oauth.py.
-
-## Candidate 4: RT-004: SI-5 identity-decision surfaces lack pinning tests. (1) No test that OAuth consent approval (routes/oauth.py:912) refuses a service key as Bearer and as the api_key form field. (2) No test that a service key cannot read another identity's task (tasks/memory.py:185) and gets 404 / -32001 with no existence leak. A future 'admin or service' change would pass the suite.
-- Severity: high
-- Component: security
-- File: tests/test_gh182_service_key.py
-- Rationale: SDK identity-binding and consent guarantees in core routes/tasks; SDK test coverage, not agent tests.
-
-## Candidate 5: RT-005: /acceptance should use only the service key for protocol calls. The A2A/AG-UI transport examples still say Authorization: Bearer <admin_key> (lines ~158, 166, 226, 232), and the Rules bullet (~605) still says the admin key goes to the chmod-600 temp file. harness/workflows/acceptance-api.js (lines 13, 98) still says 'admin API key'. The same stale text is in the template and .claude copies. Fix: replace with <service_key> everywhere, update acceptance-api.js and its template mirror, and apply to all three skill copies.
+## Candidate 1: RT-001: acceptance SKILL.md still deletes the service key file (unlinkSync) right after the first Workflow call. The key now lives only in that file, so every later fix-loop re-run and Phase 2B reads a deleted file and fails. Fix: remove the unlink after Workflow(); delete the file only in the 'Service key teardown' section next to the revoke; update the acceptance-api.js header comment; add a test.
 - Severity: high
 - Component: harness/skill
 - File: harness/skills/acceptance/SKILL.md
-- Rationale: Harness skill and workflow text that all agent repos run; SDK-owned harness.
+- Rationale: Harness skill shipped to every agent repo (also in template/ and .claude/ copies). It breaks the /acceptance fix loop. This is not agent domain code.
 
-## Candidate 6: RT-006: The 'Teardown: revoke the service key' step sits right after the Phase 2A workflow call (~line 295), before the Phase 3 fix loop and Phase 2B/--ux reuse the key. A model that follows the steps in order revokes the key after round 0, so every later round gets 401s and chases made-up auth failures. Fix: move teardown to the true exit points (final report, Phase 3b escalation, abort), state that the key persists across rounds and restarts, and update the Server restart procedure. The template copy has the same bug.
+## Candidate 2: RT-002: The acceptance 'Service key teardown' revoke still runs curl with 'Authorization: Bearer <admin_key>' on the command line. That puts the admin key in the command arguments and the transcript, against the SI-6 header-from-file rule. Fix: pipe the header through stdin (-H @-), load ADMIN_KEY in the same command, then rm -f the key file. Add a test that no copy contains 'Bearer <admin_key>'.
+- Severity: high
+- Component: security
+- File: harness/skills/acceptance/SKILL.md
+- Rationale: A secret leaks into the transcript from a harness skill that every agent repo uses. It is a security issue in SDK-owned harness content.
+
+## Candidate 3: RT-003: The service key mint block in acceptance (and agent-verify step 4) needs BASE_URL, ADMIN_KEY, SERVICE_KEY_FILE and KEY_LABEL exported, but gives no command to set them. Each Bash call starts a fresh shell. So the agent either writes the admin key inline (leak), or uses unexported variables and python raises KeyError after the key is minted, leaving it neither stored nor revoked. Fix: make the block self-contained with exports and an ADMIN_KEY loader from the ADR-000 file in the same command; add tests with unexported variables.
 - Severity: high
 - Component: harness/skill
 - File: harness/skills/acceptance/SKILL.md
-- Rationale: Harness skill control-flow bug affecting every agent's acceptance run.
+- Rationale: Harness skill instructions that cannot be followed safely. It causes either a secret leak or an orphaned key. It affects both the acceptance and agent-verify harness skills.
 
-## Candidate 7: RT-001 (round 2): The revoke_by_value narrowing to caller.admin also changes public POST /oauth/revoke behavior for plain user API keys (was: revoke any token; now: silent no-op, still 200). This is undocumented: not in the CHANGELOG [Unreleased], the oauth.py docstrings at :29/:1036 still say api_key callers may revoke any token, DESIGN.md:393 is stale, oauth_tokens.py is missing from the todo's Modifies list, and no test covers user keys (with DISABLE_API_KEYS on and off).
-- Severity: high
-- Component: protocol/oauth
-- File: agent_sdk/auth/oauth_tokens.py
-- Rationale: SDK public OAuth route behavior change plus its docs, changelog and tests.
-
-## Candidate 8: RT-002 (round 2): The template acceptance SKILL.md has drifted from the harness copy. The Rules bullet (~609) still says 'The admin key is read from ADR-000 but never printed', while the harness copy (harness/skills/acceptance/SKILL.md:614) describes the service key in a chmod-600 temp file. The LRN-208 identity check fails. The template SKILL.md edits are also uncommitted in the template peer repo, while acceptance-api.js was already committed (a6e3b29).
-- Severity: high
-- Component: harness/template
-- File: template/.claude/skills/acceptance/SKILL.md
-- Rationale: Template scaffold that seeds every downstream agent; SDK-owned.
-
-## Candidate 9: RT-001 (round 3): The new Identity.service field was inserted mid-dataclass (after admin, before label/user) in an exported frozen dataclass. Positional construction such as Identity("api_key", sid, False, "my-label") now sets service to a truthy string, which lets the key bypass idp_disable_api_keys in require_identity. Fix: move service to the end or make it kw_only; add a CHANGELOG Added line for Identity.service; add a positional-construction regression test.
+## Candidate 4: RT-004: agent-verify Phase 1 step 3 (mint a throwaway admin key from the bootstrap token) gives no command and no output handling, so the admin key plaintext prints to the transcript (GH-183 leak class). Step 4 says to read ADMIN_KEY 'from the credentials file', but agent-verify has no such file. Fix: one command that pipes the bootstrap header via -H @- into a parser, writes the plaintext to a mode-600 ADMIN_KEY_FILE and prints only key_id; load it in step 4; extend the tests.
 - Severity: high
 - Component: security
-- File: agent_sdk/auth/identity.py
-- Rationale: Public SDK auth API (agent_sdk.auth.Identity); a field-order change escalates privilege. SDK internals and security.
+- File: harness/skills/agent-verify/SKILL.md
+- Rationale: The admin credential leaks through a harness skill shipped to all agent repos. This is an SDK security issue.
 
-## Candidate 10: RT-002 (round 3): Narrowing /oauth/revoke to admin-only api_key callers changes behavior for existing user keys. That is outside the GH-182 ruling (issuecomment-6193941983), which covers only service keys. It was shipped with no maintainer ruling, and the SI annotation's claim that 'only admin keys can do that today' is wrong. Fix: either narrow only service keys (if caller.kind=="api_key" and not caller.service), or record an explicit maintainer ruling URL before release and cite it in the CHANGELOG and DESIGN.md §5.5.
+## Candidate 5: RT-001 (agent-verify): The step-3 bootstrap token awk 'f&&NF{print $1;exit}' takes the first word of the first non-empty line after the banner header. The real banner from agent_sdk/auth/api_keys.py has 'Bootstrap token (valid 15 min, single use):' there, so it sends 'X-Bootstrap-Token: Bootstrap'. The server answers 401 and every authenticated agent-verify step after it fails. The test passes only because of a hand-written fixture. Fix: match the indented token line, mirror to template/ and .claude/, and build the test fixture from BootstrapManager.arm_if_needed() output.
 - Severity: high
-- Component: protocol/oauth
-- File: agent_sdk/auth/oauth_tokens.py
-- Rationale: Breaking behavior change on an SDK public RFC 7009 route; needs a ruling at SDK level.
+- Component: harness/skill
+- File: harness/skills/agent-verify/SKILL.md
+- Rationale: A harness skill (already pushed to template 53a532a) is broken against the SDK's own bootstrap banner. It breaks /agent-verify in every agent repo.
 
-## Candidate 11: RT-003 (round 3): The template peer repo has uncommitted, unpushed edits to .claude/skills/acceptance/SKILL.md and .claude/skills/agent-verify/SKILL.md (origin/main still at a6e3b29). Agents seeded from the template still get the admin-key flow. Fix: commit with a GH-182 message, push to wailuen/a2a-agent-template, then confirm a clean status and the new origin/main head.
+## Candidate 6: RT-001 (acceptance Phase 0): The service key is written to /tmp/acc-key-<run-id>.txt, but <run-id> is only defined later and is guessable (run-001) and shared across repos. Two runs at once overwrite or delete each other's key. On a shared /tmp another user can create the file first with mode 666; chmod 600 fails silently and the key lands in a file they can read. Fix: use mktemp in the same command and print the path; open with O_NOFOLLOW and check owner uid and mode 0o600 with fstat; fail closed; add a test.
+- Severity: high
+- Component: security
+- File: harness/skills/acceptance/SKILL.md
+- Rationale: Insecure temp file handling of a secret in a harness skill. It is a step back from the earlier random path. This is an SDK security issue.
+
+## Candidate 7: RT-001 (template): template/.claude/skills/acceptance/SKILL.md was copied whole from harness and is now byte-identical. This wipes out the one intended difference: the live scriptPath now points at harness/workflows/acceptance-api.js, which does not exist in agent repos (they use .claude/workflows/). The file is also uncommitted in the template repo. Fix: restore the .claude/workflows/acceptance-api.js scriptPath, keep every other line identical, commit and push the template repo, and confirm the status is clean and nothing is left unpushed.
 - Severity: high
 - Component: harness/template
 - File: template/.claude/skills/acceptance/SKILL.md
-- Rationale: Template scaffold propagation is SDK release work; downstream agents depend on it.
+- Rationale: Template scaffold drift. Publishing it as-is breaks /acceptance in every agent repo, and the security hardening is not yet published.
+
+## Candidate 8: RT-002 (test guard): tests/test_gh183_184_service_key_mint_step.py::test_skill_copies_use_same_block calls pytest.skip when the template copy is missing (silent-skip pattern, LRN-325) and compares only the mint block. No test pins the template acceptance scriptPath to .claude/workflows/, and none checks that the template skill copies are committed and pushed. As a result, the template drift passes all 181 related tests. Fix: fail instead of skipping; add a whole-file harness-vs-template diff with an allow-list for the scriptPath line; extend the pushed-mirror test to cover the skills directories.
+- Severity: high
+- Component: harness/template
+- File: tests/test_gh183_184_service_key_mint_step.py
+- Rationale: An SDK test-suite gap. The mirror guard for harness and template skill copies cannot catch whole-file drift or unpushed template changes.
