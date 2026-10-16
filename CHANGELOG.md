@@ -8,6 +8,13 @@ internals, `contrib/`) may change in minors with notice here.
 
 _Nothing yet._
 
+## [0.15.1] — 2026-10-16
+
+Resolves GH-183 and GH-184 (harness skills only; no `agent_sdk` code change).
+
+### Fixed
+- GH-183, GH-184: the `/acceptance` and `/agent-verify` service-key mint step is now one command whose response never reaches the transcript. It pipes into a small parser that requires `"service": true` (otherwise revokes any returned key and stops with "this SDK does not support service keys; upgrade to v0.15.0+"), writes the key to a mode-600 file, and prints only `key_id` (`/acceptance` also prints the key file path, which is not secret). `/acceptance` writes into a fresh `mktemp` file, opened with `O_NOFOLLOW` and refused unless it is owned by the caller with mode 600. The `template/` copies are published; the acceptance copy keeps its one allowed difference, a live `scriptPath` of `.claude/workflows/acceptance-api.js`. New tests: `tests/test_gh183_184_service_key_mint_step.py` (including whole-file harness/template parity with that allow-list, and a check that the template copies are committed and pushed).
+
 ## [0.15.0] — 2026-10-15
 
 Resolves GH-181 (neutral A2UI prompt wording) and GH-182 (new `service` API key kind).
