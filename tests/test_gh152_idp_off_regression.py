@@ -10,7 +10,9 @@ CB = "https://client.example.com/cb"
 FORM = {"Content-Type": "application/x-www-form-urlencoded"}
 
 # Captured from the pre-GH-152-D code (client_id normalised to "CID").
-GOLDEN_PAGE_SHA = "e6ebfb0c5ae11c7f5908e5707cbf817703bb8e1d219817a5b9096dbb3ac7ddfe"
+# GOLDEN_PAGE_SHA re-captured for the v0.17.4 consent page redesign
+# (routes/_consent_ui.py); headers, CSP and metadata goldens are unchanged.
+GOLDEN_PAGE_SHA = "2f845c327d3a9436cb1f7c2e0c9eb7e4522ff7507a0f7fd96b3aae6c14c9eedd"
 GOLDEN_HEADERS_SHA = "5f7b58a2285f74070fa7f269df9d18bdc47875025ecf8a5b6f3a0243567d3ea6"
 GOLDEN_METADATA = {
     "/.well-known/oauth-protected-resource": "069fbf6e2a3e60df506cdd56b8386b5d06421a38b30dd805b2291db28c2e8ab5",

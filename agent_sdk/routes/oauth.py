@@ -62,6 +62,7 @@ from ..common.etag import etag_for, matches
 from ..common.json_strict import loads_strict
 from ..credentials.store import NS_OAUTH_IDP
 from ..models.errors import AgentError
+from ._consent_ui import render_consent_page
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,12 @@ _CONSENT_SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Referrer-Policy": "no-referrer",
 }
+
+
+def _agent_name(request: Request) -> str:
+    """The agent's public name for the consent pages (settings.display_name
+    normalizes a blank/placeholder AGENT_NAME)."""
+    return str(request.app.state.settings.display_name)
 
 
 def _oauth(request: Request) -> OAuthTokenStore:
@@ -584,55 +591,38 @@ def _validate_authorize(
 
 
 def _consent_page(
-    cleaned: dict[str, Any], params: dict[str, str], *, error: str | None = None, status: int = 200
+    cleaned: dict[str, Any],
+    params: dict[str, str],
+    *,
+    agent_name: str,
+    error: str | None = None,
+    status: int = 200,
 ) -> HTMLResponse:
-    """Minimal inline consent form (no template dependency). The admin API key
-    is form-borne (password field, autocomplete off); all round-tripped OAuth
-    params ride as hidden fields, attribute-escaped."""
+    """Inline consent form (no template dependency; layout in _consent_ui).
+    The admin API key is form-borne (password field, autocomplete off); all
+    round-tripped OAuth params ride as hidden fields, attribute-escaped."""
     hidden = "\n".join(
         f'<input type="hidden" name="{name}" value="{html.escape(params[name], quote=True)}">'
         for name in _AUTHORIZE_PARAMS
     )
-    error_html = f'<p class="err">{html.escape(error)}</p>' if error else ""
-    body = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Authorize access</title>
-<style>
-body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-       background: #f5f6fa; color: #333; display: flex; min-height: 100vh;
-       align-items: center; justify-content: center; margin: 0; }}
-.box {{ background: #fff; border: 1px solid #e0e0e0; border-radius: 8px;
-        padding: 28px; width: 380px; max-width: 90vw; }}
-h1 {{ font-size: 1.2rem; margin: 0 0 8px; }}
-p {{ font-size: 0.9rem; color: #555; margin: 0 0 14px; }}
-code {{ background: #f0f1f4; padding: 1px 5px; border-radius: 3px; }}
-input {{ width: 100%; box-sizing: border-box; padding: 10px; margin-bottom: 12px;
-         border: 1px solid #ccc; border-radius: 4px; font-size: 0.95rem; }}
-button {{ width: 100%; padding: 10px; border: none; border-radius: 4px;
-          background: #1565c0; color: #fff; font-size: 0.95rem; cursor: pointer; }}
-.err {{ color: #c62828; }}
-</style>
-</head>
-<body>
-<div class="box">
-<h1>Authorize access</h1>
-<p><strong>{html.escape(str(cleaned["client_name"]))}</strong> is requesting access to
-<code>{html.escape(str(cleaned["audience"]))}</code>.</p>
-<p>Approval requires an admin API key.</p>
-{error_html}
-<form method="post" action="/oauth/authorize">
-{hidden}
-<input type="password" name="api_key" placeholder="Admin API key"
-       autocomplete="off" autofocus required>
-<button type="submit">Approve</button>
-</form>
-</div>
-</body>
-</html>
-"""
+    form_html = (
+        f"{hidden}\n"
+        '<p class="note">Approval requires an admin API key.</p>\n'
+        '<input type="password" name="api_key" placeholder="Admin API key"'
+        ' aria-label="Admin API key" autocomplete="off" autofocus required>\n'
+        '<div class="actions one">'
+        '<button type="submit" class="primary">Approve</button></div>'
+    )
+    body = render_consent_page(
+        agent_name=agent_name,
+        client_name=str(cleaned["client_name"]),
+        return_host=urlparse(cleaned["redirect_uri"]).hostname or "",
+        audience=str(cleaned["audience"]),
+        form_action="/oauth/authorize",
+        form_html=form_html,
+        allow_label="Approve",
+        error=error,
+    )
     headers = _redirect_security_headers(str(cleaned["redirect_uri"]))
     return HTMLResponse(content=body, status_code=status, headers=headers)
 
@@ -708,7 +698,7 @@ async def oauth_authorize_page(request: Request) -> Response:
             headers=_redirect_security_headers(cleaned["redirect_uri"]),
         )
 
-    return _consent_page(cleaned, params)
+    return _consent_page(cleaned, params, agent_name=_agent_name(request))
 
 
 # ---------------------------------------------------------------------------
@@ -777,46 +767,24 @@ def _idp_local_error() -> HTMLResponse:
 
 
 def _idp_consent_page(
-    cleaned: dict[str, Any], label: str | None, ticket: str
+    cleaned: dict[str, Any], label: str | None, ticket: str, *, agent_name: str
 ) -> HTMLResponse:
-    host = urlparse(cleaned["redirect_uri"]).hostname or ""
-    who = html.escape(label) if label else "your account"
-    body = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Authorize access</title>
-<style>
-body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-       background: #f5f6fa; color: #333; display: flex; min-height: 100vh;
-       align-items: center; justify-content: center; margin: 0; }}
-.box {{ background: #fff; border: 1px solid #e0e0e0; border-radius: 8px;
-        padding: 28px; width: 380px; max-width: 90vw; }}
-h1 {{ font-size: 1.2rem; margin: 0 0 8px; }}
-p {{ font-size: 0.9rem; color: #555; margin: 0 0 14px; }}
-code {{ background: #f0f1f4; padding: 1px 5px; border-radius: 3px; }}
-button {{ width: 48%; padding: 10px; border: none; border-radius: 4px;
-          background: #1565c0; color: #fff; font-size: 0.95rem; cursor: pointer; }}
-button.deny {{ background: #757575; }}
-</style>
-</head>
-<body>
-<div class="box">
-<h1>Authorize access</h1>
-<p>Signed in as <strong>{who}</strong>.</p>
-<p><strong>{html.escape(str(cleaned["client_name"]))}</strong> (returns to
-<code>{html.escape(host)}</code>) is requesting access to
-<code>{html.escape(str(cleaned["audience"]))}</code>.</p>
-<form method="post" action="/oauth/idp/consent">
-<input type="hidden" name="ticket" value="{html.escape(ticket, quote=True)}">
-<button type="submit" name="decision" value="allow">Allow</button>
-<button type="submit" name="decision" value="deny" class="deny">Deny</button>
-</form>
-</div>
-</body>
-</html>
-"""
+    form_html = (
+        f'<input type="hidden" name="ticket" value="{html.escape(ticket, quote=True)}">\n'
+        '<div class="actions">'
+        '<button type="submit" name="decision" value="deny" class="secondary">Deny</button>'
+        '<button type="submit" name="decision" value="allow" class="primary">Allow</button>'
+        "</div>"
+    )
+    body = render_consent_page(
+        agent_name=agent_name,
+        client_name=str(cleaned["client_name"]),
+        return_host=urlparse(cleaned["redirect_uri"]).hostname or "",
+        audience=str(cleaned["audience"]),
+        form_action="/oauth/idp/consent",
+        form_html=form_html,
+        signed_in_as=label or "your account",
+    )
     return HTMLResponse(
         content=body,
         status_code=200,
@@ -857,7 +825,9 @@ async def oauth_idp_callback(request: Request) -> Response:
             _error_redirect(redirect_uri, "temporarily_unavailable", client_state), name
         )
     ticket = flows.put_consent(flow, user=user, label=label, binding=cookie)
-    return _idp_consent_page(cleaned, label, f"{flow_id}.{ticket}")
+    return _idp_consent_page(
+        cleaned, label, f"{flow_id}.{ticket}", agent_name=_agent_name(request)
+    )
 
 
 @router.post("/oauth/idp/consent", dependencies=[Depends(unauth_rate_limit)])
@@ -948,7 +918,11 @@ async def oauth_authorize_approve(request: Request) -> Response:
         # Re-render the consent form with a generic failure; the PRM-pointing
         # challenge rides along for programmatic callers (§5.5).
         page = _consent_page(
-            cleaned, params, error="Invalid or non-admin API key.", status=401
+            cleaned,
+            params,
+            agent_name=_agent_name(request),
+            error="Invalid or non-admin API key.",
+            status=401,
         )
         page.headers["WWW-Authenticate"] = _prm_challenge(runtime.prm_url)
         return page
