@@ -492,7 +492,10 @@ class TaskStore(abc.ABC):
         self, context_id: str, identity: Identity | None = None
     ) -> Sequence[dict[str, Any]]:
         """Return the Converse-format message history from the most recent
-        terminal task in ``context_id`` owned by ``identity``. Used by
+        COMPLETED task in ``context_id`` owned by ``identity``. GH-187:
+        FAILED, CANCELED and REJECTED tasks are skipped entirely (including
+        their user message) so a retry does not inherit a failed turn's stale
+        tool results; implementations must do the same. Used by
         ``_create_task_record`` to carry prior conversation history into a
         new task started on the same context (A2A §3 contextId continuation).
         Returns an empty list when no prior terminal task exists.
@@ -555,8 +558,9 @@ class TaskStore(abc.ABC):
     def context_reusable_messages(
         self, context_id: str, identity: Identity | None = None
     ) -> Sequence[dict[str, Any]]:
-        """Return the ``__resolved__`` marker content of terminal tasks in
-        ``context_id`` owned by ``identity``, oldest first (RT-001).
+        """Return the ``__resolved__`` marker content of COMPLETED tasks in
+        ``context_id`` owned by ``identity``, oldest first (RT-001). GH-187:
+        markers from FAILED/CANCELED/REJECTED tasks are not reused.
 
         Used only to seed ``run_loop``'s ``resolved_index`` (GH-148 /
         RT-A-004) on a transport whose own ``TaskRecord.messages`` does not

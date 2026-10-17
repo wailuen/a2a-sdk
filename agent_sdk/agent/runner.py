@@ -21,6 +21,7 @@ from typing import Any, Sequence
 
 from pydantic import BaseModel
 
+from ..auth.context import ResumeEnvelope, bind_identity
 from ..a2ui.translator import A2uiCapabilities, split_a2ui_delivery, translate
 from ..common.json_strict import dumps_strict, scrub_unencodable
 from ..common.tz import load_zone, valid_timezone
@@ -1247,7 +1248,11 @@ async def run_task_worker(
         future = record.resume_future
         if future is None:  # defensive: interrupt registration failed
             raise AgentError(ErrorCategory.INTERNAL, "resume channel missing")
-        return await future
+        value = await future
+        if isinstance(value, ResumeEnvelope):
+            bind_identity(value.identity)
+            return value.value
+        return value
 
     def publish(frame: dict[str, Any] | None, event: Any, *, final: bool = False) -> None:
         store.publish(task.id, StreamItem(frame=frame, event=event, final=final))

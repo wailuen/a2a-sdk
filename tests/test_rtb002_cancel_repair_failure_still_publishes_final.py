@@ -187,11 +187,15 @@ async def test_tasks_cancel_repair_failure_not_a_continuation_candidate() -> Non
         "A2A §5.1, regardless of the repair outcome"
     )
 
-    messages = store.context_messages(context_id, _IDENTITY)
+    assert store.context_messages(context_id, _IDENTITY) == [], (
+        "GH-187: a canceled task is never a continuation candidate"
+    )
+    live = store.get(record.task.id)
+    assert live is not None
+    messages = live.messages
     assert messages != [], (
         "RT-001: the in-memory repair lands regardless of the durable "
-        "flush's own failure, so the now-terminal live record must be "
-        f"selected as a continuation candidate — got {messages!r}"
+        f"flush's own failure — got {messages!r}"
     )
     assert messages[-1].get("role") != "user", (
         "RT-001 (GH-147 AC3): the repaired transcript must never end on "

@@ -276,8 +276,10 @@ class InMemoryTaskStore(TaskStore):
     def context_messages(
         self, context_id: str, identity: Identity | None = None
     ) -> Sequence[dict[str, Any]]:
-        """Return messages from the most recent terminal task in this
-        context, identity-scoped exactly like ``context_reusable_messages()``
+        """Return messages from the most recent COMPLETED task in this
+        context (GH-187: FAILED/CANCELED/REJECTED tasks are skipped entirely,
+        including their user message, so a retry never inherits a failed
+        turn's stale tool results), identity-scoped exactly like ``context_reusable_messages()``
         below — no admin api_key bypass (RT-004): this seeds a NEW task's
         model-facing ``record.messages`` (``routes/a2a.py::_create_task_record``),
         not a read-only inspection view, so cross-identity transcript data
@@ -296,11 +298,11 @@ class InMemoryTaskStore(TaskStore):
         has no turn boundary inside the trailing cap window (e.g. it hit
         ``max_turns`` without ever finishing) still gets a usable, logged
         fallback slice rather than losing all prior context silently."""
-        from ..models.a2a import TERMINAL_STATES
+        from ..models.a2a import TaskState
         candidates = [
             r for r in self._records.values()
             if r.task.context_id == context_id
-            and r.task.status.state in TERMINAL_STATES
+            and r.task.status.state == TaskState.COMPLETED
             and (identity is None or r.identity == identity.binding)
         ]
         if not candidates:
@@ -314,7 +316,8 @@ class InMemoryTaskStore(TaskStore):
         self, context_id: str, identity: Identity | None = None
     ) -> Sequence[dict[str, Any]]:
         """The ``__resolved__`` marker content of the newest
-        ``MAX_REUSABLE_TASKS`` terminal tasks in ``context_id``, oldest
+        ``MAX_REUSABLE_TASKS`` COMPLETED tasks (GH-187: markers from
+        FAILED/CANCELED/REJECTED tasks are not reused) in ``context_id``, oldest
         first (RT-001) — never the admin cross-identity override (RT-009);
         see the base-class docstring (tasks/store.py).
 
@@ -325,11 +328,11 @@ class InMemoryTaskStore(TaskStore):
         (``extract_resolved_markers``, RT-010), never its full messages:
         ``scan_resolved`` (the sole consumer of this method's return value)
         reads nothing else out of it."""
-        from ..models.a2a import TERMINAL_STATES
+        from ..models.a2a import TaskState
         candidates = [
             r for r in self._records.values()
             if r.task.context_id == context_id
-            and r.task.status.state in TERMINAL_STATES
+            and r.task.status.state == TaskState.COMPLETED
             and (identity is None or r.identity == identity.binding)
         ]
         candidates.sort(key=lambda r: r.created_at, reverse=True)

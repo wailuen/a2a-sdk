@@ -34,6 +34,7 @@ from starlette.background import BackgroundTask
 
 from ..a2ui.translator import A2uiCapabilities, translate
 from ..agent.runner import new_task, run_task_worker, split_a2ui_delivery_validated
+from ..auth.context import ResumeEnvelope, bind_identity, unbind_identity
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
 from ..common.iso8601 import iso_utc
@@ -570,6 +571,7 @@ def _start_worker(
     request: Request,
     record: TaskRecord,
     capabilities: A2uiCapabilities,
+    identity: Identity,
     *,
     extra_resolved_messages: Sequence[dict[str, Any]] | None = None,
     user_timezone: str | None = None,
@@ -578,23 +580,27 @@ def _start_worker(
     # Bind per-call forwarded credentials BEFORE create_task so the worker
     # snapshots them via contextvars (mirrors the A2A route pattern).
     forwarding.bind(forwarding.parse_header(request.headers.get(forwarding.HEADER_NAME)))
-    record.worker = asyncio.get_running_loop().create_task(
-        run_task_worker(
-            store=state.task_store,
-            record=record,
-            model=state.model_client,
-            registry=state.registry,
-            adapters=state.adapters,
-            skills=state.skills,
-            system=state.system_prompt,
-            capabilities=capabilities,
-            policies=state.loop_policies,
-            extra_resolved_messages=extra_resolved_messages,
-            inject_date=state.inject_current_date,
-            timezone_name=state.timezone,
-            user_timezone=user_timezone,
+    identity_token = bind_identity(identity)
+    try:
+        record.worker = asyncio.get_running_loop().create_task(
+            run_task_worker(
+                store=state.task_store,
+                record=record,
+                model=state.model_client,
+                registry=state.registry,
+                adapters=state.adapters,
+                skills=state.skills,
+                system=state.system_prompt,
+                capabilities=capabilities,
+                policies=state.loop_policies,
+                extra_resolved_messages=extra_resolved_messages,
+                inject_date=state.inject_current_date,
+                timezone_name=state.timezone,
+                user_timezone=user_timezone,
+            )
         )
-    )
+    finally:
+        unbind_identity(identity_token)
 
 
 @router.post("/ag-ui/run")
@@ -716,7 +722,10 @@ async def ag_ui_run(
                 sub = slot.subscribe(record.task.id)  # subscribe BEFORE resuming
                 delivered = store.deliver_resume(
                     record.task.id,
-                    {"status": entry.get("status"), "payload": entry.get("payload")},
+                    ResumeEnvelope(
+                        {"status": entry.get("status"), "payload": entry.get("payload")},
+                        identity,
+                    ),
                 )
                 if not delivered:
                     yield _emit(mapper.run_error("interrupt is no longer resumable"))
@@ -755,7 +764,7 @@ async def ag_ui_run(
                 # or shown to the model.
                 prior = store.context_reusable_messages(thread_id, identity)
                 _start_worker(
-                    request, record, mapper.capabilities,
+                    request, record, mapper.capabilities, identity,
                     extra_resolved_messages=prior,
                     user_timezone=_user_timezone(body),
                 )

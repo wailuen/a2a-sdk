@@ -1,51 +1,51 @@
-# SDK issue candidates — w053 (2026-10-16)
+# SDK issue candidates — w054 (2026-10-17)
 
 Run `/sdk-issue-scan` to review and file as GitHub issues on `wailuen/a2a-sdk`.
 
-## Candidate 1: RT-001: acceptance SKILL.md still deletes the service key file (unlinkSync) right after the first Workflow call. The key now lives only in that file, so every later fix-loop re-run and Phase 2B reads a deleted file and fails. Fix: remove the unlink after Workflow(); delete the file only in the 'Service key teardown' section next to the revoke; update the acceptance-api.js header comment; add a test.
+## Candidate 1: RT-001: The [Unreleased] CHANGELOG block has no GH-185 entry. The new public agent_sdk.auth.current_identity, its module auth/context.py, the bind sites (routes/a2a.py, routes/ag_ui.py, routes/mcp.py) and the ruling URL are all missing. tasks/memory.py and tasks/store.py are not named in the GH-187 Fixed entry.
 - Severity: high
-- Component: harness/skill
-- File: harness/skills/acceptance/SKILL.md
-- Rationale: Harness skill shipped to every agent repo (also in template/ and .claude/ copies). It breaks the /acceptance fix loop. This is not agent domain code.
+- Component: sdk/build
+- File: CHANGELOG.md
+- Rationale: The SDK's own release notes miss a new public API and changed SDK files. This is release and build hygiene for the SDK, not agent code.
 
-## Candidate 2: RT-002: The acceptance 'Service key teardown' revoke still runs curl with 'Authorization: Bearer <admin_key>' on the command line. That puts the admin key in the command arguments and the transcript, against the SI-6 header-from-file rule. Fix: pipe the header through stdin (-H @-), load ADMIN_KEY in the same command, then rm -f the key file. Add a test that no copy contains 'Bearer <admin_key>'.
+## Candidate 2: RT-002: The identity binds around _resume_or_error (A2A interrupt resume) and _open_stream (tasks/resubscribe) do nothing. deliver_resume hands work to a worker that is already running and kept the original submitter's context. So tools that run after a resume see the original submitter, not the caller who resumed. The test only checks the variable inside the route, never what a tool sees.
 - Severity: high
-- Component: security
-- File: harness/skills/acceptance/SKILL.md
-- Rationale: A secret leaks into the transcript from a harness skill that every agent repo uses. It is a security issue in SDK-owned harness content.
+- Component: protocol/a2a
+- File: agent_sdk/routes/a2a.py
+- Rationale: This is the SDK's A2A route doing identity handoff wrong. Every agent built on the SDK will mislabel who resumed a task, for example when an admin key resumes another identity's task.
 
-## Candidate 3: RT-003: The service key mint block in acceptance (and agent-verify step 4) needs BASE_URL, ADMIN_KEY, SERVICE_KEY_FILE and KEY_LABEL exported, but gives no command to set them. Each Bash call starts a fresh shell. So the agent either writes the admin key inline (leak), or uses unexported variables and python raises KeyError after the key is minted, leaving it neither stored nor revoked. Fix: make the block self-contained with exports and an ADMIN_KEY loader from the ADR-000 file in the same command; add tests with unexported variables.
-- Severity: high
-- Component: harness/skill
-- File: harness/skills/acceptance/SKILL.md
-- Rationale: Harness skill instructions that cannot be followed safely. It causes either a secret leak or an orphaned key. It affects both the acceptance and agent-verify harness skills.
-
-## Candidate 4: RT-004: agent-verify Phase 1 step 3 (mint a throwaway admin key from the bootstrap token) gives no command and no output handling, so the admin key plaintext prints to the transcript (GH-183 leak class). Step 4 says to read ADMIN_KEY 'from the credentials file', but agent-verify has no such file. Fix: one command that pipes the bootstrap header via -H @- into a parser, writes the plaintext to a mode-600 ADMIN_KEY_FILE and prints only key_id; load it in step 4; extend the tests.
-- Severity: high
-- Component: security
-- File: harness/skills/agent-verify/SKILL.md
-- Rationale: The admin credential leaks through a harness skill shipped to all agent repos. This is an SDK security issue.
-
-## Candidate 5: RT-001 (agent-verify): The step-3 bootstrap token awk 'f&&NF{print $1;exit}' takes the first word of the first non-empty line after the banner header. The real banner from agent_sdk/auth/api_keys.py has 'Bootstrap token (valid 15 min, single use):' there, so it sends 'X-Bootstrap-Token: Bootstrap'. The server answers 401 and every authenticated agent-verify step after it fails. The test passes only because of a hand-written fixture. Fix: match the indented token line, mirror to template/ and .claude/, and build the test fixture from BootstrapManager.arm_if_needed() output.
-- Severity: high
-- Component: harness/skill
-- File: harness/skills/agent-verify/SKILL.md
-- Rationale: A harness skill (already pushed to template 53a532a) is broken against the SDK's own bootstrap banner. It breaks /agent-verify in every agent repo.
-
-## Candidate 6: RT-001 (acceptance Phase 0): The service key is written to /tmp/acc-key-<run-id>.txt, but <run-id> is only defined later and is guessable (run-001) and shared across repos. Two runs at once overwrite or delete each other's key. On a shared /tmp another user can create the file first with mode 666; chmod 600 fails silently and the key lands in a file they can read. Fix: use mktemp in the same command and print the path; open with O_NOFOLLOW and check owner uid and mode 0o600 with fstat; fail closed; add a test.
-- Severity: high
-- Component: security
-- File: harness/skills/acceptance/SKILL.md
-- Rationale: Insecure temp file handling of a secret in a harness skill. It is a step back from the earlier random path. This is an SDK security issue.
-
-## Candidate 7: RT-001 (template): template/.claude/skills/acceptance/SKILL.md was copied whole from harness and is now byte-identical. This wipes out the one intended difference: the live scriptPath now points at harness/workflows/acceptance-api.js, which does not exist in agent repos (they use .claude/workflows/). The file is also uncommitted in the template repo. Fix: restore the .claude/workflows/acceptance-api.js scriptPath, keep every other line identical, commit and push the template repo, and confirm the status is clean and nothing is left unpushed.
+## Candidate 3: RT-003: The template copies of the add-tool and add-source SKILL.md files match the harness versions but are not committed or pushed in the template repo. The last template commit is 387dc73. Agents built from the template will not get the current_identity usage note.
 - Severity: high
 - Component: harness/template
-- File: template/.claude/skills/acceptance/SKILL.md
-- Rationale: Template scaffold drift. Publishing it as-is breaks /acceptance in every agent repo, and the security hardening is not yet published.
+- File: template/.claude/skills/add-tool/SKILL.md
+- Rationale: The template scaffold is SDK-level delivery. The new guidance does not reach downstream agents until the template repo has the commit.
 
-## Candidate 8: RT-002 (test guard): tests/test_gh183_184_service_key_mint_step.py::test_skill_copies_use_same_block calls pytest.skip when the template copy is missing (silent-skip pattern, LRN-325) and compares only the mint block. No test pins the template acceptance scriptPath to .claude/workflows/, and none checks that the template skill copies are committed and pushed. As a result, the template drift passes all 181 related tests. Fix: fail instead of skipping; add a whole-file harness-vs-template diff with an allow-list for the scriptPath line; extend the pushed-mirror test to cover the skills directories.
+## Candidate 4: RT-001 (tests): GH-185 tests required by the plan are missing. (1) No test checks that a rejected or unauthenticated request leaves no bound identity (SI-5). (2) The leak checks run in the test's own context, so they pass whether or not the app unbinds, and A2A and AG-UI have no back-to-back request isolation test. (3) AG-UI resume and A2A message:stream resume binding are never tested.
 - Severity: high
-- Component: harness/template
-- File: tests/test_gh183_184_service_key_mint_step.py
-- Rationale: An SDK test-suite gap. The mirror guard for harness and template skill copies cannot catch whole-file drift or unpushed template changes.
+- Component: security
+- File: tests/test_gh185_current_identity.py
+- Rationale: These are SDK test gaps for an identity-isolation (security) feature, not agent tests. With the current tests, a leak of one caller's identity into the next request would go unnoticed.
+
+## Candidate 5: RT-001 (race): When two callers resume at once, the loser wipes the winner's identity. _resume_or_error (a2a.py:537-540) and the AG-UI resume branch (ag_ui.py:723-729) set record.resume_identity before deliver_resume, then clear it to None if delivery fails. A losing second resumer clears the winner's identity, so the worker falls back to the original submitter. This was reproduced with two admin keys resuming at the same time.
+- Severity: high
+- Component: security
+- File: agent_sdk/routes/a2a.py
+- Rationale: This is a race in the SDK's A2A and AG-UI routes. Work gets credited to the wrong identity, which breaks the GH-185 ruling. It affects every agent.
+
+## Candidate 6: RT-002 (store): The new public field TaskRecord.resume_identity is written on whatever object store.get() returns. The TaskStore contract allows a durable store whose get() returns a fresh copy each time. With such a store, the resume identity is silently lost. DESIGN.md section 5 does not say whether subclasses must keep this field.
+- Severity: high
+- Component: sdk/loop
+- File: agent_sdk/tasks/store.py
+- Rationale: TaskRecord and TaskStore are exported SDK internals. Agents that plug in a durable store will silently lose the resume identity.
+
+## Candidate 7: RT-003 (scope): runner.py changed (bind_identity import and the rebind in wait_resume), but the GH-185 todo lists it only under Reads, not Creates/Modifies. The G1 review scope and the CHANGELOG entry leave it out. The four existing tests changed for GH-187 are not declared in the GH-187 todo either.
+- Severity: high
+- Component: harness/workflow
+- File: agent_sdk/agent/runner.py
+- Rationale: This is a gap in how the SDK wave tracks scope. Changed SDK files escape review scope and release notes. The fix belongs in the wave planning and redteam process.
+
+## Candidate 8: RT-004: The maintainer ruling (issues/185#issuecomment-6217407102) says tasks/resubscribe binds the caller's identity. The code (a2a.py:1122-1123) and the CHANGELOG skip it on purpose, because no tool runs on that path. The wave made this choice itself and the maintainer has not approved it.
+- Severity: high
+- Component: protocol/a2a
+- File: agent_sdk/routes/a2a.py
+- Rationale: The SDK's A2A route departs from a recorded maintainer ruling. Under the self-signoff rule, the user must approve this before release. Otherwise the code must follow the ruling.

@@ -69,7 +69,7 @@ def _complete(store: InMemoryTaskStore, context_id: str, messages: list[dict]):
     task = new_task(context_id)
     record = store.create(task, _OWNER)
     record.messages.extend(messages)
-    record.task.status = TaskStatus(state=TaskState.FAILED)
+    record.task.status = TaskStatus(state=TaskState.COMPLETED)
     return record
 
 

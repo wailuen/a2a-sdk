@@ -94,6 +94,7 @@ from ..agent.runner import (
     set_task_status,
 )
 from ..auth.identity import Identity
+from ..auth.context import ResumeEnvelope, bind_identity, unbind_identity
 from ..auth.middleware import require_identity
 from ..credentials import forwarding
 from ..common.admission import (
@@ -453,6 +454,7 @@ def _start_worker(
     request: Request,
     record: TaskRecord,
     capabilities: A2uiCapabilities,
+    identity: Identity,
     user_timezone: str | None = None,
 ) -> None:
     state = request.app.state
@@ -461,22 +463,26 @@ def _start_worker(
     # submit — a later resume runs in the worker's context, not the resume
     # request's (acceptable: this surface has no credential-bearing resume).
     forwarding.bind(forwarding.parse_header(request.headers.get(forwarding.HEADER_NAME)))
-    record.worker = asyncio.get_running_loop().create_task(
-        run_task_worker(
-            store=state.task_store,
-            record=record,
-            model=state.model_client,
-            registry=state.registry,
-            adapters=state.adapters,
-            skills=state.skills,
-            system=state.system_prompt,
-            capabilities=capabilities,
-            policies=state.loop_policies,
-            inject_date=state.inject_current_date,
-            timezone_name=state.timezone,
-            user_timezone=user_timezone,
+    identity_token = bind_identity(identity)
+    try:
+        record.worker = asyncio.get_running_loop().create_task(
+            run_task_worker(
+                store=state.task_store,
+                record=record,
+                model=state.model_client,
+                registry=state.registry,
+                adapters=state.adapters,
+                skills=state.skills,
+                system=state.system_prompt,
+                capabilities=capabilities,
+                policies=state.loop_policies,
+                inject_date=state.inject_current_date,
+                timezone_name=state.timezone,
+                user_timezone=user_timezone,
+            )
         )
-    )
+    finally:
+        unbind_identity(identity_token)
 
 
 def _create_task_record(request: Request, params: MessageSendParams, identity: Identity) -> TaskRecord:
@@ -526,7 +532,11 @@ def _resume_or_error(
         return a2a_error(A2A_UNSUPPORTED_OPERATION, "task is not awaiting input")
     if msg.context_id and msg.context_id != record.task.context_id:
         return a2a_invalid_params("contextId does not match the task")
-    delivered = store.deliver_resume(record.task.id, _message_text(msg))
+    # GH-185: the already-running worker picks this up after its resume wait,
+    # so post-resume tools see the resuming caller (not the original submitter).
+    delivered = store.deliver_resume(
+        record.task.id, ResumeEnvelope(_message_text(msg), identity)
+    )
     if not delivered:
         # lost the race: interrupt was consumed/expired between check and deliver
         return a2a_error(A2A_TASK_NOT_FOUND, "task not found")
@@ -633,7 +643,7 @@ async def message_send(
             return _strict_json_response(bare_msg.wire())
     record = _create_task_record(request, params, identity)
     _start_worker(
-            request, record, _capabilities(params.message, request),
+            request, record, _capabilities(params.message, request), identity,
             (params.message.metadata or {}).get("timezone"),
         )
     # RT-005: the sole path on this route that can activate either
@@ -921,7 +931,7 @@ async def message_stream(
         record = _create_task_record(request, params, identity)
         stream, abort = await _open_stream(request, record, identity, slot=slot)
         _start_worker(
-            request, record, _capabilities(params.message, request),
+            request, record, _capabilities(params.message, request), identity,
             (params.message.metadata or {}).get("timezone"),
         )
         # RT-005: the sole path on this route that can activate either
@@ -1109,7 +1119,11 @@ async def tasks_resubscribe(
     record = request.app.state.task_store.get(task_id, identity)
     if record is None:
         return a2a_error(A2A_TASK_NOT_FOUND, "task not found", headers=hdrs)
-    stream, abort = await _open_stream(request, record, identity)
+    identity_token = bind_identity(identity)
+    try:
+        stream, abort = await _open_stream(request, record, identity)
+    finally:
+        unbind_identity(identity_token)
     return StreamingResponse(
         stream,
         media_type="text/event-stream",

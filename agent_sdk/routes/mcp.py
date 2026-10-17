@@ -89,6 +89,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
+from ..auth.context import bind_identity, unbind_identity
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
 from ..common.admission import (
@@ -864,9 +865,11 @@ async def mcp_post(
     # Per-call forwarded credentials are request-scoped: bind around dispatch
     # (synchronous, same task as the tool invoke) and unbind in finally.
     token = forwarding.bind(forwarding.parse_header(request.headers.get(forwarding.HEADER_NAME)))
+    identity_token = bind_identity(identity)
     try:
         response = await _dispatch(request.app, message)
     finally:
+        unbind_identity(identity_token)
         forwarding.unbind(token)
 
     # Notifications (and fabricated-id notifications) → 202 Accepted, empty.
@@ -1190,9 +1193,11 @@ async def mcp_messages(
         )
 
     token = forwarding.bind(forwarding.parse_header(request.headers.get(forwarding.HEADER_NAME)))
+    identity_token = bind_identity(identity)
     try:
         response = await _dispatch(request.app, message)
     finally:
+        unbind_identity(identity_token)
         forwarding.unbind(token)
     if response is not None and message.get("id") is not None:
         # RTGA-003: put_nowait matches the SDK pattern in tasks/store.py (lines 44-54);

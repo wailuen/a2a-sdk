@@ -4,6 +4,7 @@ Team routes mounted after ``build_app()`` add
 ``Depends(agent_sdk.auth.require_identity)`` themselves (DESIGN.md §10.3).
 """
 
+from .context import current_identity
 from .identity import Identity
 from .middleware import (
     require_admin,
@@ -14,6 +15,7 @@ from .middleware import (
 
 __all__ = [
     "Identity",
+    "current_identity",
     "require_admin",
     "require_api_key_identity",
     "require_identity",

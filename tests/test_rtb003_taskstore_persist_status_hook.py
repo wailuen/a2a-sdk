@@ -238,8 +238,8 @@ async def test_cancel_with_persist_status_override_survives_durable_get(
         assert replayed is not None
         assert replayed.task.status.state == "canceled"
 
-        assert store.context_messages(context_id) != [], (
-            "with the hook, the cancelled task is a contextId continuation candidate"
+        assert store.context_messages(context_id) == [], (
+            "GH-187: a cancelled task is never a contextId continuation candidate"
         )
 
 
@@ -269,10 +269,8 @@ async def test_cancel_with_both_persist_hooks_survives_durable_get_without_dangl
             "repaired transcript, not the pre-repair dangling toolUse tail"
         )
 
-        replayed_context = store.context_messages(context_id)
-        assert replayed_context != []
-        assert not _ends_on_dangling_tool_use(list(replayed_context)), (
-            "a contextId continuation must never replay a dangling toolUse tail"
+        assert store.context_messages(context_id) == [], (
+            "GH-187: a cancelled task is never a contextId continuation candidate"
         )
 
 

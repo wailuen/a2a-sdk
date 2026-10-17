@@ -82,6 +82,19 @@ to every protocol from one return value:
 domain card you registered ([content-types.md](content-types.md)). Unknown
 types fail `build_app()`.
 
+## Who is calling
+
+`current_identity()` returns the caller's frozen `Identity` inside a tool or a
+`SourceAdapter` method, or `None` outside a request. It never carries tokens or
+headers.
+
+```python
+from agent_sdk.auth import current_identity
+
+who = current_identity()
+owner = who.principal_key if who else "anonymous"
+```
+
 ## Errors
 
 Raise `AgentError(category, message, source=...)`. It becomes a tool

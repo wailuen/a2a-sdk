@@ -168,4 +168,4 @@ async def test_persist_status_still_flushes_after_successful_repair() -> None:
     assert getattr(result, "status_code", 200) == 200
     durable = store._records[record.task.id]
     assert durable.task.status.state == "canceled"
-    assert store.context_messages(record.task.context_id) != []
+    assert store.context_messages(record.task.context_id) == []

@@ -56,6 +56,9 @@ async def <name>(inp: <Name>Input, *, api: <Source>Adapter) -> KpiCard:
   injects one instance per registered class by **exact-class match**. Declare as many
   as the tool needs. There is no `source=` kwarg — the annotations are the only
   source of truth.
+- **Caller identity:** `from agent_sdk.auth import current_identity` returns the
+  frozen `Identity` of the caller (or `None` outside a request). Use it to attribute
+  usage or scope data per user; never log it.
 - **`tier`** — 1 unless the tool composes other tools / isn't safe as a raw MCP tool.
 - **`emits`** — must be a content type already registered with the SDK (a FROZEN
   Standard Profile type, or a domain card registered via `register_content_type`).

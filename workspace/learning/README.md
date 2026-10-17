@@ -118,7 +118,7 @@ Entries ordered by LRN number.
 | LRN-112 | Monotonic clock value fed to datetime.fromtimestamp() as if it were epoch time | [LRN-112](LRN-112-monotonic-clock-epoch-confusion.md) |
 | LRN-113 | New abstractmethod on public ABC breaks external subclasses | [LRN-113](LRN-113-public-abc-new-abstractmethod.md) |
 | LRN-114 | Non-total content extraction crashes AG-UI SSE stream without terminal frame | [LRN-114](LRN-114-non-total-sse-validation-crash.md) |
-| LRN-115 | AG-UI _capabilities() fail-closed tier="none" default is intentional — do not "align" it to spec's tier="core | [LRN-115](LRN-115-agui-capabilities-fail-closed-tier-none-default.md) |
+| LRN-115 | AG-UI _capabilities() fail-closed tier="none" default is intentional — do not "align" it to spec's tier="core" | [LRN-115](LRN-115-agui-capabilities-fail-closed-tier-none-default.md) |
 | LRN-116 | MCP tools/call bypasses generator tool dispatch, breaking long-running Tier-1 tools | [LRN-116](LRN-116-mcp-tools-call-bypasses-generator-dispatch.md) |
 | LRN-117 | Allowlist must cover LLM system-prompt teaching surface | [LRN-117](LRN-117-allowlist-must-cover-llm-teaching-surface.md) |
 | LRN-118 | DESIGN.md MCP version-header rule stale after transport split | [LRN-118](LRN-118-protocol-doc-behavior-drift.md) |
@@ -410,3 +410,11 @@ Entries ordered by LRN number.
 | LRN-404 | Secret temp file path built from placeholder or guessable name | [LRN-404](LRN-404-secret-tempfile-placeholder-path.md) |
 | LRN-405 | Whole-file skill sync to template wipes per-repo lines | [LRN-405](LRN-405-whole-file-mirror-overwrite.md) |
 | LRN-406 | Mirror guard skips or checks only a fragment | [LRN-406](LRN-406-partial-mirror-guard-skips.md) |
+| LRN-407 | CHANGELOG needs one entry per GH item and new public symbols | [LRN-407](LRN-407-changelog-per-gh-entry.md) |
+| LRN-408 | ContextVar bound around hand-off to a running worker is a no-op | [LRN-408](LRN-408-contextvar-bind-after-worker.md) |
+| LRN-409 | Template skill mirror edited but not committed in peer repo | [LRN-409](LRN-409-template-mirror-uncommitted.md) |
+| LRN-410 | Annotated tests missing and leak checks run outside the app | [LRN-410](LRN-410-annotated-test-missing-leak.md) |
+| LRN-411 | Per-request state passed to worker via shared record field races | [LRN-411](LRN-411-resume-identity-race.md) |
+| LRN-412 | Handoff state on TaskRecord lost by copy-on-get stores | [LRN-412](LRN-412-store-copy-handoff-state.md) |
+| LRN-413 | File listed under Reads was modified, missing from scope and changelog | [LRN-413](LRN-413-read-only-file-changed.md) |
+| LRN-414 | Wave deviated from maintainer ruling without ratification | [LRN-414](LRN-414-unratified-ruling-deviation.md) |

@@ -114,6 +114,8 @@ never hit the live upstream in tests.
   cache plaintext; never log a credential.
 - **No secrets or input values in errors.** Map upstream failures to
   `AgentError(category, message, source=source_name)` with a generic message.
+- **Caller identity:** `agent_sdk.auth.current_identity()` gives the request's frozen
+  `Identity` (or `None` outside a request) for per-user attribution; never log it.
 - **Upstream vendor keys in credential store only (SI-6).** Never write an upstream
   API key to `.env`, pass it as a CLI arg, or emit it in any log line.
 - **Path params via `url_segment()`**, identifiers via `safe_id()`. Never f-string
