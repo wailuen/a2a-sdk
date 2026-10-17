@@ -8,6 +8,13 @@ internals, `contrib/`) may change in minors with notice here.
 
 _Nothing yet._
 
+## [0.15.3] — 2026-10-17
+
+Back-port patch on the 0.15.x line (branch `release/0.15.x`). Completes GH-198; port to main with it.
+
+### Fixed
+- GH-198 (follow-up): Copilot Studio's callback forwards across three origins (`global.consent.azure-apim.net` → `<region>.consent.azure-apim.net` → `copilotstudio.microsoft.com`), so the 0.15.2 `form-action` widening still blocked the last hop. For the exact origin `https://global.consent.azure-apim.net`, the post-consent redirect is now a 200 hand-off page with a meta refresh (`_HANDOFF_REDIRECT_ORIGINS`, `_client_redirect` in `routes/oauth.py`), which is a new navigation outside `form-action`. Every other client keeps the 30x.
+
 ## [0.15.2] — 2026-10-17
 
 Back-port patch on the 0.15.x line (branch `release/0.15.x`) for agents not yet on 0.16/0.17. Contains only GH-198; the same fix ships on main in 0.17.0.
