@@ -8,6 +8,13 @@ internals, `contrib/`) may change in minors with notice here.
 
 _Nothing yet._
 
+## [0.17.1] — 2026-10-17
+
+Resolves GH-199: brings the v0.15.3 Copilot Studio fix (7778751) to main, so agents on 0.15.3 can upgrade to 0.17.x without losing Copilot Studio sign-in.
+
+### Fixed
+- GH-199 (GH-198 follow-up): Copilot Studio's callback forwards across three origins (`global.consent.azure-apim.net` → `<region>.consent.azure-apim.net` → `copilotstudio.microsoft.com`), so the 0.17.0 `form-action` widening alone still let Chromium block the last hop. For the exact origin `https://global.consent.azure-apim.net`, the post-consent redirect (IdP consent, admin approve, error redirects) is now a 200 hand-off page with a meta refresh (`_HANDOFF_REDIRECT_ORIGINS`, `_client_redirect` in `routes/oauth.py`): a new navigation outside the form-submission chain and so outside `form-action`. Same CSP, `no-store` and `no-referrer` headers. Every other client keeps the 30x. Tests: `tests/test_oauth_flow.py`, `tests/test_gh152_idp_authorize_flow.py`. Decision: https://github.com/wailuen/a2a-sdk/issues/198#issuecomment-6229599836 (updated for the hand-off).
+
 ## [0.17.0] — 2026-10-17
 
 Resolves GH-188 to GH-198. Contains one breaking change (GH-196: tools now reject unknown arguments); see Breaking changes for migration steps. GH-198 was also back-ported as 0.15.2.
@@ -34,6 +41,10 @@ Resolves GH-188 to GH-198. Contains one breaking change (GH-196: tools now rejec
 - GH-191: the admin console chat no longer retries 4xx responses, honours `Retry-After` for 429/503 (capped at 30 s), and never re-POSTs `/ag-ui/run` after a stream drop (a re-POST would start a second run). New module `agent_sdk/console/static/retry.js`. Changed: `agent_sdk/console/static/chat.js`. Tests: `tests/test_gh191_console_retry_policy.py` (now also syntax-checks every console JS file with node).
 - GH-197: `message:stream`, the interrupt-resume stream and `tasks/{id}:subscribe` now send `: ping` SSE comment frames whenever nothing is queued for 15 s, so a long tool no longer leaves the stream silent and short-timeout clients stay connected. The first full-Task frame and the `final: true` ending are unchanged; queued items are never dropped. The interval is the shared `agent_sdk.common.sse.STREAM_HEARTBEAT_SECONDS`, also used by AG-UI. `harness/workflows/acceptance-api.js` now uses a 600 s read timeout on both clients. Changed: `agent_sdk/routes/a2a.py` (`_open_stream`), `agent_sdk/routes/ag_ui.py`, `agent_sdk/common/sse.py`. Tests: `tests/test_gh197_a2a_stream_heartbeat.py`.
 - GH-192: `/ag-ui/run` with a body that is not JSON, or is JSON but not an object (array, scalar, `null`), now returns 200 SSE with RUN_STARTED (synthesized ids) then RUN_ERROR `malformed RunAgentInput body`, instead of the misleading "no user message in input". The message is fixed text; the body is never echoed. No 400/422 before the stream (DESIGN.md §5.3 unchanged). Changed: `agent_sdk/routes/ag_ui.py` (`_parse_body` returns `None` on malformed input; the generator checks it first). Tests: `tests/test_gh192_ag_ui_malformed_body.py`. Ruling: https://github.com/wailuen/a2a-sdk/issues/192#issuecomment-6229361690
+
+## [0.15.3] — 2026-10-17
+
+Back-port patch on branch `release/0.15.x` (tag `v0.15.3`), not on main. Contains the GH-198 meta-refresh hand-off listed under 0.17.1.
 
 ## [0.15.2] — 2026-10-17
 
