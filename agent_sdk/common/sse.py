@@ -18,6 +18,10 @@ SSE_HEADERS = {
 
 HEARTBEAT = b": ping\n\n"
 
+# Idle gap after which a stream sends HEARTBEAT. Read as ``sse.STREAM_HEARTBEAT_SECONDS``
+# at call time so tests can patch it.
+STREAM_HEARTBEAT_SECONDS = 15.0
+
 
 def sse_data(obj: Any) -> bytes:
     """One SSE frame. ``obj`` must already be wire-shaped (camelCase done

@@ -140,7 +140,7 @@ function buildScenarioPrompt(s, a) {
     '       cur_task_id = None\n' +
     '       cur_ctx_id  = None\n' +
     '       cur_state   = None\n' +
-    '       async with httpx.AsyncClient(base_url=BASE_URL, headers=headers, timeout=180) as c:\n' +
+    '       async with httpx.AsyncClient(base_url=BASE_URL, headers=headers, timeout=600) as c:\n' +
     '           async with c.stream("POST", "/v1/message:stream", json=body) as r:\n' +
     '               r.raise_for_status()\n' +
     '               async for line in r.aiter_lines():\n' +
@@ -223,7 +223,7 @@ function buildScenarioPrompt(s, a) {
     '       async with httpx.AsyncClient(\n' +
     '           base_url=BASE_URL,\n' +
     '           headers={"Authorization": f"Bearer {TOKEN}"},\n' +
-    '           timeout=180\n' +
+    '           timeout=600\n' +
     '       ) as client:\n' +
     '           driver = ChatDriver(client)\n' +
     '           reply  = await driver.agui_turn(\n' +

@@ -64,8 +64,11 @@ class ChatDriver:
         ``a2ui(messages: list)``      — A2UI 4-message lifecycle sequence
         ``text(delta: str)``          — streaming text delta (AG-UI only)
         ``error(message: str)``       — run or request error
-        ``interrupt(task: dict)``     — A2A task paused in input-required/auth-required;
-                                        passes the full task dict (may contain history)
+        ``interrupt(obj: dict)``      — run paused for input.  On AG-UI: the AG-UI
+                                        interrupt dict (has ``id``; pass it to
+                                        :meth:`agui_resume`).  On A2A: the full task
+                                        dict (state input-required/auth-required;
+                                        may contain history)
 
     Example::
 
@@ -160,7 +163,43 @@ class ChatDriver:
         for multi-turn continuity.  Returns the assistant reply text.
         """
         messages.append({"role": "user", "content": query})
-        body = {
+        reply = await self._run_agui(self._agui_body(thread_id, messages), emit)
+        if reply:
+            messages.append({"role": "assistant", "content": reply})
+        return reply
+
+    async def agui_resume(
+        self,
+        interrupt_id: str,
+        thread_id: str,
+        messages: list[dict[str, Any]],
+        *,
+        payload: Any = None,
+        status: str = "resolved",
+        emit: dict[str, Callable] | None = None,
+    ) -> str:
+        """Resume an interrupted AG-UI run over ``POST /ag-ui/run`` (SSE).
+
+        Sends ``resume=[{interruptId, status, payload}]`` and does NOT append a
+        user message.  *interrupt_id* is the ``id`` of the interrupt dict the
+        ``interrupt`` emit received from :meth:`agui_turn`.  Appends the
+        assistant reply to *messages* in-place and returns it.  Frames are
+        handled exactly as in :meth:`agui_turn`; an unknown or expired id
+        fires the ``error`` emit.
+
+        Provisional API (``agent_sdk.testing``).
+        """
+        body = self._agui_body(thread_id, messages)
+        body["resume"] = [
+            {"interruptId": interrupt_id, "status": status, "payload": payload}
+        ]
+        reply = await self._run_agui(body, emit)
+        if reply:
+            messages.append({"role": "assistant", "content": reply})
+        return reply
+
+    def _agui_body(self, thread_id: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
             "threadId": thread_id,
             "runId": uuid.uuid4().hex,
             "messages": list(messages),
@@ -169,6 +208,9 @@ class ChatDriver:
             "forwardedProps": {"a2uiClientCapabilities": self._caps},
             "state": {},
         }
+
+    async def _run_agui(self, body: dict[str, Any], emit: dict[str, Callable] | None) -> str:
+        """POST *body* to ``/ag-ui/run`` and dispatch SSE frames to *emit*."""
         reply_parts: list[str] = []
         _pending_tool: str | None = None
 
@@ -231,10 +273,7 @@ class ChatDriver:
                         self._fire(emit, "interrupt", interrupts[0] if interrupts else outcome)
                     break
 
-        reply = "".join(reply_parts)
-        if reply:
-            messages.append({"role": "assistant", "content": reply})
-        return reply
+        return "".join(reply_parts)
 
     # ── A2A ───────────────────────────────────────────────────────────────────
 

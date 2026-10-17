@@ -9,7 +9,7 @@ identically across protocols.
 
 | Endpoint | Behavior |
 |---|---|
-| `POST /v1/message:send` | 200 + Task snapshot (non-blocking); resume by including `taskId` |
+| `POST /v1/message:send` | 200 + Task. Default: immediate snapshot. `configuration.blocking: true` waits for a terminal or `input-required` state (capped at the smaller of the task deadline and `AGENT_SDK_BLOCKING_SEND_MAX`, default 120 s; on the cap it returns the current non-terminal Task while the worker keeps running, so poll `tasks/get`). Resume by including `taskId` (blocking resume waits the same way) |
 | `POST /v1/message:stream` | SSE; first frame is the **full Task**, then status/artifact frames until `final: true` |
 | `GET /v1/tasks/{id}` | Task; `historyLength` truncates (0 → `[]`) |
 | `POST /v1/tasks/{id}:cancel` | 200 + canceled Task; 404/409 per table |
@@ -19,7 +19,10 @@ identically across protocols.
 Error table (body `{"error": {code, message}}`): unknown/foreign task →
 404 `-32001`; terminal-task cancel → 409 `-32002`; terminal-task resume
 (`message:send` or `message:stream` with `taskId`) → 501 `-32004`; push
-config → `-32003`; `blocking: true` → `-32004`; unacceptable
+config → `-32003`: `POST`/`GET /v1/tasks/{id}/pushNotificationConfigs` and
+`GET`/`DELETE /v1/tasks/{id}/pushNotificationConfigs/{configId}` all return 501
+`-32003` (identity required; same reply for known, foreign and unknown tasks;
+body never read); unacceptable
 `acceptedOutputModes` → `-32005`; missing `messageId` → 400 `-32602`;
 too many concurrent streams → 429 `-32000` + `Retry-After` (see below). Task
 access is
@@ -27,8 +30,11 @@ access is
 existence is never leaked (admin keys bypass).
 
 Input is text only (`defaultInputModes: ["text/plain"]`). A2A rejects any
-`FilePart`/`DataPart` with `-32005` (HTTP 415) and a message with no text with
-`-32602`, before a task is created; AG-UI rejects non-text user content parts
+`FilePart`/`DataPart` on a new task with `-32005` (HTTP 415) and a message with
+no text with `-32602`, before a task is created. A resume of an interrupt may
+also carry exactly one `DataPart` (object `data`, no other parts); the tool's
+`resume_handler` gets `{"status": None, "payload": <data>}` (GH-193). A resume
+with a `FilePart` is `-32005`; any other mixed or repeated shape is `-32602`; AG-UI rejects non-text user content parts
 in the current turn (the user messages after the last assistant message) with
 `RUN_ERROR` (maintainer ruling on GH-159).
 User `content` must be a string or a list of `text` parts; any other shape (for

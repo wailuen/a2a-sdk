@@ -20,6 +20,7 @@ import asyncio
 import copy
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -211,6 +212,10 @@ class LoopPolicies:
     # call (notice only).
     final_summary: bool = True
     final_summary_max_tokens: int = 1024
+    # GH-194: a reply with no tool calls and only blank text right after a
+    # tool result gets ONE tools-off retry (not a max_turns turn; its tokens
+    # count toward the budget). False restores the old silent ok=True end.
+    empty_reply_retry: bool = True
 
 
 def resolve_tool_timeout(name: str, entry: ToolEntry, policies: LoopPolicies) -> float:
@@ -410,6 +415,10 @@ _FINAL_SUMMARY_INSTRUCTION = (
     "Using only what you have gathered so far, write a short final answer for "
     "the user. Say clearly what is still missing or uncertain."
 )
+_EMPTY_REPLY_INSTRUCTION = (
+    "You called tools but wrote no reply. Using the tool results above, "
+    "write your answer for the user."
+)
 _FINAL_SUMMARY_NOTICE_TURNS = (
     "I reached my step limit before finishing. The work so far may be "
     "incomplete. Please try again with a narrower request."
@@ -420,7 +429,9 @@ _FINAL_SUMMARY_NOTICE_BUDGET = (
 )
 
 
-def _summary_request_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _summary_request_messages(
+    messages: list[dict[str, Any]], instruction: str = _FINAL_SUMMARY_INSTRUCTION
+) -> list[dict[str, Any]]:
     """Copy of ``messages`` whose trailing user turn also carries the summarize
     instruction (never two same-role messages in a row). The real transcript is
     left untouched so the instruction is never persisted."""
@@ -430,9 +441,9 @@ def _summary_request_messages(messages: list[dict[str, Any]]) -> list[dict[str, 
         blocks = list(content) if isinstance(content, list) else (
             [{"text": str(content)}] if content else []
         )
-        blocks.append({"text": _FINAL_SUMMARY_INSTRUCTION})
+        blocks.append({"text": instruction})
         return [*messages[:-1], {**tail, "content": blocks}]
-    return [*messages, {"role": "user", "content": [{"text": _FINAL_SUMMARY_INSTRUCTION}]}]
+    return [*messages, {"role": "user", "content": [{"text": instruction}]}]
 
 
 def _summary_max_tokens(policies: LoopPolicies) -> int:
@@ -491,6 +502,69 @@ async def _final_summary(
         append_assistant_turn(messages, [{"text": seg} for seg in segments])
         return
     yield TextEvent(text=notice)
+    bridge_trailing_user(messages)
+
+
+_EMPTY_REPLY_NOTICE = (
+    "I ran the requested steps but could not write a reply. "
+    "Please try again or rephrase your request."
+)
+
+
+def _ends_on_tool_result(messages: list[dict[str, Any]]) -> bool:
+    tail = messages[-1] if messages else None
+    if not isinstance(tail, dict) or tail.get("role") != "user":
+        return False
+    content = tail.get("content")
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and "toolResult" in b for b in content
+    )
+
+
+async def _empty_reply_retry(
+    *,
+    model: ModelClient,
+    system: str,
+    messages: list[dict[str, Any]],
+    tool_specs: list[dict[str, Any]],
+    policies: LoopPolicies,
+    is_sealed: Callable[[], bool],
+    add_notice: bool,
+) -> AsyncIterator[LoopEvent]:
+    """GH-194: one tools-off call after a blank post-tool reply. Yields
+    UsageEvent and TextEvent (folded into ``messages``); a blank or failed
+    retry yields the fixed notice unless ``add_notice`` is false (a card was
+    already delivered). Nothing is yielded or folded if sealed during the
+    await; the caller re-checks ``is_sealed()``. No provider text (SI-2)."""
+    try:
+        response = await model.converse(
+            system=system,
+            messages=_summary_request_messages(messages, _EMPTY_REPLY_INSTRUCTION),
+            tools=tool_specs,
+            max_tokens=policies.max_output_tokens,
+            tool_choice="none",
+        )
+    except Exception as exc:
+        logger.warning(
+            "empty reply retry failed error_type=%s frames=%s",
+            type(exc).__name__, frame_locations(exc),
+        )
+        response = None
+    if is_sealed():
+        return
+    segments: list[str] = []
+    if response is not None:
+        yield UsageEvent(
+            input_tokens=response.input_tokens, output_tokens=response.output_tokens
+        )
+        segments = [seg for seg in response.text_segments if seg.strip()]
+    if segments:
+        for seg in segments:
+            yield TextEvent(text=seg)
+        append_assistant_turn(messages, [{"text": seg} for seg in segments])
+        return
+    if add_notice:
+        yield TextEvent(text=_EMPTY_REPLY_NOTICE)
     bridge_trailing_user(messages)
 
 
@@ -993,6 +1067,7 @@ _VALIDATION_TYPE_PHRASES: dict[str, str] = {
     "assertion_error": "value failed a validation rule",
     "json_invalid": "value is not valid JSON",
     "extra_forbidden": "unexpected field",
+    "unknown_argument": "unknown argument (not in the tool's input schema)",
 }
 
 
@@ -1077,6 +1152,16 @@ def _redact_loc(loc: tuple[Any, ...], err_type: str, model: type[BaseModel] | No
     return ".".join(rendered) or "<root>"
 
 
+def _unknown_argument_loc(loc: tuple[Any, ...]) -> str:
+    """GH-196: the NAME of an unknown argument key is echoed (it is what the
+    model must correct); its value never is. A key that is not a short
+    identifier-like token is redacted as ``<key>`` (SI-2)."""
+    key = str(loc[0]) if loc else ""
+    if re.fullmatch(r"[A-Za-z0-9_.\-]{1,64}", key):
+        return key
+    return "<key>"
+
+
 def safe_validation_message(
     tool_name: str,
     exc: ValidationError,
@@ -1092,7 +1177,7 @@ def safe_validation_message(
     safe-by-construction (a fixed Pydantic identifier, never user input).
     """
     fields = "; ".join(
-        f"{_redact_loc(tuple(e['loc']), e['type'], input_model)} — "
+        f"{_unknown_argument_loc(e['loc']) if e['type'] == 'unknown_argument' else _redact_loc(tuple(e['loc']), e['type'], input_model)} — "
         f"{_VALIDATION_TYPE_PHRASES.get(e['type'], e['type'])}"
         for e in exc.errors()
     )
@@ -1184,6 +1269,7 @@ async def run_loop(
     is_sealed: Callable[[], bool] = sealed if sealed is not None else (lambda: False)
     deadline = Deadline(policies.deadline_seconds, clock=clock)
     total_tokens = spent_tokens
+    artifact_delivered = False
     result_cache: dict[tuple[str, str], Any] = {}
     # GH-148: "resolved this conversation" index, rebuilt fresh from
     # ``messages`` (plus ``extra_resolved_messages``, RT-A-004) every call,
@@ -1315,6 +1401,27 @@ async def run_loop(
             # the transcript never ends on 'user' regardless.
             if text_content:
                 append_assistant_turn(messages, text_content)
+            elif (
+                policies.empty_reply_retry
+                and _ends_on_tool_result(messages)
+                and not deadline.exceeded()
+                and total_tokens <= policies.token_budget
+            ):
+                async for ev in _empty_reply_retry(
+                    model=model,
+                    system=system,
+                    messages=messages,
+                    tool_specs=tool_specs,
+                    policies=policies,
+                    is_sealed=is_sealed,
+                    add_notice=not artifact_delivered,
+                ):
+                    if isinstance(ev, UsageEvent):
+                        total_tokens += ev.input_tokens + ev.output_tokens
+                    yield ev
+                if is_sealed():
+                    yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR)
+                    return
             else:
                 bridge_trailing_user(messages)
             yield DoneEvent(ok=True)
@@ -1727,6 +1834,7 @@ async def run_loop(
             if ok:
                 emits = entry.decl.emits
                 if emits is not None and isinstance(result, emits):
+                    artifact_delivered = True
                     yield ArtifactEvent(
                         data_type=getattr(emits, "data_type", entry.name),
                         tool_name=tc.name,

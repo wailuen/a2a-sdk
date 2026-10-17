@@ -164,11 +164,15 @@ def build_agent_card(
     securityScheme (a2a-advisor) — the card's own auth stays bearer-only.
 
     ``allowed_components`` (SC-D2): when set, the A2UI extension only
-    advertises catalog IDs for the listed component types.
+    advertises catalog IDs for the listed component types. Catalog IDs come
+    from the registered tools' ``emits`` types (GH-188).
     """
     base_url = settings.resolved_base_url
     extensions = [
-        a2ui_extension(allowed_components),
+        a2ui_extension(
+            allowed_components,
+            [e.decl.emits for e in registry.all() if e.decl.emits is not None],
+        ),
         AgentExtension(
             uri="https://agent-sdk.dev/extensions/ag-ui-run/v1",
             description="AG-UI streaming run endpoint (SSE)",

@@ -15,6 +15,7 @@
 
 import { el, clear, fmtJson, postSse, readSse, uuid } from "./api.js";
 import { renderA2ui } from "./a2ui.js";
+import { postWithRetry } from "./retry.js";
 
 /**
  * Minimal Markdown → DOM nodes renderer (no external deps, CSP-safe).
@@ -371,15 +372,13 @@ export function render(pane, ctx) {
     };
     if (state.contextId) message.contextId = state.contextId;
 
-    const resp = await postSse(`${state.base}/v1/message:stream`, { message }, {
-      "X-A2A-Extensions": "https://a2ui.org/a2a-extension/a2ui/v0.9.1",
-    });
-    if (!resp.ok) {
-      const body = await resp.text();
-      traceFrame(`HTTP ${resp.status}`, body);
-      systemLine(`stream request failed: HTTP ${resp.status}`);
-      return;
-    }
+    const resp = await postWithRetry(
+      () => postSse(`${state.base}/v1/message:stream`, { message }, {
+        "X-A2A-Extensions": "https://a2ui.org/a2a-extension/a2ui/v0.9.1",
+      }),
+      { systemLine, traceFrame, label: "stream request" }
+    );
+    if (!resp) return;
 
     let sawFinal = false;
     let agentStream = null; // streaming bubble for A2A status-update text parts
@@ -504,32 +503,16 @@ export function render(pane, ctx) {
       };
     }
 
-    // exponential backoff retry for transient SSE connection failures
-    let resp;
-    let delay = 1000;
-    const MAX_DELAY = 30000;
-    const MAX_RETRIES = 5;
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      resp = await postSse(`${state.base}/ag-ui/run`, body);
-      if (resp.ok) break;
-      if (attempt === MAX_RETRIES) {
-        const respBody = await resp.text();
-        traceFrame(`HTTP ${resp.status}`, respBody);
-        systemLine(`run request failed: HTTP ${resp.status}`);
-        return;
-      }
-      systemLine(`run request failed (HTTP ${resp.status}), retrying in ${delay / 1000}s…`);
-      await new Promise((r) => setTimeout(r, delay));
-      delay = Math.min(delay * 2, MAX_DELAY);
-    }
+    // Retry only 429/503 (honouring Retry-After) and network failures, and only
+    // here, before any SSE frame has been read.
+    const resp = await postWithRetry(() => postSse(`${state.base}/ag-ui/run`, body), {
+      systemLine, traceFrame, label: "run request",
+    });
+    if (!resp) return;
 
     const textBuffers = new Map(); // messageId -> streamingBubble
     const toolArgBuffers = new Map(); // toolCallId -> accumulated JSON fragment string
     let terminal = false;
-    // reconnect state: if the stream drops mid-run, retry with backoff
-    let sseDelay = 1000;
-    let sseRetries = 0;
-
     const processStream = async () => {
       try {
         await readSse(resp, ({ json, data }) => {
@@ -662,20 +645,11 @@ export function render(pane, ctx) {
           }
         });
       } catch (streamErr) {
-        // SSE stream dropped before a terminal frame — retry with backoff
-        if (!terminal && sseRetries < MAX_RETRIES) {
-          sseRetries++;
-          systemLine(`SSE stream dropped, reconnecting in ${sseDelay / 1000}s… (attempt ${sseRetries}/${MAX_RETRIES})`);
-          await new Promise((r) => setTimeout(r, sseDelay));
-          sseDelay = Math.min(sseDelay * 2, MAX_DELAY);
-          body.runId = uuid(); // fresh runId per reconnect attempt — prevents server-side duplicate-run rejection
-          resp = await postSse(`${state.base}/ag-ui/run`, body);
-          if (resp.ok) {
-            await processStream();
-          } else {
-            systemLine(`reconnect failed: HTTP ${resp.status}`);
-          }
-          return;
+        // AG-UI cannot reattach to a running stream and a new POST would start a
+        // second run (every tool runs twice), so never re-POST after a drop.
+        if (!terminal) {
+          terminal = true;
+          systemLine("stream dropped. The run may still finish on the server. It was not resent.");
         }
       }
     };

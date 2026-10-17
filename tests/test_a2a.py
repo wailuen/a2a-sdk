@@ -83,10 +83,6 @@ async def test_configuration_rejections(client):
     )
     assert r.json()["error"]["code"] == -32003
     r = await client.post(
-        "/v1/message:send", json={**base, "configuration": {"blocking": True}}
-    )
-    assert r.json()["error"]["code"] == -32004
-    r = await client.post(
         "/v1/message:send",
         json={**base, "configuration": {"acceptedOutputModes": ["image/png"]}},
     )

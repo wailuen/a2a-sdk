@@ -64,6 +64,9 @@ async def <name>(inp: <Name>Input, *, api: <Source>Adapter) -> KpiCard:
   Standard Profile type, or a domain card registered via `register_content_type`).
   `build_app()` rejects an unknown `emits` at boot. Omit `emits` for a tool that
   returns plain data (`dict`); it still works, it just won't render a card.
+- **Unknown arguments** — a tool call with a key the input model does not declare
+  (field name or alias) is rejected, and the model is told the key's name. Add the
+  field, or opt out with `allow_extra_args=True` (or `extra="allow"` on the model).
 - **`sample`** — a representative input dict; powers the console "Try" button.
 
 ### FROZEN content types available for `emits` (class name == wire name)

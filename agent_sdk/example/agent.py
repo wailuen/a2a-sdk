@@ -73,7 +73,13 @@ async def publish_note(inp: PublishInput) -> dict[str, Any]:
     """Publish a note (requires user confirmation — interrupt demo)."""
 
     async def confirmed(value: Any) -> dict[str, Any]:
-        status = value.get("status") if isinstance(value, dict) else value
+        if isinstance(value, dict):
+            payload = value.get("payload")
+            status = value.get("status")
+            if status is None and isinstance(payload, dict):
+                status = payload.get("status")
+        else:
+            status = value
         if str(status).lower() in ("approved", "yes", "confirm", "true"):
             return {"published": True, "note": inp.note}
         return {"published": False, "reason": "user declined"}

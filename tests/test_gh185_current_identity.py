@@ -415,6 +415,36 @@ async def test_mcp_no_leak_between_requests(app):
     await _sequential(app, send)
 
 
+async def test_data_part_resume_binds_resuming_caller(app):
+    resumed.clear()
+    async with app.router.lifespan_context(app):
+        a, _ = _clients(app)
+        _, admin_tok = app.state.auth.api_keys.mint("root", admin=True)
+        admin = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {admin_tok}"},
+        )
+        body = _send_body()
+        body["message"]["parts"][0]["text"] = "ask"
+        tid = (await a.post("/v1/message:send", json=body)).json()["id"]
+        for _ in range(300):
+            st = (await a.get(f"/v1/tasks/{tid}")).json()["status"]["state"]
+            if st == "input-required":
+                break
+            await asyncio.sleep(0.02)
+        assert st == "input-required"
+        resume = _send_body()
+        resume["message"]["taskId"] = tid
+        resume["message"]["parts"] = [{"kind": "data", "data": {"decision": "approved"}}]
+        r = await admin.post("/v1/message:send", json=resume)
+        assert r.status_code == 200, r.text
+        await _finish(a, tid)
+        assert resumed == ["root"]
+        await a.aclose()
+        await admin.aclose()
+
+
 async def test_stream_resume_binds_resuming_caller(app):
     resumed.clear()
     async with app.router.lifespan_context(app):

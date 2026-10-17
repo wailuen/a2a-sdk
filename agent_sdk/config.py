@@ -174,6 +174,9 @@ class BaseAgentSettings(BaseSettings):
     max_interrupted_tasks: int = Field(default=100, alias="AGENT_SDK_MAX_INTERRUPTED")
     task_ttl_seconds: int = Field(default=3600, alias="AGENT_SDK_TASK_TTL")
     task_deadline_seconds: int = Field(default=600, alias="AGENT_SDK_TASK_DEADLINE")
+    blocking_send_max_seconds: float = Field(
+        default=120.0, gt=0, alias="AGENT_SDK_BLOCKING_SEND_MAX"
+    )
     task_token_budget: int = Field(default=200_000, alias="AGENT_SDK_TASK_TOKEN_BUDGET")
     rate_limit_per_minute: int = Field(default=100, alias="AGENT_SDK_RATE_LIMIT")
     unauth_rate_limit_per_minute: int = Field(

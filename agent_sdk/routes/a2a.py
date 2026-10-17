@@ -109,11 +109,13 @@ from ..common.admission import (
 )
 from ..common.origin import guard_origin
 from ..common.json_strict import dumps_strict, loads_strict, scrub_unencodable
-from ..common.sse import SSE_HEADERS, sse_data
+from ..common import sse as _sse
+from ..common.sse import HEARTBEAT, SSE_HEADERS, sse_data
 from ..common.wire_errors import a2a_error, a2a_invalid_params, a2a_parse_error
 from ..models.a2a import (
     INTERRUPT_STATES,
     TERMINAL_STATES,
+    DataPart,
     Message,
     MessageSendParams,
     Task,
@@ -383,6 +385,24 @@ def _unsupported_input_error(message: Message) -> JSONResponse | None:
     return None
 
 
+def _resume_value(message: Message) -> Any | JSONResponse:
+    """GH-193: the value delivered to ``resume_handler``. Text resumes stay a
+    plain ``str``; exactly one DataPart (and nothing else) becomes
+    ``{"status": None, "payload": data}``. Names part kinds only (SI-2)."""
+    data_parts = [p for p in message.parts if isinstance(p, DataPart)]
+    if not data_parts:
+        return _message_text(message)
+    others = sorted({p.kind for p in message.parts if not isinstance(p, (DataPart, TextPart))})
+    if others:
+        return a2a_error(
+            A2A_CONTENT_TYPE_NOT_SUPPORTED,
+            "unsupported message part kind: " + ", ".join(others) + "; a resume accepts text or one data part",
+        )
+    if len(message.parts) != 1:
+        return a2a_invalid_params("a data resume must contain exactly one data part and no other parts")
+    return {"status": None, "payload": data_parts[0].data}
+
+
 def _capabilities(message: Message, request: Request) -> A2uiCapabilities:
     # Gate A2UI on the opt-in header — clients that never sent X-A2A-Extensions
     # containing A2UI_EXTENSION_URI must not receive A2UI DataParts. The
@@ -404,11 +424,6 @@ def _config_error(params: MessageSendParams) -> JSONResponse | None:
         return a2a_error(
             A2A_PUSH_NOTIFICATION_NOT_SUPPORTED,
             "push notifications are not supported",
-        )
-    if config.blocking:
-        return a2a_error(
-            A2A_UNSUPPORTED_OPERATION,
-            "blocking send is not supported; poll tasks/{id}",
         )
     if config.accepted_output_modes is not None and config.accepted_output_modes:
         if not _SUPPORTED_MODES.intersection(config.accepted_output_modes):
@@ -445,7 +460,11 @@ async def _parse_send(request: Request) -> MessageSendParams | JSONResponse:
         )
         detail = f"invalid message params (check: {fields})" if fields else "invalid message params"
         return a2a_invalid_params(detail)
-    if (err := _unsupported_input_error(params.message)) is not None:
+    # GH-193: a resume may carry one DataPart (validated in _resume_or_error,
+    # after the task-state checks); everything else keeps the text-only check.
+    msg = params.message
+    is_data_resume = bool(msg.task_id) and any(isinstance(p, DataPart) for p in msg.parts)
+    if not is_data_resume and (err := _unsupported_input_error(msg)) is not None:
         return err
     return params
 
@@ -532,11 +551,12 @@ def _resume_or_error(
         return a2a_error(A2A_UNSUPPORTED_OPERATION, "task is not awaiting input")
     if msg.context_id and msg.context_id != record.task.context_id:
         return a2a_invalid_params("contextId does not match the task")
+    value = _resume_value(msg)
+    if isinstance(value, JSONResponse):
+        return value
     # GH-185: the already-running worker picks this up after its resume wait,
     # so post-resume tools see the resuming caller (not the original submitter).
-    delivered = store.deliver_resume(
-        record.task.id, ResumeEnvelope(_message_text(msg), identity)
-    )
+    delivered = store.deliver_resume(record.task.id, ResumeEnvelope(value, identity))
     if not delivered:
         # lost the race: interrupt was consumed/expired between check and deliver
         return a2a_error(A2A_TASK_NOT_FOUND, "task not found")
@@ -615,10 +635,25 @@ async def message_send(
         return params
     if (err := _config_error(params)) is not None:
         return err
+    blocking = bool(params.configuration and params.configuration.blocking)
     if params.message.task_id:
-        record = _resume_or_error(request, params, identity)
-        if isinstance(record, JSONResponse):
-            return record
+        slot: _ClaimedSlot | None = None
+        sub: Subscription | None = None
+        if blocking:
+            # GH-189: subscribe BEFORE delivering the resume so no frame is missed.
+            existing = request.app.state.task_store.get(params.message.task_id, identity)
+            if existing is not None:
+                slot = await _admit(request, identity, existing.task.id)
+                sub = slot.subscribe(existing.task.id)
+        try:
+            record = _resume_or_error(request, params, identity)
+            if isinstance(record, JSONResponse):
+                return record
+            if sub is not None:
+                await _wait_blocking(request, sub)
+        finally:
+            if slot is not None:
+                await slot.release()
         # RT-005: a resume never calls _capabilities()/forwarding.bind, so
         # only A2UI can ever be echoed here, and only when the resumed
         # Task's OWN artifacts genuinely carry an A2UI part.
@@ -641,19 +676,50 @@ async def message_send(
                 parts=[TextPart(kind="text", text=reply_text)],
             )
             return _strict_json_response(bare_msg.wire())
-    record = _create_task_record(request, params, identity)
-    _start_worker(
+    slot = await _admit(request, identity, None) if blocking else None
+    try:
+        record = _create_task_record(request, params, identity)
+        sub = slot.subscribe(record.task.id) if slot is not None else None
+        _start_worker(
             request, record, _capabilities(params.message, request), identity,
             (params.message.metadata or {}).get("timezone"),
         )
-    # RT-005: the sole path on this route that can activate either
-    # extension — echoed only now that _capabilities()/_start_worker have
-    # actually run.
-    _echo_extensions(request, response)
+        # RT-005: the sole path on this route that can activate either
+        # extension — echoed only now that _capabilities()/_start_worker have
+        # actually run.
+        _echo_extensions(request, response)
+        if sub is not None:
+            await _wait_blocking(request, sub)
+    finally:
+        if slot is not None:
+            await slot.release()
     history_length = (
         params.configuration.history_length if params.configuration else None
     )
     return _strict_json_response(_task_wire(record, history_length), dict(response.headers))
+
+
+async def _wait_blocking(request: Request, sub: Subscription) -> None:
+    """GH-189: A2A v0.3.0 ``blocking: true`` — wait until the task is
+    terminal or interrupted (the runner publishes ``final`` for both), capped
+    at ``min(task deadline, blocking_send_max_seconds)``. The worker keeps
+    running past the cap. The caller owns subscription teardown."""
+    settings = request.app.state.settings
+    cap = min(float(settings.task_deadline_seconds), float(settings.blocking_send_max_seconds))
+
+    async def drain() -> None:
+        while True:
+            try:
+                item = await sub.get()
+            except StreamTerminated:
+                return
+            if item is None or item.final:
+                return
+
+    try:
+        await asyncio.wait_for(drain(), timeout=cap)
+    except asyncio.TimeoutError:
+        pass
 
 
 async def _admit(
@@ -858,7 +924,12 @@ async def _open_stream(
                 return
             while True:
                 try:
-                    item = await sub.get()
+                    item = await asyncio.wait_for(
+                        sub.get(), timeout=_sse.STREAM_HEARTBEAT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    yield HEARTBEAT
+                    continue
                 except StreamTerminated:
                     return
                 if item is None:
@@ -967,6 +1038,40 @@ async def tasks_list(
         "nextPageToken": next_token or "",
     }
     return _strict_json_response(body, dict(response.headers))
+
+
+def _push_config_not_supported(request: Request, response: Response) -> JSONResponse:
+    # GH-190: identical reply for known, foreign and unknown tasks; the task id
+    # is never looked up and the request body is never read.
+    guard_origin(request)
+    return a2a_error(
+        A2A_PUSH_NOTIFICATION_NOT_SUPPORTED,
+        "push notifications are not supported",
+        headers=dict(response.headers),
+    )
+
+
+@router.post("/v1/tasks/{task_id}/pushNotificationConfigs")
+@router.get("/v1/tasks/{task_id}/pushNotificationConfigs")
+async def push_configs_unsupported(
+    task_id: str,
+    request: Request,
+    response: Response,
+    identity: Identity = Depends(require_identity),
+) -> Any:
+    return _push_config_not_supported(request, response)
+
+
+@router.get("/v1/tasks/{task_id}/pushNotificationConfigs/{config_id}")
+@router.delete("/v1/tasks/{task_id}/pushNotificationConfigs/{config_id}")
+async def push_config_unsupported(
+    task_id: str,
+    config_id: str,
+    request: Request,
+    response: Response,
+    identity: Identity = Depends(require_identity),
+) -> Any:
+    return _push_config_not_supported(request, response)
 
 
 @router.get("/v1/tasks/{task_id}")

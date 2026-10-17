@@ -41,6 +41,7 @@ from ..common.iso8601 import iso_utc
 from ..common.origin import guard_origin
 from ..common.redact import frame_locations
 from ..common.json_strict import loads_strict
+from ..common import sse as _sse
 from ..common.sse import HEARTBEAT, SSE_HEADERS, sse_data
 from ..credentials import forwarding
 from ..models.content_types import ContentModel, MarketBriefing
@@ -513,12 +514,13 @@ def _user_timezone(body: dict[str, Any]) -> str | None:
     return forwarded.get("timezone")
 
 
-def _parse_body(raw: bytes) -> dict[str, Any]:
+def _parse_body(raw: bytes) -> dict[str, Any] | None:
+    """The body as an object, or ``None`` when it is not JSON or not an object."""
     try:
         body = loads_strict(raw)
     except (json.JSONDecodeError, ValueError):
-        return {}
-    return body if isinstance(body, dict) else {}
+        return None
+    return body if isinstance(body, dict) else None
 
 
 def _resume_interrupt_id(body: dict[str, Any]) -> str:
@@ -618,7 +620,8 @@ async def ag_ui_run(
     # Parsed BEFORE admission (RT-001, round 6) purely so the resume branch's
     # target task id is known to `_admit`. Parsing allocates nothing durable,
     # so this does not move any state mutation ahead of the load-shed check.
-    body = _parse_body(raw)
+    parsed_body = _parse_body(raw)
+    body = parsed_body if parsed_body is not None else {}
 
     # RT-002: admit against the shared A2A stream budget BEFORE any durable
     # state mutation (store.create() happens inside stream() below) and
@@ -695,6 +698,9 @@ async def ag_ui_run(
         sub = None
         record: TaskRecord | None = None
         try:
+            if parsed_body is None:
+                yield _emit(mapper.run_error("malformed RunAgentInput body"))
+                return
             if (problem := _validate(body)) is not None:
                 yield _emit(mapper.run_error(problem))
                 return
@@ -771,7 +777,7 @@ async def ag_ui_run(
 
             while not mapper.terminal_sent:
                 try:
-                    item = await asyncio.wait_for(sub.get(), timeout=15.0)
+                    item = await asyncio.wait_for(sub.get(), timeout=_sse.STREAM_HEARTBEAT_SECONDS)
                 except asyncio.TimeoutError:
                     yield HEARTBEAT
                     continue

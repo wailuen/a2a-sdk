@@ -24,12 +24,14 @@ from typing import (
     cast,
 )
 
-from pydantic import BaseModel, ValidationError
+from pydantic import AliasChoices, AliasPath, BaseModel, ValidationError
+from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from ..models.errors import AgentError, ErrorCategory
 from ..sources import SourceAdapter
 from .deferred import DeferredResult
 from .reuse import (
+    _accepts_field_name_alias,
     RAW_PREFIX,
     REF_PREFIX,
     Reusable,
@@ -323,6 +325,57 @@ class ToolInputValidationError(Exception):
         super().__init__(f"tool {tool_name!r} input validation failed")
 
 
+UNKNOWN_ARGUMENT_ERROR_TYPE = "unknown_argument"
+
+
+def _declared_argument_keys(model: type[BaseModel]) -> frozenset[str]:
+    keys: set[str] = set()
+    by_name = _accepts_field_name_alias(model)
+    for fname, finfo in model.model_fields.items():
+        va = finfo.validation_alias
+        if by_name or (finfo.alias is None and va is None):
+            keys.add(fname)
+        if isinstance(finfo.alias, str):
+            keys.add(finfo.alias)
+        choices = va.choices if isinstance(va, AliasChoices) else [va]
+        for choice in choices:
+            if isinstance(choice, str):
+                keys.add(choice)
+            elif isinstance(choice, AliasPath) and choice.path and isinstance(choice.path[0], str):
+                keys.add(choice.path[0])
+    return frozenset(keys)
+
+
+def _unknown_argument_error(keys: list[str], *, tool_name: str) -> "ToolInputValidationError":
+    """GH-196: build a ToolInputValidationError naming each unknown key and
+    never its value (SI-2)."""
+    details = [
+        InitErrorDetails(
+            type=PydanticCustomError(UNKNOWN_ARGUMENT_ERROR_TYPE, "unknown argument"),
+            loc=(key,),
+            input=None,
+        )
+        for key in keys
+    ]
+    exc = ValidationError.from_exception_data(tool_name, details)
+    return ToolInputValidationError(exc, tool_name=tool_name)
+
+
+def _check_unknown_arguments(decl: "ToolDecl", arguments: dict[str, Any]) -> None:
+    if decl.allow_extra_args or not arguments:
+        return
+    model = decl.input_model
+    if model is None:
+        allowed: frozenset[str] = frozenset()
+    elif model.model_config.get("extra") in ("allow", "forbid"):
+        return
+    else:
+        allowed = _declared_argument_keys(model)
+    unknown = [k for k in arguments if k not in allowed]
+    if unknown:
+        raise _unknown_argument_error([str(k) for k in unknown], tool_name=decl.name)
+
+
 @dataclass(slots=True)
 class ToolTerminalResult:
     """Sentinel yielded by ``ToolEntry.invoke_gen()`` as the last item.
@@ -387,6 +440,9 @@ class ToolDecl:
     # against an int field already resolved to 5831) is not rejected here as
     # a type mismatch before the tool is ever reached.
     reuse_field_types: dict[str, type] = field(default_factory=dict)
+    # GH-196: True → unknown argument keys are not rejected (and the schema
+    # advertises additionalProperties: true).
+    allow_extra_args: bool = False
 
 
 class ToolSet:
@@ -408,6 +464,7 @@ class ToolSet:
         tags: list[str] | None = None,
         long_running: bool = False,
         tool_timeout_override: float | None = None,
+        allow_extra_args: bool = False,
     ) -> Callable:
         if tier not in (1, 2):
             raise ValueError("tier must be 1 (query: A2A+MCP) or 2 (composite: A2A only)")
@@ -587,6 +644,7 @@ class ToolSet:
                     reuse_strict=reuse_strict_for_model(input_model),
                     reuse_raw_override=reuse_raw_override_for_model(input_model),
                     reuse_field_types=reuse_field_types_for_model(input_model),
+                    allow_extra_args=allow_extra_args,
                 )
             )
             return fn
@@ -655,9 +713,18 @@ class ToolEntry:
         token with the resolved value of the field's real type.
         """
         if self.decl.input_model is None:
-            return {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+            return {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": self.decl.allow_extra_args,
+            }
         schema = self.decl.input_model.model_json_schema()
-        schema.setdefault("additionalProperties", False)
+        extra = self.decl.input_model.model_config.get("extra")
+        if self.decl.allow_extra_args or extra == "allow":
+            schema["additionalProperties"] = True
+        else:
+            schema.setdefault("additionalProperties", False)
         schema.setdefault("required", [])
         if include_reuse_hint and self.decl.reuse_fields:
             properties = schema.get("properties")
@@ -739,6 +806,7 @@ class ToolEntry:
             pname: adapters[cls] for pname, cls in self.decl.adapter_params.items()
         }
         coro_fn = cast(Callable[..., Awaitable[Any]], self.decl.fn)
+        _check_unknown_arguments(self.decl, arguments)
         if self.decl.input_model is not None:
             # RT-004: narrow try — ONLY model_validate. A ValidationError
             # raised later, while coro_fn builds its ContentModel return
@@ -784,6 +852,7 @@ class ToolEntry:
             pname: adapters[cls] for pname, cls in self.decl.adapter_params.items()
         }
         gen_fn = cast(Callable[..., AsyncGenerator[Any, None]], self.decl.fn)
+        _check_unknown_arguments(self.decl, arguments)
         if self.decl.input_model is not None:
             # RT-004: narrow try — see invoke()'s matching comment.
             try:

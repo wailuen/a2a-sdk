@@ -251,7 +251,7 @@ Assembled by the SDK; teams never hand-write card JSON. Spec-conformance rules:
 - `capabilities.extensions[]` lists **only URIs with a real negotiation path**: the A2UI extension URI `https://a2ui.org/a2a-extension/a2ui/v0.9.1` (exact string; activated via `X-A2A-Extensions` echo). The previous "enhanced-content-types" pseudo-extension is dropped; content-type metadata rides in `x-sdk` fields.
 - `capabilities.pushNotifications: false`, `capabilities.streaming: true`.
 - AG-UI surface advertised via the top-level `x-agui` block (deliberate choice over a `urn:agui:run:v1` extension; AG-UI has no normative card form): `{transport, endpoint, customEvents: [...]}` — `endpoint` is absolute, derived from the same resolved base URL as `url` (so the dev localhost fallback applies here too; it is never null or malformed).
-- A2UI catalogs advertised under the A2UI extension params: `supportedCatalogIds = ["urn:a2ui-profile:standard:v1", …registered domain catalog ids]`.
+- A2UI catalogs advertised under the A2UI extension params: `supportedCatalogIds` is built from the catalogs of the registered tools' `emits` types, after the `a2ui_allowed_components` filter. The Standard Profile (`urn:a2ui-profile:standard:v1`) is listed first only when some tool emits a Profile type; a registered domain catalog no tool emits is not advertised; an agent with no emitting tools advertises `[]` (the A2UI extension entry is still present). Ruling (GH-188): https://github.com/wailuen/a2a-sdk/issues/188#issuecomment-6229361485.
 - ETag/conditional GET; `/.well-known/agent.json` byte-identical legacy alias.
 
 ---
@@ -269,7 +269,7 @@ Endpoints:
 
 Inbound `Message` validation: `messageId` is required (spec REQ); missing → 400 invalid params.
 
-`MessageSendParams.configuration` is a typed **`MessageSendConfiguration`** model (`acceptedOutputModes?, historyLength?, pushNotificationConfig?, blocking?`) — never a raw dict. The SDK honors `acceptedOutputModes` and `historyLength`; `pushNotificationConfig` present → `-32003 PushNotificationNotSupported` (capability is false); `blocking: true` the server can't honor → `-32004` (the spec leaves this code unspecified; -32004 is the documented local convention).
+`MessageSendParams.configuration` is a typed **`MessageSendConfiguration`** model (`acceptedOutputModes?, historyLength?, pushNotificationConfig?, blocking?`) — never a raw dict. The SDK honors `acceptedOutputModes` and `historyLength`; `pushNotificationConfig` present → `-32003 PushNotificationNotSupported` (capability is false); `blocking: true` waits until the task is terminal or `input-required`, capped at `min(task deadline, AGENT_SDK_BLOCKING_SEND_MAX)`, and returns the current Task at the cap (A2A v0.3.0 §7.1.1).
 
 **Task identity binding (security):** every task records its creating identity (`kind` + id, §6). `GET`, `:subscribe`, `:cancel`, and resume require the same identity (admin `api_key` identities may override); mismatch → 404 + `-32001` — existence is not leaked. Without this, anyone who learns a taskId from a log or trace could read it or, worse, confirm another identity's pending action_gate proposal.
 
@@ -286,7 +286,7 @@ Complete A2A error code table (all seven; internal sentinel names match spec nam
 | -32001 | TaskNotFound | unknown/expired task id |
 | -32002 | TaskNotCancelable | cancel on terminal task |
 | -32003 | PushNotificationNotSupported | any push-config request (capability false) |
-| -32004 | UnsupportedOperation | unsupported blocking, terminal-task re-message (`message/send`, `message/stream`), any unimplemented method |
+| -32004 | UnsupportedOperation | terminal-task re-message (`message/send`, `message/stream`), any unimplemented method |
 | -32005 | ContentTypeNotSupported | unacceptable `acceptedOutputModes` |
 | -32006 | InvalidAgentResponse | internal translator failure |
 | -32007 | AuthenticatedExtendedCardNotConfigured | extended-card request (not configured) |

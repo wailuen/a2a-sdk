@@ -361,6 +361,86 @@ async def test_authorize_approve_widens_form_action_to_loopback_redirect(client)
     )
 
 
+_APIM_REDIRECT = "https://global.consent.azure-apim.net/redirect/cr123-5fteamwork"
+_APIM_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; "
+    "form-action 'self' https://global.consent.azure-apim.net "
+    "https://*.consent.azure-apim.net; "
+    "frame-ancestors 'none'; base-uri 'none'"
+)
+
+
+async def test_authorize_approve_allows_azure_apim_regional_hop(client):
+    """GH-198: global.consent.azure-apim.net 302s to a regional host and
+    form-action is enforced across the chain, so the 303 CSP must allow it."""
+    redirect_uri = _APIM_REDIRECT
+    client_id = await _register_client(client, redirect_uri)
+    r = await client.post(
+        "/oauth/authorize",
+        content=_form(
+            {
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "response_type": "code",
+                "code_challenge": _CODE_CHALLENGE,
+                "code_challenge_method": "S256",
+            }
+        ),
+        headers=_FORM_HEADERS,
+        follow_redirects=False,
+    )
+    assert r.status_code == 303, f"{r.status_code}: {r.text}"
+    assert r.headers.get("content-security-policy", "") == _APIM_CSP
+
+
+async def test_consent_page_allows_azure_apim_regional_hop(client):
+    """LRN-126: the form-owning GET consent page carries the same widening."""
+    client_id = await _register_client(client, _APIM_REDIRECT)
+    r = await client.get(
+        "/oauth/authorize",
+        params={
+            "client_id": client_id,
+            "redirect_uri": _APIM_REDIRECT,
+            "response_type": "code",
+            "code_challenge": _CODE_CHALLENGE,
+            "code_challenge_method": "S256",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 200, f"{r.status_code}: {r.text}"
+    assert r.headers.get("content-security-policy", "") == _APIM_CSP
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "https://global.consent.azure-apim.net.evil.example/redirect/x",
+        "https://asia-001.consent.azure-apim.net/redirect/x",
+        "https://global.consent.azure-apim.net:8443/redirect/x",
+        "https://global.consent.azure-apim.net./redirect/x",
+        "http://global.consent.azure-apim.net/redirect/x",
+    ],
+)
+def test_azure_apim_wildcard_not_added_for_lookalike_origin(uri):
+    from agent_sdk.routes.oauth import _redirect_security_headers
+
+    csp = _redirect_security_headers(uri)["Content-Security-Policy"]
+    assert "*" not in csp, f"got: {csp}"
+
+
+def test_unrelated_origin_csp_unchanged_by_known_hops():
+    from agent_sdk.routes.oauth import _redirect_security_headers
+
+    csp = _redirect_security_headers("https://claude.ai/api/mcp/auth_callback")[
+        "Content-Security-Policy"
+    ]
+    assert csp == (
+        "default-src 'none'; style-src 'unsafe-inline'; "
+        "form-action 'self' https://claude.ai; "
+        "frame-ancestors 'none'; base-uri 'none'"
+    )
+
+
 async def test_authorize_error_redirect_widens_form_action(client):
     """An error redirect (e.g. unsupported_response_type) also redirects to
     the OAuth client's redirect_uri once it has been validated, so its CSP

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+from collections.abc import Iterable
 
 from ..models.a2a import AgentExtension
 from ..models.content_types import (
@@ -313,17 +314,37 @@ def _filtered_types(
     return {dt: cls for dt, cls in all_types.items() if cls.component in allowed_set}
 
 
-def supported_catalogs(allowed_components: list[str] | None = None) -> list[str]:
-    """Standard catalog first, then any registered domain catalogs.
+def supported_catalogs(
+    allowed_components: list[str] | None = None,
+    emits: Iterable[type] | None = None,
+) -> list[str]:
+    """Catalog IDs to advertise (SC-D2, GH-188).
 
-    When *allowed_components* is provided only the catalog IDs of the allowed
-    component types are included (SC-D2).
+    With *emits* (the registered tools' ``emits`` types) only catalogs of the
+    types a tool can actually emit are listed, after the
+    *allowed_components* filter; the Standard Profile comes first when
+    present.  Without *emits*, falls back to the Standard Profile plus every
+    registered catalog.
     """
-    catalogs = [CATALOG_ID]
-    for cls in _filtered_types(allowed_components).values():
-        if cls.catalog_id not in catalogs:
-            catalogs.append(cls.catalog_id)
-    return catalogs
+    if emits is None:
+        catalogs = [CATALOG_ID]
+        for cls in _filtered_types(allowed_components).values():
+            if cls.catalog_id not in catalogs:
+                catalogs.append(cls.catalog_id)
+        return catalogs
+    allowed = None if allowed_components is None else set(allowed_components)
+    found: list[str] = []
+    for cls in emits:
+        if not (isinstance(cls, type) and issubclass(cls, ContentModel)):
+            continue
+        if cls.catalog_id is None or (allowed is not None and cls.component not in allowed):
+            continue
+        if cls.catalog_id not in found:
+            found.append(cls.catalog_id)
+    if CATALOG_ID in found:
+        found.remove(CATALOG_ID)
+        found.insert(0, CATALOG_ID)
+    return found
 
 
 def data_types_for_catalog(
@@ -336,7 +357,10 @@ def data_types_for_catalog(
     )
 
 
-def a2ui_extension(allowed_components: list[str] | None = None) -> AgentExtension:
+def a2ui_extension(
+    allowed_components: list[str] | None = None,
+    emits: Iterable[type] | None = None,
+) -> AgentExtension:
     """The card's A2UI extension declaration (activated via
     X-A2A-Extensions echo, §5.1).
 
@@ -380,7 +404,7 @@ def a2ui_extension(allowed_components: list[str] | None = None) -> AgentExtensio
         description="A2UI v0.9.1 over A2A DataParts",
         required=False,
         params={
-            "supportedCatalogIds": supported_catalogs(allowed_components),
+            "supportedCatalogIds": supported_catalogs(allowed_components, emits),
             "acceptsInlineCatalogs": False,
             "deleteSurfaceSemantics": "split-delivery",
             "dataEncoding": "data.messages",

@@ -149,6 +149,15 @@ async def test_full_turn(client):
     )
     assert "Q1" in text
 
+    # Resume an AG-UI interrupt (no user message is added). The tool's
+    # resume_handler decides what the payload means; the example agent's
+    # publish_note approves when status is "approved".
+    seen: list = []
+    await driver.agui_turn("Publish it.", thread_id, messages, emit={"interrupt": seen.append})
+    text = await driver.agui_resume(
+        seen[0]["id"], thread_id, messages, status="approved",
+    )
+
     # A2A variant
     task = await driver.a2a_turn("Show me the risk scores.", context_id=None)
     assert task["status"]["state"] == "completed"

@@ -40,6 +40,19 @@ Rules the decorator enforces:
   happens without an explicit `name=` override, the SDK logs a `WARNING`
   at registration time; pass `name="foo"` to `@tools.tool(...)` to fix it.
 
+## Unknown arguments are rejected
+
+A call that carries a key the input model does not declare (by field name or
+alias) fails with `ToolInputValidationError`, on the agent loop and on MCP
+`tools/call` alike. The model sees the key's name, never its value. A tool
+with no input model rejects any argument. `input_schema()` advertises
+`additionalProperties: false` only when this is enforced.
+
+To accept extra keys, set `model_config = ConfigDict(extra="allow")` on the
+input model, or pass `allow_extra_args=True` to `@tools.tool(...)`. Both make
+the schema advertise `additionalProperties: true`. The SDK never edits your
+model class.
+
 ## MCP annotations
 
 `readOnlyHint`/`destructiveHint` come from `read_only=`. `openWorldHint` is
@@ -127,6 +140,15 @@ Per task: max 20 turns, 600s deadline (interrupt-suspended), 200k token
 budget *across resumes*, and a task-local result cache (an identical
 `(tool, args)` call is served from cache, not re-invoked). Tune via
 `BaseAgentSettings` or `LoopPolicies`.
+
+`LoopPolicies.empty_reply_retry` (default `True`): if the model answers
+right after a tool result with no tool calls and only blank text, the loop
+makes ONE more model call with tools off. It does not use a `max_turns`
+turn, its tokens count toward the token budget, and it emits a usage event.
+If that call is also blank or fails, the user sees a fixed notice and the
+task still ends `ok=True`. No notice is added when a card was already
+delivered this turn. No retry runs when the task is sealed, past its
+deadline, or out of token budget. Set `False` for the old silent end.
 
 ## Reusable values (cross-turn references)
 
