@@ -8,6 +8,13 @@ internals, `contrib/`) may change in minors with notice here.
 
 _Nothing yet._
 
+## [0.15.2] — 2026-10-17
+
+Back-port patch on the 0.15.x line (branch `release/0.15.x`) for agents not yet on 0.16/0.17. Contains only GH-198; the same fix ships on main in 0.17.0.
+
+### Fixed
+- GH-198: Microsoft Copilot Studio could not finish OAuth sign-in. Its redirect URI `https://global.consent.azure-apim.net/redirect/<id>` 302s to a regional host (e.g. `asia-001.consent.azure-apim.net`), and the consent page's CSP `form-action` blocked that hop. A fixed exact-origin table (`_KNOWN_REDIRECT_HOPS` in `routes/oauth.py`) now adds `https://*.consent.azure-apim.net` to `form-action` only when the validated redirect origin is exactly `https://global.consent.azure-apim.net`; every other client's CSP is unchanged. Decision and revisit triggers: https://github.com/wailuen/a2a-sdk/issues/198#issuecomment-6229599836
+
 ## [0.15.1] — 2026-10-16
 
 Resolves GH-183 and GH-184 (harness skills only; no `agent_sdk` code change).
