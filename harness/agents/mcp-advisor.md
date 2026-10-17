@@ -87,7 +87,8 @@ same dimensions into a **recommended build order**.
    block for back-compat.
 6. HTTP transport: single endpoint POST+GET; `Accept: application/json, text/event-stream`
    handled; GET returns `text/event-stream` or **405**; honor `Mcp-Session-Id` (400 if
-   required & missing, 404 if expired); require `MCP-Protocol-Version` post-init; validate
+   required & missing, 404 if expired); validate `MCP-Protocol-Version` post-init (400 if present but unsupported; if absent, use the
+   version negotiated at initialize, else assume 2025-03-26 — do NOT 400 on absent); validate
    `Origin`.
 7. **Remote/HTTP auth (if protected):** real **`401`** + `WWW-Authenticate: Bearer
    resource_metadata=...`; RFC 9728 PRM; RFC 8414 AS metadata with

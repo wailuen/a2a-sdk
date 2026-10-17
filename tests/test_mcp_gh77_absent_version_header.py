@@ -1,14 +1,9 @@
-"""GH-77: absent MCP-Protocol-Version header on post-init requests must return 400.
+"""GH-77 / GH-200: MCP-Protocol-Version handling on Streamable HTTP POST /mcp.
 
-MCP spec §10: the MCP-Protocol-Version header is REQUIRED on every non-initialize
-request after the session is established. The server must return 400 when the
-header is absent on a non-initialize POST, not silently fall back.
-
-Tests:
-- POST to a non-initialize endpoint with no MCP-Protocol-Version header → 400
-- POST to initialize with no MCP-Protocol-Version header → 200 (regression guard)
-- POST to a non-initialize endpoint with a present but unrecognized version → 400
-  (existing behavior, must remain unchanged)
+GH-200 reverses GH-77's absent-header 400: the spec only requires 400 for an
+invalid/unsupported value. An absent header on a non-initialize request is
+dispatched using the version negotiated at initialize for that session, else
+2025-03-26. Present-but-unrecognized still 400s.
 """
 
 from __future__ import annotations
@@ -56,69 +51,101 @@ def test_negotiated_version_unrecognized_returns_none() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Integration: POST /mcp — absent header on non-initialize → 400
+# Integration: POST /mcp — absent header on non-initialize (GH-200 reverses the
+# GH-77 400: dispatch, echoing the session's negotiated version)
 # ---------------------------------------------------------------------------
 
 
-async def test_absent_version_header_on_ping_returns_400(
-    client: httpx.AsyncClient,
-) -> None:
-    """POST /mcp with method=ping and NO MCP-Protocol-Version header must
-    return 400 per MCP spec §10 (header required post-initialization)."""
-    # Establish a session first.
-    r_init = await client.post(
+async def _init(client: httpx.AsyncClient, version: str) -> str:
+    r = await client.post(
         "/mcp",
         json={
             "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
-            "params": {"protocolVersion": "2025-06-18", "capabilities": {}},
+            "params": {"protocolVersion": version, "capabilities": {}},
         },
     )
-    assert r_init.status_code == 200, r_init.text
-    session_id = r_init.headers.get("mcp-session-id")
+    assert r.status_code == 200, r.text
+    session_id = r.headers.get("mcp-session-id")
     assert session_id, "Expected Mcp-Session-Id from initialize"
+    return session_id
 
-    # Send ping with no MCP-Protocol-Version header.
+
+@pytest.mark.parametrize("version", ["2025-03-26", "2025-06-18"])
+@pytest.mark.parametrize("method", ["ping", "tools/list"])
+async def test_absent_version_header_echoes_session_version(
+    client: httpx.AsyncClient, version: str, method: str
+) -> None:
+    session_id = await _init(client, version)
+    r = await client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": method, "params": {}},
+        headers={"Mcp-Session-Id": session_id},
+    )
+    assert r.status_code == 200, r.text
+    assert "result" in r.json()
+    assert r.headers.get("mcp-protocol-version") == version
+
+
+async def test_absent_version_header_no_session_falls_back_to_2025_03_26(
+    client: httpx.AsyncClient,
+) -> None:
+    r = await client.post(
+        "/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}}
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers.get("mcp-protocol-version") == "2025-03-26"
+
+
+async def test_absent_version_header_unknown_session_still_404(
+    client: httpx.AsyncClient,
+) -> None:
     r = await client.post(
         "/mcp",
         json={"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}},
-        headers={"Mcp-Session-Id": session_id},
-        # deliberately no MCP-Protocol-Version header
+        headers={"Mcp-Session-Id": "deadbeef"},
     )
-    assert r.status_code == 400, (
-        f"Absent MCP-Protocol-Version on post-init ping must return 400; "
-        f"got {r.status_code}: {r.text}"
-    )
+    assert r.status_code == 404
 
 
-async def test_absent_version_header_on_tools_list_returns_400(
+async def test_absent_version_header_missing_session_id_with_live_session_400(
     client: httpx.AsyncClient,
 ) -> None:
-    """POST /mcp with method=tools/list and NO MCP-Protocol-Version header must
-    return 400 (same rule applies to all non-initialize methods)."""
-    r_init = await client.post(
-        "/mcp",
-        json={
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {"protocolVersion": "2025-06-18", "capabilities": {}},
-        },
+    await _init(client, "2025-06-18")
+    r = await client.post(
+        "/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}}
     )
-    assert r_init.status_code == 200, r_init.text
-    session_id = r_init.headers.get("mcp-session-id")
-    assert session_id
+    assert r.status_code == 400
+    assert "Mcp-Session-Id required" in r.text
 
+
+async def test_present_unrecognized_version_header_returns_400(
+    client: httpx.AsyncClient,
+) -> None:
+    session_id = await _init(client, "2025-06-18")
     r = await client.post(
         "/mcp",
-        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
-        headers={"Mcp-Session-Id": session_id},
+        json={"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}},
+        headers={"Mcp-Session-Id": session_id, "MCP-Protocol-Version": "1999-01-01"},
     )
-    assert r.status_code == 400, (
-        f"Absent MCP-Protocol-Version on tools/list must return 400; "
-        f"got {r.status_code}: {r.text}"
+    assert r.status_code == 400
+    assert "unsupported MCP-Protocol-Version" in r.text
+    assert "required" not in r.text
+    assert "1999" not in r.headers.get("mcp-protocol-version", "")
+
+
+async def test_present_supported_version_header_echoed(
+    client: httpx.AsyncClient,
+) -> None:
+    session_id = await _init(client, "2025-06-18")
+    r = await client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}},
+        headers={"Mcp-Session-Id": session_id, "MCP-Protocol-Version": "2025-03-26"},
     )
+    assert r.status_code == 200
+    assert r.headers.get("mcp-protocol-version") == "2025-03-26"
 
 
 # ---------------------------------------------------------------------------

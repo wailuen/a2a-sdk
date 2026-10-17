@@ -53,8 +53,11 @@ MUST send ``MCP-Protocol-Version`` on every non-``initialize`` request, and
 the server MUST 400 a present-but-unrecognized version — both hold on every
 path below. Only the ABSENT-header case is a spec SHOULD (assume
 2025-03-26 for pre-header clients), and handling of that case is where the
-paths diverge: Streamable HTTP (``POST /mcp``) is stricter than the SHOULD
-and 400s on absent too, present-but-unrecognized → 400 (§10 MUST);
+paths diverge: Streamable HTTP (``POST /mcp``) follows the SHOULD (GH-200,
+reversing GH-77's absent→400): absent → dispatched; the response header
+carries the version the session negotiated at initialize, else 2025-03-26
+(``_dispatch`` itself is version-agnostic); present-but-unrecognized →
+400 (§10 MUST);
 ``GET``/``DELETE /mcp`` — absent → allowed (no negotiation context to
 validate against), present-but-unrecognized → 400 (GH-111, mirrors the POST
 check); Legacy SSE (``POST /mcp/messages``) — absent → allowed, assume
@@ -131,8 +134,9 @@ assert SUPPORTED_PROTOCOL_VERSIONS == tuple(
 _TITLE_MIN_VERSION = "2025-11-25"
 _PROTOCOL_VERSION_HEADER = "MCP-Protocol-Version"
 # Sentinel returned by _negotiated_version when the MCP-Protocol-Version header
-# is absent.  Distinct from None (unrecognized version) so call sites can
-# enforce MCP spec §10 — absent header on a non-initialize request → 400.
+# is absent.  Distinct from None (unrecognized version).  GH-200: on Streamable
+# HTTP an absent header is NOT an error — mcp_post uses the session's version
+# negotiated at initialize, else 2025-03-26 (reverses GH-77's absent→400).
 _HEADER_ABSENT = object()
 _SESSION_ID_HEADER = "Mcp-Session-Id"
 
@@ -233,8 +237,9 @@ def _max_streams_per_identity(app: Any) -> int:
     )
 
 
-def _sessions(app: Any) -> "OrderedDict[str, tuple[float, str]]":
-    """Streamable HTTP sessions: id → (last-seen, owner identity key).
+def _sessions(app: Any) -> "OrderedDict[str, tuple[float, str, str]]":
+    """Streamable HTTP sessions: id → (last-seen, owner identity key,
+    protocol version negotiated at initialize — GH-200).
     Bounded LRU + idle TTL. The owner binding makes a stolen/guessed session
     id useless to any other caller (cross-identity session hijack defense)."""
     sessions = getattr(app.state, "mcp_sessions", None)
@@ -244,7 +249,7 @@ def _sessions(app: Any) -> "OrderedDict[str, tuple[float, str]]":
     return sessions
 
 
-def _prune_sessions(sessions: "OrderedDict[str, tuple[float, str]]") -> None:
+def _prune_sessions(sessions: "OrderedDict[str, tuple[float, str, str]]") -> None:
     cutoff = time.time() - SESSION_TTL_SECONDS
     for sid in [s for s, rec in sessions.items() if rec[0] <= cutoff]:
         sessions.pop(sid, None)
@@ -253,7 +258,7 @@ def _prune_sessions(sessions: "OrderedDict[str, tuple[float, str]]") -> None:
 
 
 def _session_alive(
-    sessions: "OrderedDict[str, tuple[float, str]]", session_id: str, owner: str
+    sessions: "OrderedDict[str, tuple[float, str, str]]", session_id: str, owner: str
 ) -> bool:
     """Presence + idle-TTL + ownership check; touches last-seen (LRU) when
     alive AND owned. A mismatched owner is treated as not-found (no existence
@@ -263,13 +268,13 @@ def _session_alive(
     rec = sessions.get(session_id)
     if rec is None:
         return False
-    last_seen, sess_owner = rec
+    last_seen, sess_owner, sess_version = rec
     if last_seen <= time.time() - SESSION_TTL_SECONDS:
         sessions.pop(session_id, None)
         return False
     if sess_owner != owner:
         return False
-    sessions[session_id] = (time.time(), owner)
+    sessions[session_id] = (time.time(), owner, sess_version)
     sessions.move_to_end(session_id)
     return True
 
@@ -386,8 +391,10 @@ def _negotiated_version(request: Request) -> "str | object | None":
     """Validate ``MCP-Protocol-Version``.
 
     Returns:
-    - ``_HEADER_ABSENT`` sentinel — header not present at all; caller must 400
-      on non-initialize requests (MCP spec §10).
+    - ``_HEADER_ABSENT`` sentinel — header not present at all. Not an error
+      (GH-200): ``mcp_post`` falls back to the session's negotiated version,
+      else 2025-03-26 (spec: SHOULD assume 2025-03-26); only a present but
+      invalid value is a 400 (MCP-Protocol-Version transport rules).
     - A version string — header present and recognized; use this version.
     - ``None`` — header present but unrecognized; caller must 400.
     """
@@ -815,16 +822,16 @@ async def mcp_post(
     # response body is authoritative, so even a future/unsupported header value
     # is not grounds for 400 here.
     version = _negotiated_version(request)
-    if (version is None or version is _HEADER_ABSENT) and not is_initialize:
-        # MCP spec §10: absent or unrecognized version header on a non-initialize
-        # request → 400; advertise a version we support so the client can retry.
+    if version is None and not is_initialize:
+        # Present but unrecognized → 400 (spec); an ABSENT header is resolved
+        # below, after the session checks (GH-200).
         return JSONResponse(
             status_code=400,
-            content={"error": "MCP-Protocol-Version header required"},
+            content={"error": "unsupported MCP-Protocol-Version"},
             headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
         )
-    # For initialize with an absent/unrecognized header, fall back to our
-    # highest so base_headers is always a valid version string.
+    # Absent/unrecognized on initialize: fall back to our highest so
+    # base_headers is always a valid version string.
     effective_version = (
         version
         if isinstance(version, str)
@@ -862,6 +869,17 @@ async def mcp_post(
                 headers=base_headers,
             )
 
+    # GH-200: absent header on a non-initialize request → the version the
+    # session negotiated at initialize, else 2025-03-26. Only values from
+    # SUPPORTED_PROTOCOL_VERSIONS are ever echoed.
+    if version is _HEADER_ABSENT and not is_initialize:
+        fallback = "2025-03-26"
+        if presented_session is not None:
+            rec = sessions.get(presented_session)
+            if rec is not None and rec[2] in SUPPORTED_PROTOCOL_VERSIONS:
+                fallback = rec[2]
+        base_headers = {_PROTOCOL_VERSION_HEADER: fallback}
+
     # Per-call forwarded credentials are request-scoped: bind around dispatch
     # (synchronous, same task as the tool invoke) and unbind in finally.
     token = forwarding.bind(forwarding.parse_header(request.headers.get(forwarding.HEADER_NAME)))
@@ -887,14 +905,18 @@ async def mcp_post(
         for orphan_sid in [s for s, rec in list(sessions.items()) if rec[1] == owner]:
             sessions.pop(orphan_sid, None)
         session_id = uuid.uuid4().hex
-        sessions[session_id] = (time.time(), owner)  # bound to the caller
+        negotiated_ver = response["result"].get("protocolVersion")
+        sessions[session_id] = (
+            time.time(),
+            owner,  # bound to the caller
+            negotiated_ver if negotiated_ver in SUPPORTED_PROTOCOL_VERSIONS else "2025-03-26",
+        )
         _prune_sessions(sessions)
         headers[_SESSION_ID_HEADER] = session_id
         # P6-00: override the response version header with the negotiated
         # version from the initialize result body (the request may have carried
         # no MCP-Protocol-Version header, so base_headers holds the fallback
         # default; the body always contains the real negotiated version).
-        negotiated_ver = response["result"].get("protocolVersion")
         if negotiated_ver:
             headers[_PROTOCOL_VERSION_HEADER] = negotiated_ver
 
@@ -914,9 +936,9 @@ async def mcp_get(
     # GH-111: mirror mcp_post's validation — a present-but-unrecognized
     # MCP-Protocol-Version must 400 here too; absent is allowed (no
     # negotiation body to validate against on this verb).  The message names
-    # the ACTUAL trigger (present-but-unrecognized): unlike mcp_post, an absent
-    # header is accepted here, so "header required" would misdirect a client
-    # that DID send a version into thinking it omitted the header (RT-005).
+    # the ACTUAL trigger (present-but-unrecognized): an absent header is
+    # accepted here (as on mcp_post since GH-200), so "header required" would
+    # misdirect a client that DID send a version (RT-005).
     if _negotiated_version(request) is None:
         return JSONResponse(
             status_code=400,
@@ -1182,13 +1204,14 @@ async def mcp_messages(
 
     version = _negotiated_version(request)
     # Legacy path: _HEADER_ABSENT (header omitted) → tolerate for back-compat (§10 SHOULD);
-    # None (header present but unrecognized) → 400. Streamable path rejects both.
+    # None (header present but unrecognized) → 400. Streamable path accepts
+    # absent too (GH-200).
     # NOTE: _dispatch() below is version-agnostic — no resolved version value is threaded
     # into it, so this branch is purely an admission check, not a version assumption.
     if version is None and not is_initialize:
         return JSONResponse(
             status_code=400,
-            content={"error": "MCP-Protocol-Version header required"},
+            content={"error": "unsupported MCP-Protocol-Version"},
             headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
         )
 

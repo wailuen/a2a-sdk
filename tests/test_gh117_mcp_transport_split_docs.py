@@ -2,7 +2,7 @@
 the transport-split MCP-Protocol-Version absent-header behavior shipped in
 commit bbfe353 (mcp.py module docstring), not the earlier blanket rule.
 
-Streamable HTTP (POST /mcp, non-initialize) — absent header → 400.
+Streamable HTTP (POST /mcp, non-initialize) — absent header → negotiated session version (GH-200).
 Legacy SSE (POST /mcp/messages) — absent header → allowed, assume 2025-03-26.
 
 ACs verified:
@@ -63,14 +63,22 @@ def test_design_md_section_5_5_mentions_streamable_http_and_legacy_sse_for_absen
     )
 
 
-def test_design_md_streamable_http_absent_header_returns_400():
+def test_design_md_streamable_http_absent_header_uses_session_version():
     bullet = _protocol_version_bullet(_section_5_5(_design_md_text()))
     idx = bullet.index("Streamable HTTP")
-    window = bullet[idx: idx + 300]
-    assert "400" in window, (
-        "DESIGN.md §5.5 must state that Streamable HTTP absent-header "
-        "requests return 400, in the same clause as 'Streamable HTTP'"
-    )
+    end = bullet.index("Legacy SSE")
+    window = bullet[idx:end]
+    for needle in (
+        "GH-200",
+        "negotiated",
+        "2025-03-26",
+        "Present-but-unrecognized → 400",
+    ):
+        assert needle in window, (
+            f"DESIGN.md §5.5 Streamable HTTP clause must contain {needle!r} "
+            "(GH-200: absent header uses the session-negotiated version)"
+        )
+    assert not re.search(r"Streamable HTTP[^.]{0,40}400s? on absent", window)
 
 
 def test_design_md_legacy_sse_absent_header_assumes_default_version():
@@ -88,7 +96,7 @@ def test_design_md_no_longer_states_blanket_absent_rule():
     assert "absent → assume `2025-03-26`" not in section, (
         "DESIGN.md §5.5 must not state a blanket (transport-unqualified) "
         "absent-header rule; the old wording implied this applied to "
-        "Streamable HTTP too, which now 400s instead"
+        "Streamable HTTP too, which uses the session-negotiated version (GH-200)"
     )
 
 

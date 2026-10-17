@@ -71,7 +71,7 @@ Reviewers (parallel): `a2a-advisor`, `ag-ui-advisor`, `a2ui-advisor`, `mcp-advis
 | 8 | MAJOR | Identity kind tagging; admin surfaces reject oauth kind; consent needs real API key | §5.5, §6 |
 | 9 | MINOR | GET /mcp → text/event-stream, not 405 (Claude.ai Desktop) | §5.5 |
 | 10 | MINOR | DELETE /mcp → 204 idempotent | §5.5 |
-| 11 | MINOR | MCP-Protocol-Version header validation (400 invalid; absent behavior transport-split — Streamable HTTP non-init→400, Legacy SSE→assume 2025-03-26; GH-77) | §5.5 |
+| 11 | MINOR | MCP-Protocol-Version header validation (400 invalid; absent behavior transport-split — Streamable HTTP non-init: session's negotiated version, else 2025-03-26; present-but-unrecognized→400; Legacy SSE→assume 2025-03-26; GH-77, reversed by GH-200) | §5.5 |
 | 12 | MINOR | CI: curl OAuth-chain probes + live port + `claude mcp add` release gate | §12 |
 | 13 | MINOR | Omit empty scope from token response; code_challenge_methods_supported ["S256"] | §5.5 |
 
@@ -144,7 +144,7 @@ Verdicts on v2: a2a APPROVE_WITH_MINORS · ag-ui APPROVE_WITH_MINORS · a2ui APP
 |---|---|---|
 | HIGH | v2 claimed strict single-URI audience enforcement; pitchbook (and live Claude.ai, which sends bare origin) use two-value equivalence — v2 was internally inconsistent | explicit accepted set {origin, origin/mcp}, hard 401 outside it, documented RFC 8707 deviation + rationale §5.5 |
 | MED | "resource required at token" would break Claude.ai (it doesn't send it there) | resource carried from code metadata; not re-required at token; authorize defaults it §5.5 |
-| LOW | "required on all post-init requests" vs absent→default contradiction | transport-split (GH-77): Streamable HTTP non-init POST — absent→400 (effectively required); GET/DELETE — absent→allowed; Legacy SSE — absent→assume 2025-03-26 §5.5 |
+| LOW | "required on all post-init requests" vs absent→default contradiction | transport-split (GH-77): Streamable HTTP non-init POST — absent uses the session's negotiated version, else 2025-03-26, present-but-unrecognized→400 (GH-200 reversed the earlier 400-on-absent rule); GET/DELETE — absent→allowed; Legacy SSE — absent→assume 2025-03-26 §5.5 |
 | LOW | oauth-kind route policy ambiguous (revoke? token?) | routes enumerated; revoke = self-only; token unauthenticated §5.5 |
 | LOW | CI missing unknown-session 404 probe | §12 |
 | INFO | pitchbook structuredContent-without-outputSchema not in §1 defect list | added §1 |
