@@ -361,6 +361,53 @@ async def test_authorize_approve_widens_form_action_to_loopback_redirect(client)
     )
 
 
+async def _approve_csp(client, redirect_uri: str) -> str:
+    client_id = await _register_client(client, redirect_uri)
+    r = await client.post(
+        "/oauth/authorize",
+        content=_form(
+            {
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "response_type": "code",
+                "code_challenge": _CODE_CHALLENGE,
+                "code_challenge_method": "S256",
+            }
+        ),
+        headers=_FORM_HEADERS,
+        follow_redirects=False,
+    )
+    assert r.status_code == 303, f"Expected 303 redirect; got {r.status_code}: {r.text}"
+    return r.headers.get("content-security-policy", "")
+
+
+async def test_authorize_approve_allows_azure_apim_regional_hop(client):
+    """Copilot Studio registers global.consent.azure-apim.net, which 302s to a
+    regional host (asia-001.consent.azure-apim.net). form-action covers the
+    whole chain, so the regional hop must be allowed or the browser blocks it
+    after Approve and the connection fails."""
+    csp = await _approve_csp(
+        client, "https://global.consent.azure-apim.net/redirect/cr123-5fteamwork"
+    )
+    assert csp == (
+        "default-src 'none'; style-src 'unsafe-inline'; "
+        "form-action 'self' https://global.consent.azure-apim.net "
+        "https://*.consent.azure-apim.net; "
+        "frame-ancestors 'none'; base-uri 'none'"
+    ), f"got: {csp}"
+
+
+async def test_regional_hop_not_added_for_lookalike_origin(client):
+    """The extra source is keyed by the exact origin: a client on any other
+    host (even another azure-apim.net subdomain) gets only its own origin."""
+    csp = await _approve_csp(
+        client, "https://global.consent.azure-apim.net.evil.example/redirect/x"
+    )
+    assert "*.consent.azure-apim.net" not in csp, f"got: {csp}"
+    csp = await _approve_csp(client, "https://asia-001.consent.azure-apim.net/redirect/x")
+    assert "*.consent.azure-apim.net" not in csp, f"got: {csp}"
+
+
 async def test_authorize_error_redirect_widens_form_action(client):
     """An error redirect (e.g. unsupported_response_type) also redirects to
     the OAuth client's redirect_uri once it has been validated, so its CSP

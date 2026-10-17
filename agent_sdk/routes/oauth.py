@@ -415,6 +415,18 @@ def _clean_params(source: Any) -> dict[str, str]:
     return cleaned
 
 
+# Exact redirect_uri origins whose callback is itself a 30x hop to another
+# origin, and the fixed sources that hop can land on. form-action is enforced
+# across the whole form-submission redirect chain, so the hop's target must be
+# allowed too. Microsoft Power Platform / Copilot Studio registers
+# https://global.consent.azure-apim.net/redirect/<connector> and that endpoint
+# 302s to a regional host (e.g. asia-001.consent.azure-apim.net). Keyed by the
+# exact validated origin, so no client-supplied value ever reaches the CSP.
+_KNOWN_REDIRECT_HOPS: dict[str, tuple[str, ...]] = {
+    "https://global.consent.azure-apim.net": ("https://*.consent.azure-apim.net",),
+}
+
+
 def _redirect_security_headers(redirect_uri: str) -> dict[str, str]:
     """Consent-page CSP, but with ``form-action`` widened to include the
     validated ``redirect_uri``'s origin.
@@ -455,9 +467,10 @@ def _redirect_security_headers(redirect_uri: str) -> dict[str, str]:
     origin = _validated_origin(parsed)
     headers = dict(_CONSENT_SECURITY_HEADERS)
     if origin is not None:
+        sources = " ".join([origin, *_KNOWN_REDIRECT_HOPS.get(origin, ())])
         headers["Content-Security-Policy"] = _CONSENT_SECURITY_HEADERS[
             "Content-Security-Policy"
-        ].replace("form-action 'self'", f"form-action 'self' {origin}")
+        ].replace("form-action 'self'", f"form-action 'self' {sources}")
     return headers
 
 
