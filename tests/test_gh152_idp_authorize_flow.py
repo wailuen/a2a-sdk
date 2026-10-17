@@ -395,6 +395,34 @@ async def _allowed(ic, idp):
     return cid, verifier, cookie, page, r
 
 
+async def test_idp_consent_hands_off_azure_apim_by_meta_refresh(ic, idp):
+    """GH-198: Copilot Studio's callback forwards across further origins, so
+    Allow ends on our origin (200) and a meta refresh carries the code on; the
+    code still redeems against the registered redirect_uri."""
+    apim = "https://global.consent.azure-apim.net/redirect/cr123-5fteamwork"
+    cid = await register(ic, apim)
+    verifier, challenge = pkce()
+    r = await ic.get("/oauth/authorize", params=authorize_params(cid, challenge, redirect_uri=apim))
+    assert r.status_code == 302, r.text
+    q = {k: v[0] for k, v in parse_qs(urlparse(r.headers["location"]).query).items()}
+    cookie = cookie_value(r)
+    page = await callback(ic, idp, q, cookie)
+    r = await ic.post("/oauth/idp/consent", content=_consent_body(ticket_of(page)),
+                      headers={**FORM, "Cookie": f"{cookie.name}={cookie}"})
+    assert r.status_code == 200 and "location" not in r.headers
+    m = re.search(r"content='0;url=([^']+)'", r.text)
+    assert m, r.text
+    target = urlparse(html_mod.unescape(m.group(1)))
+    assert f"{target.scheme}://{target.netloc}{target.path}" == apim
+    qs = parse_qs(target.query)
+    assert qs["state"] == ["client-state"]
+    tok = await ic.post("/oauth/token", content=urlencode({
+        "grant_type": "authorization_code", "code": qs["code"][0], "client_id": cid,
+        "redirect_uri": apim, "code_verifier": verifier,
+    }), headers=FORM)
+    assert tok.status_code == 200, tok.text
+
+
 async def test_full_idp_flow_mints_user_bound_token(ic, idp):
     cid, verifier, _, _, r = await _allowed(ic, idp)
     assert r.status_code == 303

@@ -25,6 +25,10 @@ All tests use the shared async httpx client from conftest (asyncio_mode=auto).
 
 from __future__ import annotations
 
+import html
+import re
+from urllib.parse import parse_qs, urlparse
+
 import pytest
 
 
@@ -389,7 +393,8 @@ async def test_authorize_approve_allows_azure_apim_regional_hop(client):
         headers=_FORM_HEADERS,
         follow_redirects=False,
     )
-    assert r.status_code == 303, f"{r.status_code}: {r.text}"
+    # GH-199: this exact origin gets the 200 meta-refresh hand-off, not a 303.
+    assert r.status_code == 200, f"{r.status_code}: {r.text}"
     assert r.headers.get("content-security-policy", "") == _APIM_CSP
 
 
@@ -439,6 +444,65 @@ def test_unrelated_origin_csp_unchanged_by_known_hops():
         "form-action 'self' https://claude.ai; "
         "frame-ancestors 'none'; base-uri 'none'"
     )
+
+
+async def test_authorize_approve_hands_off_azure_apim_by_meta_refresh(client):
+    """GH-198: Copilot Studio's callback forwards global.consent ->
+    <region>.consent -> copilotstudio.microsoft.com, so a 303 from the form
+    POST is blocked at the last hop by form-action. For that exact origin the
+    POST ends on our origin (200) and a meta refresh carries code + state on."""
+    redirect_uri = "https://global.consent.azure-apim.net/redirect/cr123-5fteamwork"
+    client_id = await _register_client(client, redirect_uri)
+    r = await client.post(
+        "/oauth/authorize",
+        content=_form(
+            {
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "response_type": "code",
+                "code_challenge": _CODE_CHALLENGE,
+                "code_challenge_method": "S256",
+                "state": "s1",
+            }
+        ),
+        headers=_FORM_HEADERS,
+        follow_redirects=False,
+    )
+    assert r.status_code == 200, f"Expected 200 hand-off; got {r.status_code}: {r.text}"
+    assert "location" not in r.headers
+    assert r.headers["cache-control"] == "no-store"
+    assert r.headers["referrer-policy"] == "no-referrer"
+    m = re.search(r"<meta http-equiv='refresh' content='0;url=([^']+)'>", r.text)
+    assert m, r.text
+    target = urlparse(html.unescape(m.group(1)))
+    assert f"{target.scheme}://{target.netloc}{target.path}" == redirect_uri
+    qs = parse_qs(target.query)
+    assert qs["state"] == ["s1"] and qs["code"][0]
+
+
+async def test_ordinary_client_still_gets_303(client):
+    """The hand-off is keyed by exact origin; every other client keeps the 303."""
+    for redirect_uri in (
+        "https://claude.ai/api/mcp/auth_callback",
+        "https://global.consent.azure-apim.net.evil.example/redirect/x",
+    ):
+        client_id = await _register_client(client, redirect_uri)
+        r = await client.post(
+            "/oauth/authorize",
+            content=_form(
+                {
+                    "client_id": client_id,
+                    "redirect_uri": redirect_uri,
+                    "response_type": "code",
+                    "code_challenge": _CODE_CHALLENGE,
+                    "code_challenge_method": "S256",
+                }
+            ),
+            headers=_FORM_HEADERS,
+            follow_redirects=False,
+        )
+        assert r.status_code == 303, f"{redirect_uri}: got {r.status_code}"
+        assert r.headers["location"].startswith(redirect_uri)
 
 
 async def test_authorize_error_redirect_widens_form_action(client):

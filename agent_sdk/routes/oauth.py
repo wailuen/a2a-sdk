@@ -474,6 +474,36 @@ def _redirect_security_headers(redirect_uri: str) -> dict[str, str]:
     return headers
 
 
+# Exact redirect_uri origins whose callback forwards across further origins the
+# client picks at run time. Copilot Studio: global.consent.azure-apim.net ->
+# <region>.consent.azure-apim.net -> copilotstudio.microsoft.com (seen 17 Oct
+# 2026, GH-198). form-action covers every hop of a form submission's redirect
+# chain, so no fixed allow-list can be complete. For these origins a form POST
+# ends on our own origin with a 200 page that moves on by meta refresh: a new
+# navigation, outside the form-submission chain and so outside form-action.
+_HANDOFF_REDIRECT_ORIGINS: frozenset[str] = frozenset(
+    {"https://global.consent.azure-apim.net"}
+)
+
+
+def _client_redirect(url: str, redirect_uri: str, status: int) -> Response:
+    """Send the browser back to the OAuth client after a form POST: a plain
+    30x, or the meta-refresh hand-off page for ``_HANDOFF_REDIRECT_ORIGINS``.
+    ``redirect_uri`` must already be validated; ``url`` is built from it."""
+    headers = _redirect_security_headers(redirect_uri)
+    if _validated_origin(urlparse(redirect_uri)) not in _HANDOFF_REDIRECT_ORIGINS:
+        return RedirectResponse(url=url, status_code=status, headers=headers)
+    target = html.escape(url, quote=True)
+    body = (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        f"<meta http-equiv='refresh' content='0;url={target}'>"
+        "<title>Returning to the app</title></head>"
+        f"<body><p>Returning to the app. <a href='{target}'>Continue</a></p>"
+        "</body></html>"
+    )
+    return HTMLResponse(content=body, status_code=200, headers=headers)
+
+
 def _error_page(message: str, status: int = 400) -> HTMLResponse:
     body = (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
@@ -484,18 +514,14 @@ def _error_page(message: str, status: int = 400) -> HTMLResponse:
     return HTMLResponse(content=body, status_code=status, headers=_CONSENT_SECURITY_HEADERS)
 
 
-def _error_redirect(redirect_uri: str, error: str, state: str) -> RedirectResponse:
+def _error_redirect(redirect_uri: str, error: str, state: str) -> Response:
     """RFC 6749 §4.1.2.1 — once the redirect_uri is validated, errors go back
     to the client via redirect, not as a local error page."""
     query: dict[str, str] = {"error": error}
     if state:
         query["state"] = state
     sep = "&" if urlparse(redirect_uri).query else "?"
-    return RedirectResponse(
-        url=f"{redirect_uri}{sep}{urlencode(query)}",
-        status_code=302,
-        headers=_redirect_security_headers(redirect_uri),
-    )
+    return _client_redirect(f"{redirect_uri}{sep}{urlencode(query)}", redirect_uri, 302)
 
 
 def _validate_authorize(
@@ -697,13 +723,9 @@ def _pkce_pair() -> tuple[str, str]:
     return verifier, base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
-def _redirect_with(redirect_uri: str, query: dict[str, str], status: int) -> RedirectResponse:
+def _redirect_with(redirect_uri: str, query: dict[str, str], status: int) -> Response:
     sep = "&" if urlparse(redirect_uri).query else "?"
-    return RedirectResponse(
-        url=f"{redirect_uri}{sep}{urlencode(query)}",
-        status_code=status,
-        headers=_redirect_security_headers(redirect_uri),
-    )
+    return _client_redirect(f"{redirect_uri}{sep}{urlencode(query)}", redirect_uri, status)
 
 
 async def _federate(
@@ -945,10 +967,8 @@ async def oauth_authorize_approve(request: Request) -> Response:
     # A loopback redirect_uri may already carry a query — join with '&' then.
     sep = "&" if urlparse(cleaned["redirect_uri"]).query else "?"
     logger.info("oauth authorize approved client_id=%s...", cleaned["client_id"][:8])
-    return RedirectResponse(
-        url=f"{cleaned['redirect_uri']}{sep}{urlencode(query)}",
-        status_code=303,
-        headers=_redirect_security_headers(cleaned["redirect_uri"]),
+    return _client_redirect(
+        f"{cleaned['redirect_uri']}{sep}{urlencode(query)}", cleaned["redirect_uri"], 303
     )
 
 
