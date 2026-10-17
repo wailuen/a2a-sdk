@@ -408,6 +408,30 @@ async def test_regional_hop_not_added_for_lookalike_origin(client):
     assert "*.consent.azure-apim.net" not in csp, f"got: {csp}"
 
 
+async def test_consent_page_allows_azure_apim_regional_hop(client):
+    """LRN-126: the GET consent page owns the form, so its CSP (not only the
+    303's) must carry the regional hop for the exact APIM origin."""
+    redirect_uri = "https://global.consent.azure-apim.net/redirect/cr123-5fteamwork"
+    client_id = await _register_client(client, redirect_uri)
+    r = await client.get(
+        "/oauth/authorize",
+        params={
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "code_challenge": _CODE_CHALLENGE,
+            "code_challenge_method": "S256",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 200, f"Expected 200 consent page; got {r.status_code}: {r.text}"
+    csp = r.headers.get("content-security-policy", "")
+    assert (
+        "form-action 'self' https://global.consent.azure-apim.net "
+        "https://*.consent.azure-apim.net;" in csp
+    ), f"got: {csp}"
+
+
 async def test_authorize_error_redirect_widens_form_action(client):
     """An error redirect (e.g. unsupported_response_type) also redirects to
     the OAuth client's redirect_uri once it has been validated, so its CSP
