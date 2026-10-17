@@ -8,6 +8,11 @@ internals, `contrib/`) may change in minors with notice here.
 
 _Nothing yet._
 
+## [0.17.3] — 2026-10-17
+
+### Fixed
+- GH-201: `POST /mcp` sessions no longer evict each other when several clients share one credential. A successful `initialize` used to delete every session owned by the identity key (RTGA-010), and a shared API key or org-wide OAuth client has no user part in that key, so the clients kicked each other out (next call got 404). Now `initialize` evicts only the session it replaces (the presented, caller-owned `Mcp-Session-Id`), and an identity holds at most 200 live sessions by default, set by the new `AGENT_SDK_MAX_MCP_SESSIONS_PER_IDENTITY` (least-recently-used evicted first; other identities are never touched). The default matches the stream cap because an org-wide OAuth client or shared API key puts a whole org on one identity. A non-initialize request with no `Mcp-Session-Id` is now dispatched normally instead of getting 400 "Mcp-Session-Id required". This reverses RTGA-010's evict-all and the session-required 400. 404 for unknown, expired and foreign session ids is unchanged. Changed: `agent_sdk/routes/mcp.py`, `DESIGN.md` §5.5, mcp-advisor and mcp-check checklists. Tests: `tests/test_gh201_mcp_session_sharing.py`. Ruling: https://github.com/wailuen/a2a-sdk/issues/201#issuecomment-6234642337 and issuecomment-6235185280
+
 ## [0.17.2] — 2026-10-17
 
 ### Fixed
