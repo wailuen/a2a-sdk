@@ -8,6 +8,16 @@ internals, `contrib/`) may change in minors with notice here.
 
 _Nothing yet._
 
+## [0.16.0] — 2026-10-17
+
+Resolves GH-185 (new `current_identity()`) and GH-187 (retry after a failed task).
+
+### Added
+- GH-185: `agent_sdk.auth.current_identity() -> Identity | None` (new module `agent_sdk/auth/context.py`, exported from `agent_sdk/auth/__init__.py`). A tool or `SourceAdapter` can read who is calling. It is bound at `routes/a2a.py` (`message:send`, `message:stream`, interrupt resume), `routes/ag_ui.py` (`/ag-ui/run`, including resume) and `routes/mcp.py` (`POST /mcp`, `/mcp/messages`). On resume the already-running worker rebinds to the resuming caller (`agent/runner.py`, `run_task_worker.wait_resume`; the identity travels inside the resume future's value as a `ResumeEnvelope`, so concurrent resumers cannot overwrite it), so a tool that runs after a resume sees the resumer, not the original submitter. `tasks/resubscribe` is also bound, per the maintainer ruling. Returns `None` outside a request. Only the `Identity` is held; it is never logged. Tests: `tests/test_gh185_current_identity.py`. Ruling: https://github.com/wailuen/a2a-sdk/issues/185#issuecomment-6217407102
+
+### Fixed
+- GH-187: a new task in an existing `contextId` is now seeded only from the most recent COMPLETED task (`context_messages()`), and `context_reusable_messages()` only reuses `__resolved__` markers from COMPLETED tasks. FAILED, CANCELED and REJECTED tasks are skipped entirely, including their user message. Before, a task that failed part-way (e.g. a model 429 after a tool round) left tool results in its transcript; the retry inherited them, answered from the stale results, called no tool, and so emitted no data part or A2UI card. Accepted trade-off: a bare "try again" after a failure has no memory of the failed request, so the user must restate it. A context whose only prior tasks failed starts fresh. Changed files: `agent_sdk/tasks/memory.py`, `agent_sdk/tasks/store.py`. New tests: `tests/test_gh187_retry_after_failed_task.py`. Ruling: https://github.com/wailuen/a2a-sdk/issues/187#issuecomment-6217406480
+
 ## [0.15.1] — 2026-10-16
 
 Resolves GH-183 and GH-184 (harness skills only; no `agent_sdk` code change).
