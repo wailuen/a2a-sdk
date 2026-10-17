@@ -8,6 +8,11 @@ internals, `contrib/`) may change in minors with notice here.
 
 _Nothing yet._
 
+## [0.17.4] — 2026-10-17
+
+### Changed
+- OAuth consent pages redesigned. Both the admin-key page (`GET /oauth/authorize`) and the IdP sign-in consent page now share one layout in `agent_sdk/routes/_consent_ui.py`: the TPC mark ("Built by TPC"), the agent's name (`settings.display_name`), a plain headline ("<client> wants to access <agent>"), what the app can do if allowed, the app / return host / resource details, clear primary and secondary buttons, and a short safety note. It follows the system light/dark setting and stacks for phone widths. The page stays self-contained under the unchanged consent CSP: inline style and an inline SVG mark only (`agent_sdk/routes/_tpc_logo.py`), no script, image fetch, font or external stylesheet. Form fields, actions and decision values are unchanged. Agents get it by upgrading the SDK; no agent change needed. Tests: `tests/test_consent_page_design.py`; the IdP-off golden page hash in `tests/test_gh152_idp_off_regression.py` was re-captured (headers, CSP and metadata goldens unchanged).
+
 ## [0.17.3] — 2026-10-17
 
 ### Fixed
