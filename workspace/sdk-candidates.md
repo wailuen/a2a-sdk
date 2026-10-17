@@ -1,15 +1,9 @@
-# SDK issue candidates — w056 (2026-10-17)
+# SDK issue candidates — w057 (2026-10-17)
 
 Run `/sdk-issue-scan` to review and file as GitHub issues on `wailuen/a2a-sdk`.
 
-## Candidate 1: REVIEWS.md lines 74 and 147 still say a Streamable HTTP non-initialize POST with no MCP-Protocol-Version header returns 400. GH-200 reversed that rule: such a request should use the session's negotiated version, or 2025-03-26 if there is none. A present but unrecognized header still returns 400. GET/DELETE with no header are allowed. Legacy SSE with no header assumes 2025-03-26. This breaks LRN-118's Check and its Prevention rule, which says DESIGN.md and REVIEWS.md must be updated in the same commit.
+## Candidate 1: RT-001: The per-identity session cap runs in the wrong order. In the MCP initialize branch (mcp.py ~903-912), the new session is inserted first. Then _prune_sessions runs the global _MAX_SESSIONS LRU eviction (popitem(last=False)). Only after that is the caller's own oldest session trimmed. When the global map is full, an identity already at its 4-session cap that initializes again evicts a different identity's least-recently-used session, then trims its own. Probe: with _MAX_SESSIONS=6, a victim holding 2 sessions and an attacker holding 4, three re-initializes by the attacker left the victim with 1 session. The map ended at 5, below the cap, so the foreign eviction was not needed. Fix: add a helper such as _evict_identity_lru(sessions, owner, cap) that pops the owner's oldest sessions while len(owned) >= cap. Run it before the insert. Then insert, then call _prune_sessions. Add a regression test in tests/test_gh201_mcp_session_sharing.py that asserts all of the other identity's sessions survive.
 - Severity: high
 - Component: protocol/mcp
-- File: REVIEWS.md
-- Rationale: The finding is about the SDK's own MCP protocol docs for the agent_sdk/routes/mcp.py header handling. It is not agent-specific code. The fix belongs in the SDK repo, and the w056 todo's doc acceptance check only named DESIGN.md.
-
-## Candidate 2: test_design_md_streamable_http_absent_header_returns_400 (line 66) still enforces the GH-77 rule that GH-200 reversed. The module docstring (line 5) and the assertion message at line 90 say the same thing. The test only passes because the new DESIGN.md history note ('GH-200 reverses GH-77's absent→400') puts '400' inside the checked text window. If someone tidies that note away, the test fails and pushes them to write the old rule back in. The fix is to rename it to test_design_md_streamable_http_absent_header_uses_session_version, assert 'GH-200', 'negotiated', '2025-03-26' and 'present-but-unrecognized → 400', and add a negative check against '400s on absent'.
-- Severity: high
-- Component: protocol/mcp
-- File: tests/test_gh117_mcp_transport_split_docs.py
-- Rationale: This is an SDK doc-guard test for MCP protocol behavior, not an agent test. It locks in a reversed protocol rule and conflicts with the GH-200 ruling and LRN-118's updated Check.
+- File: agent_sdk/routes/mcp.py
+- Rationale: SDK protocol route code (agent_sdk/routes/mcp.py), not agent-domain code. It is a cross-tenant availability and security problem: one identity can evict another identity's MCP sessions. It breaks the GH-201 SI-5 rule that no step may evict a session owned by a different identity, and the 'global LRU behaves as before' acceptance check. It also differs from the IdpFlowStore._evict_for reference pattern, which evicts the caller's own entry before inserting.

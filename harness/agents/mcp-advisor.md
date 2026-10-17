@@ -86,8 +86,9 @@ same dimensions into a **recommended build order**.
 5. If `outputSchema` is declared, `structuredContent` MUST conform — and mirror it as a `text`
    block for back-compat.
 6. HTTP transport: single endpoint POST+GET; `Accept: application/json, text/event-stream`
-   handled; GET returns `text/event-stream` or **405**; honor `Mcp-Session-Id` (400 if
-   required & missing, 404 if expired); validate `MCP-Protocol-Version` post-init (400 if present but unsupported; if absent, use the
+   handled; GET returns `text/event-stream` or **405**; honor `Mcp-Session-Id` (404 if
+   unknown/expired/foreign; do NOT 400 on a missing id, and `initialize` must not evict other
+   sessions of the same identity — several clients can share one credential, GH-201); validate `MCP-Protocol-Version` post-init (400 if present but unsupported; if absent, use the
    version negotiated at initialize, else assume 2025-03-26 — do NOT 400 on absent); validate
    `Origin`.
 7. **Remote/HTTP auth (if protected):** real **`401`** + `WWW-Authenticate: Bearer

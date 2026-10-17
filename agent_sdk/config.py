@@ -264,6 +264,16 @@ class BaseAgentSettings(BaseSettings):
         default=None, ge=1, alias="AGENT_SDK_MAX_MCP_STREAMS_PER_IDENTITY"
     )
 
+    # GH-201: per-identity cap on live POST /mcp sessions. Keyed like
+    # max_mcp_streams_per_identity above, and for the same reason: org-wide
+    # OAuth clients and shared API keys put a whole org on one identity key,
+    # so the default must admit an org's concurrent connectors. None (default)
+    # leaves routes/mcp.py's own SDK default (see `_MAX_SESSIONS_PER_IDENTITY`).
+    # `ge=1` for the same reason as the stream cap; unset means the default.
+    max_mcp_sessions_per_identity: int | None = Field(
+        default=None, ge=1, alias="AGENT_SDK_MAX_MCP_SESSIONS_PER_IDENTITY"
+    )
+
     # RT-001 (A2A stream admission cap follow-up): routes/a2a.py's per-identity
     # cap on concurrent open message:stream/tasks:subscribe connections is
     # keyed the same way as max_mcp_streams_per_identity above — see that

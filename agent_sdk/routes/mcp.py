@@ -5,6 +5,10 @@ Three verbs at ``/mcp``:
 - ``POST /mcp`` — JSON-RPC 2.0. Session id allocated on ``initialize`` and
   returned via ``Mcp-Session-Id``; a non-initialize POST bearing an
   unknown/expired session id → 404 (initialize itself is the recovery path).
+  GH-201: sessions are per client, not per identity — initialize evicts only
+  the caller-owned session it presents, an identity holds at most
+  ``_max_sessions_per_identity()`` (LRU; default 200, configurable), and a session-less non-initialize POST
+  is dispatched normally.
 - ``GET /mcp`` — server→client SSE channel, held open with heartbeats.
   Returning 405 here breaks Claude.ai Desktop (pitchbook LRN-053) — never.
   Two outcomes per spec, three here: see the stream-admission deviation
@@ -142,6 +146,13 @@ _SESSION_ID_HEADER = "Mcp-Session-Id"
 
 SESSION_TTL_SECONDS = 30 * 60  # idle TTL
 _MAX_SESSIONS = 1_000
+# GH-201: per-identity session cap. A shared API key or org-wide OAuth client
+# puts many clients on one identity key, so initialize must not evict siblings;
+# beyond this many live sessions the identity's least-recently-used one is
+# evicted. Sized like _MAX_GET_STREAMS_PER_IDENTITY (a per-ORG cap under those
+# modes, see below); operators can change it via
+# AGENT_SDK_MAX_MCP_SESSIONS_PER_IDENTITY. See _max_sessions_per_identity().
+_MAX_SESSIONS_PER_IDENTITY = 200
 _MAX_BODY_BYTES = 2 * 1024 * 1024
 _HEARTBEAT_SECONDS = 15.0
 # GH-143 (+ RT-001 follow-up): bound concurrent open indefinite
@@ -255,6 +266,26 @@ def _prune_sessions(sessions: "OrderedDict[str, tuple[float, str, str]]") -> Non
         sessions.pop(sid, None)
     while len(sessions) > _MAX_SESSIONS:
         sessions.popitem(last=False)
+
+
+def _max_sessions_per_identity(app: Any) -> int:
+    """Effective per-identity POST /mcp session cap (GH-201), via the shared
+    resolver (C-024): ``AGENT_SDK_MAX_MCP_SESSIONS_PER_IDENTITY`` if set, else
+    ``_MAX_SESSIONS_PER_IDENTITY``, clamped to ``_MAX_SESSIONS``."""
+    return resolve_per_identity_limit(
+        app,
+        "max_mcp_sessions_per_identity",
+        _MAX_SESSIONS_PER_IDENTITY,
+        _MAX_SESSIONS,
+    )
+
+
+def _evict_identity_lru(
+    sessions: "OrderedDict[str, tuple[float, str, str]]", owner: str, cap: int
+) -> None:
+    owned = [sid for sid, rec in sessions.items() if rec[1] == owner]
+    for sid in owned[: max(0, len(owned) - (cap - 1))]:
+        sessions.pop(sid, None)
 
 
 def _session_alive(
@@ -856,19 +887,6 @@ async def mcp_post(
             return JSONResponse(
                 status_code=404, content={"error": "session not found"}, headers=base_headers
             )
-    # If the header is absent on a non-initialize request AND the owner already
-    # has at least one live session, the client is misbehaving — reject with 400
-    # so it can recover via re-initialize rather than silently creating orphaned
-    # dispatch without a session context.
-    if presented_session is None and not is_initialize:
-        owner_has_session = any(rec[1] == owner for rec in sessions.values())
-        if owner_has_session:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Mcp-Session-Id required"},
-                headers=base_headers,
-            )
-
     # GH-200: absent header on a non-initialize request → the version the
     # session negotiated at initialize, else 2025-03-26. Only values from
     # SUPPORTED_PROTOCOL_VERSIONS are ever echoed.
@@ -897,13 +915,14 @@ async def mcp_post(
     response = _writable_response(response)
     headers = dict(base_headers)
     if is_initialize and "result" in response:
-        # RTGA-010: evict any existing sessions for this owner before allocating
-        # a new one.  Re-initialization with an existing session leaks an orphan
-        # slot that counts against the LRU cap until TTL expiry.  The old session
-        # is worthless to the caller anyway (they're reinitializing), so eager
-        # eviction keeps the session map compact.
-        for orphan_sid in [s for s, rec in list(sessions.items()) if rec[1] == owner]:
-            sessions.pop(orphan_sid, None)
+        # GH-201 (reverses RTGA-010 evict-all): evict only the session this
+        # initialize replaces — the presented id, if live AND owned by the
+        # caller. A foreign id is never touched (owner binding).
+        if presented_session is not None:
+            replaced = sessions.get(presented_session)
+            if replaced is not None and replaced[1] == owner:
+                sessions.pop(presented_session, None)
+        _evict_identity_lru(sessions, owner, _max_sessions_per_identity(request.app))
         session_id = uuid.uuid4().hex
         negotiated_ver = response["result"].get("protocolVersion")
         sessions[session_id] = (

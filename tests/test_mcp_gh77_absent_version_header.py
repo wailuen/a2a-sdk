@@ -109,15 +109,17 @@ async def test_absent_version_header_unknown_session_still_404(
     assert r.status_code == 404
 
 
-async def test_absent_version_header_missing_session_id_with_live_session_400(
+async def test_absent_version_header_missing_session_id_with_live_session_dispatches(
     client: httpx.AsyncClient,
 ) -> None:
+    """GH-201: a missing Mcp-Session-Id is not an error, even with live sessions."""
     await _init(client, "2025-06-18")
     r = await client.post(
         "/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}}
     )
-    assert r.status_code == 400
-    assert "Mcp-Session-Id required" in r.text
+    assert r.status_code == 200
+    assert "result" in r.json()
+    assert r.headers.get("mcp-protocol-version") == "2025-03-26"
 
 
 async def test_present_unrecognized_version_header_returns_400(

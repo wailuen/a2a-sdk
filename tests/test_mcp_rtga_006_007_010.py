@@ -9,8 +9,8 @@ RTGA-007  Trailing-slash configured CORS origins must not be 403'd by the
           defense-in-depth origin guards on POST /mcp, GET /mcp, DELETE /mcp,
           GET /mcp/sse, POST /mcp/messages.
 
-RTGA-010  Re-initializing evicts the previous session for the same owner
-          so orphan slots do not accumulate against the LRU cap.
+RTGA-010  (reversed by GH-201) Re-initializing evicts only the presented,
+          caller-owned session; see tests/test_gh201_mcp_session_sharing.py.
 """
 
 from __future__ import annotations
@@ -179,65 +179,28 @@ async def test_trailing_slash_origin_normalized_in_app_state(
 
 
 # ---------------------------------------------------------------------------
-# RTGA-010 — re-initialize evicts previous owner session
+# RTGA-010 (reversed by GH-201) — re-initialize evicts only the presented session
 # ---------------------------------------------------------------------------
 
 
-async def test_reinitialize_evicts_previous_session(
+async def test_reinitialize_evicts_only_presented_session(
     client: httpx.AsyncClient, app
 ) -> None:
-    """A second initialize from the same owner must evict the first session
-    so orphan slots don't accumulate against the LRU cap."""
+    """GH-201: a plain initialize leaves the owner's other sessions alone;
+    re-initialize presenting session S evicts S and nothing else."""
     sessions = _sessions(app)
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {}},
+    }
+    sid1 = (await client.post("/mcp", json=body)).headers["mcp-session-id"]
+    sid2 = (await client.post("/mcp", json=body)).headers["mcp-session-id"]
+    assert sid1 in sessions and sid2 in sessions
 
-    # First initialize — allocates one session.
-    r1 = await client.post(
-        "/mcp",
-        json={
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {"protocolVersion": "2025-06-18", "capabilities": {}},
-        },
-    )
-    assert r1.status_code == 200, r1.text
-    sid1 = r1.headers.get("mcp-session-id")
-    assert sid1, "Expected Mcp-Session-Id from first initialize"
-    assert sid1 in sessions, "First session must be registered"
-
-    # Capture the owner key from the recorded session entry.
-    owner = sessions[sid1][1]
-
-    def _owner_sessions() -> list[str]:
-        return [s for s, rec in sessions.items() if rec[1] == owner]
-
-    assert len(_owner_sessions()) == 1, (
-        f"Expected 1 owner session after first init; got {_owner_sessions()!r}"
-    )
-
-    # Second initialize — must evict the first and allocate a new one.
-    r2 = await client.post(
-        "/mcp",
-        json={
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "initialize",
-            "params": {"protocolVersion": "2025-06-18", "capabilities": {}},
-        },
-    )
-    assert r2.status_code == 200, r2.text
-    sid2 = r2.headers.get("mcp-session-id")
-    assert sid2, "Expected Mcp-Session-Id from second initialize"
-    assert sid2 != sid1, "Second initialize must allocate a new session id"
-
-    # The old session must have been evicted.
-    assert sid1 not in sessions, (
-        f"First session {sid1!r} must be evicted after re-initialize"
-    )
-    # Exactly one owner session must remain.
-    remaining = _owner_sessions()
-    assert len(remaining) == 1, (
-        f"Expected exactly 1 owner session after re-initialize; "
-        f"got {len(remaining)}: {remaining!r}"
-    )
-    assert sid2 in sessions, "New session must be registered"
+    r3 = await client.post("/mcp", json=body, headers={"Mcp-Session-Id": sid1})
+    assert r3.status_code == 200, r3.text
+    sid3 = r3.headers["mcp-session-id"]
+    assert sid1 not in sessions
+    assert sid2 in sessions and sid3 in sessions

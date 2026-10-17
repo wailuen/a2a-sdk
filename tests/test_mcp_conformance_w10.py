@@ -1,7 +1,7 @@
 """MCP protocol conformance tests — wave 10, Group D (M-1, L-1).
 
-M-1  POST /mcp without Mcp-Session-Id on a non-initialize request, when the
-     caller already has a live session, must be rejected with HTTP 400.
+M-1  (reversed by GH-201) POST /mcp without Mcp-Session-Id on a non-initialize
+     request is dispatched normally, whatever sessions the caller holds.
 L-1  tools/call with an unknown tool name returns JSON-RPC -32601 (method not
      found), not -32602.  tools/call with a valid name but non-dict arguments
      still returns -32602 (invalid params).
@@ -42,31 +42,22 @@ async def _mcp_init(client: httpx.AsyncClient) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# M-1: absent Mcp-Session-Id on a non-initialize request rejected with 400
+# M-1 (GH-201): absent Mcp-Session-Id on a non-initialize request is dispatched
 # ---------------------------------------------------------------------------
 
 
-async def test_m1_absent_session_id_after_init_returns_400(client: httpx.AsyncClient) -> None:
-    """After a successful initialize (session established), a subsequent
-    non-initialize POST that omits the Mcp-Session-Id header must return 400
-    with JSON body {"error": "Mcp-Session-Id required"}."""
-    # Establish a session for this caller.
+async def test_m1_absent_session_id_after_init_is_dispatched(client: httpx.AsyncClient) -> None:
+    """GH-201 (reverses M-1): a non-initialize POST without Mcp-Session-Id is
+    dispatched normally even when the caller has a live session."""
     await _mcp_init(client)
 
-    # Send a ping WITHOUT the Mcp-Session-Id header.
     r = await client.post(
         "/mcp",
         json={"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}},
         headers={"MCP-Protocol-Version": "2025-06-18"},
-        # Deliberately omit Mcp-Session-Id
     )
-    assert r.status_code == 400, (
-        f"Expected 400 when Mcp-Session-Id absent and owner has live session; got {r.status_code}: {r.text}"
-    )
-    body = r.json()
-    assert body.get("error") == "Mcp-Session-Id required", (
-        f"Unexpected error body: {body}"
-    )
+    assert r.status_code == 200, r.text
+    assert "result" in r.json()
 
 
 async def test_m1_absent_session_id_before_any_init_is_ok(client: httpx.AsyncClient) -> None:
@@ -80,10 +71,7 @@ async def test_m1_absent_session_id_before_any_init_is_ok(client: httpx.AsyncCli
         json={"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}},
         headers={"MCP-Protocol-Version": "2025-06-18"},
     )
-    # 400 from the session gate would be wrong; anything else is acceptable.
-    assert r.status_code != 400 or r.json().get("error") != "Mcp-Session-Id required", (
-        "Session gate must not fire when the owner has no established session"
-    )
+    assert r.status_code == 200, r.text
 
 
 # ---------------------------------------------------------------------------
