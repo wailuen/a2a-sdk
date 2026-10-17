@@ -8,6 +8,12 @@ internals, `contrib/`) may change in minors with notice here.
 
 _Nothing yet._
 
+## [0.17.2] — 2026-10-17
+
+### Fixed
+- GH-200: `POST /mcp` no longer returns 400 when `MCP-Protocol-Version` is absent on a non-initialize request. This reverses the GH-77 absent-header 400, which the spec does not require (it only requires 400 for an invalid or unsupported value). Microsoft Copilot Studio omits the header on `tools/list` after `initialize`, so it could not load tools. The server now records the negotiated version against the `Mcp-Session-Id` at initialize and uses it for an absent header (else `2025-03-26`). A present but unrecognized value still gets 400, now worded "unsupported MCP-Protocol-Version". Session checks are unchanged. Changed: `agent_sdk/routes/mcp.py`, `DESIGN.md` §5.5. Tests: `tests/test_mcp_gh77_absent_version_header.py`. Ruling: https://github.com/wailuen/a2a-sdk/issues/200#issuecomment-6234026443
+- GH-200: the legacy `POST /mcp/messages` path now also words a present-but-unrecognized version 400 as "unsupported MCP-Protocol-Version". The mcp-advisor checklist and mcp-check skill no longer require the header on every post-init request.
+
 ## [0.17.1] — 2026-10-17
 
 Resolves GH-199: brings the v0.15.3 Copilot Studio fix (7778751) to main, so agents on 0.15.3 can upgrade to 0.17.x without losing Copilot Studio sign-in.
