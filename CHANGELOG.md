@@ -8,6 +8,14 @@ internals, `contrib/`) may change in minors with notice here.
 
 _Nothing yet._
 
+## [0.17.6] — 2026-10-19
+
+### Added
+- GH-202: `CredentialStore.list_items(namespace)` (`agent_sdk/credentials/store.py`), a non-abstract method returning `{field: plaintext}` for a namespace. The default is `list_fields` + `get`, so existing subclasses keep working. Stores passed to `ApiKeyStore` must subclass `CredentialStore` (or provide `list_items`), because `list_keys()` and revoke now call it.
+
+### Fixed
+- GH-202: API-key store calls no longer block the event loop. With tens of thousands of keys on `AzureTableCredentialStore`, `GET /admin/api/keys` made one synchronous HTTP read per key on the loop and the whole agent (including `/health`) stopped answering for minutes. New non-abstract `CredentialStore.list_items(namespace)` (default: `list_fields` + `get`, so third-party stores are unaffected); Azure Table (`credentials/azure_table.py`) does one partition query and SQLite (`credentials/encrypted_sqlite.py`) one `SELECT`, with no cache use for reserved namespaces. `ApiKeyStore.list_keys()` and revoke's last-admin check make one `list_items` call; `count()` stays one names-only `list_fields` query (no decrypt). The admin list/revoke/overview routes (`routes/admin.py`) and every `api_keys.verify` call (`auth/middleware.py`, `routes/oauth.py`) now run via `asyncio.to_thread`. `verify` writes `last_used` only when it is unset or older than 60 s, so `last_used` is accurate to ~60 s. No pagination; response shape unchanged. The sync `resolve_identity()` keeps its signature (docstring notes it blocks). `auth/api_keys.py` also guards the threaded paths: `last_used` writes and revoke use per-key locks (a revoked key is never re-created by an in-flight `verify`, which re-reads the row before writing), a separate lock serialises the last-admin check, and a `last_used` write that finds its lock busy is skipped, so a slow admin revoke never stalls other keys. Tests: `tests/test_gh202_api_key_store_off_loop.py`, `tests/test_gh202_api_key_races.py`. Ruling: https://github.com/wailuen/a2a-sdk/issues/202#issuecomment-6259246006
+
 ## [0.17.5] — 2026-10-19
 
 ### Changed
