@@ -232,7 +232,10 @@ def test_acceptance_teardown_revokes_without_argv_key(tmp_path):
     assert "DELETE" in log.read_text() and "/admin/api/keys/k1" in log.read_text()
 
 
-class _MemStore:
+from agent_sdk.credentials.store import CredentialStore  # noqa: E402
+
+
+class _MemStore(CredentialStore):
     def __init__(self):
         self.v = {}
 

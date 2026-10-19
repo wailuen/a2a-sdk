@@ -19,6 +19,7 @@ import json
 import re
 import secrets
 import sys
+import threading
 import time
 from dataclasses import dataclass
 
@@ -27,6 +28,8 @@ from ..models.errors import AgentError, ErrorCategory
 from .identity import Identity
 
 BOOTSTRAP_TTL_SECONDS = 15 * 60
+_LAST_USED_WRITE_INTERVAL = 60.0
+_KEY_LOCK_STRIPES = 64
 _API_KEY_RE = re.compile(r"^ak_([0-9a-f]{16})_[A-Za-z0-9_-]+$")
 
 
@@ -48,6 +51,11 @@ class ApiKeyInfo:
 class ApiKeyStore:
     def __init__(self, store: CredentialStore) -> None:
         self._store = store
+        self._key_locks = tuple(threading.Lock() for _ in range(_KEY_LOCK_STRIPES))
+        self._admin_lock = threading.Lock()
+
+    def _lock_for(self, key_id: str) -> threading.Lock:
+        return self._key_locks[hash(key_id) % _KEY_LOCK_STRIPES]
 
     # ── queries ──
 
@@ -56,8 +64,8 @@ class ApiKeyStore:
 
     def list_keys(self) -> list[ApiKeyInfo]:
         out = []
-        for key_id in self._store.list_fields(NS_API_KEYS):
-            record = self._record(key_id)
+        for key_id, raw in self._store.list_items(NS_API_KEYS).items():
+            record = json.loads(raw) if raw else None
             if record is not None:
                 out.append(
                     ApiKeyInfo(
@@ -111,8 +119,10 @@ class ApiKeyStore:
             if record is None:
                 continue
             if hmac.compare_digest(record["hash"], presented_hash):
-                record["last_used"] = time.time()
-                self._store.set(NS_API_KEYS, key_id, json.dumps(record))
+                now = time.time()
+                last_used = record.get("last_used")
+                if last_used is None or now - last_used > _LAST_USED_WRITE_INTERVAL:
+                    self._touch_last_used(key_id, record["hash"], now)
                 return Identity(
                     kind="api_key",
                     subject=key_id,
@@ -122,22 +132,43 @@ class ApiKeyStore:
                 )
         return None
 
+    def _touch_last_used(self, key_id: str, expected_hash: str, now: float) -> None:
+        # Best-effort: a skipped write only delays last_used. Store set() is an
+        # upsert, so re-read under the per-key lock to never re-create a
+        # concurrently revoked row.
+        lock = self._lock_for(key_id)
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            current = self._record(key_id)
+            if current is None or current["hash"] != expected_hash:
+                return
+            current["last_used"] = now
+            self._store.set(NS_API_KEYS, key_id, json.dumps(current))
+        finally:
+            lock.release()
+
     def revoke(self, key_id: str) -> None:
-        record = self._record(key_id)
-        if record is None:
-            raise AgentError(ErrorCategory.NOT_FOUND, "unknown key id")
-        if record["admin"]:
-            other_admins = [
-                k
-                for k in self._store.list_fields(NS_API_KEYS)
-                if k != key_id and (self._record(k) or {}).get("admin")
-            ]
-            if not other_admins:
-                raise AgentError(
-                    ErrorCategory.VALIDATION,
-                    "refusing to revoke the last admin key (mint another admin key first)",
-                )
-        self._store.delete(NS_API_KEYS, key_id)
+        with self._lock_for(key_id):
+            record = self._record(key_id)
+            if record is None:
+                raise AgentError(ErrorCategory.NOT_FOUND, "unknown key id")
+            if not record["admin"]:
+                self._store.delete(NS_API_KEYS, key_id)
+                return
+            # Serialises the last-admin check + delete across admin revokes only.
+            with self._admin_lock:
+                other_admins = [
+                    k
+                    for k, raw in self._store.list_items(NS_API_KEYS).items()
+                    if k != key_id and raw and json.loads(raw).get("admin")
+                ]
+                if not other_admins:
+                    raise AgentError(
+                        ErrorCategory.VALIDATION,
+                        "refusing to revoke the last admin key (mint another admin key first)",
+                    )
+                self._store.delete(NS_API_KEYS, key_id)
 
 
 class BootstrapManager:

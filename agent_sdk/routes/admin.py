@@ -299,7 +299,7 @@ async def mint_key(request: Request, body: KeyMintRequest) -> dict[str, Any]:
 
 @router.get("/admin/api/keys", dependencies=[Depends(require_admin)])
 async def list_keys(request: Request) -> dict[str, Any]:
-    keys = _auth(request).api_keys.list_keys()
+    keys = await asyncio.to_thread(_auth(request).api_keys.list_keys)
     return {
         "keys": [
             {
@@ -320,7 +320,7 @@ async def list_keys(request: Request) -> dict[str, Any]:
 @router.delete("/admin/api/keys/{key_id}", dependencies=[Depends(require_admin)])
 async def revoke_key(key_id: str, request: Request) -> dict[str, Any]:
     try:
-        _auth(request).api_keys.revoke(key_id)
+        await asyncio.to_thread(_auth(request).api_keys.revoke, key_id)
     except AgentError as exc:
         # Last-admin protection (and any other refusal) surfaces as 400.
         status = 404 if exc.category is ErrorCategory.NOT_FOUND else 400
@@ -410,7 +410,7 @@ async def overview(request: Request) -> dict[str, Any]:
             "per_identity_per_minute": settings.rate_limit_per_minute,
             "per_ip_unauth_per_minute": settings.unauth_rate_limit_per_minute,
         },
-        "keys": {"count": auth.api_keys.count()},
+        "keys": {"count": await asyncio.to_thread(auth.api_keys.count)},
         "bootstrap_armed": auth.bootstrap.armed,
         # GH-119 follow-up: reflect the resolved allow-list guard_origin()/
         # CorsMiddleware actually enforce (includes the deployment's own

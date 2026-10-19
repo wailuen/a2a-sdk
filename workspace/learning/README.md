@@ -105,10 +105,10 @@ Entries ordered by LRN number.
 | LRN-099 | A2A REST action suffix can differ from the JSON-RPC method name | [LRN-099](LRN-099-a2a-rest-suffix-differs-from-method-name.md) |
 | LRN-100 | Budget-exhausted deferred marker must be relocated once findings are resolved | [LRN-100](LRN-100-budget-exhausted-deferred-must-be-relocated.md) |
 | LRN-101 | Agent card description must never fall back to empty string | [LRN-101](LRN-101-agent-card-description-empty-string-fallback.md) |
-| LRN-102 | TOOL_PROGRESS CUSTOM event missing from CUSTOM_EVENTS, card schema, DESIGN.md table and console router (parity guard blind) | [LRN-102](LRN-102-tool-progress-custom-event-parity-gap.md) |
-| LRN-103 | A2A multi-turn requires contextId continuation across turns | [LRN-103](LRN-103-a2a-multiturn-contextid-continuation.md) |
-| LRN-104 | Deferred imports in model clients must not be swallowed by bare except Exception | [LRN-104](LRN-104-deferred-import-silent-wrap.md) |
-| LRN-105 | Bare except Exception in model client invoke paths swallows distinct error categories | [LRN-105](LRN-105-broad-except-swallows-error-category.md) |
+| LRN-102 | TOOL_PROGRESS CUSTOM event emitted in ag_ui.py but absent from CUSTOM_EVENTS tuple, card schema, DESIGN.md... | [LRN-102](LRN-102-tool-progress-custom-event-parity-gap.md) |
+| LRN-103 | A2A multi-turn continuation must use contextId, not taskId, for completed tasks | [LRN-103](LRN-103-a2a-multiturn-contextid-continuation.md) |
+| LRN-104 | deferred imports in model clients must not be silently caught by bare except Exception | [LRN-104](LRN-104-deferred-import-silent-wrap.md) |
+| LRN-105 | bare "except Exception" in model client invoke paths swallows distinct error categories (e.g.... | [LRN-105](LRN-105-broad-except-swallows-error-category.md) |
 | LRN-106 | caplog assertions on agent_sdk.* loggers false-green outside full-suite order | [LRN-106](LRN-106-caplog-propagate-false-order-dependent.md) |
 | LRN-107 | Fixed broken test idiom recurs uncaught in a sibling test | [LRN-107](LRN-107-duplicated-broken-test-idiom.md) |
 | LRN-108 | Unautomated documentation anchors drift silently | [LRN-108](LRN-108-unautomated-doc-anchor-drift.md) |
@@ -432,3 +432,9 @@ Entries ordered by LRN number.
 | LRN-426 | Ruling reversal must sweep every doc, not only the named one | [LRN-426](LRN-426-ruling-reversal-doc-sweep.md) |
 | LRN-427 | Substring doc test can lock in a reversed rule | [LRN-427](LRN-427-doc-test-locks-old-rule.md) |
 | LRN-428 | Per-key quota must evict own entries before insert | [LRN-428](LRN-428-quota-evict-before-insert.md) |
+| LRN-429 | Thread offload removes free atomicity of read-modify-write | [LRN-429](LRN-429-thread-offload-lost-atomicity.md) |
+| LRN-430 | Check-then-delete safety rules need a lock off the event loop | [LRN-430](LRN-430-check-then-delete-needs-lock.md) |
+| LRN-431 | Not-blocked-loop test must make only the code under test slow | [LRN-431](LRN-431-unproven-loop-block-test.md) |
+| LRN-432 | Process-wide lock across store I/O starves the to_thread pool | [LRN-432](LRN-432-global-lock-starves-pool.md) |
+| LRN-433 | CHANGELOG must name every changed file and new public method | [LRN-433](LRN-433-changelog-names-every-file.md) |
+| LRN-434 | Fix-round test files and base-class changes missing from todo scope | [LRN-434](LRN-434-fix-round-test-files-unlisted.md) |

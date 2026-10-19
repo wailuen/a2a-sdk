@@ -252,6 +252,21 @@ class AzureTableCredentialStore(CredentialStore):
             if not e["RowKey"].startswith("__")
         )
 
+    def list_items(self, namespace: str) -> dict[str, str]:
+        """One partition query; values decrypted in place. Never touches the
+        cache, so reserved namespaces stay uncached."""
+        if namespace == "__meta__":
+            return {}
+        entities = self._table.query_entities(
+            "PartitionKey eq @partition_key",
+            parameters={"partition_key": namespace},
+        )
+        return {
+            e["RowKey"]: decrypt(self._aes, namespace, e["RowKey"], e["Value"].encode())
+            for e in entities
+            if not e["RowKey"].startswith("__")
+        }
+
     def close(self) -> None:
         """No-op: azure-data-tables client is stateless."""
 

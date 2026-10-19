@@ -12,6 +12,7 @@ surface carry ``WWW-Authenticate`` pointing at the PRM.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -97,7 +98,10 @@ def _rate_limited() -> HTTPException:
 
 
 def resolve_identity(request: Request) -> Identity | None:
-    """Best-effort identity resolution without raising (health/self-check)."""
+    """Best-effort identity resolution without raising (health/self-check).
+
+    Does blocking credential-store I/O; async callers should run it via
+    ``asyncio.to_thread``."""
     runtime = _runtime(request)
     token = _bearer(request)
     if token is None:
@@ -117,7 +121,7 @@ async def _resolve_identity(request: Request) -> Identity:
             raise _rate_limited()
         raise _unauthorized(request, runtime, "missing bearer credentials")
 
-    identity = runtime.api_keys.verify(token)
+    identity = await asyncio.to_thread(runtime.api_keys.verify, token)
     if identity is None and runtime.oauth is not None:
         identity = runtime.oauth.verify(token)
     if identity is None:

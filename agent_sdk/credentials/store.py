@@ -55,6 +55,19 @@ class CredentialStore(abc.ABC):
     @abc.abstractmethod
     def close(self) -> None: ...
 
+    def list_items(self, namespace: str) -> dict[str, str]:
+        """``{field: plaintext}`` for every field in *namespace*.
+
+        Default is one ``get`` per field; built-in stores override it with a
+        single query. Does blocking I/O: async callers use ``asyncio.to_thread``.
+        """
+        items: dict[str, str] = {}
+        for field in self.list_fields(namespace):
+            value = self.get(namespace, field)
+            if value is not None:
+                items[field] = value
+        return items
+
 
 def resolver_for_source(store: CredentialStore, source_name: str) -> CredentialResolver:
     """Per-adapter resolver: bound to one namespace, reserved names refused.

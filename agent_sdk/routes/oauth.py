@@ -38,6 +38,7 @@ Errors never echo caller-supplied values (codes, verifiers, tokens, URIs).
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import html
@@ -914,7 +915,9 @@ async def oauth_authorize_approve(request: Request) -> Response:
     assert cleaned is not None
 
     presented = _bearer(request) or form.get("api_key", "").strip()
-    identity = runtime.api_keys.verify(presented) if presented else None
+    identity = (
+        await asyncio.to_thread(runtime.api_keys.verify, presented) if presented else None
+    )
     if identity is None or identity.kind != "api_key" or not identity.admin:
         # Re-render the consent form with a generic failure; the PRM-pointing
         # challenge rides along for programmatic callers (§5.5).
@@ -1063,7 +1066,7 @@ async def oauth_revoke(request: Request) -> JSONResponse:
     # Try Bearer auth first (api_key or oauth-kind callers).
     presented = _bearer(request)
     if presented is not None:
-        identity = runtime.api_keys.verify(presented)
+        identity = await asyncio.to_thread(runtime.api_keys.verify, presented)
         if identity is None:
             identity = store.verify(presented)
         if identity is None:

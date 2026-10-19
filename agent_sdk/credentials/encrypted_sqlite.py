@@ -134,6 +134,14 @@ class EncryptedSqliteStore(CredentialStore):
             ).fetchall()
         return [r[0] for r in rows]
 
+    def list_items(self, namespace: str) -> dict[str, str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT field, value FROM credentials WHERE namespace=? ORDER BY field",
+                (namespace,),
+            ).fetchall()
+        return {r[0]: self._decrypt(namespace, r[0], r[1]) for r in rows}
+
     def close(self) -> None:
         if getattr(self, "_closed", False):
             return
