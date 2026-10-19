@@ -62,7 +62,7 @@ from ..common.etag import etag_for, matches
 from ..common.json_strict import loads_strict
 from ..credentials.store import NS_OAUTH_IDP
 from ..models.errors import AgentError
-from ._consent_ui import render_consent_page
+from ._consent_ui import render_consent_page, render_notice_page
 
 logger = logging.getLogger(__name__)
 
@@ -500,23 +500,20 @@ def _client_redirect(url: str, redirect_uri: str, status: int) -> Response:
     headers = _redirect_security_headers(redirect_uri)
     if _validated_origin(urlparse(redirect_uri)) not in _HANDOFF_REDIRECT_ORIGINS:
         return RedirectResponse(url=url, status_code=status, headers=headers)
-    target = html.escape(url, quote=True)
-    body = (
-        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        f"<meta http-equiv='refresh' content='0;url={target}'>"
-        "<title>Returning to the app</title></head>"
-        f"<body><p>Returning to the app. <a href='{target}'>Continue</a></p>"
-        "</body></html>"
+    body = render_notice_page(
+        title="Returning to the app",
+        message="You’re being sent back to the app now.",
+        hint="If nothing happens in a few seconds, choose Continue.",
+        continue_url=url,
     )
     return HTMLResponse(content=body, status_code=200, headers=headers)
 
 
 def _error_page(message: str, status: int = 400) -> HTMLResponse:
-    body = (
-        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        "<title>Authorization error</title></head>"
-        f"<body><h1>Authorization error</h1><p>{html.escape(message)}</p>"
-        "</body></html>"
+    body = render_notice_page(
+        title="Sign-in couldn’t continue",
+        message=message,
+        hint="Close this page and start again from the app you came from.",
     )
     return HTMLResponse(content=body, status_code=status, headers=_CONSENT_SECURITY_HEADERS)
 
@@ -544,16 +541,20 @@ def _validate_authorize(
     client_id = params["client_id"]
     redirect_uri = params["redirect_uri"]
     if not client_id or not redirect_uri:
-        return None, _error_page("missing client_id or redirect_uri")
+        return None, _error_page("The sign-in link is missing details (client_id or redirect_uri).")
     client = store.get_client(client_id)
     if client is None:
-        return None, _error_page("unknown client")
+        return None, _error_page("This app isn’t registered with this agent (unknown client).")
     registered = client.get("redirect_uris")
     if not isinstance(registered, list) or redirect_uri not in registered:
-        return None, _error_page("redirect_uri is not registered for this client")
+        return None, _error_page(
+            "The address this app asked to return to isn’t one it registered (redirect_uri)."
+        )
     if not _valid_redirect_uri(redirect_uri):
         # Defense in depth — never trust the DCR record alone.
-        return None, _error_page("redirect_uri is not acceptable")
+        return None, _error_page(
+            "The address this app asked to return to isn’t allowed (redirect_uri)."
+        )
 
     state = params["state"]
     if params["response_type"] != "code":

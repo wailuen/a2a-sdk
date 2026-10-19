@@ -156,3 +156,54 @@ def render_consent_page(
 </body>
 </html>
 """
+
+
+_NOTICE_CSS = """
+.intro { padding-bottom: 4px; }
+.msg { margin: 0; font-size: 15px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
+.go { display: flex; align-items: center; justify-content: center; height: 44px;
+  margin: 24px 32px 0; border-radius: 8px; text-decoration: none; }
+.go:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 480px) { .go { margin-left: 20px; margin-right: 20px; height: 48px; font-size: 16px; } }
+"""
+
+
+def render_notice_page(
+    *,
+    title: str,
+    message: str,
+    hint: str,
+    continue_url: str | None = None,
+) -> str:
+    """Build a short branded page with no form: the OAuth error page, and the
+    meta-refresh hand-off page when ``continue_url`` is given (refreshes to it
+    at once and offers a Continue link). Every argument is a raw value and is
+    escaped here; ``continue_url`` must already be validated by the caller."""
+    refresh = link = ""
+    if continue_url is not None:
+        target = html.escape(continue_url, quote=True)
+        refresh = f"<meta http-equiv='refresh' content='0;url={target}'>\n"
+        link = f'<a class="go primary" href=\'{target}\'>Continue</a>\n'
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+{refresh}<title>{html.escape(title)}</title>
+<style>{_CSS}{_NOTICE_CSS}</style>
+</head>
+<body>
+<main>
+<div class="head">
+{TPC_LOGO_SVG}
+<div><div class="agent">Sign-in</div><div class="sub">Built by TPC</div></div>
+</div>
+<div class="intro">
+<h1>{html.escape(title)}</h1>
+<p class="msg">{html.escape(message)}</p>
+</div>
+{link}<p class="foot">{html.escape(hint)}</p>
+</main>
+</body>
+</html>
+"""

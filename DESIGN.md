@@ -100,7 +100,7 @@ agent_sdk/
 │   ├── ag_ui.py            # POST /ag-ui/run (SSE)
 │   ├── mcp.py              # /mcp Streamable HTTP (POST+GET+DELETE) + legacy SSE pair
 │   ├── oauth.py            # 8414/7591/6749+PKCE/8707/9728/7009 + consent page
-│   ├── _consent_ui.py      # shared consent page layout (TPC mark, light/dark, phone); inline-only for the consent CSP
+│   ├── _consent_ui.py      # shared consent + notice (error, hand-off) page layout (TPC mark, light/dark, phone); inline-only for the consent CSP
 │   ├── _tpc_logo.py        # TPC mark as an inline SVG constant
 │   ├── admin.py            # console API (credentials, keys, usage, samples)
 │   └── health.py

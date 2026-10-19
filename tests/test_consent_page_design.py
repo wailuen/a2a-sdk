@@ -13,9 +13,9 @@ import re
 
 import httpx
 
-from agent_sdk.routes._consent_ui import render_consent_page
+from agent_sdk.routes._consent_ui import render_consent_page, render_notice_page
 from agent_sdk.routes._tpc_logo import TPC_LOGO_SVG
-from agent_sdk.routes.oauth import _idp_consent_page
+from agent_sdk.routes.oauth import _client_redirect, _error_page, _idp_consent_page
 
 _REDIRECT = "https://claude.ai/api/mcp/auth_callback"
 _CODE_CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
@@ -130,3 +130,44 @@ async def test_admin_consent_page_renders_new_layout(client: httpx.AsyncClient) 
     assert '<form method="post" action="/oauth/authorize">' in page
     assert "default-src 'none'" in r.headers["content-security-policy"]
     _assert_self_contained(page)
+
+
+def test_error_page_is_branded_and_escaped() -> None:
+    r = _error_page('<script>alert(1)</script>')
+    page = r.body.decode()
+    assert r.status_code == 400
+    assert TPC_LOGO_SVG in page and "Built by TPC" in page
+    assert "Sign-in couldn’t continue" in page
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+    assert "<form" not in page
+    assert "form-action 'self';" in r.headers["content-security-policy"]
+    _assert_self_contained(page)
+
+
+async def test_unknown_client_error_page_is_branded(client: httpx.AsyncClient) -> None:
+    r = await client.get(
+        "/oauth/authorize",
+        params={"client_id": "nope", "redirect_uri": _REDIRECT, "response_type": "code"},
+    )
+    assert r.status_code == 400
+    assert TPC_LOGO_SVG in r.text and "unknown client" in r.text
+    _assert_self_contained(r.text)
+
+
+def test_handoff_page_is_branded_and_keeps_meta_refresh() -> None:
+    apim = "https://global.consent.azure-apim.net/redirect/x"
+    url = f"{apim}?code=a&state=b<c"
+    r = _client_redirect(url, apim, 303)
+    page = r.body.decode()
+    assert r.status_code == 200 and "location" not in r.headers
+    target = "https://global.consent.azure-apim.net/redirect/x?code=a&amp;state=b&lt;c"
+    assert f"<meta http-equiv='refresh' content='0;url={target}'>" in page
+    assert f"href='{target}'>Continue</a>" in page
+    assert TPC_LOGO_SVG in page and "Returning to the app" in page
+    assert "<script" not in page.lower() and "<img" not in page.lower()
+
+
+def test_notice_page_without_link_has_no_refresh() -> None:
+    page = render_notice_page(title="T", message="M", hint="H")
+    assert "http-equiv" not in page and "Continue</a>" not in page
+    assert "@media (prefers-color-scheme: dark)" in page
