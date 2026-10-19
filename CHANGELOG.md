@@ -8,6 +8,11 @@ internals, `contrib/`) may change in minors with notice here.
 
 _Nothing yet._
 
+## [0.17.5] — 2026-10-19
+
+### Changed
+- The OAuth sign-in error page and the "Returning to the app" hand-off page now use the same TPC-branded layout as the consent pages (new `render_notice_page` in `agent_sdk/routes/_consent_ui.py`): TPC mark, card, light/dark and phone layout. The hand-off page (used for `_HANDOFF_REDIRECT_ORIGINS`, e.g. Copilot Studio) keeps the identical meta refresh tag and gains a Continue button. Error messages are reworded in plain language (the technical name stays in brackets, e.g. "(unknown client)"). CSP, status codes and redirect behavior are unchanged. Agents get it by upgrading the SDK; no agent change needed. Tests: `tests/test_consent_page_design.py`.
+
 ## [0.17.4] — 2026-10-17
 
 ### Changed
