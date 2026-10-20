@@ -43,8 +43,11 @@ any implementation, fix loops gated on a critical/high severity floor
    under `workspace/todos/active/`.
 7. **Auto-redteam loop until zero critiques (all severities):**
    - Run `redteam` scoped to the plan files.
-   - If findings: invoke `planner` to fix; re-redteam. Cap at 3 rounds; log any
-     remaining issues and continue (planning issues do not block execution).
+   - If findings: rounds 1–3, invoke `planner` to fix; from round 4 on, invoke
+     `debug` instead for a fresh-lens root-cause fix of the plan. Re-redteam after
+     every fix. The plan passes only at zero findings.
+   - If round 8 still has findings, stop and show the user the open findings —
+     do not start execution on a plan with open findings.
    - Codify any novel learnings surfaced in this plan-review pass.
 8. Show plan summary: wave count, scopes, SI-flagged todos, registry reuses, dep order.
 9. **Confirm with user**: "N waves planned. Proceed? [y/n]"

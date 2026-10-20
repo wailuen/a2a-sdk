@@ -144,28 +144,6 @@ def test_rt006_agent_call_budget_is_mutable_for_recompute(wf_path: Path) -> None
 
 
 @pytest.mark.parametrize("wf_path", WAVE_CYCLE_FILES, ids=WAVE_CYCLE_IDS)
-def test_rt006_agent_call_budget_recompute_scales_with_group_count(wf_path: Path) -> None:
-    content = _read(wf_path)
-    assert "AGENT_CALL_BUDGET = Number(normalizedArgs.agentBudget) || Math.max(150, 45 * wave.groups.length + 80)" in content, (
-        f"{wf_path.name}: AGENT_CALL_BUDGET must be recomputed from wave.groups.length once "
-        "known (explicit override wins; otherwise scale with group count) — a fixed constant "
-        "the same fix documents as too low for a routine wave is a failure mode, not a guard."
-    )
-    # The recompute must happen strictly after wave.groups exists (i.e. after Parse), not
-    # only at the top-of-file default used for the handful of pre-Parse calls.
-    default_idx = content.find("let AGENT_CALL_BUDGET = Number(normalizedArgs.agentBudget) || 150")
-    recompute_idx = content.find(
-        "AGENT_CALL_BUDGET = Number(normalizedArgs.agentBudget) || Math.max(150, 45 * wave.groups.length + 80)"
-    )
-    wave_groups_norm_idx = content.find("g.scope    = uniq(g.creates.concat(g.modifies))")
-    assert -1 < default_idx < wave_groups_norm_idx < recompute_idx, (
-        f"{wf_path.name}: the scaled AGENT_CALL_BUDGET recompute must be positioned after "
-        "wave.groups has been parsed and normalized, not before — wave.groups.length is not "
-        "yet meaningful at the top-of-file default."
-    )
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_FILES, ids=WAVE_CYCLE_IDS)
 def test_rt011_explicit_zero_agent_budget_rejected_via_consolidated_guard(wf_path: Path) -> None:
     """RT-011 (fix round): the dedicated agentBudget===0 guard was fully redundant with
     the finite/positive guard immediately below it (0 fails `> 0` too) and has been
@@ -197,187 +175,15 @@ def test_rt011_explicit_zero_agent_budget_rejected_via_consolidated_guard(wf_pat
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_FILES, ids=WAVE_CYCLE_IDS)
-def test_rt016_unit_loop_uses_single_inequality_mismatch_check(wf_path: Path) -> None:
-    unit = _unit_redteam_section(_read(wf_path), wf_path)
-    assert "rt.findingsCount !== rt.findings.length" in unit, (
-        f"{wf_path.name}: unit redteam loop must use a single findingsCount !== findings.length "
-        "invariant — the old two-special-case guard missed partial mismatches."
-    )
-    assert "rt.findingsCount === 0 && rt.findings.length > 0" not in unit, (
-        f"{wf_path.name}: the old findingsCount===0-with-nonempty-array special case must be "
-        "removed — it self-healed by overwriting findingsCount instead of failing closed, and "
-        "never caught a partial mismatch."
-    )
-    assert "rt.findingsCount > 0 && rt.findings.length === 0" not in unit, (
-        f"{wf_path.name}: the old findingsCount>0-with-empty-array special case must be "
-        "removed — folded into the single inequality check."
-    )
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_FILES, ids=WAVE_CYCLE_IDS)
-def test_rt016_phase_loop_uses_single_inequality_mismatch_check(wf_path: Path) -> None:
-    phase_section = _phase_redteam_section(_read(wf_path), wf_path)
-    assert "rt.findingsCount !== rt.findings.length" in phase_section, (
-        f"{wf_path.name}: phase redteam loop must use a single findingsCount !== "
-        "findings.length invariant — the old two-special-case guard missed partial mismatches."
-    )
-    assert "rt.findingsCount === 0 && rt.findings.length > 0" not in phase_section, (
-        f"{wf_path.name}: the old findingsCount===0-with-nonempty-array special case must be "
-        "removed from the phase loop."
-    )
-    assert "rt.findingsCount > 0 && rt.findings.length === 0" not in phase_section, (
-        f"{wf_path.name}: the old findingsCount>0-with-empty-array special case must be "
-        "removed from the phase loop."
-    )
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_FILES, ids=WAVE_CYCLE_IDS)
-def test_rt016_mismatch_check_still_fails_closed_with_round_budget(wf_path: Path) -> None:
-    """The unified check must keep the round-budget/deferred-note handling — it must not
-    regress into a bare log-and-continue that loops forever on a persistent mismatch."""
-    for section_fn, round_var, label in (
-        (_unit_redteam_section, "uRound", "unit"),
-        (_phase_redteam_section, "pRound", "phase"),
-    ):
-        section = section_fn(_read(wf_path), wf_path)
-        mismatch_idx = section.find("rt.findingsCount !== rt.findings.length")
-        assert mismatch_idx != -1, f"{wf_path.name}: {label} mismatch check missing."
-        window = section[mismatch_idx : mismatch_idx + 1200]
-        assert f"if ({round_var} >=" in window, (
-            f"{wf_path.name}: {label} findingsCount mismatch branch must still enforce the "
-            "round budget (fail closed forever is as bad as fail open forever)."
-        )
-        assert "rt-mismatch-budget.md" in window, (
-            f"{wf_path.name}: {label} findingsCount mismatch branch must still write a "
-            "deferred note when the round budget is exhausted."
-        )
-
-
 # ---------------------------------------------------------------------------
 # RT-004: unit redteam round-5 budget exit captures codify findings and blocks archive.
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_FILES, ids=WAVE_CYCLE_IDS)
-def test_rt004_unit_budget_exit_captures_codify_findings_before_break(wf_path: Path) -> None:
-    unit = _unit_redteam_section(_read(wf_path), wf_path)
-    push_idx = unit.find("allHighFindings.push.apply(allHighFindings, highFindings)")
-    budget_log_idx = unit.find("Round budget exhausted for group")
-    assert push_idx != -1, f"{wf_path.name}: unit loop never pushes highFindings into allHighFindings."
-    assert budget_log_idx != -1, f"{wf_path.name}: unit round-budget exit log message not found."
-    assert push_idx < budget_log_idx, (
-        f"{wf_path.name}: allHighFindings.push.apply(...) must run BEFORE the uRound >= 5 "
-        "round-budget break — codify accumulation positioned after the break is unreachable "
-        "from that exit path, silently dropping surviving critical/high findings from the "
-        "Codify LRN pass and SDK-issue scan."
-    )
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_FILES, ids=WAVE_CYCLE_IDS)
-def test_rt004_unit_budget_exit_sets_blocking_flags(wf_path: Path) -> None:
-    unit = _unit_redteam_section(_read(wf_path), wf_path)
-    budget_log_idx = unit.find("Round budget exhausted for group")
-    assert budget_log_idx != -1, f"{wf_path.name}: unit round-budget exit log message not found."
-    window = unit[budget_log_idx : budget_log_idx + 1200]
-    assert "unitBudgetBlocked = true" in window, (
-        f"{wf_path.name}: the unit round-budget exit must set unitBudgetBlocked — a group "
-        "exiting round 5 with surviving critical/high findings must not let the wave archive "
-        "as if clean."
-    )
-    assert "protocolBlocked = true" in window, (
-        f"{wf_path.name}: the unit round-budget exit must fold into protocolBlocked (or an "
-        "equivalent OR'd condition) so the existing archive gate actually stops the wave."
-    )
-    # The deferred note (pre-existing) must still be written on this path.
-    assert "-group-' + group.label + '-budget-exhausted.md" in window, (
-        f"{wf_path.name}: the unit round-budget deferred note must still be written."
-    )
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_FILES, ids=WAVE_CYCLE_IDS)
-def test_rt004_unit_budget_note_includes_final_findings(wf_path: Path) -> None:
-    unit = _unit_redteam_section(_read(wf_path), wf_path)
-    budget_log_idx = unit.find("Round budget exhausted for group")
-    window = unit[budget_log_idx : budget_log_idx + 1200]
-    assert "JSON.stringify(rt.findings, null, 2)" in window, (
-        f"{wf_path.name}: the unit round-budget deferred note must include the round's full "
-        "findings, mirrored by the phase-loop equivalent."
-    )
 
 
 # ---------------------------------------------------------------------------
 # RT-003: phase redteam round-8 budget exit writes a deferred note, captures codify
 # findings, and blocks archive.
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_FILES, ids=WAVE_CYCLE_IDS)
-def test_rt003_phase_budget_exit_captures_codify_findings_before_break(wf_path: Path) -> None:
-    phase_section = _phase_redteam_section(_read(wf_path), wf_path)
-    push_idx = phase_section.find("allHighFindings.push.apply(allHighFindings, highFindings)")
-    budget_log_idx = phase_section.find("Phase round budget exhausted")
-    assert push_idx != -1, f"{wf_path.name}: phase loop never pushes highFindings into allHighFindings."
-    assert budget_log_idx != -1, f"{wf_path.name}: phase round-budget exit log message not found."
-    assert push_idx < budget_log_idx, (
-        f"{wf_path.name}: allHighFindings.push.apply(...) must run BEFORE the pRound >= 8 "
-        "round-budget break — codify accumulation positioned after the break is unreachable "
-        "from that exit path, silently dropping surviving critical/high findings from the "
-        "Codify LRN pass and SDK-issue scan."
-    )
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_FILES, ids=WAVE_CYCLE_IDS)
-def test_rt003_phase_budget_exit_writes_deferred_note(wf_path: Path) -> None:
-    phase_section = _phase_redteam_section(_read(wf_path), wf_path)
-    budget_log_idx = phase_section.find("Phase round budget exhausted")
-    assert budget_log_idx != -1, f"{wf_path.name}: phase round-budget exit log message not found."
-    window = phase_section[budget_log_idx : budget_log_idx + 1200]
-    assert "-phase-budget-exhausted.md" in window, (
-        f"{wf_path.name}: the phase round-budget exit must write a deferred note "
-        "(<wave>-phase-budget-exhausted.md), mirroring the unit loop's round-budget note — "
-        "previously this exit path was a bare log() with no durable artifact at all."
-    )
-    assert "JSON.stringify(rt.findings, null, 2)" in window, (
-        f"{wf_path.name}: the phase round-budget deferred note must include the round's full "
-        "findings."
-    )
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_FILES, ids=WAVE_CYCLE_IDS)
-def test_rt003_phase_budget_exit_sets_blocking_flags(wf_path: Path) -> None:
-    phase_section = _phase_redteam_section(_read(wf_path), wf_path)
-    budget_log_idx = phase_section.find("Phase round budget exhausted")
-    window = phase_section[budget_log_idx : budget_log_idx + 1200]
-    assert "phaseBudgetBlocked = true" in window, (
-        f"{wf_path.name}: the phase round-budget exit must set phaseBudgetBlocked — reaching "
-        "the round cap now signals surviving critical/high findings (GH-132 severity floor), "
-        "not a leftover low nit, and must not let the wave archive as if clean."
-    )
-    assert "protocolBlocked = true" in window, (
-        f"{wf_path.name}: the phase round-budget exit must fold into protocolBlocked so the "
-        "existing archive gate actually stops the wave."
-    )
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_FILES, ids=WAVE_CYCLE_IDS)
-def test_rt003_rt004_budget_blocked_flags_declared_and_returned(wf_path: Path) -> None:
-    content = _read(wf_path)
-    assert "let   unitBudgetBlocked   = false" in content or "let unitBudgetBlocked = false" in content, (
-        f"{wf_path.name}: unitBudgetBlocked must be declared as wave-level state."
-    )
-    assert "let   phaseBudgetBlocked  = false" in content or "let phaseBudgetBlocked = false" in content, (
-        f"{wf_path.name}: phaseBudgetBlocked must be declared as wave-level state."
-    )
-    return_block_idx = content.rfind("return {")
-    assert return_block_idx != -1, f"{wf_path.name}: no final return object found."
-    return_block = content[return_block_idx:]
-    assert "unitBudgetBlocked:" in return_block, (
-        f"{wf_path.name}: unitBudgetBlocked must be surfaced on the wave's final return object."
-    )
-    assert "phaseBudgetBlocked:" in return_block, (
-        f"{wf_path.name}: phaseBudgetBlocked must be surfaced on the wave's final return object."
-    )
 
 
 @pytest.mark.parametrize("wf_path", WAVE_CYCLE_FILES, ids=WAVE_CYCLE_IDS)

@@ -158,31 +158,14 @@ team can extend the agent from inside its own repo. The plugin root is the
 directory **two levels up** from this `SKILL.md`
 (`<plugin>/skills/new-agent/../..` = `<plugin>/`).
 
-**Skills** (do **not** copy `new-agent` or `setup` — `new-agent` is run-once
-from outside the agent repo; `setup` is template-only and would be a no-op in
-a `/new-agent`-scaffolded repo since all placeholders are already filled):
-- `skills/add-tool/`, `skills/add-source/`, `skills/agent-verify/`
-- `skills/scenario/`, `skills/codify/`, `skills/analyze/`
-- `skills/todos/`, `skills/implement/`, `skills/wave/`
-- `skills/redteam/`, `skills/debug/`
-- `skills/upgrade/`, `skills/changelog/`
-- `skills/provision/`, `skills/diagnose/`, `skills/migrate/`
-- `skills/sdk-issue/`
-
-→ all to `<name>/.claude/skills/`
-
-**Agents**:
-- `agents/core/redteam.md`, `agents/core/analyst.md`,
-  `agents/core/planner.md`, `agents/core/codify.md`, `agents/core/debug.md`
-  → `<name>/.claude/agents/core/`
-- `agents/project/sdk-advisor.md`, `agents/project/python-implementer.md`
-  → `<name>/.claude/agents/project/`
-
-**Workflow**:
-- `workflows/wave-cycle.js` → `<name>/.claude/workflows/wave-cycle.js`
-
-**Reference**:
-- `reference/sdk-security-invariants.md` → `<name>/.claude/reference/`
+Copy these plugin directories as a whole, so the seeded set never drifts from
+what the harness ships:
+- `skills/` → `<name>/.claude/skills/` — **except** `new-agent` and `setup`
+  (`new-agent` runs once from outside the agent repo; `setup` is for template
+  clones and is a no-op here because all placeholders are already filled)
+- `agents/` → `<name>/.claude/agents/` (core, project, and the protocol advisors)
+- `workflows/` → `<name>/.claude/workflows/`
+- `reference/` → `<name>/.claude/reference/`
 
 **Settings**:
 - `settings.json` → `<name>/.claude/settings.json`
@@ -202,10 +185,6 @@ was seeded from. This is the base used by `/upgrade` step 10 to distinguish
   }
 }
 ```
-
-`/agent-verify` and the Protocol Audit phase of `wave-cycle.js` additionally
-rely on the globally-installed check kit (`agent-stack-check` + the four protocol
-advisors); note that in the handoff if the kit isn't present.
 
 Also seed the workspace template: copy `harness/workspace/` → `<name>/workspace/`
 (all subdirectory `README.md` files, no content files). The workspace is where all
@@ -266,12 +245,9 @@ Contrib:     <none | list>  (EXPERIMENTAL)
 MASTER_KEY:  generated → .env (not shown; rotate via python -m agent_sdk rotate-master-key)
 Tests:       <pass/fail summary>
 Dev boot:    <ok @ :8000 | skipped (--no-run)>
-Seeded:      .claude/skills/{add-tool,add-source,agent-verify,scenario,codify,analyze,todos,implement,wave,redteam,debug}
-             .claude/skills/{upgrade,changelog,provision,diagnose,migrate,sdk-issue}
-             .claude/agents/core/{redteam,analyst,planner,codify,debug}.md
-             .claude/agents/project/{sdk-advisor,python-implementer}.md
-             .claude/workflows/wave-cycle.js
-             .claude/reference/sdk-security-invariants.md
+Seeded:      .claude/skills/  (<n> skills; all except new-agent, setup)
+             .claude/agents/  (core, project, protocol advisors)
+             .claude/workflows/  .claude/reference/
              .claude/settings.json
              .claude/.harness-manifest.json
              workspace/{prd,adr,learning,components,scenarios}/README.md

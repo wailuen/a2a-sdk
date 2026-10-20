@@ -398,9 +398,10 @@ the same scenario. The domain logic is correct; the wire format diverges:
 - If AG-UI passed but A2A failed: inspect the A2A `message:stream` SSE events.
   Common causes: `kind: "artifact-update"` MIME/`data_type` mismatch,
   `status.state: "failed"` on the task, or reply text buried in a non-text Part.
-- Spawn an implementer targeting the route that failed
-  (`agent_sdk/routes/ag_ui.py` or `agent_sdk/routes/a2a.py`). No domain code changes.
-- Server restart required before re-test.
+- The route code lives in the SDK (`agent_sdk/routes/`), which this repo cannot
+  change. File it with `/sdk-issue`, attaching both transports' event streams.
+  Mark the scenario ESCALATED and exclude it from further rounds; it does not
+  block other scenarios from reaching 100%.
 
 **`code-bug`** — wrong tool logic, wrong output format, tool errored (fails on
 BOTH transports with the same root cause):
@@ -423,8 +424,9 @@ BOTH transports with the same root cause):
   (A persona-gap does NOT block other scenarios from reaching 100%.)
 
 **`upstream-issue`** — source adapter / credential failure:
-- Spawn a diagnose agent: read the source adapter + check credentials via
-  `POST /admin/sources/<name>/health`. Report the error category.
+- Spawn a diagnose agent: read the source adapter + check health via
+  `GET /admin/api/overview` (admin bearer) and read `adapters[].healthy` for
+  that source. Report the error category.
 - If credentials missing: prompt user to re-seed via `/provision`.
 - If adapter bug: spawn implementer to fix.
 - Server restart required if code was changed.

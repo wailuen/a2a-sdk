@@ -406,6 +406,14 @@ RT004_FILES, RT004_FILES_IDS = _existing_wf_files(
 # Helper
 # ---------------------------------------------------------------------------
 
+
+# wave-cycle.js behaviour (as opposed to sdk-wave.js prompt wording) is pinned by
+# tests/test_wave_cycle_behaviour.py, which executes the script; wording tests below that
+# use this helper apply to sdk-wave.js only.
+def _sdk_wave_only(paths: list[Path], ids: list[str]) -> tuple[list[Path], list[str]]:
+    keep = [(p, i) for p, i in zip(paths, ids) if p == SDK_WAVE]
+    return [p for p, _ in keep], [i for _, i in keep]
+
 def _read(path: Path) -> str:
     assert path.exists(), f"Workflow file not found: {path}"
     return path.read_text()
@@ -503,7 +511,7 @@ def _offending_harness_paths_description(content: str, wf_path: Path) -> str:
 # Schema field presence: offendingHarnessPaths in ARCHIVE_INTENT_SCHEMA
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("wf_path", [WAVE_CYCLE_RUNTIME, SDK_WAVE], ids=["wave-cycle.js", "sdk-wave.js"])
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_archive_intent_schema_has_offending_harness_paths_in_required(wf_path: Path) -> None:
     """GH-84: ARCHIVE_INTENT_SCHEMA required array must include 'offendingHarnessPaths'.
 
@@ -528,7 +536,7 @@ def test_archive_intent_schema_has_offending_harness_paths_in_required(wf_path: 
     )
 
 
-@pytest.mark.parametrize("wf_path", [WAVE_CYCLE_RUNTIME, SDK_WAVE], ids=["wave-cycle.js", "sdk-wave.js"])
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_archive_intent_schema_has_offending_harness_paths_in_properties(wf_path: Path) -> None:
     """GH-84: ARCHIVE_INTENT_SCHEMA properties must define 'offendingHarnessPaths'."""
     content = _read(wf_path)
@@ -547,7 +555,7 @@ def test_archive_intent_schema_has_offending_harness_paths_in_properties(wf_path
 # Agent prompt: step 4 instructs agent to populate offendingHarnessPaths
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("wf_path", [WAVE_CYCLE_RUNTIME, SDK_WAVE], ids=["wave-cycle.js", "sdk-wave.js"])
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_archive_intent_prompt_contains_harness_dirs(wf_path: Path) -> None:
     """GH-84 (+ post-archive w035 follow-up): archiveIntent agent prompt must instruct the
     agent to check every harness deliverable directory and populate offendingHarnessPaths.
@@ -562,7 +570,7 @@ def test_archive_intent_prompt_contains_harness_dirs(wf_path: Path) -> None:
         )
 
 
-@pytest.mark.parametrize("wf_path", [WAVE_CYCLE_RUNTIME, SDK_WAVE], ids=["wave-cycle.js", "sdk-wave.js"])
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_archive_intent_schema_description_contains_harness_dirs(wf_path: Path) -> None:
     """RT-002 (post-archive w035 follow-up): every HARNESS_DIRS entry must also appear
     inside the offendingHarnessPaths *schema description*, not only the prompt text.
@@ -597,7 +605,7 @@ def test_archive_intent_schema_description_contains_harness_dirs(wf_path: Path) 
 # anchor directly to that mechanism, across all four archive-gate runners.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("wf_path", STEP4B_FILES, ids=STEP4B_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(STEP4B_FILES, STEP4B_FILES_IDS)[0], ids=_sdk_wave_only(STEP4B_FILES, STEP4B_FILES_IDS)[1])
 def test_rt002_step4b_prompt_contains_git_dash_c_template_instruction(wf_path: Path) -> None:
     """RT-002 (fix round): the archiveIntent prompt must instruct the agent to separately
     run `git -C template status --short` (guarded by an `if a template/ directory exists`
@@ -625,7 +633,7 @@ def test_rt002_step4b_prompt_contains_git_dash_c_template_instruction(wf_path: P
         )
 
 
-@pytest.mark.parametrize("wf_path", STEP4B_FILES, ids=STEP4B_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(STEP4B_FILES, STEP4B_FILES_IDS)[0], ids=_sdk_wave_only(STEP4B_FILES, STEP4B_FILES_IDS)[1])
 def test_rt002_step4b_schema_description_documents_template_folding(wf_path: Path) -> None:
     """RT-002 (fix round): the offendingHarnessPaths schema description — the site the
     archive-gate agent is actually constrained against at runtime, per
@@ -648,7 +656,7 @@ def test_rt002_step4b_schema_description_documents_template_folding(wf_path: Pat
 # Dual blocking condition
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("wf_path", [WAVE_CYCLE_RUNTIME, SDK_WAVE], ids=["wave-cycle.js", "sdk-wave.js"])
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_dual_blocking_condition_present(wf_path: Path) -> None:
     """GH-84: the archive blocking condition must check BOTH offendingPaths and
     offendingHarnessPaths. A single-field check silently misses harness deliverables.
@@ -711,7 +719,7 @@ def test_dual_blocking_condition_present(wf_path: Path) -> None:
 # message) whenever it is false.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("wf_path", RT004_FILES, ids=RT004_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[0], ids=_sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[1])
 def test_rt004_archive_intent_schema_has_template_dir_exists_in_required(wf_path: Path) -> None:
     """RT-004: ARCHIVE_INTENT_SCHEMA required array must include 'templateDirExists' — without
     it in the schema the agent is not constrained to report it, and the hard-block below has
@@ -745,7 +753,7 @@ def test_rt004_archive_intent_schema_has_template_dir_exists_in_properties(wf_pa
     )
 
 
-@pytest.mark.parametrize("wf_path", RT004_FILES, ids=RT004_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[0], ids=_sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[1])
 def test_rt004_prompt_checks_template_dir_unconditionally(wf_path: Path) -> None:
     """RT-004: the archiveIntent prompt must instruct the agent to determine templateDirExists
     UNCONDITIONALLY (regardless of git status), not only when template/ happens to exist —
@@ -805,7 +813,7 @@ def test_rt004_declares_template_scope_hard_block_present(wf_path: Path) -> None
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("wf_path", RT004_FILES, ids=RT004_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[0], ids=_sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[1])
 def test_rt006_template_dir_check_schema_defined(wf_path: Path) -> None:
     """Every runner must carry the cheap single-fact schema the Parse gate uses —
     reusing ARCHIVE_INTENT_SCHEMA here would demand git status output this early
@@ -824,7 +832,7 @@ def test_rt006_template_dir_check_schema_defined(wf_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("wf_path", RT004_FILES, ids=RT004_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[0], ids=_sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[1])
 def test_rt006_parse_phase_aborts_before_any_expensive_phase(wf_path: Path) -> None:
     """The gate must run in the Parse phase and RETURN, not merely warn — and it must
     fail closed on a null agent response, like every other gate in these runners."""
@@ -867,7 +875,7 @@ def _protocol_blocked_message_section(content: str, wf_path: Path) -> str:
     return match.group(1)
 
 
-@pytest.mark.parametrize("wf_path", RT004_FILES, ids=RT004_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[0], ids=_sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[1])
 def test_rt004_archive_skip_message_distinguishes_template_propagation_block(wf_path: Path) -> None:
     """RT-004 (RT-003 principle: 'use the actual block cause in the message'): a wave blocked
     by the templatePropagationBlocked gate must not fall into the generic 'blocked by critical
@@ -886,7 +894,7 @@ def test_rt004_archive_skip_message_distinguishes_template_propagation_block(wf_
 # GH-118 (LRN-119): schema field presence: offendingUndeclaredImports
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_gh118_archive_intent_schema_has_offending_undeclared_imports_in_required(wf_path: Path) -> None:
     """GH-118: ARCHIVE_INTENT_SCHEMA required array must include 'offendingUndeclaredImports'.
 
@@ -910,7 +918,7 @@ def test_gh118_archive_intent_schema_has_offending_undeclared_imports_in_require
     )
 
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_gh118_archive_intent_schema_has_offending_undeclared_imports_in_properties(wf_path: Path) -> None:
     """GH-118: ARCHIVE_INTENT_SCHEMA properties must define 'offendingUndeclaredImports'."""
     content = _read(wf_path)
@@ -930,7 +938,7 @@ def test_gh118_archive_intent_schema_has_offending_undeclared_imports_in_propert
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
-    "wf_path,dialect_root", ARCHIVE_GATE_DIALECT_CASES, ids=ARCHIVE_GATE_DIALECT_IDS
+    "wf_path,dialect_root", [(SDK_WAVE, "agent_sdk")], ids=["sdk-wave.js"]
 )
 def test_gh118_archive_intent_prompt_contains_import_cross_check_instructions(
     wf_path: Path, dialect_root: str
@@ -1004,7 +1012,7 @@ def test_rt001_archive_gate_carries_no_foreign_source_root(
             )
 
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_gh118_inline_comment_cross_references_lrn_and_gh(wf_path: Path) -> None:
     """AC: inline GH-84 comment blocks are updated to document the new import-cross-check
     clause and cross-reference LRN-119 / GH-118, so a future reader of either comment block
@@ -1053,7 +1061,7 @@ def test_gh118_inline_comment_cross_references_lrn_and_gh(wf_path: Path) -> None
 # test_workflow_sync.py, not re-parametrized here.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_rt003_archive_intent_schema_has_offending_undeclared_scope_in_required(wf_path: Path) -> None:
     """RT-003 (w036): ARCHIVE_INTENT_SCHEMA required array must include
     'offendingUndeclaredScope'. Without this field in the schema the agent is not
@@ -1077,7 +1085,7 @@ def test_rt003_archive_intent_schema_has_offending_undeclared_scope_in_required(
     )
 
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_rt003_archive_intent_schema_has_offending_undeclared_scope_in_properties(wf_path: Path) -> None:
     """RT-003 (w036): ARCHIVE_INTENT_SCHEMA properties must define 'offendingUndeclaredScope'."""
     content = _read(wf_path)
@@ -1093,7 +1101,7 @@ def test_rt003_archive_intent_schema_has_offending_undeclared_scope_in_propertie
 
 
 @pytest.mark.parametrize(
-    "wf_path,dialect_root", UNDECLARED_SCOPE_DIALECT_CASES, ids=UNDECLARED_SCOPE_DIALECT_IDS
+    "wf_path,dialect_root", [(SDK_WAVE, "agent_sdk")], ids=["sdk-wave.js"]
 )
 def test_rt003_offending_undeclared_scope_description_names_tracked_and_dialect_root(
     wf_path: Path, dialect_root: str
@@ -1135,7 +1143,7 @@ def test_rt003_offending_undeclared_scope_description_names_tracked_and_dialect_
 # RT-003 (w036): quadruple blocking condition
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH118_FILES, GH118_FILES_IDS)[0], ids=_sdk_wave_only(GH118_FILES, GH118_FILES_IDS)[1])
 def test_rt003_quadruple_blocking_condition_present(wf_path: Path) -> None:
     """RT-003 (w036): the archive blocking condition must OR in a fourth clause for
     offendingUndeclaredScope, on top of the existing triple condition (offendingPaths,
@@ -1172,7 +1180,7 @@ def test_rt003_quadruple_blocking_condition_present(wf_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
-    "wf_path,dialect_root", UNDECLARED_SCOPE_DIALECT_CASES, ids=UNDECLARED_SCOPE_DIALECT_IDS
+    "wf_path,dialect_root", [(SDK_WAVE, "agent_sdk")], ids=["sdk-wave.js"]
 )
 def test_rt003_archive_intent_prompt_contains_undeclared_scope_check_instructions(
     wf_path: Path, dialect_root: str
@@ -1192,7 +1200,7 @@ def test_rt003_archive_intent_prompt_contains_undeclared_scope_check_instruction
         )
 
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH118_FILES, GH118_FILES_IDS)[0], ids=_sdk_wave_only(GH118_FILES, GH118_FILES_IDS)[1])
 def test_rt003_prompt_return_fields_count_updated_to_six(wf_path: Path) -> None:
     """RT-003 (w036): the prompt's final 'Return all N fields' instruction and the
     clean-tree default-value list must both be updated from five to six fields —
@@ -1219,7 +1227,7 @@ def test_rt003_prompt_return_fields_count_updated_to_six(wf_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_rt003_inline_comment_cross_references_gh_issues(wf_path: Path) -> None:
     """RT-003 (w036): inline comment blocks (schema + blocking-condition site) cite
     'RT-003', so a future reader finds the rationale without archaeology — mirrors
@@ -1251,7 +1259,7 @@ def test_rt003_inline_comment_cross_references_gh_issues(wf_path: Path) -> None:
 # style in agent_sdk/routes/, including the canonical LRN-119 module.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_rt001_archive_intent_prompt_contains_relative_import_forms(wf_path: Path) -> None:
     """RT-001: the archiveIntent agent prompt must instruct the agent to parse and resolve
     relative intra-package imports (`from . import X`, `from .mod import Y`,
@@ -1276,7 +1284,7 @@ def test_rt001_archive_intent_prompt_contains_relative_import_forms(wf_path: Pat
         )
 
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_rt001_archive_intent_prompt_resolves_dots_against_importing_file_directory(wf_path: Path) -> None:
     """RT-001: the prompt must anchor relative-import resolution to the directory containing
     the importing file (not to some fixed root), and walk up one parent per extra dot —
@@ -1295,7 +1303,7 @@ def test_rt001_archive_intent_prompt_resolves_dots_against_importing_file_direct
         )
 
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_rt001_archive_intent_prompt_not_restricted_to_agent_sdk_only_wording(wf_path: Path) -> None:
     """RT-001: the old 'only resolve agent_sdk.* targets' wording scoped the agent to
     absolute imports only. The prompt must now explicitly cover intra-package targets
@@ -1316,7 +1324,7 @@ def test_rt001_archive_intent_prompt_not_restricted_to_agent_sdk_only_wording(wf
 
 
 @pytest.mark.parametrize(
-    "wf_path,dialect_root", ARCHIVE_GATE_DIALECT_CASES, ids=ARCHIVE_GATE_DIALECT_IDS
+    "wf_path,dialect_root", [(SDK_WAVE, "agent_sdk")], ids=["sdk-wave.js"]
 )
 def test_rt001_archive_intent_prompt_covers_single_segment_and_top_level_absolute_forms(
     wf_path: Path, dialect_root: str
@@ -1342,7 +1350,7 @@ def test_rt001_archive_intent_prompt_covers_single_segment_and_top_level_absolut
         )
 
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_rt001_relative_from_import_disambiguates_submodule(wf_path: Path) -> None:
     """RT-001 (round-4): the RELATIVE from-import form `from ..pkg import submodule`
     must be disambiguated the SAME way the ABSOLUTE from-import form is — a first
@@ -1386,7 +1394,7 @@ def test_rt001_relative_from_import_disambiguates_submodule(wf_path: Path) -> No
     )
 
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_rt001_undeclared_import_offender_must_exist_on_disk(wf_path: Path) -> None:
     """RT-001 (round-4) defense-in-depth: step 5c must only flag a resolved path as an
     undeclared-import offender when it actually EXISTS on disk (untracked-but-present).
@@ -1408,7 +1416,7 @@ def test_rt001_undeclared_import_offender_must_exist_on_disk(wf_path: Path) -> N
     )
 
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_rt002_archive_intent_prompt_ignores_stdlib_and_third_party_imports(wf_path: Path) -> None:
     """RT-002: the archiveIntent prompt must instruct the agent to ignore stdlib and
     third-party imports when resolving intra-package targets, so a stdlib/third-party
@@ -1425,7 +1433,7 @@ def test_rt002_archive_intent_prompt_ignores_stdlib_and_third_party_imports(wf_p
     )
 
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_rt002_archive_intent_prompt_tracked_resolved_path_never_an_offender(wf_path: Path) -> None:
     """RT-002: the archiveIntent prompt must state that a resolved path which IS tracked
     (git ls-files returns it) is never an offender, even if it was also modified — so a
@@ -1445,7 +1453,7 @@ def test_rt002_archive_intent_prompt_tracked_resolved_path_never_an_offender(wf_
         )
 
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_rt001_cross_referenced_at_schema_and_prompt(wf_path: Path) -> None:
     """RT-001: 'RT-001' must appear both inside the ARCHIVE_INTENT_SCHEMA block (schema
     description) and inside the live archiveIntent prompt itself — anchored the same way as
@@ -1469,7 +1477,7 @@ def test_rt001_cross_referenced_at_schema_and_prompt(wf_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_rt001_from_import_disambiguates_subpackage(wf_path: Path) -> None:
     """RT-001 (round-5): the ABSOLUTE and RELATIVE-bare from-import rules must add a
     THIRD disambiguation branch — checking `<pkg-path>/<name>/__init__.py` (ABSOLUTE) /
@@ -1493,7 +1501,7 @@ def test_rt001_from_import_disambiguates_subpackage(wf_path: Path) -> None:
         )
 
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", [SDK_WAVE], ids=["sdk-wave.js"])
 def test_rt001_absolute_worked_example_resolves_routes_to_package_init(wf_path: Path) -> None:
     """RT-001 (round-5): the prompt's own worked example was factually wrong about the
     repo layout — it claimed `from <root> import <dir>` resolves by checking for
@@ -1586,7 +1594,7 @@ def _import_resolver_ladder(content: str, wf_path: Path) -> str:
     return prompt[start:end]
 
 
-@pytest.mark.parametrize("wf_path", GH118_FILES, ids=GH118_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH118_FILES, GH118_FILES_IDS)[0], ids=_sdk_wave_only(GH118_FILES, GH118_FILES_IDS)[1])
 def test_rt004_pkg_path_as_module_branch_present(wf_path: Path) -> None:
     """RT-004: BOTH the ABSOLUTE and the RELATIVE-with-module-path from-import
     forms must carry the pkg-path-as-MODULE branch ("<pkg-path> itself names a
@@ -1637,43 +1645,8 @@ def test_rt004_pkg_path_as_module_branch_present(wf_path: Path) -> None:
     )
 
 
-def test_import_resolver_ladder_identical_across_runners() -> None:
-    """RT-004 root-cause guard: the import-resolver ladder is shared behavioral
-    logic that MUST stay identical between sdk-wave.js and wave-cycle.js.
-
-    Prior rounds asserted only per-file token presence, never cross-runner
-    equivalence — so the RT-004 four-way refinement landing in sdk-wave.js alone
-    silently diverged from wave-cycle.js and passed CI green. This equivalence
-    assertion fails the moment either runner's ladder is edited without the other,
-    closing the sdk-wave.js <-> wave-cycle.js drift axis that test_workflow_sync.py
-    (wave-cycle.js's three copies only) does not cover.
-
-    RT-001 (round-5 fresh-lens debug): comparison is dialect-NORMALIZED, not raw.
-    Requiring the two ladders to be textually identical is what forced sdk-wave.js's
-    `agent_sdk` source root into wave-cycle.js in the first place — a runner that only
-    ever executes against a downstream `src/` tree, where an agent_sdk-rooted resolver
-    matches nothing. The property worth pinning is that the four-way LOGIC is the same,
-    not that the PATHS are; _normalize_ladder_dialect maps each runner's root and
-    worked-example tokens to neutral placeholders so a strictly-weaker port still
-    fails here while the required dialect divergence is allowed. Same approach as
-    _normalize_auth_surface_dialect.
-    """
-    sdk_ladder = _normalize_ladder_dialect(
-        _import_resolver_ladder(_read(SDK_WAVE), SDK_WAVE), SDK_WAVE
-    )
-    wc_ladder = _normalize_ladder_dialect(
-        _import_resolver_ladder(_read(WAVE_CYCLE_RUNTIME), WAVE_CYCLE_RUNTIME),
-        WAVE_CYCLE_RUNTIME,
-    )
-    assert _normalize_ws(sdk_ladder) == _normalize_ws(wc_ladder), (
-        "import-resolver ladder diverges between sdk-wave.js and wave-cycle.js "
-        "(after normalizing each runner's source-root dialect) — the four-way "
-        "disambiguation (submodule -> sub-package -> pkg-path-as-MODULE -> enclosing "
-        "package) must be identical across both runners. Any refinement to one MUST be "
-        "ported to the other; the byte-identical sync guard covers only wave-cycle.js's "
-        "three copies, never this axis."
-    )
-
+# The resolver-ladder equivalence check across runners was retired: wave-cycle.js resolves
+# imports with ast in ARCHIVE_GATE_PY (pinned by tests/test_wave_cycle_behaviour.py), not prose.
 
 def _surface_array_body(content: str, name: str, wf_path: Path) -> str:
     """Extract the literal contents between `[` and `]` of `const <name> = [...]`,
@@ -1845,140 +1818,6 @@ _SEAM_RECHECK_PUSH_ANCHOR = (
 )
 
 
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_MIRRORS, ids=WAVE_CYCLE_MIRROR_IDS)
-def test_rt001_seam_task_not_gated_on_seam_route_markers(wf_path: Path) -> None:
-    """RT-001 (this wave): this wave's own RT-001 change added src/auth/middleware into
-    A2A_SURFACE/MCP_SURFACE/AGUI_SURFACE, but SEAM_ROUTE_MARKERS (['routes', 'a2a', 'mcp',
-    'agent_card', 'ag_ui', 'a2ui'] — matched as WHOLE path segments since RT-001 round-7,
-    so no auth segment ever matches: 'oauth'/'oauth_tokens' are not one of these markers)
-    contains no auth-path fragment.
-    A wave touching only src/auth/middleware.py therefore set runProtocol=true and
-    dispatched the three per-protocol advisors, but seamPaths was empty so the seam leg
-    — the only leg that checks 'Auth mode enforced uniformly: no surface accepts a token
-    type another rejects' — was silently SKIPPED. The seam task must be dispatched
-    whenever this block runs at all (it only runs inside `if (runProtocol)`), never gated
-    on a second, independently-maintained marker list. Matches sdk-wave.js, which has
-    never gated its seam task on any marker list.
-
-    RT-002: beyond the substring checks below (which only catch the exact spelling this
-    wave removed), also structurally verifies the seam push is UNGATED by comparing its
-    indentation to the unconditional `const seamPaths = wave.allScope.filter(...)`
-    statement in the same block — any `if (...) {` wrapper, spelled any way, adds an
-    indent level and fails this check regardless of the guard's exact syntax.
-    """
-    content = _read(wf_path)
-    block = _seam_initial_block(content, wf_path)
-    assert "proto:seam" in block, (
-        f"{wf_path.name}: the seam-check block does not contain the proto:seam agent() call."
-    )
-    assert "if (seamPaths.length === 0)" not in block, (
-        f"{wf_path.name}: the seam task is still gated on `if (seamPaths.length === 0)` — "
-        "RT-001: a protocol-surface member absent from SEAM_ROUTE_MARKERS (e.g. "
-        "src/auth/middleware) can skip the seam audit entirely. Dispatch on runProtocol "
-        "instead (this block already only runs inside the `if (runProtocol)` branch)."
-    )
-    seam_push_indent = _leading_indent(
-        block, r"advisorTasks\.push\(function\(\) \{.{0,160}?Cross-protocol seam audit",
-        wf_path, "the seam advisorTasks.push(...) call",
-    )
-    seam_const_indent = _leading_indent(
-        block, r"const seamPaths = wave\.allScope\.filter\(",
-        wf_path, "the unconditional `const seamPaths = ...` statement",
-    )
-    assert seam_push_indent == seam_const_indent, (
-        f"{wf_path.name}: the seam advisorTasks.push(...) is indented {seam_push_indent} "
-        f"spaces but the unconditional `const seamPaths = wave.allScope.filter(...)` "
-        f"sibling statement in the same block is indented {seam_const_indent} spaces — "
-        "RT-002: a deeper indent means the push has been re-wrapped in a NEW conditional "
-        "guard (any spelling — `if (!seamPaths.length)`, `if (seamPaths.length < 1)`, "
-        "etc.), reintroducing the GH-123 seam-skip bug under syntax the plain substring "
-        "check above cannot see. The seam push must sit at the same nesting level as "
-        "`const seamPaths`, a statement that unconditionally runs whenever this block does."
-    )
-    # RT-003 (round-5): indentation parity is defeated by a non-indented conditional body
-    # (this codebase uses one at `if (!protocolBlocked) {`). Also assert no `if (` textually
-    # precedes the seam push within the block — a wrapper cannot re-gate the push without a
-    # preceding `if (`, regardless of how its body is indented.
-    seam_push_prefix = _text_before_anchor(
-        block, r"advisorTasks\.push\(function\(\) \{.{0,160}?Cross-protocol seam audit",
-        wf_path, "the seam advisorTasks.push(...) call",
-    )
-    assert "if (" not in seam_push_prefix, (
-        f"{wf_path.name}: an `if (` conditional textually precedes the seam "
-        "advisorTasks.push(...) within the seam block — RT-003: the push has been wrapped "
-        "in a guard. Indentation parity alone does not catch this, because the codebase "
-        "uses non-indented conditional bodies (e.g. `if (!protocolBlocked) {`) that keep a "
-        "wrapped push at the same indent as its unconditional siblings. The seam push must "
-        "not be wrapped in any conditional; it runs whenever this block does."
-    )
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_MIRRORS, ids=WAVE_CYCLE_MIRROR_IDS)
-def test_rt001_seam_recheck_task_not_gated_on_seam_paths(wf_path: Path) -> None:
-    """RT-001 (this wave), recheck-path counterpart of
-    test_rt001_seam_task_not_gated_on_seam_route_markers: the recheck dispatch mirrored
-    the same seamPaths.length > 0 gate, so a middleware-only wave with critical protocol
-    findings would also skip the seam RE-audit after the fix.
-
-    RT-002: also structurally verifies the recheck push is UNGATED, the same way as the
-    initial-dispatch counterpart above — see that test's docstring for why an indentation
-    comparison catches re-gating under any syntax, not just the one substring this wave
-    removed.
-    """
-    content = _read(wf_path)
-    block = _seam_recheck_block(content, wf_path)
-    assert "proto:recheck:seam" in block, (
-        f"{wf_path.name}: the seam-recheck block does not contain the proto:recheck:seam "
-        "agent() call."
-    )
-    assert "if (seamPaths.length > 0)" not in block, (
-        f"{wf_path.name}: the seam recheck task is still gated on "
-        "`if (seamPaths.length > 0)` — RT-001: same gap as the initial seam task, on the "
-        "recheck path."
-    )
-    recheck_push_indent = _leading_indent(
-        block, r"recheckTasks\.push\(function\(\) \{.{0,160}?Cross-protocol seam re-audit",
-        wf_path, "the seam recheckTasks.push(...) call",
-    )
-    # `const recheckTasks = []` sits just before the `if (runA2A) { ... }` legs, outside
-    # this test's `block` (which starts at `// Seam recheck:`) — search the FULL file
-    # content for it instead. The indent value is intrinsic to the matched line itself,
-    # not to the substring it was found within, so this is equally valid as a same-level
-    # sibling anchor: both it and the ungated seam push are direct children of the
-    # enclosing `if (!protocolBlocked) {` body, one level above the `if (runA2A) {`-gated
-    # per-protocol recheck legs.
-    recheck_const_indent = _leading_indent(
-        content, r"const recheckTasks = \[\]",
-        wf_path, "the unconditional `const recheckTasks = []` statement",
-    )
-    assert recheck_push_indent == recheck_const_indent, (
-        f"{wf_path.name}: the seam recheckTasks.push(...) is indented {recheck_push_indent} "
-        f"spaces but the unconditional `const recheckTasks = []` sibling statement is "
-        f"indented {recheck_const_indent} spaces — RT-002: a deeper indent means the "
-        "recheck push has been re-wrapped in a NEW conditional guard, reintroducing the "
-        "GH-123 seam-recheck-skip bug under syntax the plain substring check above cannot "
-        "see."
-    )
-    # RT-003 (round-5): the recheck push's enclosing `if (!protocolBlocked) {` block body is
-    # deliberately NOT indented (its body sits at the same 4-space level as the `if (` line),
-    # so `if (!seamPaths.length) { recheckTasks.push(...) }` written in that same non-indented
-    # style would keep recheck_push_indent == recheck_const_indent AND evade the substring
-    # check above. Assert no `if (` textually precedes the seam recheck push within the
-    # recheck block — the syntax- and indent-independent signal that no conditional wraps it.
-    recheck_push_prefix = _text_before_anchor(
-        block, r"recheckTasks\.push\(function\(\) \{.{0,160}?Cross-protocol seam re-audit",
-        wf_path, "the seam recheckTasks.push(...) call",
-    )
-    assert "if (" not in recheck_push_prefix, (
-        f"{wf_path.name}: an `if (` conditional textually precedes the seam "
-        "recheckTasks.push(...) within the seam-recheck block — RT-003: the recheck push has "
-        "been wrapped in a guard. Because the enclosing `if (!protocolBlocked) {` body is "
-        "non-indented, an equally non-indented `if (!seamPaths.length) {` wrapper would pass "
-        "the indentation-parity check above while re-gating the seam re-audit. The recheck "
-        "push must not be wrapped in any conditional; it runs whenever the recheck block does."
-    )
-
-
 # ---------------------------------------------------------------------------
 # RT-002 (round-5 fresh-lens): the round-4 removal of '/oauth' from SEAM_ROUTE_MARKERS
 # — which had substring-matched the credential-verification store src/auth/oauth_tokens
@@ -2042,39 +1881,6 @@ def test_rt002_seam_route_markers_contain_no_auth_fragment(wf_path: Path) -> Non
 # audit for the auth-only case with the whole suite green. Pinned on both the initial and
 # recheck seam pushes, across all four runners (three wave-cycle.js mirrors + sdk-wave.js).
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_MIRRORS, ids=WAVE_CYCLE_MIRROR_IDS)
-def test_rt002_seam_initial_prompt_passes_full_scope(wf_path: Path) -> None:
-    """RT-002: the seam INITIAL prompt must include `wave.allScope.join(...)`. seamPaths is
-    empty for an AUTH_SURFACE-only wave, so the full scope list is the only signal naming
-    the changed auth file; without it the seam audit is blind to the exact change class it
-    exists to protect."""
-    block = _seam_initial_block(_read(wf_path), wf_path)
-    seam_prompt = _text_from_anchor(
-        block, _SEAM_INITIAL_PUSH_ANCHOR, wf_path, "the seam advisorTasks.push(...) call",
-    )
-    assert "wave.allScope.join" in seam_prompt, (
-        f"{wf_path.name}: the seam initial prompt does not pass `wave.allScope.join(...)` — "
-        "RT-002: seamPaths is empty for an AUTH_SURFACE-only wave, so the full scope list is "
-        "the sole signal identifying the changed auth file; without it the seam audit is "
-        "blind to exactly the change class it exists to protect."
-    )
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_MIRRORS, ids=WAVE_CYCLE_MIRROR_IDS)
-def test_rt002_seam_recheck_prompt_passes_full_scope(wf_path: Path) -> None:
-    """RT-002: the seam RECHECK prompt (post-fix re-audit) must likewise include
-    `wave.allScope.join(...)` — same auth-only blind spot as the initial seam prompt, on
-    the recheck leg."""
-    block = _seam_recheck_block(_read(wf_path), wf_path)
-    seam_prompt = _text_from_anchor(
-        block, _SEAM_RECHECK_PUSH_ANCHOR, wf_path, "the seam recheckTasks.push(...) call",
-    )
-    assert "wave.allScope.join" in seam_prompt, (
-        f"{wf_path.name}: the seam recheck prompt does not pass `wave.allScope.join(...)` — "
-        "RT-002: same auth-only blind spot as the initial seam prompt, on the recheck leg."
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -2835,7 +2641,7 @@ def test_rt005_unrecognised_severity_is_blocking(wf_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_gh132_unit_loop_exit_uses_severity_floor(wf_path: Path) -> None:
     unit = _unit_redteam_section(_read(wf_path), wf_path)
     assert "if (blocking.length === 0) {" in unit, (
@@ -2848,7 +2654,7 @@ def test_gh132_unit_loop_exit_uses_severity_floor(wf_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_gh132_phase_loop_exit_uses_severity_floor(wf_path: Path) -> None:
     phase_section = _phase_redteam_section(_read(wf_path), wf_path)
     assert "if (blocking.length === 0) {" in phase_section, (
@@ -2861,7 +2667,7 @@ def test_gh132_phase_loop_exit_uses_severity_floor(wf_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_gh132_medium_low_findings_deferred_once_not_blocking(wf_path: Path) -> None:
     content = _read(wf_path)
     helpers = _helpers_section(content, wf_path)
@@ -2913,7 +2719,7 @@ def test_gh132_medium_low_findings_deferred_once_not_blocking(wf_path: Path) -> 
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_gh132_debug_replaces_fix_fan_out_not_alongside_it(wf_path: Path) -> None:
     """The fix fan-out must be gated on NOT escalating to debug: the debug agent's
     own prompt already says 'Fix at the root', so dispatching both debug AND the
@@ -2942,7 +2748,7 @@ def test_gh132_debug_replaces_fix_fan_out_not_alongside_it(wf_path: Path) -> Non
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_gh132_fix_fan_out_batched_below_threshold_split_above(wf_path: Path) -> None:
     content = _read(wf_path)
     assert re.search(r"const FIX_BATCH_FILE_THRESHOLD = \d+", content), (
@@ -3144,7 +2950,7 @@ def _findings_mismatch_guard_marker(wf_path: Path) -> str:
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt007_findings_count_zero_with_items_reconciled(wf_path: Path) -> None:
     """WC-RT-004 direction: findingsCount=0 with a non-empty findings array must be
     reconciled to non-clean in BOTH the unit and phase redteam loops (RT-016: on
@@ -3164,7 +2970,7 @@ def test_rt007_findings_count_zero_with_items_reconciled(wf_path: Path) -> None:
         )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt007_findings_count_positive_with_empty_array_reconciled(wf_path: Path) -> None:
     """RT-007 inverse direction: findingsCount>0 with an EMPTY findings array must
     also be caught — otherwise it silently breaks the loop clean via
@@ -3183,7 +2989,7 @@ def test_rt007_findings_count_positive_with_empty_array_reconciled(wf_path: Path
         )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt007_inverse_guard_precedes_severity_floor_exit(wf_path: Path) -> None:
     """The inverse guard must run BEFORE `blocking.length === 0` is evaluated in
     both loops — placed after the guard but still gating the exit would let the
@@ -3201,7 +3007,7 @@ def test_rt007_inverse_guard_precedes_severity_floor_exit(wf_path: Path) -> None
         )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt007_inverse_guard_mirrors_null_response_budget_handling(wf_path: Path) -> None:
     """The inverse guard must fail closed exactly like the null-response branch:
     round-budget check (uRound>=5 / pRound>=8), a deferred note on budget exhaustion,
@@ -3274,7 +3080,7 @@ def _block_before_next_break(section: str, log_marker: str, wf_path: Path) -> st
     return section[start:break_idx]
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt003_unit_null_response_budget_exit_sets_blocking_flags(wf_path: Path) -> None:
     """The unit loop's null-response round-budget exit (uRound >= 5 inside `if (!rt) {`) must
     set protocolBlocked and redteamUnknownBlocked before its break — otherwise a redteam
@@ -3294,7 +3100,7 @@ def test_rt003_unit_null_response_budget_exit_sets_blocking_flags(wf_path: Path)
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt003_unit_mismatch_budget_exit_sets_blocking_flags(wf_path: Path) -> None:
     """The unit loop's findings-count-mismatch round-budget exit must set protocolBlocked and
     redteamUnknownBlocked before its break, identically to the null-response exit above —
@@ -3315,7 +3121,7 @@ def test_rt003_unit_mismatch_budget_exit_sets_blocking_flags(wf_path: Path) -> N
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt003_phase_null_response_budget_exit_sets_blocking_flags(wf_path: Path) -> None:
     """The phase loop's null-response round-budget exit (pRound >= 8 inside `if (!rt) {`) must
     set protocolBlocked and redteamUnknownBlocked before its break."""
@@ -3334,7 +3140,7 @@ def test_rt003_phase_null_response_budget_exit_sets_blocking_flags(wf_path: Path
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt003_phase_mismatch_budget_exit_sets_blocking_flags(wf_path: Path) -> None:
     """The phase loop's findings-count-mismatch round-budget exit must set protocolBlocked and
     redteamUnknownBlocked before its break."""
@@ -3353,7 +3159,7 @@ def test_rt003_phase_mismatch_budget_exit_sets_blocking_flags(wf_path: Path) -> 
     )
 
 
-@pytest.mark.parametrize("wf_path", RT004_FILES, ids=RT004_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[0], ids=_sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[1])
 def test_rt003_archive_skip_message_distinguishes_redteam_unknown_block(wf_path: Path) -> None:
     """A wave blocked solely by redteamUnknownBlocked must not fall into the generic 'blocked
     by critical protocol findings' / '/agent-verify' branch (LRN-032: that remediation is
@@ -3471,7 +3277,7 @@ def test_rt004_peer_repo_annotations_item_shape(wf_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt004_todos_redteam_prompt_documents_peer_repo_propagation_check(wf_path: Path) -> None:
     prompt = _plan_rt_prompt(_read(wf_path), wf_path)
     for expected in (
@@ -3487,7 +3293,7 @@ def test_rt004_todos_redteam_prompt_documents_peer_repo_propagation_check(wf_pat
         )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt004_has_annotations_includes_peer_repo_annotations(wf_path: Path) -> None:
     content = _read(wf_path)
     has_annotations_match = re.search(
@@ -3502,7 +3308,7 @@ def test_rt004_has_annotations_includes_peer_repo_annotations(wf_path: Path) -> 
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt004_peer_repo_gap_count_logged(wf_path: Path) -> None:
     content = _read(wf_path)
     assert (
@@ -3516,7 +3322,7 @@ def test_rt004_peer_repo_gap_count_logged(wf_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt004_annotate_agent_payload_includes_peer_repo_annotations(wf_path: Path) -> None:
     annotate_prompt = _todos_annotate_prompt(_read(wf_path), wf_path)
     assert "JSON.stringify(planRt.peerRepoAnnotations, null, 2)" in annotate_prompt, (
@@ -3610,24 +3416,6 @@ def test_rt008_plan_row_guard_defines_wave_file_tag(wf_path: Path) -> None:
 
 
 @pytest.mark.parametrize("wf_path", WAVE_CYCLE_MIRRORS, ids=WAVE_CYCLE_MIRROR_IDS)
-def test_rt008_plan_row_checks_require_both_wave_id_and_file_tag(wf_path: Path) -> None:
-    """Both the initial presence check and the post-repair recheck must pipe a waveId grep
-    into a fixed-string grep on this wave's own waveFileTag — matching on waveId alone is
-    exactly the LRN-062/RT-008 vacuous-pass hole this guard exists to close.
-    """
-    content = _read(wf_path)
-    block = _plan_row_guard_block(content, wf_path)
-    combined_grep = (
-        'Run: grep -i "\' + wave.waveId + \'" workspace/todos/plan.md | '
-        'grep -ci -F "\' + waveFileTag + \'"\\n'
-    )
-    assert block.count(combined_grep) == 2, (
-        f"{wf_path.name}: expected the combined waveId+waveFileTag grep pipeline in both "
-        f"planRowCheck and planRowRecheck (found {block.count(combined_grep)} of 2)."
-    )
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_MIRRORS, ids=WAVE_CYCLE_MIRROR_IDS)
 def test_rt008_plan_row_checks_no_longer_grep_wave_id_alone(wf_path: Path) -> None:
     """Negative guard: the old vacuous single-condition grep ('grep -ci "<waveId>"
     workspace/todos/plan.md' with no downstream filter on this wave's own file) must not
@@ -3639,21 +3427,6 @@ def test_rt008_plan_row_checks_no_longer_grep_wave_id_alone(wf_path: Path) -> No
     assert vacuous_grep not in block, (
         f"{wf_path.name}: the plan-row guard still contains the bare waveId-only grep — "
         "RT-008 regression (two waves sharing a waveId can satisfy each other's ledger check)."
-    )
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_MIRRORS, ids=WAVE_CYCLE_MIRROR_IDS)
-def test_rt008_plan_row_repair_prompt_warns_about_id_reuse(wf_path: Path) -> None:
-    """The self-heal repair prompt must tell the implementing agent not to overwrite a
-    same-waveId-but-different-file row belonging to another wave (RT-004 ID reuse) — without
-    this, an agent repairing the ledger could "fix" the pre-existing row in place instead of
-    appending a new one, silently merging two distinct waves' history under one row.
-    """
-    content = _read(wf_path)
-    block = _plan_row_guard_block(content, wf_path)
-    assert "different wave that reused this waveId" in block, (
-        f"{wf_path.name}: repair prompt does not warn about RT-004 waveId reuse — an agent "
-        "could overwrite a different wave's pre-existing row instead of appending its own."
     )
 
 
@@ -3720,7 +3493,7 @@ def test_rt009_accumulate_non_blocking_helper_defined(wf_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt009_unit_and_phase_loops_accumulate_every_round(wf_path: Path) -> None:
     content = _read(wf_path)
     unit = _unit_redteam_section(content, wf_path)
@@ -3735,7 +3508,7 @@ def test_rt009_unit_and_phase_loops_accumulate_every_round(wf_path: Path) -> Non
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt009_unit_medium_low_note_reachable_from_every_break(wf_path: Path) -> None:
     """The medium-low deferred note must be written from ONE place positioned AFTER the
     while(true) loop closes, not nested inside the clean-exit `if` branch — otherwise only
@@ -3757,7 +3530,7 @@ def test_rt009_unit_medium_low_note_reachable_from_every_break(wf_path: Path) ->
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt009_phase_medium_low_note_reachable_from_every_break(wf_path: Path) -> None:
     """Mirrors test_rt009_unit_medium_low_note_reachable_from_every_break for the full-wave
     phase redteam loop."""
@@ -3810,7 +3583,7 @@ def _wf_error_prefix(wf_path: Path) -> str:
     return "wave-cycle:" if wf_path in WAVE_CYCLE_MIRRORS else "sdk-wave:"
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt001_unit_budget_exit_captures_codify_findings_before_break(wf_path: Path) -> None:
     unit = _unit_redteam_section(_read(wf_path), wf_path)
     push_idx = unit.find("allHighFindings.push.apply(allHighFindings, highFindings)")
@@ -3825,7 +3598,7 @@ def test_rt001_unit_budget_exit_captures_codify_findings_before_break(wf_path: P
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt001_phase_budget_exit_captures_codify_findings_before_break(wf_path: Path) -> None:
     phase_section = _phase_redteam_section(_read(wf_path), wf_path)
     push_idx = phase_section.find("allHighFindings.push.apply(allHighFindings, highFindings)")
@@ -3840,7 +3613,7 @@ def test_rt001_phase_budget_exit_captures_codify_findings_before_break(wf_path: 
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt001_phase_budget_exit_writes_deferred_note(wf_path: Path) -> None:
     """The phase round-cap exit must write a durable deferred note — the exact gap RT-001
     found in sdk-wave.js: 'continuing to Protocol Audit' with no artifact at all."""
@@ -3859,7 +3632,7 @@ def test_rt001_phase_budget_exit_writes_deferred_note(wf_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt001_unit_and_phase_budget_exit_set_blocking_flags(wf_path: Path) -> None:
     content = _read(wf_path)
     unit = _unit_redteam_section(content, wf_path)
@@ -3997,7 +3770,7 @@ def test_rt006_agent_call_budget_is_mutable_for_recompute(wf_path: Path) -> None
     )
 
 
-@pytest.mark.parametrize("wf_path", GH132_LOOP_LOGIC_FILES, ids=GH132_LOOP_LOGIC_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[0], ids=_sdk_wave_only(GH132_LOOP_LOGIC_FILES, GH132_LOOP_LOGIC_IDS)[1])
 def test_rt006_agent_call_budget_recompute_scales_with_group_count(wf_path: Path) -> None:
     content = _read(wf_path)
     assert (
@@ -4113,7 +3886,7 @@ def _archive_move_prompt(content: str, wf_path: Path) -> str:
     return match.group(1)
 
 
-@pytest.mark.parametrize("wf_path", RT004_FILES, ids=RT004_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[0], ids=_sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[1])
 def test_w039_wave_schema_has_completed_file_exists_in_required(wf_path: Path) -> None:
     """WAVE_SCHEMA.required must include 'completedFileExists' — without it the parse
     agent is not constrained to return the field and the collision gate below can never
@@ -4129,7 +3902,7 @@ def test_w039_wave_schema_has_completed_file_exists_in_required(wf_path: Path) -
     )
 
 
-@pytest.mark.parametrize("wf_path", RT004_FILES, ids=RT004_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[0], ids=_sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[1])
 def test_w039_wave_schema_has_completed_file_exists_boolean_property(wf_path: Path) -> None:
     """WAVE_SCHEMA.properties must define 'completedFileExists' as a boolean, anchored to
     the schema block itself so a stray comment mention elsewhere can't substitute."""
@@ -4140,7 +3913,7 @@ def test_w039_wave_schema_has_completed_file_exists_boolean_property(wf_path: Pa
     )
 
 
-@pytest.mark.parametrize("wf_path", RT004_FILES, ids=RT004_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[0], ids=_sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[1])
 def test_w039_parse_prompt_checks_completed_dir_unconditionally(wf_path: Path) -> None:
     """The Parse-phase prompt must instruct the agent to determine completedFileExists via
     an unconditional `test -f workspace/todos/completed/<basename>` check, mirroring how
@@ -4171,7 +3944,7 @@ def test_w039_parse_prompt_checks_completed_dir_unconditionally(wf_path: Path) -
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("wf_path", RT004_FILES, ids=RT004_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[0], ids=_sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[1])
 def test_rt001_parse_prompt_scans_full_creates_line_for_every_backticked_path(wf_path: Path) -> None:
     """The Parse-phase prompt must instruct the agent to scan the WHOLE Creates: line
     for every backticked path token, not just extract "the" path — and must name the
@@ -4190,7 +3963,7 @@ def test_rt001_parse_prompt_scans_full_creates_line_for_every_backticked_path(wf
         )
 
 
-@pytest.mark.parametrize("wf_path", RT004_FILES, ids=RT004_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[0], ids=_sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[1])
 def test_rt001_wave_schema_allcreates_allmodifies_document_dominant_prose_form(wf_path: Path) -> None:
     """WAVE_SCHEMA's allCreates/allModifies properties must carry a description naming
     the parenthetical prose form as dominant — a reader of the schema alone (without
@@ -4212,7 +3985,7 @@ def test_rt001_wave_schema_allcreates_allmodifies_document_dominant_prose_form(w
         )
 
 
-@pytest.mark.parametrize("wf_path", RT004_FILES, ids=RT004_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[0], ids=_sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[1])
 def test_w039_wave_id_collision_hard_block_present(wf_path: Path) -> None:
     """`if (wave.completedFileExists)` must appear between the Parse-phase agent call and
     the rest of the workflow, and must `return` an error object (not merely log) — a wave
@@ -4231,7 +4004,7 @@ def test_w039_wave_id_collision_hard_block_present(wf_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("wf_path", RT004_FILES, ids=RT004_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[0], ids=_sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[1])
 def test_w039_wave_id_collision_gate_precedes_scope_union(wf_path: Path) -> None:
     """The completedFileExists hard-block must run before wave.allScope is computed (and
     therefore before Implement can start) — catching the collision only after other
@@ -4247,7 +4020,7 @@ def test_w039_wave_id_collision_gate_precedes_scope_union(wf_path: Path) -> None
     )
 
 
-@pytest.mark.parametrize("wf_path", RT004_FILES, ids=RT004_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[0], ids=_sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[1])
 def test_w039_archive_move_prompt_checks_before_overwriting(wf_path: Path) -> None:
     """The archive step's move instruction must check whether the destination already
     exists and refuse to overwrite it, as a defense-in-depth fallback behind the
@@ -4262,24 +4035,6 @@ def test_w039_archive_move_prompt_checks_before_overwriting(wf_path: Path) -> No
     assert "do NOT move or overwrite it" in normalized, (
         f"{wf_path.name}: archive move instruction does not explicitly forbid overwriting "
         "an existing destination file."
-    )
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_MIRRORS, ids=WAVE_CYCLE_MIRROR_IDS)
-def test_w039_lrn100_sweep_checks_before_overwriting(wf_path: Path) -> None:
-    """wave-cycle.js's step-4 LRN-100 relocation sweep moves resolved deferred markers to
-    completed/ by basename too — it must not overwrite an existing destination file
-    either, mirroring the step-1 move-instruction fix. sdk-wave.js has no step 4 (it does
-    not implement the LRN-100 sweep), so this is scoped to the three wave-cycle.js
-    mirrors only."""
-    prompt = _archive_move_prompt(_read(wf_path), wf_path)
-    normalized = _normalize_ws(prompt)
-    assert "LRN-100 relocation sweep" in normalized, (
-        f"{wf_path.name}: step-4 LRN-100 relocation sweep not found in the archive prompt."
-    )
-    assert "do NOT overwrite it" in normalized, (
-        f"{wf_path.name}: step-4 LRN-100 relocation sweep does not forbid overwriting an "
-        "existing workspace/todos/completed/ destination for a relocated deferred marker."
     )
 
 
@@ -4304,67 +4059,6 @@ def test_w039_lrn100_sweep_checks_before_overwriting(wf_path: Path) -> None:
 
 def _protocol_audit_section(content: str, wf_path: Path) -> str:
     return _section(content, _PHASE5_MARKER, _PHASE6_MARKER, wf_path)
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_MIRRORS, ids=WAVE_CYCLE_MIRROR_IDS)
-def test_rt011_unit_loop_pushes_all_blocking_findings_not_just_codified(wf_path: Path) -> None:
-    unit = _unit_redteam_section(_read(wf_path), wf_path)
-    assert "const highFindings = blocking.filter(function(f) { return f.codify })" not in unit, (
-        f"{wf_path.name}: the unit loop must not filter blocking findings on f.codify before "
-        "pushing into allHighFindings — a critical/high finding missing the required Codify: "
-        "line would be silently dropped from the Codify LRN pass and the SDK issue scan."
-    )
-    assert "const highFindings = blocking\n" in unit, (
-        f"{wf_path.name}: the unit loop must push EVERY blocking (critical/high) finding into "
-        "allHighFindings, not a codify-filtered subset."
-    )
-    push_idx = unit.find("allHighFindings.push.apply(allHighFindings, highFindings)")
-    assert push_idx != -1, f"{wf_path.name}: unit loop never pushes highFindings into allHighFindings."
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_MIRRORS, ids=WAVE_CYCLE_MIRROR_IDS)
-def test_rt011_unit_loop_warns_by_name_on_missing_codify(wf_path: Path) -> None:
-    unit = _unit_redteam_section(_read(wf_path), wf_path)
-    assert "missingCodify" in unit, (
-        f"{wf_path.name}: the unit loop must compute which blocking findings lack a Codify: "
-        "line (missingCodify), even though they are no longer dropped from allHighFindings."
-    )
-    warn_idx = unit.find("WARNING: ' + missingCodify.length")
-    assert warn_idx != -1, (
-        f"{wf_path.name}: a critical/high finding missing a Codify: line must be logged by "
-        "name (f.id) so the gap stays visible instead of silent."
-    )
-    assert "missingCodify.map(function(f) { return f.id })" in unit, (
-        f"{wf_path.name}: the missing-codify warning must name each offending finding by id."
-    )
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_MIRRORS, ids=WAVE_CYCLE_MIRROR_IDS)
-def test_rt011_phase_loop_pushes_all_blocking_findings_not_just_codified(wf_path: Path) -> None:
-    phase_section = _phase_redteam_section(_read(wf_path), wf_path)
-    assert "const highFindings = blocking.filter(function(f) { return f.codify })" not in phase_section, (
-        f"{wf_path.name}: the phase loop must not filter blocking findings on f.codify before "
-        "pushing into allHighFindings — see the unit-loop RT-011 test for the failure mode."
-    )
-    assert "const highFindings = blocking\n" in phase_section, (
-        f"{wf_path.name}: the phase loop must push EVERY blocking (critical/high) finding into "
-        "allHighFindings, not a codify-filtered subset."
-    )
-    push_idx = phase_section.find("allHighFindings.push.apply(allHighFindings, highFindings)")
-    assert push_idx != -1, f"{wf_path.name}: phase loop never pushes highFindings into allHighFindings."
-
-
-@pytest.mark.parametrize("wf_path", WAVE_CYCLE_MIRRORS, ids=WAVE_CYCLE_MIRROR_IDS)
-def test_rt011_phase_loop_warns_by_name_on_missing_codify(wf_path: Path) -> None:
-    phase_section = _phase_redteam_section(_read(wf_path), wf_path)
-    assert "missingCodify" in phase_section, (
-        f"{wf_path.name}: the phase loop must compute which blocking findings lack a Codify: "
-        "line (missingCodify), even though they are no longer dropped from allHighFindings."
-    )
-    assert "WARNING: ' + missingCodify.length" in phase_section, (
-        f"{wf_path.name}: a critical/high finding missing a Codify: line must be logged by "
-        "name so the gap stays visible instead of silent."
-    )
 
 
 @pytest.mark.parametrize("wf_path", WAVE_CYCLE_MIRRORS, ids=WAVE_CYCLE_MIRROR_IDS)
@@ -4499,7 +4193,7 @@ def test_rt001_parallel_agent_results_never_silently_filter_nulls(wf_path: Path)
     )
 
 
-@pytest.mark.parametrize("wf_path", RT004_FILES, ids=RT004_FILES_IDS)
+@pytest.mark.parametrize("wf_path", _sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[0], ids=_sdk_wave_only(RT004_FILES, RT004_FILES_IDS)[1])
 def test_rt001_both_advisor_fanouts_count_nulls_and_block(wf_path: Path) -> None:
     """Both protocol fan-outs (initial audit + post-fix recheck) must count null advisor
     results and block archive. The recheck site matters most: a null there drops the
