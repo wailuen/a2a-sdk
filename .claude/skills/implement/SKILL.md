@@ -1,7 +1,7 @@
 ---
 name: implement
 category: core
-description: "Execute todos autonomously end-to-end — parallel specialist agents, smoke tests, zero-tolerance redteam loop per unit and phase, codify learnings, archive. Uses Opus."
+description: "Execute todos autonomously end-to-end — parallel specialist agents, smoke tests, zero-tolerance redteam loop per unit and phase, codify learnings, archive."
 ---
 
 # /implement — Parallel Execution Engine
