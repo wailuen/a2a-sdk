@@ -53,10 +53,12 @@ not return until all scenarios pass or the round budget is exhausted.
    protocol surface bugs on untouched routes will not be detected (LRN-002).
    Both checks must be clean before Phase 1 begins.
 
-2. **Read ADR-000.** Open `workspace/adr/ADR-000-<env>-credentials.md`.
-   Parse the YAML frontmatter: extract `endpoint` (use as base URL unless
-   `--url` was passed) and `admin_key`. If the file does not exist, stop:
-   "Run `/provision` first — ADR-000-<env>-credentials.md not found."
+2. **Read ADR-000's endpoint only.** From `workspace/adr/ADR-000-<env>-credentials.md`
+   take just the `endpoint` line (`grep -E '^endpoint:' <file>`; use it as base URL
+   unless `--url` was passed). Never open or print the whole file — it holds
+   `admin_key`, which the mint and teardown commands below load themselves. If the
+   file does not exist, stop: "Run `/provision` first — ADR-000-<env>-credentials.md
+   not found."
 
    **Mint a service key (GH-182).** The admin key is used only for this step
    and for teardown. Mint a non-admin service key and use it for every

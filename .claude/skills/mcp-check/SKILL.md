@@ -74,7 +74,7 @@ local server, skip the OAuth/CORS layers and focus on transport + stdout hygiene
 | `protocolVersion` echoed in `initialize` (echo-if-supported) | lifecycle |
 | **`initialize` result carries NO version-future field** (e.g. `serverInfo.icons` only if negotiated `2025-11-25`) | **P9.1 — critical** |
 | `tools/list` → `{tools:[{name,inputSchema,...}]}`; tool failures use `isError:true`, not JSON-RPC error | §4, §9 |
-| `MCP-Protocol-Version` post-init: 400 if present but unsupported; if absent, assume the negotiated version, else 2025-03-26 (not a 400); `Mcp-Session-Id` lifecycle (404 unknown/expired/foreign; a missing id is NOT a 400 — GH-201; initialize must not evict sibling sessions of the same identity); `Origin` validated | §10 |
+| `MCP-Protocol-Version` post-init: 400 if present but unsupported; if absent, assume the negotiated version, else 2025-03-26 (not a 400); `Mcp-Session-Id` lifecycle (404 unknown/expired/foreign; a missing id is NOT a 400; initialize must not evict sibling sessions of the same identity); `Origin` validated | §10 |
 | stdio servers: **stdout is MCP-only** (logs → stderr) | §10 |
 
 ### Layer 5 — Known failure-mode scan  (`P7`, `P9`)

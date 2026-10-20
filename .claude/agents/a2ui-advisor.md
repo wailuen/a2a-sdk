@@ -31,7 +31,7 @@ When auditing or advising on an implementation, identify:
 - **Catalog** — which Profile types are emitted; any project-local custom types beyond the Profile.
 - **Delivery** — whether A2UI rides in A2A `DataPart` or AG-UI `CUSTOM` events.
 - **System prompt** — whether `generate_system_prompt()` is called; the `allowed_components` filter.
-- **Frontend renderer** — Path A (full renderer) or Path B (backend extraction); see the client guide.
+- **Frontend renderer** — Path A (full renderer) or Path B (backend extraction); see "Client side" below.
 - **Protocol version** — v0.8 / v0.9 / v0.9.1 (the `version` field in emitted messages).
 
 ## Protocol versions

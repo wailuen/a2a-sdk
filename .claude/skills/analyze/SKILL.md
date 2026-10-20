@@ -1,7 +1,7 @@
 ---
 name: analyze
 category: core
-description: "Create or update PRD, ADR, todos, and spec documents in workspace/ — compact, machine-scannable, context-optimised. Uses Opus."
+description: "Create or update PRD, ADR, todos, and spec documents in workspace/ — compact, machine-scannable, context-optimised."
 ---
 
 # /analyze — Spec document management

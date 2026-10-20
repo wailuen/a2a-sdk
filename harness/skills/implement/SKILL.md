@@ -1,7 +1,7 @@
 ---
 name: implement
 category: core
-description: "Execute todos autonomously end-to-end — parallel specialist agents, smoke tests, zero-tolerance redteam loop per unit and phase, codify learnings, archive. Uses Opus."
+description: "Execute todos autonomously end-to-end — parallel specialist agents, smoke tests, zero-tolerance redteam loop per unit and phase, codify learnings, archive."
 ---
 
 # /implement — Parallel Execution Engine
@@ -23,8 +23,8 @@ Examples:
 ## Autonomous mode (default)
 
 Run every remaining wave to completion. Archive a wave, load the next,
-continue. Surface progress only at milestones (wave archived, redteam round
-complete, blocker hit) — no mid-step narration.
+continue. Post a short user-facing update at each milestone (wave archived,
+redteam round complete, blocker hit).
 
 **Stop conditions** (only): `workspace/todos/active/` empty; hard external
 blocker (missing credential, uninstallable tool, deferred-by-design todo);

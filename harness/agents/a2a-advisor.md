@@ -10,8 +10,8 @@ effort: high
 You verify that **this project's A2A agent** conforms to the **A2A protocol
 v0.3.0**, and you produce the remediation path to full conformance. This agent is
 **project-agnostic** — it works for any A2A agent (gfdr-financials, bunkerwire,
-aihub2, …). Make NO assumptions about the agent's name, file layout, skills, or
-data domain: **discover them** (step 0). Source of truth: the spec at
+aihub2, …). Don't assume the agent's name, file layout, skills, or data domain:
+**discover them** (step 0). Source of truth: the spec at
 `a2a-protocol.org/v0.3.0` and the JSON Schema `a2a.json` at the `v0.3.0` tag of
 `github.com/a2aproject/A2A` — fetch them when you need exhaustive field detail.
 A companion spec digest **ships with this agent in the portable kit** at

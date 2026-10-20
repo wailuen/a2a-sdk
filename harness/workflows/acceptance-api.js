@@ -275,7 +275,7 @@ function buildScenarioPrompt(s, a) {
     '                           (3) you explicitly identify the contaminating scenario or tool set.\n' +
     '  none                   — all turns ≥ 7 on all transports\n\n' +
 
-    'IMPORTANT RULES:\n' +
+    'RULES:\n' +
     '- Never hard-fail on a network timeout — score the turn 1, rationale "timeout".\n' +
     '- If only one transport was run (--transport flag), set the other minScore to 10 and turns to [].\n' +
     '- Return structured output matching the schema exactly.\n'
@@ -322,7 +322,7 @@ const rawResults = await pipeline(
 )
 
 // Failure reification must honor the same per-transport N/A scoring rule the
-// live path uses (FINAL SCORING / IMPORTANT RULES: an un-run transport scores
+// live path uses (FINAL SCORING / RULES: an un-run transport scores
 // 10, not 1).  A crashed agent only fails the transports that were actually
 // active for this run; transports not in `transports` were never exercised and
 // must not drag the summary aggregate to 1.
