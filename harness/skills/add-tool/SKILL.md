@@ -101,7 +101,7 @@ and will raise at boot if there is a clash. **Loop in `a2ui-advisor`** on the ca
 shape and catalog id before finalizing — catalog/`component` mismatches silently break
 rendering (seam S6).
 
-## The test (required — never call Bedrock)
+## The test (required — never call the live model backend)
 
 Add a test using `agent_sdk.testing`: script the model with `tool_call(...)` then
 `reply(...)`, stub the adapter method with `monkeypatch`, drive it through

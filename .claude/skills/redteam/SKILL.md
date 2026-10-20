@@ -1,7 +1,7 @@
 ---
 name: redteam
 category: core
-description: "Adversarial critique of agent-sdk agent code against spec — finds gaps, drift, SDK invariant violations, and security issues. Auto-codifies critical/high findings. Uses Opus."
+description: "Adversarial critique of agent-sdk agent code against spec — finds gaps, drift, SDK invariant violations, and security issues. Auto-codifies critical/high findings."
 ---
 
 # /redteam — Adversarial Review
@@ -62,10 +62,9 @@ learnings that block future regressions.
 - Auto-invoked at the end of `/implement` on landed code
 - Standalone at any time
 
-## Pre-release scope rule (LRN-002)
+## Pre-release scope rule
 
 When `/redteam` is invoked as part of a **release gate** (not a single-wave review),
-it MUST run at full scope with **no scope argument**. A scoped redteam (e.g.
-`/redteam w006`) only covers changed code — pre-existing protocol surface regressions
-will not be detected (this is how GH #4–#8 slipped through the 0.4.0 release gate).
-Full scope is the only safe pre-release posture.
+run it at full scope with **no scope argument**. A scoped redteam (e.g.
+`/redteam w006`) only covers changed code, so regressions in pre-existing protocol
+surfaces go undetected.

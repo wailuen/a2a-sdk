@@ -32,10 +32,6 @@ has `<SRC>/agent`, `<SRC>/routes`, `<SRC>/sources`, `<SRC>/models`,
 never skip the item.
 
 Specs, plans, and learnings live under `workspace/` in both trees.
-`test -f CLAUDE.md` and read it for project-specific context before starting;
-in the a2a-sdk repo read `DESIGN.md` + `REVIEWS.md` instead (there is no root
-`CLAUDE.md` — `harness/CLAUDE.md` is the downstream-agent template, not this
-repo's context).
 
 ## Before you start
 
@@ -44,7 +40,7 @@ repo's context).
    `REVIEWS.md` instead (there is no root `CLAUDE.md` — `harness/CLAUDE.md`
    is the downstream-agent template, not this repo's context).
 2. Read `workspace/learning/README.md` (the LRN index table: `| LRN | Description | File |`).
-   For each entry, read the LRN file and run its `## Check` clause against the current code.
+   Dimension 7 runs each entry's `## Check` clause.
 3. Read `workspace/prd/` and `workspace/adr/` for the scope being reviewed.
 4. Read `workspace/components/README.md` — registry of reusable building blocks
    (used in Dimension 8).

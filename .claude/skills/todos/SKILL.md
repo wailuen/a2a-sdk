@@ -52,6 +52,9 @@ workspace/todos/
 6. Launch the `planner` agent (Opus) — produces `plan.md` + wave files under
    `active/`.
 7. **Auto-redteam loop until zero critiques** (all severities). See `/redteam`.
+   Rounds 1–3: `planner` fixes the findings. From round 4 on: `debug` does a
+   fresh-lens root-cause fix instead. Re-redteam after every fix. If round 8
+   still has findings, stop and show the user the open findings.
    Codify novel learnings from the plan-review round.
 8. Report: wave count, slice count, parallel groups.
 

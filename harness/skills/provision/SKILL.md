@@ -37,12 +37,12 @@ All subsequent references to `<port>` in this skill use this resolved value.
 
 ### Phase 1 — Pre-flight checks
 
-1. Read `.env` and `.env.example`. Verify:
-   - `MASTER_KEY` is set and non-empty (never echo the value — only confirm presence).
-     If `.env` doesn't exist yet (fresh scaffold before first run), that's OK — step 3
-     will create the venv; the user should generate `MASTER_KEY` first via
-     `python -c "import secrets; print(secrets.token_urlsafe(48))"` and write it to
-     `.env`. Stop and instruct if `MASTER_KEY` is absent.
+1. Check `.env` against `.env.example` one key at a time (e.g.
+   `grep -cE '^MASTER_KEY=.+' .env`), never by printing the file — `.env` holds
+   `MASTER_KEY` and may hold `AZURE_STORAGE_CONNECTION_STRING`. Verify:
+   - `MASTER_KEY` is set and non-empty (confirm presence only). If `.env` or
+     `MASTER_KEY` is missing (fresh scaffold before first run), stop and tell the
+     user to run `/setup`, which writes `MASTER_KEY` into `.env` without printing it.
    - `PUBLIC_URL` is empty or `http://localhost:<port>` (for local dev).
    - `DEV_MODE` is `true` for local runs.
    - Model backend env var is set (`BEDROCK_MODEL_ARN` + `BEDROCK_REGION`, or

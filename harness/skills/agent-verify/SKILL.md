@@ -81,8 +81,8 @@ All subsequent `<port>` references in this skill use this resolved value.
    ')
    ```
 
-4. Mint a **service key** with that admin key (GH-182). Run this ONE command
-   (GH-183/GH-184); it loads `ADMIN_KEY` from `ADMIN_KEY_FILE` itself. The mint
+4. Mint a **service key** with that admin key. Run this as a single command
+   (same reason as step 3); it loads `ADMIN_KEY` from `ADMIN_KEY_FILE` itself. The mint
    response never reaches stdout; a server older than
    v0.15.0 ignores `service`, so the parser revokes the stray key and stops with
    "this SDK does not support service keys; upgrade to v0.15.0+". On success the

@@ -1,32 +1,23 @@
 export const meta = {
   name: 'sdk-wave',
-  description: 'SDK-context wave executor: todos redteam → tier-parallel implement → unit zero-tolerance redteam (severity floor: only critical/high findings block; debug fires unconditionally at round 4+ (uRound > 3) and at any round when stall is detected, replacing the fix fan-out that round; round 5 exits via deferred note) → phase zero-tolerance redteam (same severity floor; debug fires unconditionally at round 4+ (pRound > 3) and at any round when stall is detected, replacing the fix fan-out that round; round 8 exits) → protocol audit → codify → archive. All harness agentTypes are used: redteam, python-implementer, debug, codify (populated in harness/agents/core/ since 2026-06-16), plus advisor agentTypes (a2a-advisor etc.).',
+  description: 'SDK-repo wave executor: deterministic preflight + parse → todos plan review until zero issues (planner fixes rounds 1-3, fresh-lens debug fixes round 4+, 8-round ceiling blocks the wave) → tier-parallel implement → unit zero-tolerance redteam (max 5 rounds; debug replaces the fix fan-out at round 4+ or on stall) → phase zero-tolerance redteam (max 8 rounds; same debug rule) → protocol audit → codify → deterministic archive gate → archive',
   phases: [
-    { title: 'Parse',          detail: 'Read wave file; extract groups, creates paths, groupDeps, LRN baseline' },
-    { title: 'Todos Redteam',  detail: 'Redteam the wave plan: SI risk annotation, registry reuse (Reuses: C-NNN), new component candidate flagging' },
-    { title: 'Implement',      detail: 'Tier-based parallel fan-out (groupDeps); scoped pytest per todo; no full-suite run until gate' },
-    { title: 'Unit Redteam',   detail: 'Per-group zero-tolerance fix loop, all groups concurrently (max 5 rounds/group; each round\'s fix+gate step is mutex-serialized across groups so the full-suite gate never grades a neighbour mid-edit; falls back to sequential when any two group scopes overlap; severity floor — only critical/high findings block, medium/low deferred; debug fires unconditionally at round 4+ (uRound > 3) and at any round when stall is detected (same findings as previous round), replacing the fix fan-out that round; round 5 exits via deferred note)' },
-    { title: 'Phase Redteam',  detail: 'Full-wave zero-tolerance fix loop (max 8 rounds; severity floor — only critical/high findings block, medium/low deferred; debug fires unconditionally at round 4+ (pRound > 3) and at any round when stall is detected (same findings as previous round), replacing the fix fan-out that round; round 8 exits; skipped for single-group waves — allScope == the sole group.scope Unit Redteam just cleared)' },
+    { title: 'Parse',          detail: 'One scripted preflight (wave-ID collision, concurrent wave, behind origin, scope scan, next LRN), then read the wave file into groups' },
+    { title: 'Todos Redteam',  detail: 'Review the plan until zero issues: rounds 1-3 fixed by planner, round 4+ by a fresh-lens debug pass; 8 rounds without a clean review stops the wave before Implement' },
+    { title: 'Implement',      detail: 'Tier-based parallel fan-out (groupDeps); scoped pytest per todo; a todo whose agent dies is retried once, then blocks archive' },
+    { title: 'Unit Redteam',   detail: 'Per-group zero-tolerance fix loop, groups concurrently with fix + gate serialised (max 5 rounds/group; debug replaces the fix fan-out at round 4+ or when the same findings repeat)' },
+    { title: 'Phase Redteam',  detail: 'Full-wave zero-tolerance fix loop (max 8 rounds; same debug rule); skipped for single-group waves' },
     { title: 'Protocol Audit', detail: 'a2a-advisor / mcp-advisor / ag-ui-advisor / a2ui-advisor in parallel (only for touched protocol surfaces) + seam check' },
-    { title: 'Codify',         detail: 'SDK issue scan → batched LRN capture (~5 findings per codify agent, batches in parallel; LRN IDs fixed by finding index) → README index → C-NNN registration' },
-    { title: 'Archive',        detail: 'Pre-archive pytest gate + commit-intent guard (GH-40/GH-84) → move to completed/ → update plan.md' },
+    { title: 'Codify',         detail: 'SDK issue scan → batched LRN capture → README index → C-NNN registration' },
+    { title: 'Archive',        detail: 'Pytest gate + scripted commit check, then move wave file to completed/, update plan.md, backfill FR Implementation: and Test: fields, verify the move and ledger row' },
   ],
 }
 
 // ─── args ─────────────────────────────────────────────────────────────────────
-// args.waveFile : absolute path to the active wave file
-// args.today    : ISO date string for archive timestamps (e.g. "2026-06-16")
-// GH-131 (ported from wave-cycle.js): the workflow sandbox bans the Date global
-// outright, so a Date-based fallback for a missing args.today always throws when it
-// fires — and it fires whenever args arrives JSON-encoded as a string (making
-// args.today read as undefined through the object accessor), producing a Date-related
-// crash with zero agents spawned instead of an error naming the actual missing arg.
-// Normalize args first (string-encoded args are parsed; a missing/falsy args becomes
-// {}), then fail fast naming whichever field(s) are absent — never fall back to Date.
-// RT-006 (ported from wave-cycle.js RT-017): GH-131's AC is to fail fast with a clear
-// error naming the missing arg(s) — a string args payload that is not valid JSON must
-// not still die with a bare, unattributed SyntaxError one layer up from the exact
-// failure mode GH-131 removed.
+// args.waveFile    : path to the active wave file
+// args.today       : ISO date string for plan.md timestamps (the sandbox bans Date)
+// args.agentBudget : optional positive override of the per-wave agent-call ceiling
+// args may arrive JSON-encoded as a string; fail fast naming whatever is missing.
 let normalizedArgs
 if (typeof args === 'string') {
   try {
@@ -51,43 +42,16 @@ if (missingArgs.length > 0) {
 }
 const WAVE_FILE = normalizedArgs.waveFile
 const TODAY     = normalizedArgs.today
-// RT-004 (w036/w039 wave-ID collision, ported from wave-cycle.js): a reused wave ID
-// whose basename already exists under workspace/todos/completed/ makes the archive
-// step's `mv` silently overwrite the earlier wave's record — no runner checked for
-// this. WAVE_BASENAME anchors both the Parse-phase hard-block below and the
-// archive-step anti-overwrite instruction to the same value.
 const WAVE_BASENAME = WAVE_FILE.split('/').pop()
+const WAVE_ID_FROM_FILE = (WAVE_BASENAME.match(/^w\d+/) || [WAVE_BASENAME])[0]
 
 // ─── protocol surface paths — SDK repo layout ─────────────────────────────────
-// LRN-132/GH-123: agent_sdk/routes/oauth is the OAuth discovery/token
-// endpoints surface (PRM/authorize/token/register/revoke), not the store
-// that backs require_identity. require_identity (defined in
-// agent_sdk/auth/middleware.py) delegates credential verification to
-// OAuthTokenStore in agent_sdk/auth/oauth_tokens.py via
-// runtime.oauth.verify(). Both routes/oauth and middleware are shared
-// surfaces every protected A2A, AG-UI, and MCP route depends on — not
-// MCP-only. RT-001: middleware.py itself must also be a shared surface
-// member — it is the file that actually DEFINES require_identity and is
-// consumed directly via Depends() by all four route files. AUTH_SURFACE
-// holds both paths and is folded into all three protocol arrays so a wave
-// touching only oauth.py OR only middleware.py still dispatches
-// a2a-advisor and ag-ui-advisor, not mcp-advisor alone.
-// RT-001 (round 2): middleware.py only calls into the credential-verification
-// implementations — agent_sdk/auth/oauth_tokens.py (OAuthTokenStore.verify)
-// and agent_sdk/auth/api_keys.py (ApiKeyStore.verify) are what actually gate
-// every protected route. Neither was a surface member, so a wave touching
-// only oauth_tokens.py (e.g. an audience-binding regression) dispatched no
-// protocol advisor at all. Both are added to AUTH_SURFACE for the same
-// reason middleware.py was: trace the transitive runtime consumers of
-// require_identity, not just its direct Depends() target.
-// RT-003 (round 5): both verify() backends (oauth_tokens.py:377, api_keys.py:94)
-// `from .identity import Identity` and return an Identity — the object
-// require_identity yields to every protected route's Depends(). By the same
-// "trace transitive require_identity consumers" rule that added oauth_tokens
-// and api_keys, agent_sdk/auth/identity.py belongs in AUTH_SURFACE too — a wave
-// touching only identity.py (e.g. a binding-key or kind-tag regression on the
-// dataclass every audience check relies on) previously dispatched no protocol
-// advisor at all.
+// This runner serves the a2a-sdk repo, whose source root is agent_sdk/. Every auth file that
+// require_identity depends on (the oauth routes, the middleware that defines it, both
+// credential verifiers and the Identity they return) is folded into the three transport
+// surfaces: over-triggering an audit is cheap, an unaudited auth change is not. A2UI has no
+// transport of its own (it rides A2A DataParts / AG-UI CUSTOM events), so it does not fold
+// auth in.
 const AUTH_SURFACE = [
   'agent_sdk/routes/oauth',
   'agent_sdk/auth/middleware',
@@ -99,44 +63,40 @@ const AUTH_SURFACE = [
 const A2A_SURFACE  = ['agent_sdk/routes/a2a', 'agent_sdk/routes/agent_card', 'agent_sdk/models/a2a'].concat(AUTH_SURFACE)
 const MCP_SURFACE  = ['agent_sdk/routes/mcp'].concat(AUTH_SURFACE)
 const AGUI_SURFACE = ['agent_sdk/routes/ag_ui'].concat(AUTH_SURFACE)
-// RT-003 (fix wave): A2UI_SURFACE deliberately does NOT fold in AUTH_SURFACE, unlike
-// A2A_SURFACE/MCP_SURFACE/AGUI_SURFACE above. A2UI has no transport of its own — it is
-// delivered exclusively as an A2A DataPart or an AG-UI CUSTOM event, so a wave touching
-// only an AUTH_SURFACE file already sets runA2A/runAGUI (both fold in AUTH_SURFACE),
-// dispatching a2a-advisor/ag-ui-advisor plus the unconditional seam leg below — the
-// layer where A2UI's transport-level auth is actually enforced and audited. Folding
-// AUTH_SURFACE in here too would dispatch a2ui-advisor on every auth-only wave for no
-// added coverage: a2ui-advisor audits component/message-shape conformance, not
-// authentication. Unlike AUTH_SURFACE's fold into the three transport arrays (a genuine
-// under-triggering risk closed by GH-123/LRN-132), omitting it here is not an
-// under-trigger — it is a documented exception, not a silent gap. Mirrors
-// wave-cycle.js's identical rationale above its own A2UI_SURFACE.
 const A2UI_SURFACE = ['agent_sdk/a2ui/', 'agent_sdk/models/content_types']
+
+// Test command: the repo's .venv when present, else the ambient python. One constant, so a
+// checkout that needs a different runner patches exactly one line.
+const PYTEST = '$(test -x .venv/bin/python && echo .venv/bin/python || echo python) -m pytest -q'
 
 // ─── schemas ──────────────────────────────────────────────────────────────────
 
-// GH-164: the Parse-phase scope scan is deterministic (a regex run by the agent, not an AI
-// reading), so a path the AI parse drops (e.g. `src/config.py`) is caught instead of silently
-// narrowing every downstream gate keyed off wave.allScope.
-const SCOPE_SCAN_SCHEMA = {
+// Filled verbatim from the preflight script's JSON (see PREFLIGHT_PY below).
+const PREFLIGHT_SCHEMA = {
   type: 'object',
-  required: ['paths'],
+  required: ['ok', 'error', 'scopePaths'],
   additionalProperties: false,
   properties: {
-    paths: { type: 'array', items: { type: 'string' }, description: 'GH-164: the exact paths printed by the scan script, unmodified' },
+    ok:                  { type: 'boolean' },
+    error:               { type: 'string' },
+    completedFileExists: { type: 'boolean' },
+    templateDirExists:   { type: 'boolean' },
+    otherActiveWaves:    { type: 'array', items: { type: 'string' } },
+    dirtyPathCount:      { type: 'integer' },
+    behindCount:         { type: 'integer' },
+    lrnNext:             { type: 'integer' },
+    scopePaths:          { type: 'array', items: { type: 'string' }, description: 'The JSON list printed by the scope scan, unmodified' },
   },
 }
 
 const WAVE_SCHEMA = {
   type: 'object',
-  required: ['waveId', 'allCreates', 'allModifies', 'groups', 'groupDeps', 'lrnNext', 'completedFileExists'],
+  required: ['waveId', 'allCreates', 'allModifies', 'groups', 'groupDeps'],
   additionalProperties: false,
   properties: {
     waveId:      { type: 'string' },
-    allCreates:  { type: 'array', items: { type: 'string' }, description: 'RT-001 (fix round): every path token (backticked OR bare) a todo creates. A bare-path Creates: line is the MINORITY form in this repo\'s own todos but the ONLY form the planner agent writes for agent repos (RT-001 fresh-lens debug) — the DOMINANT form declares every real path inside prose with no separate Modifies: field at all, e.g. `Creates: (modifies `a`, `b`, `c`); adds `x``, where `a`/`b`/`c` are modifies (see allModifies) and `x` alone is the create. Extraction must scan the whole Creates: line for every path token, backticked or bare, not stop at the first one.' },
-    allModifies: { type: 'array', items: { type: 'string' }, description: 'RT-001 (fix round): every path token (backticked OR bare) a todo modifies — both a dedicated Modifies: line AND every token named inside a "modifies ..." clause (parenthetical or bare) on a Creates: line, which is how most of this repo\'s todos declare their real modify-set.' },
-    lrnNext:     { type: 'integer' },
-    completedFileExists: { type: 'boolean', description: 'RT-004: true if workspace/todos/completed/<basename of the wave file> already exists (`test -f workspace/todos/completed/<basename> && echo yes || echo no`), determined UNCONDITIONALLY while parsing — a reused wave ID whose basename collides with an already-archived wave would have its record silently overwritten by the archive step\'s mv-by-basename' },
+    allCreates:  { type: 'array', items: { type: 'string' }, description: 'Every in-repo file path this wave creates, from every Creates: line, backticked or bare, outside any "modifies ..." clause.' },
+    allModifies: { type: 'array', items: { type: 'string' }, description: 'Every in-repo file path this wave modifies: Modifies: lines plus every path inside a "modifies ..." clause on a Creates: line.' },
     groupDeps: {
       type: 'object',
       description: 'Maps group label to the labels of OTHER groups it depends on (empty array = no external deps)',
@@ -167,52 +127,6 @@ const WAVE_SCHEMA = {
           },
         },
       },
-    },
-  },
-}
-
-// RT-002 (w039 archival hygiene): w039 and w040 ran concurrently against this exact
-// repo with no isolation between them — both wave files sat in workspace/todos/active/
-// at once with 106+ modified/added paths uncommitted, interleaving w040's GH-148
-// mechanism into the SAME files (agent/loop.py, agent/runner.py, tasks/store.py,
-// routes/a2a.py) w039's own todos were mid-editing, leaving neither wave's diff
-// reviewable, revertible, or releasable independently of the other. See this schema's
-// guard below, checked once right after Parse.
-const CONCURRENCY_GUARD_SCHEMA = {
-  type: 'object',
-  required: ['otherActiveWaves', 'dirtyPathCount'],
-  additionalProperties: false,
-  properties: {
-    otherActiveWaves: {
-      type: 'array',
-      items: { type: 'string' },
-      description: 'Basenames of other wave files (w[NNN]-*.md, excluding CHECKPOINT-*.md) ' +
-        'in workspace/todos/active/ besides this run\'s own wave file',
-    },
-    dirtyPathCount: {
-      type: 'integer',
-      description: 'Number of lines from `git status --porcelain` at repo root (modified + ' +
-        'staged + untracked paths, 0 if the working tree is clean)',
-    },
-  },
-}
-
-// RT-001 (w039/origin divergence): w039 landed and archived on a local `main` that was,
-// unnoticed, simultaneously 5 commits ahead AND 14 commits behind `origin/main` — v0.6.0
-// and v0.7.0 were already tagged upstream and unmerged into this history, and every one of
-// w039's own scope files had also changed upstream in the gap. A wave "landed" on a branch
-// that cannot be shipped without a later merge is not landed. See this schema's guard
-// below, checked once right after Parse, alongside the concurrency guard.
-const REMOTE_SYNC_SCHEMA = {
-  type: 'object',
-  required: ['behindCount'],
-  additionalProperties: false,
-  properties: {
-    behindCount: {
-      type: 'integer',
-      description: 'Output of `git rev-list --count main..origin/main` after `git fetch ' +
-        'origin main --quiet` (0 if origin/main is unreachable — no remote, no network — ' +
-        'or already an ancestor of main)',
     },
   },
 }
@@ -274,7 +188,7 @@ const PLAN_RT_SCHEMA = {
   required: ['issuesFound', 'reuseAnnotations', 'siAnnotations', 'sliceIssues', 'newCandidates', 'peerRepoAnnotations'],
   additionalProperties: false,
   properties: {
-    issuesFound: { type: 'boolean' },
+    issuesFound: { type: 'boolean', description: 'true when any of reuseAnnotations, siAnnotations, sliceIssues or peerRepoAnnotations is non-empty' },
     reuseAnnotations: {
       type: 'array',
       items: {
@@ -326,14 +240,6 @@ const PLAN_RT_SCHEMA = {
         },
       },
     },
-    // RT-014 / LRN-085 (RT-004/LRN-131: ported from wave-cycle.js — this runner, not
-    // wave-cycle.js, is the one that actually executes in the a2a-sdk repo where the
-    // harness/workflows/*.js -> template/.claude/workflows/*.js propagation gap can
-    // occur; downstream agent repos wave-cycle.js runs in ship neither directory):
-    // a todo whose Creates:/Modifies: touches harness/workflows/*.js or
-    // .claude/workflows/*.js but omits the template/.claude/workflows/<file>.js
-    // peer-repo mirror (wailuen/a2a-agent-template) leaves propagation to
-    // out-of-band action. See LRN-071 (template/ is a peer repo, not a submodule).
     peerRepoAnnotations: {
       type: 'array',
       items: {
@@ -350,6 +256,7 @@ const PLAN_RT_SCHEMA = {
   },
 }
 
+// SDK issue scan schema — classifies findings as SDK-level vs agent-domain
 const SDK_SCAN_SCHEMA = {
   type: 'object',
   required: ['sdkCandidates'],
@@ -385,113 +292,179 @@ const GATE_SCHEMA = {
   },
 }
 
-// GH-84: archive intent schema — git status check before archive
-// The agent runs `git status --short` in the SDK repo, parses the output into dirty paths,
-// cross-references against wave.allScope (Creates: ∪ Modifies:) for offendingPaths, and
-// separately flags any dirty/untracked paths under harness deliverable directories
-// (tests/, docs/, workspace/learning/, workspace/scenarios/results/, workspace/prd/, .claude/workflows/,
-// harness/workflows/, .claude/agents/, harness/agents/, .claude/skills/, harness/skills/) plus the
-// single-file entry pyproject.toml (RT-007, below) as
-// offendingHarnessPaths. Post-archive w035 follow-up: the workflow-file
-// dirs were added after a GH-118 fix (RT-003) landed in wave-cycle.js without either
-// wave.allScope or this dir list watching wave-cycle.js/sdk-wave.js's own directories — an
-// undeclared workflow-file edit could evade offendingPaths AND offendingHarnessPaths at once.
-// RT-007 (w036): the identical double-blind-spot recurred for harness agent/skill files — a
-// todo touching .claude/agents/core/redteam.md, harness/agents/core/redteam.md, or
-// .claude/skills/wave/SKILL.md was neither declared in any todo's Creates:/Modifies: (evading
-// offendingPaths) nor watched by this dir list (evading offendingHarnessPaths) at once. Fix:
-// .claude/agents/, harness/agents/, .claude/skills/, and harness/skills/ were added to the dir
-// list above (and the matching schema description / prompt step 4 text below).
-// RT-002 (round-7): template/.claude/workflows/ is the third byte-identical mirror (synced via
-// test_workflow_sync.py). RT-001 (w036): that mirror lives inside a gitignored nested peer repo
-// (template/), so it can NEVER show up in the top-level `git status --short` this gate runs in
-// step 1 — watching it via the main-repo dirty-path list (step 4) was a dead guard. Step 4b
-// separately runs `git -C template status --short` and folds any dirty .claude/workflows/ path
-// from THAT output into offendingHarnessPaths (prefixed `template/`) — the only way this gate
-// can see an uncommitted template mirror.
-// RT-007 (pytest-gate blind spot): pyproject.toml sat outside every gate clause at once — not a
-// harness dir (evading offendingHarnessPaths), not under agent_sdk/**.py (evading
-// offendingUndeclaredScope), not a .py import target (evading offendingUndeclaredImports), and
-// simply never named in a todo's Creates:/Modifies: (evading offendingPaths) — a sixth variant
-// of the double-blind-spot class documented above. A pytest.ini_options edit (e.g. a
-// filterwarnings entry broad enough to mask a genuine leaked event loop or socket) could land
-// fully undetected by this gate. Fix: pyproject.toml was added to the dir list above as a
-// single-file entry (and the matching schema description / prompt step 4 text below) — `starts
-// with` matching degenerates to an exact match for a top-level file with no children.
-// GH-118 (LRN-119): the checks above only catch paths git already sees as dirty/untracked
-// AND either in wave.allScope or under a harness dir — they never inspect import statements.
-// A module extracted mid-wave (e.g. agent_sdk/common/origin.py in GH-110) that sits
-// untracked, is imported by a declared file, but is itself outside both allScope and the
-// harness dirs produces no offending entry and silently passes the gate — risking an
-// ImportError at boot on every importing surface if archive stages only declared paths.
-// offendingUndeclaredImports closes that gap: it holds resolved agent_sdk.* import targets
-// of dirty/scope .py files that are themselves untracked and undeclared.
-// RT-003 (w036, post-archive gh-issues review): a THIRD blind spot, orthogonal to the two
-// above — a file that is TRACKED (already existed pre-wave, so offendingUndeclaredImports'
-// `git ls-files` check never flags it), modified mid-wave, named only inside a todo's
-// Reuses:/SI: prose annotation (never its own Creates:/Modifies: line, so it evades
-// offendingPaths), and outside every harness deliverable dir (so it evades
-// offendingHarnessPaths too). GH-135/GH-130 each hit this exact gap on tracked
-// agent_sdk/**.py files (agent_sdk/routes/mcp.py, agent_sdk/routes/admin.py,
-// agent_sdk/__init__.py, agent_sdk/common/redact.py). offendingUndeclaredScope closes it:
-// any dirty, TRACKED agent_sdk/**.py path absent from wave.allScope is flagged as
-// undeclared scope drift and blocks archive, same as the other three checks.
-// RT-002 (LRN-131): RT-004 (GH-131/GH-132/LRN-071/LRN-085) — steps 4/4b and step 6 above only
-// ever detect a DIRTY template/.claude/workflows/ mirror — they say nothing when template/ is
-// not checked out in this working tree at all. GH-131 and GH-132 both declared
-// template/.claude/workflows/wave-cycle.js as a deliverable in Modifies:, yet template/ is a
-// gitignored peer repo (LRN-071) that can be entirely absent from a checkout — in that case
-// step 4b's own guard ("If a `template/` directory exists...") never fires, so this gate
-// silently reports a clean archive-commit check even though the declared propagation was never
-// verified. This RT-004 hard-block originally landed only in the three wave-cycle.js copies —
-// sdk-wave.js is the runner .claude/skills/wave/SKILL.md step 2 actually launches, so it was
-// left exposed to the identical failure class. templateDirExists below, plus the
-// declaresTemplateScope hard-block after the archiveIntent response further down, close that
-// gap here too: a wave that declares a template/ path as scope hard-blocks archive, loudly,
-// whenever template/ is not checked out.
-// RT-012 (post-archive gh-issues review): docs/content-types.md landed 64 net-new lines
-// documenting the GH-130/RT-011 delimiter-safety contract with no todo declaring it in
-// Creates:/Modifies: — invisible to offendingPaths (undeclared), offendingHarnessPaths (docs/
-// was not a watched dir), offendingUndeclaredImports (not a .py file), AND
-// offendingUndeclaredScope (not under agent_sdk/**.py) simultaneously: a fifth variant of the
-// same double-blind-spot RT-003/RT-007 closed for other file classes above. Fix: docs/ was
-// added to the harness-deliverable dir list (HARNESS_DIRS in tests/test_workflows.py, and the
-// matching schema description / prompt step 4 text below, in all three archive-gate runners).
-// RT-006 (round-7 fresh-lens debug): the Parse-phase template-dir fast-abort landed only in
-// the two wave-cycle.js mirrors. sdk-wave.js carried the LATE archive-gate hard-block below
-// but no Parse gate at all — so a wave declaring a template/ deliverable in this repo (whose
-// own open deliverable IS a template/ propagation) burned its entire agent-call budget on
-// Implement/Redteam/Codify before discovering at archive time that the propagation could never
-// land. That is the precise waste the wave-cycle.js gate was written to prevent. A minimal,
-// single-purpose schema (deliberately NOT reusing ARCHIVE_INTENT_SCHEMA's full commit-check
-// shape, which needs git status output this early check has no use for) lets the Parse-phase
-// gate ask the same `test -d template` question cheaply, before any expensive phase starts.
-const TEMPLATE_DIR_CHECK_SCHEMA = {
+// Post-archive verification: the ledger row must name this wave's own file (two waves can
+// share a waveId), and the wave file must actually have moved.
+const ARCHIVE_CHECK_SCHEMA = {
   type: 'object',
-  required: ['templateDirExists'],
+  required: ['rowPresent', 'matchCount', 'archivedFileExists', 'activeFileExists'],
   additionalProperties: false,
   properties: {
-    templateDirExists: { type: 'boolean', description: 'True if a `template/` directory exists at the repo root (`test -d template`)' },
+    rowPresent:         { type: 'boolean' },
+    matchCount:         { type: 'number' },
+    archivedFileExists: { type: 'boolean' },
+    activeFileExists:   { type: 'boolean' },
   },
 }
 
+// Filled verbatim from the archive-gate script's JSON (see ARCHIVE_GATE_PY below).
 const ARCHIVE_INTENT_SCHEMA = {
   type: 'object',
-  required: ['gitStatusOutput', 'dirtyPaths', 'offendingPaths', 'offendingHarnessPaths', 'offendingUndeclaredImports', 'offendingUndeclaredScope', 'templateDirExists'],
+  required: ['ok', 'error'],
   additionalProperties: false,
   properties: {
-    gitStatusOutput:      { type: 'string', description: 'Raw stdout of git status --short' },
-    dirtyPaths:           { type: 'array', items: { type: 'string' }, description: 'All paths reported dirty or untracked by git' },
-    offendingPaths:       { type: 'array', items: { type: 'string' }, description: 'Dirty paths that overlap with wave.allScope (Creates: ∪ Modifies:)' },
-    offendingHarnessPaths: { type: 'array', items: { type: 'string' }, description: 'Dirty/untracked paths under tests/, docs/, workspace/learning/, workspace/scenarios/results/, workspace/prd/, .claude/workflows/, harness/workflows/, .claude/agents/, harness/agents/, .claude/skills/, or harness/skills/, or exactly matching the single-file entry pyproject.toml (step 4) — plus, per step 4b, any dirty .claude/workflows/ path from `git -C template status --short` (the nested template repo), resolved to template/.claude/workflows/<file> — even if not in allScope' },
-    offendingUndeclaredImports: { type: 'array', items: { type: 'string' }, description: 'GH-118/LRN-119/RT-001: resolved import targets (absolute agent_sdk.* OR relative from ./from ..) of dirty/scope .py files that are untracked (git ls-files empty) AND absent from wave.allScope' },
-    offendingUndeclaredScope: { type: 'array', items: { type: 'string' }, description: 'RT-003 (w036): dirty paths under agent_sdk/**.py that ARE TRACKED (git ls-files returns them, unlike offendingUndeclaredImports which only inspects untracked .py files) but absent from wave.allScope — a source file modified mid-wave and named only in a todo\'s Reuses:/SI: prose, never added to Creates:/Modifies:. agent_sdk/ is not a harness dir, so offendingHarnessPaths cannot see it either' },
-    templateDirExists:    { type: 'boolean', description: 'RT-004: true if a `template/` directory exists at the repo root (`test -d template`), determined UNCONDITIONALLY in step 0 below regardless of git status or tree cleanliness — the only signal this gate has for whether a wave that declares a template/ path in scope can have its propagation verified in this checkout' },
+    ok:                         { type: 'boolean' },
+    error:                      { type: 'string' },
+    dirtyPaths:                 { type: 'array', items: { type: 'string' } },
+    offendingPaths:             { type: 'array', items: { type: 'string' }, description: 'Uncommitted paths inside the wave scope' },
+    offendingHarnessPaths:      { type: 'array', items: { type: 'string' }, description: 'Uncommitted harness deliverables, incl. template/.claude/workflows/ mirror changes or unpushed template commits' },
+    offendingUndeclaredImports: { type: 'array', items: { type: 'string' }, description: 'Untracked, undeclared agent_sdk modules imported by scope or dirty .py files' },
+    offendingUndeclaredScope:   { type: 'array', items: { type: 'string' }, description: 'Tracked agent_sdk/**.py files modified but not declared in scope' },
+    templateDirExists:          { type: 'boolean' },
   },
 }
+const ARCHIVE_INTENT_LISTS = ['dirtyPaths', 'offendingPaths', 'offendingHarnessPaths', 'offendingUndeclaredImports', 'offendingUndeclaredScope']
+
+// ─── deterministic scripts (run by an agent, results returned verbatim) ───────
+
+// Preflight: every Parse-phase fact that is a file-system or git lookup, in one run.
+// Failure of the fetch (no remote, offline) is not a blocker; failure of git itself is.
+const PREFLIGHT_PY = [
+  'import json,os,re,subprocess,sys',
+  'def run(*a):',
+  '    try:',
+  '        r=subprocess.run(a,capture_output=True,text=True,timeout=120)',
+  '        return r.stdout if r.returncode==0 else None',
+  '    except Exception:',
+  '        return None',
+  'base=os.path.basename(sys.argv[1])',
+  'top=run("git","rev-parse","--show-toplevel")',
+  'if top is None:',
+  '    print(json.dumps({"ok":False,"error":"not inside a git repository"}))',
+  '    sys.exit(0)',
+  'os.chdir(top.strip())',
+  'act="workspace/todos/active"',
+  'others=sorted(f for f in (os.listdir(act) if os.path.isdir(act) else []) if re.match(r"w\\d+-.*\\.md$",f) and f!=base)',
+  'st=run("git","status","--porcelain")',
+  'dirty=len([l for l in st.splitlines() if l.strip()]) if st is not None else -1',
+  'run("git","fetch","origin","main","--quiet")',
+  'b=run("git","rev-list","--count","main..origin/main")',
+  'behind=int(b.strip()) if b and b.strip().isdigit() else 0',
+  'learn="workspace/learning"',
+  'nums=[int(n) for f in (os.listdir(learn) if os.path.isdir(learn) else []) for n in re.findall(r"^LRN-(\\d+)",f)]',
+  'idx=os.path.join(learn,"README.md")',
+  'if os.path.isfile(idx): nums+=[int(n) for n in re.findall(r"LRN-(\\d+)",open(idx,encoding="utf-8").read())]',
+  'print(json.dumps({"ok":True,"error":"",',
+  '  "completedFileExists":os.path.exists("workspace/todos/completed/"+base),',
+  '  "templateDirExists":os.path.isdir("template"),',
+  '  "otherActiveWaves":others,"dirtyPathCount":dirty,"behindCount":behind,',
+  '  "lrnNext":max(nums,default=0)+1}))',
+].join('\n')
+
+// Archive commit gate. Blocks archive when anything the wave produced would be lost on
+// checkout or would break on a fresh clone:
+//   offendingPaths             uncommitted scope files
+//   offendingHarnessPaths      uncommitted harness deliverables (tests/, docs/, workflows,
+//                              agents, skills, prd/learning/results, pyproject.toml), plus the
+//                              template/ peer repo's workflow mirror when dirty or unpushed —
+//                              template/ is a nested repo the top-level git status cannot see
+//   offendingUndeclaredImports untracked agent_sdk modules that a scope/dirty .py file imports
+//                              (absolute agent_sdk.* or relative), resolved on disk with ast
+//   offendingUndeclaredScope   tracked agent_sdk/**.py files modified but not declared (exact match)
+const ARCHIVE_GATE_PY = [
+  'import ast,json,os,subprocess,sys',
+  'PKG="agent_sdk"',
+  'def git(*a):',
+  '    r=subprocess.run(("git",)+a,capture_output=True,text=True)',
+  '    if r.returncode!=0: raise RuntimeError("git "+" ".join(a)+": "+r.stderr.strip())',
+  '    return r.stdout',
+  'def norm(p): return os.path.normpath(p).replace(os.sep,"/")',
+  'def paths(raw):',
+  '    out=[]',
+  '    for l in raw.splitlines():',
+  '        if len(l)>3: out.append((l[:2],norm(l[3:].split(" -> ")[-1].strip().strip(chr(34)))))',
+  '    return out',
+  'def under(p,d): return p==d or p.startswith(d.rstrip("/")+"/")',
+  'def first(*c):',
+  '    for x in c:',
+  '        if os.path.isfile(x): return norm(x)',
+  '    return None',
+  'try:',
+  '    os.chdir(git("rev-parse","--show-toplevel").strip())',
+  '    scope={norm(p) for p in json.loads(sys.argv[1])}',
+  '    status=paths(git("status","--porcelain","-uall"))',
+  '    dirty=[p for _,p in status]',
+  '    tracked={norm(p) for p in git("ls-files").splitlines()}',
+  '    offending=[p for p in dirty if any(under(p,s) or under(s,p) for s in scope)]',
+  '    hdirs=("tests/","docs/","workspace/learning/","workspace/scenarios/results/","workspace/prd/",".claude/workflows/","harness/workflows/",".claude/agents/","harness/agents/",".claude/skills/","harness/skills/")',
+  '    harness=[p for p in dirty if p.startswith(hdirs) or p=="pyproject.toml"]',
+  '    if os.path.exists("template/.git"):',
+  '        harness+=["template/"+p for _,p in paths(git("-C","template","status","--porcelain","-uall")) if p.startswith(".claude/workflows/")]',
+  '        r=subprocess.run(["git","-C","template","rev-list","--count","@{upstream}..HEAD"],capture_output=True,text=True)',
+  '        if r.returncode!=0 or r.stdout.strip()!="0": harness.append("template/ (unpushed or no upstream: run git -C template push)")',
+  '    targets=set()',
+  '    for f in sorted({p for p in dirty+list(scope) if p.endswith(".py")}):',
+  '        if not os.path.isfile(f): continue',
+  '        try: tree=ast.parse(open(f,encoding="utf-8").read())',
+  '        except Exception: continue',
+  '        for n in ast.walk(tree):',
+  '            if isinstance(n,ast.Import):',
+  '                for a in n.names:',
+  '                    if a.name==PKG or a.name.startswith(PKG+"."):',
+  '                        m=a.name.replace(".","/")',
+  '                        targets.add(first(m+".py",m+"/__init__.py"))',
+  '            elif isinstance(n,ast.ImportFrom):',
+  '                if n.level==0:',
+  '                    if not n.module or not (n.module==PKG or n.module.startswith(PKG+".")): continue',
+  '                    pkg=n.module.replace(".","/"); named=n.module!=PKG',
+  '                else:',
+  '                    base=os.path.dirname(f)',
+  '                    for _ in range(n.level-1): base=os.path.dirname(base)',
+  '                    pkg=norm(os.path.join(base,(n.module or "").replace(".","/")))',
+  '                    named=bool(n.module)',
+  '                for a in n.names:',
+  '                    c=[pkg+"/"+a.name+".py",pkg+"/"+a.name+"/__init__.py"] if a.name!="*" else []',
+  '                    if named: c.append(pkg+".py")',
+  '                    c.append(pkg+"/__init__.py")',
+  '                    targets.add(first(*c))',
+  '    imports=sorted(t for t in targets if t and t not in tracked and t not in scope)',
+  '    undeclared=[p for p in dirty if p.startswith(PKG+"/") and p.endswith(".py") and p in tracked and p not in scope]',
+  '    print(json.dumps({"ok":True,"error":"","dirtyPaths":dirty,"offendingPaths":offending,',
+  '      "offendingHarnessPaths":harness,"offendingUndeclaredImports":imports,',
+  '      "offendingUndeclaredScope":undeclared,"templateDirExists":os.path.isdir("template")}))',
+  'except Exception as e:',
+  '    print(json.dumps({"ok":False,"error":str(e)}))',
+].join('\n')
+
+// Deterministic Creates:/Modifies: scope scan — the ground truth Parse is checked against.
+// Keep its path rule in step with harness/wave_scope.py::_looks_like_path.
+const SCOPE_SCAN_PY = [
+  'import json,re,sys',
+  'EXT=(".py",".js",".ts",".md",".json",".toml",".yaml",".yml",".lock")',
+  'ROOT=(".md",".json",".toml",".yaml",".yml",".lock")',
+  'DOT={".env.example",".env.sample",".env.template",".gitignore",".gitattributes",".dockerignore",".editorconfig",".python-version",".nvmrc",".npmrc",".pre-commit-config.yaml"}',
+  'BAD=" ()"+chr(34)+chr(39)',
+  'def ok(t):',
+  '    if not t or any(c in t for c in BAD) or "*" in t or "?" in t: return False',
+  '    if t.startswith("/") or t.endswith("/") or t.startswith("template/"): return False',
+  '    f=t.rsplit("/",1)[-1]',
+  '    if f.startswith("."): return f in DOT',
+  '    if "/" not in t: return "__" not in t and f.endswith(ROOT)',
+  '    return f.endswith(EXT)',
+  'out=[]; skip=False',
+  'for l in open(sys.argv[1],encoding="utf-8"):',
+  '    if re.match(r"\\s*(?:[-*]\\s*)?(?:#{1,6}\\s|\\[.\\])",l): skip="[~]" in l',
+  '    if skip or not re.match(r"\\s*(?:[-*+]\\s*)?(?:\\*\\*)?(?:Creates|Modifies)(?:\\*\\*)?:",l,re.I): continue',
+  '    for t in re.split(r"[\\s,;()\\[\\]]+",l):',
+  '        t=t.lstrip("`*"+chr(34)+chr(39)).rstrip("`*.,:;"+chr(34)+chr(39))',
+  '        if ok(t): out.append(t)',
+  'print(json.dumps(sorted(set(out))))',
+].join('\n')
+
+function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'" }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
+// Stall detection uses description (not id) because agents re-derive ids each round.
 function sigs(findings) {
   return new Set(findings.map(function(f) { return f.file + ':' + f.description }))
 }
@@ -502,21 +475,9 @@ function sigsEqual(a, b) {
   return true
 }
 
-// GH-132 (ported from wave-cycle.js): severity floor — only critical/high findings
-// block the unit/phase redteam loops. Gating loop exit on raw findingsCount (every
-// severity, including low) meant an adversarial reviewer's routine low-severity nit
-// was enough to force the round cap every time. Medium/low findings are still
-// surfaced (recorded once to a deferred note on every loop exit — RT-009, see
-// accumulateNonBlocking below) but never themselves keep the loop going.
-// RT-005 (round-7 fresh-lens debug): the two sets are COMPLEMENTS, and non-blocking is
-// the one defined by an allow-list. Matching 'critical'/'high' here and 'medium'/'low'
-// there left a third bucket that belonged to NEITHER set: a finding whose severity is
-// absent, capitalised ('High'), or any other string did not block the loop, was not
-// accumulated by accumulateNonBlocking(), and never reached the <wave>-medium-low.md
-// deferred note — it vanished with no log line at all. That is the exact fail-OPEN this
-// file rejects everywhere else (null agent responses, findingsCount mismatches —
-// LRN-020/LRN-028/LRN-032). A finding is non-blocking ONLY when it says so; anything
-// else blocks and is named in a warning so the odd severity is visible, not silent.
+// Severity floor: only critical/high keep a fix loop going; medium/low are recorded in a
+// deferred note. The two sets are complements and only the non-blocking one is an
+// allow-list, so a missing or unexpected severity blocks (fail-closed) and is named.
 function isNonBlockingSeverity(f) {
   return f && (f.severity === 'medium' || f.severity === 'low')
 }
@@ -534,17 +495,8 @@ function nonBlockingFindings(findings) {
   return findings.filter(isNonBlockingSeverity)
 }
 
-// RT-009 (ported from wave-cycle.js — RT-002: this fix originally landed only in the
-// wave-cycle.js mirrors, leaving this runner, the one .claude/skills/wave/SKILL.md
-// launches for SDK waves, silently dropping every medium/low finding on all but the
-// clean-exit path): the clean-exit branch (blocking.length === 0) was the ONLY
-// loop-exit path that wrote the medium/low deferred note — the null-gate break,
-// findings-mismatch break, and tests-red break all exited the same while(true) loop
-// with that round's non-blocking findings computed and then discarded. Every round now
-// accumulates its nonBlockingFindings into a loop-scoped store (deduped by the same
-// file+description key sigs() uses, so a finding resurfacing across rounds is recorded
-// once, not once per round); the caller writes ONE deferred note from ONE place after
-// the loop, regardless of which break fired.
+// Every round's non-blocking findings, deduped by file+description, written once after the
+// loop whichever way it exits.
 function accumulateNonBlocking(store, seenSigs, findings) {
   for (const f of nonBlockingFindings(findings)) {
     const sig = f.file + ':' + f.description
@@ -555,47 +507,24 @@ function accumulateNonBlocking(store, seenSigs, findings) {
   }
 }
 
-// GH-132: batch the fix fan-out into ONE agent per round covering every file, unless
-// the round's blocking findings span more files than this threshold — a single prompt
-// spanning too many files risks losing per-file fidelity, so past the threshold the
-// loop falls back to the original one-agent-per-file parallel fan-out.
+function uniq(xs) { return Array.from(new Set(xs || [])) }
+
+// One fix agent per round covering every file, unless the findings span more files than
+// this — then one agent per file, so a single prompt never loses per-file fidelity.
 const FIX_BATCH_FILE_THRESHOLD = 6
 
-// GH-132: hard cap on LRN files captured per wave. Findings beyond the cap were
-// already fixed by the redteam loop above — only individual LRN codification is
-// capped, so an unusually finding-heavy wave cannot fan out one parallel codify agent
-// per finding with no ceiling.
+// Cap on LRN files captured per wave; the overflow is recorded in a deferred note.
 const MAX_LRN_PER_WAVE = 20
 
+// Plan review stops the wave if it is not clean after this many rounds.
+const PLAN_MAX_ROUNDS = 8
+const UNIT_MAX_ROUNDS = 5
+const PHASE_MAX_ROUNDS = 8
+
 // ─── agent-call budget (hard backstop) ────────────────────────────────────────
-// GH-132: with the severity floor and debug-replaces-fix-fan-out changes above,
-// steady-state agent-call volume per wave should collapse on its own — but as a
-// backstop against any future or unforeseen runaway loop (e.g. a stalled loop, or an
-// unusually wide finding set), every dispatched agent call is counted against a hard
-// per-wave ceiling. Exceeding it stops the wave LOUDLY (throws) instead of silently
-// continuing to spend agent calls.
-// RT-002: overridable via args.agentBudget (the same Workflow(...) args object that carries
-// waveFile/today) so a wave whose honest cost exceeds the default does not throw at the same
-// point on every retry with no escape hatch short of editing this file. Number(...) so a
-// JSON-encoded numeric string resolves correctly (normalizedArgs above already handles the
-// string-encoded-args case).
-// RT-006 (ported from wave-cycle.js): a flat 150-call ceiling is documented as already below
-// the honest cost of a routine 4-group wave (~4x20 unit-loop + ~32 phase + 24 codify +
-// implement + archive) — a hard backstop set below normal usage aborts waves that would
-// otherwise complete, with no signal short of an operator already knowing to pass
-// args.agentBudget. Recomputed below (see "AGENT_CALL_BUDGET recompute") once
-// wave.groups.length is known, so the ceiling scales with the wave's own shape instead of a
-// fixed constant; 150 here is only the floor used for the handful of calls before Parse
-// resolves the wave. An explicit args.agentBudget of exactly 0 is invalid (silently falling
-// back to a default via `0 || default` would hide a typo'd override), so it is rejected below
-// rather than tolerated. RT-011 (fix round, ported from wave-cycle.js): an exact-zero override
-// is not the only invalid shape — Number('abc') is NaN, not 0, so a typo'd override would sail
-// past a zero-only check, and the very next line's `Number(x) || default` pattern would then
-// silently swallow the NaN into the default too (NaN is falsy, same as 0) — the exact gap
-// wave-cycle.js's RT-015 fix closed there but this file never carried. Validate the full
-// contract ONCE, here: any provided override must be a finite, positive number — this single
-// guard covers exactly-zero (0 fails `> 0`), negative, non-finite, and non-numeric overrides
-// alike, in one throw site rather than a dedicated zero-only guard plus a separate general one.
+// Every dispatched agent call counts against a per-wave ceiling; exceeding it stops the wave
+// loudly with a deferred note. The ceiling scales with the wave's group count once Parse
+// resolves it; args.agentBudget overrides it and must be a finite positive number.
 if (normalizedArgs.agentBudget !== undefined && normalizedArgs.agentBudget !== null &&
     !(Number.isFinite(Number(normalizedArgs.agentBudget)) && Number(normalizedArgs.agentBudget) > 0)) {
   throw new Error(
@@ -606,17 +535,12 @@ if (normalizedArgs.agentBudget !== undefined && normalizedArgs.agentBudget !== n
 }
 let AGENT_CALL_BUDGET = Number(normalizedArgs.agentBudget) || 150
 let agentCallCount = 0
-// RT-012: tracked so the budget-exceeded deferred note (below) can record where in the
-// wave the ceiling was hit — the last successfully dispatched call, since the one that
-// trips the budget check never itself dispatches. waveIdForBudgetNote starts as a WAVE_FILE
-// fallback because a budget of 1 (pathological but not impossible) could trip on the very
-// first call, before the Parse phase has resolved wave.waveId.
 let lastDispatchedLabel = 'none'
 let lastDispatchedPhase = 'Parse'
-let waveIdForBudgetNote = WAVE_FILE
+let waveIdForBudgetNote = WAVE_ID_FROM_FILE
 const _dispatchAgent = agent
-// RT-003: all agents share ONE working tree; a stash/reset by one silently deletes other
-// groups' uncommitted work (w043 lost GH-160/161/164 this way). Append the ban to every prompt.
+// All agents share ONE working tree; a stash/reset by one silently deletes other groups'
+// uncommitted work. Appended to every prompt.
 const SHARED_TREE_GIT_BAN =
   '\n\nSHARED WORKING TREE RULE: other agents have uncommitted work in this tree. NEVER run\n' +
   '`git stash`, `git reset`, `git checkout -- <path>`, `git restore`, `git clean` or\n' +
@@ -627,11 +551,7 @@ async function callAgent(prompt, opts) {
     log('BUDGET EXCEEDED: ' + agentCallCount + ' agent call(s) dispatched this wave — hard budget is ' +
         AGENT_CALL_BUDGET + '. Stopping loudly to prevent runaway cost; investigate the loop or ' +
         'finding volume that drove this before re-running.')
-    // WC-003: write a deferred note so the operator has a durable artifact indicating why
-    // the wave stopped and how to retry — every other terminal exit path in this file does
-    // this; the budget throw did not (RT-012). Dispatched through the raw _dispatchAgent
-    // (bypassing callAgent) so the note write itself cannot be blocked by the very budget
-    // it exists to report on.
+    // Dispatched directly so the note cannot be blocked by the budget it reports on.
     await _dispatchAgent(
       'Write workspace/todos/deferred/' + waveIdForBudgetNote + '-agent-budget-exceeded.md\n\n' +
       'Include: waveId (' + waveIdForBudgetNote + '), wave file (' + WAVE_FILE + '), date (' +
@@ -644,7 +564,7 @@ async function callAgent(prompt, opts) {
       'a higher ceiling by passing agentBudget in the workflow args (args.agentBudget on the ' +
       'Workflow(...) call that launches sdk-wave.js), e.g. args: { waveFile, today, ' +
       'agentBudget: 300 }."',
-      { label: 'defer:agent-budget-exceeded', phase: lastDispatchedPhase }
+      { label: 'defer:agent-budget-exceeded', phase: lastDispatchedPhase, effort: 'low' }
     )
     throw new Error('agent-call budget exceeded (' + AGENT_CALL_BUDGET + ' calls) for this wave')
   }
@@ -653,375 +573,421 @@ async function callAgent(prompt, opts) {
   return _dispatchAgent(prompt + SHARED_TREE_GIT_BAN, opts)
 }
 
+// Deferred notes are mechanical writes. A note that fails to write is logged; the blocking
+// flag that motivated it is already set by the caller.
+async function deferNote(fileName, body, label, phaseName) {
+  const r = await callAgent(
+    'Write workspace/todos/deferred/' + fileName + '\n\n' + body,
+    { label: label, phase: phaseName, effort: 'low' }
+  )
+  if (!r) log('WARNING: deferred note workspace/todos/deferred/' + fileName + ' was not written (agent returned null)')
+  return r
+}
+
+function runGate(label, phaseName) {
+  return callAgent(
+    'Run: ' + PYTEST + ' tests/\n' +
+    'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
+    '"test_file.py::test_name: reason" strings for each failing test). Return all fields.',
+    { schema: GATE_SCHEMA, label: label, phase: phaseName, effort: 'low' }
+  )
+}
+
+// Gate → (red: one test-fix agent → re-gate). Returns 'green', 'null' (gate never reported:
+// unknown state, never clean) or 'red' (still red, or unknown, after the test fix).
+async function gateWithTestFix(labelBase, phaseName, fixContext) {
+  const gate = await runGate('gate:' + labelBase, phaseName)
+  if (!gate) {
+    log('WARNING: gate ' + labelBase + ' returned null — treating as failure (unknown test state)')
+    testsRed = true
+    return 'null'
+  }
+  if (gate.exitCode === 0) return 'green'
+  testsRed = true
+  log('Gate RED (' + gate.failCount + ' failing) — dispatching test-fix agent')
+  await callAgent(
+    'Fix the failing tests below' + (fixContext ? ' ' + fixContext : '') + '. Read the test file and the source it covers.\n' +
+    'Failing tests:\n' + (gate.failures || []).join('\n') + '\n\n' +
+    'Run `' + PYTEST + ' <failing-test-file>` to confirm GREEN before finishing.',
+    { label: 'fix:tests:' + labelBase, phase: phaseName }
+  )
+  const reGate = await runGate('gate:' + labelBase + ':recheck', phaseName)
+  if (!reGate || reGate.exitCode !== 0) {
+    log('Re-gate still RED (' + (reGate ? reGate.failCount : '?') + ' failing) after test-fix')
+    return 'red'
+  }
+  return 'green'
+}
+
 // ─── state ────────────────────────────────────────────────────────────────────
-let registryCandidates  = []
-let sdkCandidatesCount  = 0
+let registryCandidates = []   // new C-NNN candidates from Todos Redteam → registered in Codify
+let protocolBlocked        = false   // any cause: archive must not run
+let testsRed               = false
+let testsBlockedArchive    = false   // pre-archive gate red or unknown
+let fixLoopTestsBlocked    = false   // a redteam fix loop stopped on a red/unknown test gate with findings unresolved
+let archivePlanRowMissing  = false   // plan.md ledger row (or the move itself) missing after archive
+let templatePropagationBlocked = false
+let unitBudgetBlocked      = false   // unit round budget exhausted with surviving critical/high findings
+let phaseBudgetBlocked     = false   // phase round budget exhausted with surviving critical/high findings
+let redteamUnknownBlocked  = false   // a redteam never returned a trustworthy verdict
+let implementBlocked       = false   // an implement agent died twice on the same todo
+let totalTodos             = 0
+let sdkCandidatesCount     = 0
+const allHighFindings      = []      // critical/high findings → Codify
 
 // ─── phase 0: parse wave file ─────────────────────────────────────────────────
 phase('Parse')
 
-const wave = await callAgent(
-  'Read the wave file at: ' + WAVE_FILE + '\n\n' +
-  'Also read workspace/learning/README.md to find the highest LRN number ' +
-  '(e.g. LRN-023 → lrnNext = 24; if none, lrnNext = 1).\n\n' +
-  'Extract:\n' +
-  '- waveId: the w[NNN] identifier from the filename\n' +
-  '- A "path token" is any token on a Creates:/Modifies: line that names exactly ONE\n' +
-  '  FILE, backticked OR BARE (RT-001, fresh-lens debug): the planner agent writes bare,\n' +
-  '  comma-separated paths (e.g. Creates: src/tools/x.py, tests/test_x.py) and bare\n' +
-  '  "(modifies a, b)" clauses, so a path is NEVER skipped for lacking backticks. Split\n' +
-  '  the line on whitespace, commas, semicolons, parens and square brackets; strip\n' +
-  '  backticks, "*" and quotes from both ends of each piece and any trailing . , : ;\n' +
-  '  then apply the rules below. A bold **Creates:** / **Modifies:** header line counts\n' +
-  '  too, and a trailing "# ..." annotation is still part of its line. RT-001\n' +
-  '  (round-7 fresh-lens debug): these lines are PROSE, so they also backtick things\n' +
-  '  that are NOT scope. REJECT every one of the following outright: a DIRECTORY (any\n' +
-  '  token ending in "/" — `agent_sdk/`, `docs/`, `.claude/agents/`, `harness/skills/`),\n' +
-  '  a GLOB (any token containing "*" or "?" — `agent_sdk/**.py`, `tests/test_*.py`), a\n' +
-  '  slash-command (`/sdk-test`), an identifier or dotted attribute chain\n' +
-  '  (`max_retries`, `wave.allScope`, `openai.RateLimitError`), and a bare extension\n' +
-  '  (`.py`). A directory or glob token is NEVER wave scope even when the prose plainly\n' +
-  '  mentions it — e.g. an aside reading "(`agent_sdk/` is not a harness dir)" declares\n' +
-  '  NOTHING. Each scope entry is a claim about one deliverable and the archive gate\n' +
-  '  reads it as one, so a single directory token would declare an entire subtree and\n' +
-  '  silently disable the undeclared-scope check. Accept a token only if its FINAL\n' +
-  '  segment is a filename ending in a real repo extension (.py .js .ts .md .json .toml\n' +
-  '  .yaml .yml .lock) or is EXACTLY one of these known lockfiles/dotfiles (GH-164):\n' +
-  '  `uv.lock`, `package-lock.json`, `poetry.lock`, `yarn.lock`, `pnpm-lock.yaml`,\n' +
-  '  `.env.example`, `.env.sample`, `.env.template`, `.gitignore`, `.gitattributes`,\n' +
-  '  `.dockerignore`, `.editorconfig`, `.python-version`, `.nvmrc`, `.npmrc`,\n' +
-  '  `.pre-commit-config.yaml` (any other leading-dot name, like a bare `.py` or `.env`,\n' +
-  '  is still rejected). Qualifying examples: `harness/wave_scope.py`, `pyproject.toml`, and\n' +
-  '  `.claude/workflows/wave-cycle.js` all qualify (a leading dot-segment is fine — the\n' +
-  '  FINAL segment is what must look like a filename). RT-001 (residual fix): a token\n' +
-  '  with NO "/" at all is further restricted to ROOT-LEVEL extensions (.md .json\n' +
-  '  .toml .yaml .yml .lock, plus the known dotfiles above) — no .py/.js/.ts source file is ever bare at this repo\'s root,\n' +
-  '  every real one is nested, so a bare `wave-cycle.js` or `test_workflow_sync.py`\n' +
-  '  can never string-match the real, directory-qualified dirty path `git status`\n' +
-  '  reports for it and must be REJECTED; write the full path instead. This rule is\n' +
-  '  the prose twin of harness/wave_scope.py::_looks_like_path; keep the two in step.\n' +
-  '- allCreates: every repo-relative path token (backticked or bare) this wave creates. RT-001\n' +
-  '  (fix round): a "Creates:" line is NOT always a bare path — this repo\'s dominant\n' +
-  '  todo form puts every real deliverable inside prose with NO separate "Modifies:"\n' +
-  '  field at all, e.g. a todo line reading: Creates: (modifies `a`, `b`, `c`); adds\n' +
-  '  `d`, `e`. Scan the FULL "Creates:" line for EVERY path token (backticked or bare), wherever\n' +
-  '  it sits — inside a parenthetical "(modifies ...)" clause, after a trailing "adds\n' +
-  '  ..." / "adds/updates ..." clause, or bare. NEVER stop at the first backticked\n' +
-  '  token on the line: a Creates: line naming six modified files inside one\n' +
-  '  parenthetical, followed by a trailing "adds `x`" clause, has SEVEN real paths, not\n' +
-  '  one. A path token belongs in allCreates UNLESS it sits inside a "modifies ..."\n' +
-  '  clause (parenthetical or bare) naming it — those belong in allModifies instead.\n' +
-  '- allModifies: every repo-relative path token (backticked or bare) this wave modifies. This\n' +
-  '  includes BOTH a dedicated "Modifies:" line\'s paths AND every (backticked or bare) path\n' +
-  '  token named inside a "modifies ..." clause on a Creates: line, parenthetical or\n' +
-  '  bare — e.g. Creates: (modifies `a`); modifies `b` names TWO modifies, not one. Do\n' +
-  '  NOT assume a todo\'s real modify-set appears only on its own "Modifies:" line: most\n' +
-  '  todos in this repo declare it entirely inside Creates: prose instead.\n' +
-  '  EXCLUDE any todo marked [~] (out-of-repo / cannot land here) and any path\n' +
-  '  that resolves to another repo — only in-repo paths count as wave scope.\n' +
-  '  A wave whose only paths are Modifies: (no Creates:) is legitimate, not a bug.\n' +
-  '- lrnNext: highest existing LRN number + 1\n' +
-  '- groups: execution groups (Depends: respected). Each group MUST carry both its\n' +
-  '  own creates (Creates: paths) and modifies (Modifies: paths, in-repo only).\n' +
-  '  Todos without ‖ group: get label "ungrouped-N" (N = position).\n' +
-  '  Same ‖ group: label → same group entry.\n' +
-  '  Do NOT impose a sequential ordering — let groupDeps express ordering instead.\n' +
-  '- groupDeps: for each group label, list the labels of OTHER groups whose todos\n' +
-  '  appear in any `Depends:` field of this group\'s todos.\n' +
-  '  A group with no external Depends: references maps to [].\n' +
-  '  Format: {"A": [], "B": ["A"], ...}\n\n' +
-  '- completedFileExists: run `test -f workspace/todos/completed/' + WAVE_BASENAME +
-  ' && echo yes || echo no` UNCONDITIONALLY (regardless of anything else above) and set ' +
-  'completedFileExists to true/false accordingly.\n\n' +
-  'Return structured data.',
-  { schema: WAVE_SCHEMA, label: 'parse', phase: 'Parse' }
-)
-
-if (!wave) {
-  log('ERROR: could not parse wave file at ' + WAVE_FILE)
-  return { error: 'parse-failed' }
+async function runPreflight(label) {
+  const pf = await callAgent(
+    'Run the two commands below at the repo root exactly as written (do not edit them).\n' +
+    'Return the JSON object the first one prints, field for field, and set scopePaths to the\n' +
+    'JSON list the second one prints, unmodified. If a command fails to run, set ok=false and\n' +
+    'put its error text in error.\n\n' +
+    'python3 - ' + shq(WAVE_FILE) + " <<'PREFLIGHT'\n" + PREFLIGHT_PY + '\nPREFLIGHT\n\n' +
+    'python3 - ' + shq(WAVE_FILE) + " <<'SCOPE_SCAN'\n" + SCOPE_SCAN_PY + '\nSCOPE_SCAN',
+    { schema: PREFLIGHT_SCHEMA, label: label, phase: 'Parse', effort: 'low' }
+  )
+  // Unknown state is never "nothing found": a failed or malformed preflight stops the wave.
+  const wellFormed = pf && pf.ok === true &&
+    Array.isArray(pf.scopePaths) && Array.isArray(pf.otherActiveWaves) &&
+    ['completedFileExists', 'templateDirExists'].every(function(k) { return typeof pf[k] === 'boolean' }) &&
+    ['dirtyPathCount', 'behindCount', 'lrnNext'].every(function(k) { return Number.isInteger(pf[k]) })
+  if (!wellFormed) {
+    if (pf && pf.error) log('Preflight error: ' + pf.error)
+    return null
+  }
+  return pf
 }
 
-if (!wave.waveId) {
-  log('ERROR: wave file parsed but waveId is undefined — aborting (harness bug, not a clean wave)')
-  return { error: 'missing-wave-id' }
+// Reads the wave file into groups, then cross-checks scope against the deterministic scan.
+// Returns the wave, or { error } on any failure.
+async function parseWave(pf, label) {
+  const parsed = await callAgent(
+    'Read the wave file at: ' + WAVE_FILE + '\n\n' +
+    'Extract:\n' +
+    '- waveId: the w[NNN] identifier from the filename.\n' +
+    '- allCreates / allModifies: every in-repo FILE path the wave touches. Read the WHOLE of every\n' +
+    '  Creates:/Modifies: line (bold **Creates:** / **Modifies:** headers and trailing "# ..." annotations\n' +
+    '  included) and never stop at the first backticked path: paths may be backticked OR BARE,\n' +
+    '  comma-separated, or inside prose. A "Creates:" line often names its real modify-set inside a\n' +
+    '  parenthetical "(modifies `a`, `b`)" clause and its creates after "adds ...": a path inside a\n' +
+    '  "modifies ..." clause goes to allModifies, every other path on a Creates: line to allCreates,\n' +
+    '  every path on a Modifies: line to allModifies.\n' +
+    '  A path names exactly one file whose final segment has a real extension (.py .js .ts .md .json\n' +
+    '  .toml .yaml .yml .lock) or is a known dotfile/lockfile (uv.lock, .env.example, .gitignore, ...).\n' +
+    '  Not paths: directories (ending "/", e.g. agent_sdk/), globs ("*", "?"), slash-commands,\n' +
+    '  identifiers or dotted attributes, bare extensions. A path with no "/" counts only for root-level\n' +
+    '  files (.md .json .toml .yaml .yml .lock or a dotfile); write nested files with their full path.\n' +
+    '  Skip todos marked [~] and paths in other repos. A wave with only Modifies: paths is valid.\n' +
+    '- groups: execution groups. Todos sharing a ‖ group: label form one group; a todo without one\n' +
+    '  gets label "ungrouped-N" (N = position). Each group carries its own creates and modifies\n' +
+    '  (in-repo paths) and its todos (id, title, full body text).\n' +
+    '- groupDeps: for each group label, the labels of OTHER groups named in its todos\' Depends:\n' +
+    '  fields ([] when none; a dependency inside the same group adds nothing).\n\n' +
+    'Return structured data.',
+    { schema: WAVE_SCHEMA, label: label, phase: 'Parse' }
+  )
+  if (!parsed) {
+    log('ERROR: could not parse wave file at ' + WAVE_FILE)
+    return { error: 'parse-failed' }
+  }
+  const w = parsed
+  // Unified review scope = Creates: ∪ Modifies:. Modify-only waves are legitimate.
+  w.allCreates  = uniq(w.allCreates)
+  w.allModifies = uniq(w.allModifies)
+  w.allScope    = uniq(w.allCreates.concat(w.allModifies))
+  for (const g of w.groups) {
+    g.creates  = uniq(g.creates)
+    g.modifies = uniq(g.modifies)
+    g.scope    = uniq(g.creates.concat(g.modifies))
+  }
+  // The scan is the ground truth for which paths exist on Creates:/Modifies: lines; a path
+  // the read missed would silently narrow every gate keyed off allScope.
+  const scanned = uniq(pf.scopePaths)
+  const missed = scanned.filter(function(p) { return w.allScope.indexOf(p) === -1 })
+  if (missed.length > 0) {
+    log('ERROR: wave ' + w.waveId + ' Parse missed ' + missed.length + ' path(s) the ' +
+        'deterministic Creates:/Modifies: scan found: ' + missed.join(', ') +
+        ' — aborting rather than running with a narrowed scope. Fix the wave file wording or re-run.')
+    return { error: 'scope-scan-mismatch', waveId: w.waveId, missed: missed }
+  }
+  w.allScope = uniq(w.allScope.concat(scanned))
+  if (w.allScope.length === 0) {
+    log('ERROR: wave ' + w.waveId + ' has no Creates: AND no Modifies: paths — aborting ' +
+        '(truly empty scope is a harness bug, not a clean wave)')
+    return { error: 'empty-scope', waveId: w.waveId }
+  }
+  return w
 }
-// RT-004 (w036/w039 wave-ID collision, ported from wave-cycle.js): hard-block BEFORE any
-// other Parse-phase work when this wave's basename already exists in
-// workspace/todos/completed/ — proceeding would let the archive step silently overwrite
-// the earlier wave's record via mv-by-basename. Fail fast and name the fix instead of
-// discovering the collision only at archive time.
-if (wave.completedFileExists) {
+
+// A wave that declares a template/ deliverable cannot land it unless the peer repo
+// wailuen/a2a-agent-template is checked out at template/. Checked before any expensive phase.
+function templateScopeUnlandable(w, pf) {
+  const templatePaths = w.allScope.filter(function(p) { return p.startsWith('template/') })
+  if (templatePaths.length === 0 || pf.templateDirExists) return false
+  log('ABORT — wave ' + w.waveId + ' declares a template/ deliverable but template/ is not checked out in this working tree:')
+  templatePaths.forEach(function(p) { log('  [template/ absent] ' + p) })
+  log('Clone the peer repo (wailuen/a2a-agent-template) into template/ at the repo root, ' +
+      'copy the declared file(s) in from their harness/workflows/ source, verify `diff` is empty, ' +
+      'then `git -C template/ commit && git -C template/ push`. Re-run /wave ' + w.waveId +
+      ' once template/ is checked out and the propagation can be verified.')
+  return true
+}
+
+const preflight = await runPreflight('parse:preflight')
+if (!preflight) {
+  log('ERROR: preflight for ' + WAVE_FILE + ' returned no trustworthy result — aborting Parse')
+  return { error: 'preflight-failed', waveFile: WAVE_FILE }
+}
+
+// Archive moves the wave file by basename; a reused ID would overwrite the earlier record.
+if (preflight.completedFileExists) {
   log('ERROR: wave ID collision — workspace/todos/completed/' + WAVE_BASENAME + ' already ' +
       'exists. Archiving ' + WAVE_FILE + ' under this ID would overwrite the earlier wave\'s ' +
-      'record. Rename this wave file (and any workspace/todos/deferred/' + wave.waveId +
-      '-*.md markers) to an unused wave ID, then re-run.')
-  return { error: 'wave-id-collision', waveId: wave.waveId, completedFile: 'workspace/todos/completed/' + WAVE_BASENAME }
-}
-// RT-012: now that wave.waveId is known, the budget-exceeded deferred note (if the ceiling
-// is ever hit later in this run) can name it precisely instead of falling back to WAVE_FILE.
-waveIdForBudgetNote = wave.waveId
-
-// Unified review scope = Creates: ∪ Modifies: paths. Modify-only waves (0 Creates,
-// >0 Modifies) are legitimate (e.g. skill/doc-only waves) — deriving scope from
-// Creates: alone false-aborts them here AND lands them with empty adversarial-review
-// and protocol-audit scope downstream. Always union both. (RT-002 / LRN below)
-function uniq(xs) { return Array.from(new Set(xs || [])) }
-
-wave.allCreates  = uniq(wave.allCreates)
-wave.allModifies = uniq(wave.allModifies)
-wave.allScope    = uniq(wave.allCreates.concat(wave.allModifies))
-for (const g of wave.groups) {
-  g.creates  = uniq(g.creates)
-  g.modifies = uniq(g.modifies)
-  g.scope    = uniq(g.creates.concat(g.modifies))
+      'record. Rename this wave file (and any workspace/todos/deferred/' +
+      WAVE_ID_FROM_FILE + '-*.md markers) to an unused wave ID, then re-run.')
+  return { error: 'wave-id-collision', waveId: WAVE_ID_FROM_FILE, completedFile: 'workspace/todos/completed/' + WAVE_BASENAME }
 }
 
-// GH-164 (A): allScope came only from the AI parse above, with no deterministic check, so it
-// could silently drop a path such as `src/config.py`. Run a plain regex scan of every
-// Creates:/Modifies: line (through the same agent-call channel used for the file read), union it
-// with the AI result, and fail Parse if the AI missed anything the scan found. Fail-closed: a
-// null scan response is unknown state, not "nothing found". RT-001 (w047 fresh-lens debug): the
-// scan reads BARE paths as well as backticked ones (the planner agent writes bare comma-separated
-// paths); a backtick-only scan printed [] for every planner-format wave, making this gate a no-op.
-const scopeScan = await callAgent(
-  'Run this script exactly as written (do not edit it) and return the JSON list it prints as ' +
-  '`paths`, unmodified. It is a deterministic regex scan of the Creates:/Modifies: lines of the ' +
-  'wave file; do not add, remove or reinterpret any path.\n\n' +
-  'python3 - ' + WAVE_FILE + ' <<\'PY\'\n' +
-  'import json,re,sys\n' +
-  'EXT=(".py",".js",".ts",".md",".json",".toml",".yaml",".yml",".lock")\n' +
-  'ROOT=(".md",".json",".toml",".yaml",".yml",".lock")\n' +
-  'DOT={".env.example",".env.sample",".env.template",".gitignore",".gitattributes",".dockerignore",".editorconfig",".python-version",".nvmrc",".npmrc",".pre-commit-config.yaml"}\n' +
-  'BAD=" ()"+chr(34)+chr(39)\n' +
-  'def ok(t):\n' +
-  '    if not t or any(c in t for c in BAD) or "*" in t or "?" in t: return False\n' +
-  '    if t.startswith("/") or t.endswith("/") or t.startswith("template/"): return False\n' +
-  '    f=t.rsplit("/",1)[-1]\n' +
-  '    if f.startswith("."): return f in DOT\n' +
-  '    if "/" not in t: return "__" not in t and f.endswith(ROOT)\n' +
-  '    return f.endswith(EXT)\n' +
-  'out=[]; skip=False\n' +
-  'for l in open(sys.argv[1],encoding="utf-8"):\n' +
-  '    if re.match(r"\\s*(?:[-*]\\s*)?(?:#{1,6}\\s|\\[.\\])",l): skip="[~]" in l\n' +
-  '    if skip or not re.match(r"\\s*(?:[-*+]\\s*)?(?:\\*\\*)?(?:Creates|Modifies)(?:\\*\\*)?:",l,re.I): continue\n' +
-  '    for t in re.split(r"[\\s,;()\\[\\]]+",l):\n' +
-  '        t=t.lstrip("`*"+chr(34)+chr(39)).rstrip("`*.,:;"+chr(34)+chr(39))\n' +
-  '        if ok(t): out.append(t)\n' +
-  'print(json.dumps(sorted(set(out))))\n' +
-  'PY',
-  { schema: SCOPE_SCAN_SCHEMA, label: 'parse:scope-scan', phase: 'Parse' }
-)
-if (!scopeScan || !Array.isArray(scopeScan.paths)) {
-  log('ERROR: wave ' + wave.waveId + ' deterministic scope scan returned no result — aborting Parse')
-  return { error: 'scope-scan-failed', waveId: wave.waveId }
-}
-const scannedScope = uniq(scopeScan.paths)
-const scopeMissedByParse = scannedScope.filter(function (p) { return wave.allScope.indexOf(p) === -1 })
-if (scopeMissedByParse.length > 0) {
-  log('ERROR: wave ' + wave.waveId + ' Parse missed ' + scopeMissedByParse.length + ' path(s) the ' +
-      'deterministic Creates:/Modifies: scan found: ' + scopeMissedByParse.join(', ') +
-      ' — aborting rather than running with a narrowed scope. Fix the wave file wording or re-run.')
-  return { error: 'scope-scan-mismatch', waveId: wave.waveId, missed: scopeMissedByParse }
-}
-wave.allScope = uniq(wave.allScope.concat(scannedScope))
-log('allScope (final, ' + wave.allScope.length + '): ' + wave.allScope.join(', '))
-
-// RT-006 (ported from wave-cycle.js): now that wave.groups.length is known, widen the hard
-// backstop to track the wave's own shape rather than the flat constant used for the handful of
-// Parse-phase calls above. An explicit args.agentBudget override always wins (kept as the upper
-// hand, per RT-002); otherwise the floor scales with group count so a normal-sized wave's honest
-// cost — the exact volume the pre-fix 150 constant was documented as falling below — no longer
-// trips the same backstop meant to catch runaway loops, not routine usage.
-AGENT_CALL_BUDGET = Number(normalizedArgs.agentBudget) || Math.max(150, 45 * wave.groups.length + 80)
-
-if (wave.allScope.length === 0) {
-  log('ERROR: wave ' + wave.waveId + ' has no Creates: AND no Modifies: paths — aborting ' +
-      '(truly empty scope is a harness bug, not a clean wave)')
-  return { error: 'empty-scope', waveId: wave.waveId }
-}
-
-// RT-006 (round-7 fresh-lens debug), ported verbatim from .claude/workflows/wave-cycle.js:
-// a wave that declares a template/ peer-repo deliverable in Creates:/Modifies: but runs from
-// a checkout where template/ (wailuen/a2a-agent-template, LRN-071) was never cloned cannot
-// have that deliverable land — no amount of Implement/Redteam/Codify work changes that.
-// Discovering it only at the archive gate below means every one of those phases already ran
-// and spent the wave's agent-call budget on work whose declared propagation was never
-// landable. Fail fast here instead, before any of them start.
-const parseDeclaresTemplateScope = wave.allScope.some(function(p) { return p.startsWith('template/') })
-if (parseDeclaresTemplateScope) {
-  const templateCheck = await callAgent(
-    'Run `test -d template && echo yes || echo no` at the repo root and report the result.',
-    { schema: TEMPLATE_DIR_CHECK_SCHEMA, label: 'gate:template-dir-check', phase: 'Parse' }
-  )
-  // Fail-closed (the RT-001/WC-001 convention used throughout this file): a null response
-  // means unknown state, which is not the same as template/ being present.
-  if (!templateCheck || templateCheck.templateDirExists === false) {
-    log('ABORT — wave ' + wave.waveId + ' declares a template/ deliverable but template/ is not checked out in this working tree:')
-    wave.allScope.filter(function(p) { return p.startsWith('template/') })
-      .forEach(function(p) { log('  [template/ absent] ' + p) })
-    log('Clone the peer repo (wailuen/a2a-agent-template, LRN-071) into template/ at the repo root, ' +
-        'copy the declared file(s) in from their harness/workflows/ source, verify `diff` is empty, ' +
-        'then `git -C template/ commit && git -C template/ push`. Re-run /wave ' + wave.waveId +
-        ' once template/ is checked out and the propagation can be verified.')
-    return { error: 'template-dir-missing', waveId: wave.waveId }
-  }
-}
-
-// RT-002: refuse to stack a second wave's Implement phase on top of an earlier wave's
-// still-uncommitted work — a wave RESUMING itself (its own file already in active/) is
-// not blocked, only a genuinely OTHER wave file coexisting with dirty state.
-const concurrency = await callAgent(
-  'List every wave file directly inside workspace/todos/active/ that matches the ' +
-  'pattern w[0-9]+-*.md, EXCLUDING CHECKPOINT-*.md files and excluding the file at ' +
-  WAVE_FILE + ' itself (this run\'s own wave file — do not report it even if its ' +
-  'basename matches). Return their basenames as otherActiveWaves (empty array if none).\n\n' +
-  'Separately, run `git status --porcelain` at the repo root and return the number of ' +
-  'lines it prints as dirtyPathCount (0 if the working tree is clean).',
-  { schema: CONCURRENCY_GUARD_SCHEMA, label: 'concurrency-guard', phase: 'Parse' }
-)
-
-if (concurrency && concurrency.otherActiveWaves.length > 0 && concurrency.dirtyPathCount > 0) {
-  log('ERROR: wave ' + wave.waveId + ' cannot start — ' +
-      concurrency.otherActiveWaves.join(', ') + ' already sits in workspace/todos/active/ ' +
-      'and the working tree has ' + concurrency.dirtyPathCount + ' uncommitted path(s). ' +
-      'Commit or archive the other wave first (or re-run this wave from a dedicated ' +
-      'worktree) — running two waves against one uncommitted tree produces a diff neither ' +
-      'can be reviewed, reverted, or released independently of the other.')
+// Two waves on one uncommitted tree produce a diff neither can be reviewed, reverted or
+// released independently. An unknown dirty count (-1) counts as dirty.
+if (preflight.otherActiveWaves.length > 0 && preflight.dirtyPathCount !== 0) {
+  log('ERROR: wave ' + WAVE_ID_FROM_FILE + ' cannot start — ' +
+      preflight.otherActiveWaves.join(', ') + ' already sits in workspace/todos/active/ ' +
+      'and the working tree has ' + (preflight.dirtyPathCount < 0 ? 'an unknown number of' : preflight.dirtyPathCount) +
+      ' uncommitted path(s). Commit or archive the other wave first (or re-run this wave from a ' +
+      'dedicated worktree).')
   return {
     error: 'concurrent-wave-uncommitted',
-    waveId: wave.waveId,
-    otherActiveWaves: concurrency.otherActiveWaves,
-    dirtyPathCount: concurrency.dirtyPathCount,
+    waveId: WAVE_ID_FROM_FILE,
+    otherActiveWaves: preflight.otherActiveWaves,
+    dirtyPathCount: preflight.dirtyPathCount,
   }
 }
 
-// RT-001: a wave that lands on a branch already behind its remote is not landed — it is
-// staged on a lineage that needs a merge nobody has done yet, and every file the wave
-// touches may already differ upstream. Fetch failure (no `origin` remote, no network)
-// degrades to behindCount 0 rather than blocking every wave in an offline/remoteless repo.
-const remoteSync = await callAgent(
-  'Run `git fetch origin main --quiet` at the repo root (ignore failure — no configured ' +
-  '`origin` remote or no network access both mean this check does not apply). Then run ' +
-  '`git rev-list --count main..origin/main` and return the printed integer as behindCount ' +
-  '(0 if that command fails for any reason, e.g. no such remote or no such branch).',
-  { schema: REMOTE_SYNC_SCHEMA, label: 'remote-sync-guard', phase: 'Parse' }
-)
-
-if (remoteSync && remoteSync.behindCount > 0) {
-  log('ERROR: wave ' + wave.waveId + ' cannot start — local main is ' +
-      remoteSync.behindCount + ' commit(s) behind origin/main. Fetch and merge or rebase ' +
+// Work landed on a branch that has diverged from origin/main is not landed.
+if (preflight.behindCount > 0) {
+  log('ERROR: wave ' + WAVE_ID_FROM_FILE + ' cannot start — local main is ' +
+      preflight.behindCount + ' commit(s) behind origin/main. Fetch and merge or rebase ' +
       'onto origin/main first, run the full suite + mypy on the merged tree, and ' +
       're-verify this wave\'s acceptance criteria against the post-merge code before ' +
-      'Implement — work landed on a diverged branch is not landed.')
-  return {
-    error: 'behind-origin',
-    waveId: wave.waveId,
-    behindCount: remoteSync.behindCount,
-  }
+      'Implement.')
+  return { error: 'behind-origin', waveId: WAVE_ID_FROM_FILE, behindCount: preflight.behindCount }
 }
 
+let wave = await parseWave(preflight, 'parse')
+if (wave.error) return wave
+waveIdForBudgetNote = wave.waveId
+if (templateScopeUnlandable(wave, preflight)) return { error: 'template-dir-missing', waveId: wave.waveId }
+
+// Two concurrent wave runs would read the same lrnNext and overwrite each other's LRN
+// files; waves run sequentially by design.
+const lrnBase = preflight.lrnNext
+
+function setBudgetFromWave() {
+  AGENT_CALL_BUDGET = Number(normalizedArgs.agentBudget) || Math.max(150, 45 * wave.groups.length + 80)
+}
+setBudgetFromWave()
+log('allScope (' + wave.allScope.length + '): ' + wave.allScope.join(', '))
 log('Wave ' + wave.waveId + ': ' + wave.groups.length + ' group(s), ' +
     wave.allScope.length + ' scope path(s) (' + wave.allCreates.length + ' create / ' +
-    wave.allModifies.length + ' modify), lrnNext=' + wave.lrnNext)
-
-const lrnBase         = wave.lrnNext
-const allHighFindings = []
-let   protocolBlocked    = false
-let   testsBlockedArchive = false   // RT-003: tracks when a red test suite (not protocol) blocks archive
-let   templatePropagationBlocked = false  // RT-004 (LRN-131): archive blocked because this wave declares a template/ deliverable but template/ is not checked out (GH-131/GH-132/LRN-071/LRN-085)
-let   redteamUnknownBlocked = false  // RT-003 (this wave, LRN-032; ported from wave-cycle.js): a redteam round budget was exhausted while the verdict was never established (persistent null response, or a findingsCount/findings mismatch) — archive must not proceed on an UNKNOWN verdict
-let   unitBudgetBlocked   = false    // RT-001 (ported from wave-cycle.js): a group's unit redteam loop exited on the round-5 budget cap with surviving critical/high findings — archive must not proceed as if clean
-let   phaseBudgetBlocked  = false    // RT-001 (ported from wave-cycle.js): the phase redteam loop exited on the round-8 budget cap with surviving critical/high findings — archive must not proceed as if clean
-let   testsRed            = false
-let   totalTodos          = 0
+    wave.allModifies.length + ' modify), lrnNext=' + lrnBase + ', agent budget=' + AGENT_CALL_BUDGET)
 
 // ─── phase 1: todos redteam ───────────────────────────────────────────────────
 phase('Todos Redteam')
 
-const planRt = await callAgent(
-  'Review the todo plan for wave ' + wave.waveId + ' BEFORE implementation starts.\n\n' +
-  'Wave file: ' + WAVE_FILE + '\n' +
-  'Also read:\n' +
-  '  - workspace/components/README.md  (C-NNN registry)\n' +
-  '  - workspace/learning/README.md    (past learnings + Prevention clauses)\n\n' +
-  'Check ONLY these five things:\n' +
-  '1. REGISTRY REUSE — does a C-NNN component already cover this todo\'s capability?\n' +
-  '   If yes, add to reuseAnnotations.\n' +
-  '2. SI RISK — does this todo touch auth, credential, or transport code?\n' +
-  '   If yes and SI: field is absent, add to siAnnotations.\n' +
-  '3. VERTICAL SLICE — is this todo a horizontal layer instead of an end-to-end\n' +
-  '   deliverable? Add to sliceIssues only if genuinely non-vertical.\n' +
-  '4. NEW COMPONENT CANDIDATES — would any planned code be reusable across\n' +
-  '   multiple agents or waves? Add name/location/description to newCandidates.\n' +
-  '5. PEER-REPO PROPAGATION (LRN-085/RT-014) — does this todo\'s Creates:/Modifies:\n' +
-  '   list include `.claude/workflows/<file>.js` or `harness/workflows/<file>.js`\n' +
-  '   WITHOUT also including `template/.claude/workflows/<file>.js`? That path is a\n' +
-  '   THIRD byte-identical mirror living in the peer repo wailuen/a2a-agent-template —\n' +
-  '   the runtime copy downstream agents actually execute — and propagation to it is\n' +
-  '   never implicit (see LRN-071). If a todo touches the first two without the third,\n' +
-  '   add {todoId, mirrorPath: "template/.claude/workflows/<file>.js", note} to\n' +
-  '   peerRepoAnnotations.\n\n' +
-  'If the plan is already clean, issuesFound=false and all arrays empty.\n' +
-  'Return structured output.',
-  { schema: PLAN_RT_SCHEMA, label: 'rt:todos', phase: 'Todos Redteam', agentType: 'redteam' }
-)
-
-if (planRt) {
-  registryCandidates = planRt.newCandidates || []
-
-  if (!planRt.issuesFound) {
-    log('Todos plan clean — proceeding directly to implementation')
-  } else {
-    const hasAnnotations = (planRt.reuseAnnotations     && planRt.reuseAnnotations.length > 0) ||
-                           (planRt.siAnnotations         && planRt.siAnnotations.length > 0) ||
-                           (planRt.peerRepoAnnotations   && planRt.peerRepoAnnotations.length > 0)
-    const hasSliceIssues = planRt.sliceIssues && planRt.sliceIssues.length > 0
-
-    if (hasSliceIssues) {
-      log('Todos Redteam: ' + planRt.sliceIssues.length + ' slice issue(s) — logged (not blocking)')
-      planRt.sliceIssues.forEach(function(s) { log('  [slice] ' + s.todoId + ': ' + s.issue) })
-    }
-
-    if (registryCandidates.length > 0) {
-      log('Todos Redteam: ' + registryCandidates.length + ' new component candidate(s) flagged')
-    }
-
-    if (planRt.peerRepoAnnotations && planRt.peerRepoAnnotations.length > 0) {
-      log('Todos Redteam: ' + planRt.peerRepoAnnotations.length + ' peer-repo propagation gap(s) flagged (LRN-085)')
-    }
-
-    if (hasAnnotations) {
-      log('Todos Redteam: writing SI, registry, and peer-repo annotations back to wave file before implement')
-      await callAgent(
-        'Annotate the wave file ' + WAVE_FILE + ' with these additions.\n\n' +
-        'Registry reuse (add `Reuses: <componentId>` to the matching todo body):\n' +
-        JSON.stringify(planRt.reuseAnnotations, null, 2) + '\n\n' +
-        'SI risk (add `SI: <siId>  # <note>` to the matching todo body):\n' +
-        JSON.stringify(planRt.siAnnotations, null, 2) + '\n\n' +
-        'Peer-repo propagation (LRN-085/RT-014) — append `mirrorPath` to the matching\n' +
-        'todo\'s `Creates:` (or `Modifies:`) list, with the annotation:\n' +
-        '"lands via commit+push to wailuen/a2a-agent-template per LRN-071; runtime\n' +
-        'copy is what /acceptance / the harness skill actually executes — implementer\n' +
-        'runs `git -C template/ commit && git -C template/ push` as an explicit\n' +
-        'final step":\n' +
-        JSON.stringify(planRt.peerRepoAnnotations, null, 2) + '\n\n' +
-        'Rules:\n' +
-        '- Match todo by its backtick-wrapped ID on the checkbox line\n' +
-        '- Append annotation lines after the last indented field of that todo block\n' +
-        '- Preserve all whitespace and structure\n\n' +
-        'Report: which todos were annotated.',
-        { label: 'rt:todos:annotate', phase: 'Todos Redteam' }
-      )
-    }
+// Zero-tolerance plan review: every annotation, slice and propagation issue blocks. Rounds
+// 1-3 are fixed by the planner (or a plain annotation write when that is all that is
+// needed); from round 4 a fresh-lens debug pass replaces it. A null or self-contradicting
+// review is unknown, never clean. After PLAN_MAX_ROUNDS without a clean review the wave stops
+// before Implement.
+function planIssueCount(r) {
+  return r.reuseAnnotations.length + r.siAnnotations.length + r.sliceIssues.length + r.peerRepoAnnotations.length
+}
+function planIssuesOnly(r) {
+  return {
+    reuseAnnotations:    r.reuseAnnotations,
+    siAnnotations:       r.siAnnotations,
+    sliceIssues:         r.sliceIssues,
+    peerRepoAnnotations: r.peerRepoAnnotations,
   }
-} else {
-  log('Todos Redteam agent returned null — proceeding to implementation')
+}
+function mergeCandidates(found) {
+  for (const c of found || []) {
+    const dup = registryCandidates.some(function(x) { return x.name === c.name && x.location === c.location })
+    if (!dup) registryCandidates.push(c)
+  }
+}
+
+const ANNOTATION_RULES =
+  'Annotation format:\n' +
+  '- Registry reuse: add `Reuses: <componentId>  # <note>` to the todo body.\n' +
+  '- SI risk: add `SI: <siId>  # <note>` to the todo body.\n' +
+  '- Peer-repo propagation: append the mirrorPath to the todo\'s Modifies: (or Creates:) line, with the\n' +
+  '  note "lands via commit+push to wailuen/a2a-agent-template; implementer runs\n' +
+  '  `git -C template/ commit && git -C template/ push` as an explicit final step".\n' +
+  'Match each todo by its backticked ID on the checkbox line (e.g. `- [ ] `P1-01` ...`). Put new lines\n' +
+  'right after the last indented field of that todo block. Preserve all other whitespace and structure.'
+
+let planRound = 0
+let planClean = false
+let planEdited = false
+let lastPlanIssues = null   // last trustworthy review with issues; null if every round was unknown
+while (planRound < PLAN_MAX_ROUNDS) {
+  planRound++
+  const planRt = await callAgent(
+    'Review the todo plan for wave ' + wave.waveId + ' before implementation starts.\n\n' +
+    'Wave file: ' + WAVE_FILE + '\n' +
+    'Also read workspace/components/README.md (C-NNN registry), workspace/learning/README.md\n' +
+    '(Check/Prevention clauses) and .claude/reference/sdk-security-invariants.md (SI-1…SI-7).\n\n' +
+    'Check these five things (cross-wave ordering is out of scope):\n' +
+    '1. Registry reuse — a C-NNN component already covers a todo\'s capability and the todo has no\n' +
+    '   `Reuses:` line for it → reuseAnnotations.\n' +
+    '2. SI risk — a todo touches auth, credential, or transport code (SI-1…SI-7 territory) and has no\n' +
+    '   `SI:` line for that invariant → siAnnotations.\n' +
+    '3. Vertical slice — a todo is a horizontal layer rather than an end-to-end deliverable → sliceIssues.\n' +
+    '4. New component candidates — planned code reusable across agents or waves → newCandidates\n' +
+    '   (informational; not an issue).\n' +
+    '5. Peer-repo propagation — a todo lists `.claude/workflows/<file>.js` or\n' +
+    '   `harness/workflows/<file>.js` without `template/.claude/workflows/<file>.js`. The template copy\n' +
+    '   is the third byte-identical mirror, in the peer repo wailuen/a2a-agent-template, and is never\n' +
+    '   propagated implicitly → peerRepoAnnotations with that mirrorPath.\n\n' +
+    'Report an annotation only when the wave file does not already carry it.\n' +
+    'issuesFound is true when any of reuseAnnotations, siAnnotations, sliceIssues or\n' +
+    'peerRepoAnnotations is non-empty, and false only when all four are empty.' +
+    (lastPlanIssues
+      ? '\n\nThis is round ' + planRound + '. The previous review reported the issues below and a fix was ' +
+        'applied to the wave file. Confirm each is resolved and look for new ones:\n' +
+        JSON.stringify(planIssuesOnly(lastPlanIssues), null, 2)
+      : ''),
+    { schema: PLAN_RT_SCHEMA, label: 'rt:todos:r' + planRound, phase: 'Todos Redteam', agentType: 'redteam' }
+  )
+
+  const wellFormed = planRt && ['reuseAnnotations', 'siAnnotations', 'sliceIssues', 'newCandidates', 'peerRepoAnnotations']
+    .every(function(k) { return Array.isArray(planRt[k]) })
+  if (!wellFormed) {
+    log('WARNING: plan review returned no usable result at round ' + planRound + ' — unknown, not clean')
+    continue
+  }
+  mergeCandidates(planRt.newCandidates)
+  const issueCount = planIssueCount(planRt)
+  if (issueCount === 0 && planRt.issuesFound) {
+    log('WARNING: plan review at round ' + planRound + ' set issuesFound but listed no issues — unknown, not clean')
+    continue
+  }
+  if (issueCount === 0) {
+    planClean = true
+    log('Todos plan clean at round ' + planRound +
+        (registryCandidates.length > 0 ? ' (' + registryCandidates.length + ' new component candidate(s) flagged)' : ''))
+    break
+  }
+  if (!planRt.issuesFound) log('WARNING: plan review listed ' + issueCount + ' issue(s) but issuesFound=false — treating them as issues')
+
+  lastPlanIssues = planRt
+  log('Todos plan round ' + planRound + ': ' + issueCount + ' issue(s) (reuse ' + planRt.reuseAnnotations.length +
+      ', SI ' + planRt.siAnnotations.length + ', slice ' + planRt.sliceIssues.length +
+      ', peer-repo ' + planRt.peerRepoAnnotations.length + ')')
+  planRt.sliceIssues.forEach(function(s) { log('  [slice] ' + s.todoId + ': ' + s.issue) })
+  if (planRound >= PLAN_MAX_ROUNDS) break
+
+  const issuesJson = JSON.stringify(planIssuesOnly(planRt), null, 2)
+  planEdited = true
+  if (planRound > 3) {
+    log('Plan review failed ' + planRound + ' consecutive rounds — fresh-lens debug pass on the plan')
+    await callAgent(
+      'The plan review for wave ' + wave.waveId + ' has failed ' + planRound + ' consecutive rounds.\n' +
+      'Fresh-lens pass: read the wave file (' + WAVE_FILE + '), the GitHub issue(s) or spec it cites and\n' +
+      'the issues below cold — do not trust earlier fix attempts. Find why the plan keeps failing review\n' +
+      'and fix the wave file at the root so every issue below is resolved. Edit only the wave file.\n\n' +
+      ANNOTATION_RULES + '\n\nIssues:\n' + issuesJson + '\n\nReport what you changed and why it failed before.',
+      { label: 'debug:todos:r' + planRound, phase: 'Todos Redteam', agentType: 'debug' }
+    )
+  } else if (planRt.sliceIssues.length > 0) {
+    await callAgent(
+      'Fix the plan-review issues below in the wave file ' + WAVE_FILE + '.\n' +
+      'Restructure each horizontal todo into a vertical slice, and add every annotation as listed. Keep todo\n' +
+      'IDs, ‖ group labels and Depends: consistent, and keep each todo\'s Creates:/Modifies: lines accurate\n' +
+      'for the files it will touch. Edit only the wave file.\n\n' +
+      ANNOTATION_RULES + '\n\nIssues:\n' + issuesJson + '\n\nReport what you changed.',
+      { label: 'plan:fix:r' + planRound, phase: 'Todos Redteam', agentType: 'planner' }
+    )
+  } else {
+    await callAgent(
+      'Annotate the wave file ' + WAVE_FILE + ' with the additions below.\n\n' +
+      ANNOTATION_RULES + '\n\nAdditions:\n' + issuesJson + '\n\nReport which todos were annotated.',
+      { label: 'plan:annotate:r' + planRound, phase: 'Todos Redteam', effort: 'low' }
+    )
+  }
+}
+
+if (!planClean) {
+  log('BLOCKED — the todo plan for wave ' + wave.waveId + ' is not clean after ' + planRound + ' review round(s); stopping before Implement')
+  await deferNote(
+    wave.waveId + '-plan-review-blocked.md',
+    'Include: wave ID (' + wave.waveId + '), wave file (' + WAVE_FILE + '), date (' + TODAY + '),\n' +
+    'review rounds (' + planRound + '), and the open plan-review issues:\n' +
+    (lastPlanIssues ? JSON.stringify(planIssuesOnly(lastPlanIssues), null, 2) : '(unknown — no review returned a usable result)') + '\n\n' +
+    'Instruction in the file: "Resolve these plan issues in the wave file, then re-run /wave ' + wave.waveId + '".',
+    'defer:todos:plan-review-blocked', 'Todos Redteam'
+  )
+  return {
+    error: 'plan-review-blocked',
+    waveId: wave.waveId,
+    planReviewRounds: planRound,
+    openIssues: lastPlanIssues ? planIssuesOnly(lastPlanIssues) : 'unknown',
+  }
+}
+
+// Fixes changed the wave file: re-read it so implementers get the annotated todo bodies and
+// every gate sees the final scope (e.g. an added template/ mirror path).
+if (planEdited) {
+  const pf2 = await runPreflight('parse:preflight:replan')
+  if (!pf2) {
+    log('ERROR: preflight after plan fixes returned no trustworthy result — aborting')
+    return { error: 'preflight-failed', waveFile: WAVE_FILE }
+  }
+  const reparsed = await parseWave(pf2, 'parse:replan')
+  if (reparsed.error) return reparsed
+  wave = reparsed
+  if (templateScopeUnlandable(wave, pf2)) return { error: 'template-dir-missing', waveId: wave.waveId }
+  setBudgetFromWave()
+  log('Wave re-read after plan fixes — ' + wave.groups.length + ' group(s), allScope (' + wave.allScope.length + '): ' + wave.allScope.join(', '))
 }
 
 // ─── phase 2: implement (tier-based parallel) ─────────────────────────────────
 phase('Implement')
 
+function implementPrompt(todo) {
+  return 'Implement this SDK todo. Read the relevant source files before making changes.\n\n' +
+    'This is the a2a-sdk repo: the public API must not break (no new required params on existing\n' +
+    'functions), type annotations must be correct (mypy runs at release), and tests must pass.\n' +
+    'Test-first for correctness-bearing code: write the failing test first and confirm RED, then the\n' +
+    'code and confirm GREEN, then refactor. The todo is not done until its test was RED.\n\n' +
+    'Todo:\n' + todo.body + '\n\n' +
+    'Run only your test file (`' + PYTEST + ' tests/<your-test-file>.py`) — a central gate runs the\n' +
+    'full suite after all groups finish.\n' +
+    'Report: files created/modified, RED→GREEN confirmation, any blockers.'
+}
+
+// A null implement result means the agent died: retry once, then block archive.
+async function implementTodo(todo) {
+  const opts = { label: 'impl:' + todo.id, phase: 'Implement', agentType: 'python-implementer' }
+  let r = await callAgent(implementPrompt(todo), opts)
+  if (!r) {
+    log('WARNING: implement agent for ' + todo.id + ' returned null — retrying once')
+    r = await callAgent(implementPrompt(todo), { label: 'impl:' + todo.id + ':retry', phase: 'Implement', agentType: 'python-implementer' })
+  }
+  if (!r) {
+    log('ERROR: implement agent for ' + todo.id + ' returned null twice — archive will be blocked')
+    implementBlocked = true
+    protocolBlocked = true
+  }
+  return r
+}
+
+// Tier-based execution: a tier is every group whose external deps are complete; groups in a
+// tier run in parallel (the planner groups conflicting todos together).
 const completedGroups = new Set()
 const remainingGroups = wave.groups.slice()
 
@@ -1032,7 +998,19 @@ while (remainingGroups.length > 0) {
   })
 
   if (readyGroups.length === 0) {
-    log('WARNING: unresolvable group dependency; falling back to sequential for group ' + remainingGroups[0].label)
+    // Circular or unresolvable dep — record it, then run the first remaining group.
+    const fallbackLabel = remainingGroups[0].label
+    log('WARNING: unresolvable group dependency detected — circular dep chain likely. ' +
+        'Writing deferred note and falling back to sequential for group ' + fallbackLabel)
+    await deferNote(
+      wave.waveId + '-circular-dep-' + fallbackLabel + '.md',
+      'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '), group (' + fallbackLabel + '),\n' +
+      'reason: circular or unresolvable groupDeps — no group was ready to run.\n' +
+      'Remaining groups: ' + remainingGroups.map(function(g) { return g.label }).join(', ') + '.\n' +
+      'Instruction: "Inspect groupDeps in the wave file for cycles, fix them, ' +
+      'then re-run /wave ' + wave.waveId + '."',
+      'defer:circ-dep:' + fallbackLabel, 'Implement'
+    )
     readyGroups.push(remainingGroups[0])
   }
 
@@ -1040,86 +1018,213 @@ while (remainingGroups.length > 0) {
     const idx = remainingGroups.findIndex(function(g) { return g.label === rg.label })
     if (idx !== -1) remainingGroups.splice(idx, 1)
   }
-
-  const tierLabel = readyGroups.map(function(g) { return g.label }).join(', ')
   totalTodos += readyGroups.reduce(function(n, g) { return n + g.todos.length }, 0)
-
   if (readyGroups.length > 1) {
-    log('Implementing ' + readyGroups.length + ' groups in parallel: ' + tierLabel)
+    log('Implementing ' + readyGroups.length + ' groups in parallel: ' + readyGroups.map(function(g) { return g.label }).join(', '))
   }
 
-  function makeGroupThunk(group) {
+  await parallel(readyGroups.map(function(group) {
     return function() {
       log('Implementing group ' + group.label + ' (' + group.todos.length + ' todo(s))')
-      if (group.todos.length === 1) {
-        const todo = group.todos[0]
-        return callAgent(
-          'Implement this SDK todo. Read the relevant source files before making changes.\n\n' +
-          'Context: this is the a2a-sdk repo — public API must not break (no new required\n' +
-          'params on existing functions), type annotations must be correct (mypy runs at\n' +
-          'release), and tests must pass.\n\n' +
-          'Test-first for correctness-bearing code: write failing test FIRST (RED),\n' +
-          'then implement (GREEN), then refactor. Do NOT run the full test suite —\n' +
-          'run only the test file for your changes:\n' +
-          '  .venv/bin/pytest -q tests/<your-test-file>.py\n\n' +
-          'Todo:\n' + todo.body + '\n\n' +
-          'Report: files created/modified, RED→GREEN confirmation, any blockers.',
-          { label: 'impl:' + todo.id, phase: 'Implement', agentType: 'python-implementer' }
-        )
-      } else {
-        return parallel(group.todos.map(function(todo) {
-          return function() {
-            return callAgent(
-              'Implement this SDK todo. Read the relevant source files before making changes.\n\n' +
-              'Context: this is the a2a-sdk repo — public API must not break, type annotations\n' +
-              'must be correct, and tests must pass.\n\n' +
-              'Test-first: write failing test FIRST (RED), then implement (GREEN). Run only\n' +
-              'your test file: `.venv/bin/pytest -q tests/<your-test-file>.py`\n\n' +
-              'Todo:\n' + todo.body + '\n\n' +
-              'Report: files created/modified, RED→GREEN confirmation.',
-              { label: 'impl:' + todo.id, phase: 'Implement', agentType: 'python-implementer' }
-            )
-          }
-        }))
-      }
+      return parallel(group.todos.map(function(todo) {
+        return function() { return implementTodo(todo) }
+      }))
     }
+  }))
+  if (agentCallCount > AGENT_CALL_BUDGET) {
+    throw new Error('agent-call budget exceeded (' + AGENT_CALL_BUDGET + ' calls) for this wave')
   }
-
-  if (readyGroups.length === 1) {
-    await makeGroupThunk(readyGroups[0])()
-  } else {
-    await parallel(readyGroups.map(makeGroupThunk))
-  }
-
   for (const rg of readyGroups) completedGroups.add(rg.label)
 }
 
-// ─── phase 3: unit redteam ────────────────────────────────────────────────────
-phase('Unit Redteam')
+// ─── redteam fix loop (shared by unit and phase) ──────────────────────────────
+// One loop for both levels so they cannot drift apart:
+//   review → null or findingsCount/findings mismatch = unknown (round counts, stall memory kept)
+//          → no critical/high = clean
+//          → round budget reached = deferred note + 'budget' (findings survived)
+//          → fix: debug replaces the fix fan-out at round 4+ or when findings repeat
+//          → gate (+ one test fix + re-gate); null or still red = 'tests'
+// Outcomes: 'clean' | 'budget' | 'unknown' | 'tests'.
+const FIX_RULE = 'Keep the public API stable and type annotations correct. Run `' + PYTEST + '` on the affected tests after.'
 
-// Groups are partitioned by non-overlapping file scope (the planner groups conflicting
-// todos together — the same guarantee Implement relies on to run a tier concurrently), so
-// every group's review → diagnose → fix loop is independent and all groups run at once.
-// The one shared resource is the pytest gate: it reads the WHOLE repo, so a gate running
-// while a neighbouring group's fix agents are mid-edit could grade a transient state and
-// misattribute the failure (LRN-017: the gate's exitCode is the sole authoritative signal —
-// it must never be uncertain about what it graded). The mutate-and-verify section of each
-// round (debug → fix → gate → fix-tests → re-gate) is therefore serialised across groups by
-// gateLock; the read-only rt review call stays outside the lock so group B can review while
-// group A fixes-and-gates. A stale review read of a neighbour's file mid-edit is the same
-// self-correcting risk Implement already accepts — it yields a finding that is re-checked
-// next round, never a wrong gate verdict.
-let gateLock = Promise.resolve()
-function withGateLock(fn) {
-  const run = gateLock.then(fn, fn)                        // run after the queue ahead of it, whatever its outcome
-  gateLock = run.then(function() {}, function() {})      // keep the chain alive even if fn throws
-  return run
+async function redteamFixLoop(cfg) {
+  let round = 0
+  let prevSigs = new Set()
+  const nonBlockingStore = []
+  const nonBlockingSigs = new Set()
+  let outcome = 'clean'
+
+  while (true) {
+    round++
+    const rt = await callAgent(cfg.reviewPrompt,
+      { schema: RT_SCHEMA, label: 'rt:' + cfg.base + ':r' + round, phase: cfg.phase, agentType: 'redteam' })
+
+    const unknown = !rt ? 'returned null'
+      : (!Array.isArray(rt.findings) || rt.findingsCount !== rt.findings.length)
+        ? 'reported findingsCount=' + rt.findingsCount + ' but findings array has ' + (Array.isArray(rt.findings) ? rt.findings.length : 'no') + ' item(s)'
+        : null
+    if (unknown) {
+      log('WARNING: ' + cfg.base + ' redteam ' + unknown + ' at round ' + round + ' — treating as unknown (not clean)')
+      if (round >= cfg.maxRounds) {
+        await deferNote(
+          cfg.stem + (!rt ? '-rt-null-budget.md' : '-rt-mismatch-budget.md'),
+          'Include: wave ID (' + wave.waveId + '), scope (' + cfg.base + '), date (' + TODAY + '),\n' +
+          'round (' + round + '), reason: redteam ' + unknown + ' on every round — unknown state.\n' +
+          'Instruction: "Re-run /wave ' + wave.waveId + ' to retry this redteam."',
+          'defer:' + cfg.base + (!rt ? ':rt-null-budget' : ':rt-mismatch-budget'), cfg.phase
+        )
+        outcome = 'unknown'
+        break
+      }
+      continue
+    }
+
+    const blocking = blockingFindings(rt.findings)
+    const nonBlocking = nonBlockingFindings(rt.findings)
+    accumulateNonBlocking(nonBlockingStore, nonBlockingSigs, rt.findings)
+
+    if (blocking.length === 0) {
+      log(cfg.base + ' clean at round ' + round + ' (no critical/high findings)' +
+          (nonBlocking.length > 0 ? '; ' + nonBlocking.length + ' medium/low finding(s) deferred' : ''))
+      break
+    }
+    log(cfg.base + ' round ' + round + ': ' + blocking.length + ' blocking finding(s)' +
+        (nonBlocking.length > 0 ? ' (+' + nonBlocking.length + ' medium/low, non-blocking)' : ''))
+
+    const curSigs = sigs(blocking)
+    const stalled = round > 1 && sigsEqual(curSigs, prevSigs)
+
+    // Surviving critical/high findings reach Codify on every exit path, including the cap.
+    const missingCodify = blocking.filter(function(f) { return !f.codify })
+    if (missingCodify.length > 0) {
+      log('WARNING: ' + missingCodify.length + ' critical/high finding(s) in ' + cfg.base +
+          ' missing a Codify: line: ' + missingCodify.map(function(f) { return f.id }).join(', '))
+    }
+    allHighFindings.push.apply(allHighFindings, blocking)
+
+    if (round >= cfg.maxRounds) {
+      log('Round budget exhausted for ' + cfg.base + ' — deferring and blocking archive (surviving critical/high findings)')
+      await deferNote(
+        cfg.stem + '-budget-exhausted.md',
+        'Include: wave ID (' + wave.waveId + '), scope (' + cfg.base + '), date (' + TODAY + '),\n' +
+        'round count (' + round + '), and the final findings:\n' +
+        JSON.stringify(rt.findings, null, 2) + '\n\n' +
+        'Instruction in the file: "Fix remaining findings, then re-run /wave ' + wave.waveId + '".',
+        'defer:' + cfg.base + ':budget-exhausted', cfg.phase
+      )
+      outcome = 'budget'
+      break
+    }
+
+    const gateResult = await cfg.withLock(async function() {
+      const escalateToDebug = round > 3 || stalled
+      if (escalateToDebug) {
+        log((stalled ? 'Stall detected — ' : 'Round 4+ — ') + 'escalating to debug agent (replaces fix fan-out this round)')
+        await callAgent(
+          'Fix loop for ' + cfg.base + ' needs a fresh-lens analysis' +
+          (stalled ? ' (stalled: same findings across 2 rounds)' : ' (round ' + round + ')') + '.\n\n' +
+          'Findings:\n' + JSON.stringify(blocking, null, 2) + '\n\n' +
+          'Scope:\n' + cfg.scope.join('\n') + '\n\n' +
+          'Read the code cold, diagnose the root cause, and fix it at the root.',
+          { label: 'debug:' + cfg.base + ':r' + round, phase: cfg.phase, agentType: 'debug' }
+        )
+      } else {
+        const byFile = {}
+        for (const f of blocking) {
+          if (!byFile[f.file]) byFile[f.file] = []
+          byFile[f.file].push(f)
+        }
+        const files = Object.keys(byFile)
+        const fixTasks = files.length > FIX_BATCH_FILE_THRESHOLD
+          ? files.map(function(file) {
+              return function() {
+                return callAgent(
+                  'Fix these findings in ' + file + ':\n\n' + JSON.stringify(byFile[file], null, 2) + '\n\n' + FIX_RULE,
+                  { label: 'fix:' + cfg.base + ':r' + round + ':' + file.replace(/\//g, '-'),
+                    phase: cfg.phase, agentType: 'python-implementer' }
+                )
+              }
+            })
+          : [function() {
+              return callAgent(
+                'Fix these findings, grouped by file:\n\n' + JSON.stringify(byFile, null, 2) + '\n\n' + FIX_RULE,
+                { label: 'fix:' + cfg.base + ':r' + round, phase: cfg.phase, agentType: 'python-implementer' }
+              )
+            }]
+        await parallel(fixTasks)
+      }
+      prevSigs = curSigs
+      return gateWithTestFix(cfg.base + ':r' + round, cfg.phase)
+    })
+
+    if (gateResult !== 'green') {
+      await deferNote(
+        cfg.stem + (gateResult === 'null' ? '-gate-null-r' : '-tests-red-r') + round + '.md',
+        'Include: wave ID (' + wave.waveId + '), scope (' + cfg.base + '), date (' + TODAY + '),\n' +
+        'round (' + round + '), reason: ' + (gateResult === 'null'
+          ? 'test gate returned null (unknown test state)'
+          : 'test suite RED after the fix attempt') + ', with these blocking findings unresolved:\n' +
+        JSON.stringify(blocking, null, 2) + '\n\n' +
+        'Instruction: "Fix failing tests and remaining findings, then re-run /wave ' + wave.waveId + '".',
+        'defer:' + cfg.base + (gateResult === 'null' ? ':gate-null:r' : ':tests-red:r') + round, cfg.phase
+      )
+      outcome = 'tests'
+      break
+    }
+  }
+
+  if (nonBlockingStore.length > 0) {
+    await deferNote(
+      cfg.stem + '-medium-low.md',
+      'Include: wave ID (' + wave.waveId + '), scope (' + cfg.base + '), date (' + TODAY + '),\n' +
+      'non-blocking (medium/low) findings accumulated across every redteam round (deduped by file+description):\n' +
+      JSON.stringify(nonBlockingStore, null, 2) + '\n\n' +
+      'Instruction in the file: "Non-blocking — these did not block ' + wave.waveId + '\'s archive. ' +
+      'Address opportunistically or fold into a future wave."',
+      'defer:' + cfg.base + ':medium-low', cfg.phase
+    )
+  }
+  return { rounds: round, outcome: outcome }
 }
 
-// Disjointness guard: the concurrent path is only safe while no two groups share a scope
-// path. Two scope paths collide when equal, or when one is a directory prefix of the other.
-// If the planner invariant does not hold for this wave, warn and fall back to the
-// one-group-at-a-time order (gateLock is then uncontended and behaves as a pass-through).
+function applyLoopOutcome(outcome, budgetFlag) {
+  if (outcome === 'clean') return
+  protocolBlocked = true
+  if (outcome === 'budget') {
+    if (budgetFlag === 'unit') unitBudgetBlocked = true
+    else phaseBudgetBlocked = true
+  } else if (outcome === 'unknown') {
+    redteamUnknownBlocked = true
+  } else if (outcome === 'tests') {
+    fixLoopTestsBlocked = true
+  }
+}
+
+// SDK review dimensions, shared by unit and phase review prompts.
+const SDK_REVIEW_DIMENSIONS =
+  'Review dimensions: protocol spec conformance, type correctness, test coverage, public API\n' +
+  'stability and backward compatibility (no breaking changes), error handling, code quality.\n' +
+  'No partial implementations, stubs, TODOs or placeholder returns — every AC in the todo body\n' +
+  'must be satisfied in the landed code.\n' +
+  'For protocol routes (agent_sdk/routes/): check HTTP status codes, wire shapes, spec version\n' +
+  'gating, and spec citations. SDK Security Invariants (SI-1…SI-7) fail closed.'
+
+// ─── phase 3: unit redteam (per group, zero-tolerance) ───────────────────────
+phase('Unit Redteam')
+
+// Groups have disjoint scope, so their loops run concurrently. The pytest gate reads the
+// whole repo, so each round's mutate-and-verify section (fix → gate → re-gate) is serialised
+// across groups; reviews stay outside the lock.
+let gateLock = Promise.resolve()
+function withGateLock(fn) {
+  const run = gateLock.then(fn, fn)
+  gateLock = run.then(function() {}, function() {})
+  return run
+}
+function noLock(fn) { return fn() }
+
+// Two scope paths collide when equal or when one is a directory prefix of the other. If
+// any groups collide, the planner invariant does not hold: run groups one at a time.
 function scopePathsOverlap(a, b) {
   if (a === b) return true
   const aDir = a.charAt(a.length - 1) === '/' ? a : a + '/'
@@ -1136,239 +1241,24 @@ wave.groups.forEach(function(a, ai) {
   })
 })
 
-// Resolves to { label, rounds } on every normal exit so the fan-out below can tell a
-// finished group from one whose thunk threw (parallel() maps a throw to null).
-const runUnitRedteamForGroup = async function(group) {
+async function runUnitRedteamForGroup(group) {
   log('Unit redteam — group ' + group.label)
-  let uRound   = 0
-  let prevSigs = new Set()
-  // RT-009: accumulates every round's non-blocking findings, across ALL loop-exit paths —
-  // written once, after the loop, regardless of which break fired.
-  let groupNonBlocking = []
-  let groupNonBlockingSigs = new Set()
-
-  while (true) {
-    uRound++
-
-    const rt = await callAgent(
+  const res = await redteamFixLoop({
+    base: 'unit:' + group.label,
+    stem: wave.waveId + '-group-' + group.label,
+    phase: 'Unit Redteam',
+    maxRounds: UNIT_MAX_ROUNDS,
+    scope: group.scope,
+    withLock: withGateLock,
+    reviewPrompt:
       'Adversarial review of the SDK files created/modified by group ' + group.label + '.\n\n' +
       'Scope (Creates: AND Modifies: paths for this group):\n' + group.scope.join('\n') + '\n\n' +
       'Also check their transitive callers and importers within agent_sdk/.\n\n' +
-      'Review dimensions: spec/protocol conformance, type correctness, test coverage,\n' +
-      'public API stability (no breaking changes), error handling, code quality.\n' +
-      'Dimension 5: no partial implementations, stubs, TODOs, or placeholder returns —\n' +
-      'every AC in the todo body must be satisfied in the landed code.\n' +
-      'For protocol routes (agent_sdk/routes/): check HTTP status codes, wire shapes,\n' +
-      'spec version gating, and spec citations.\n\n' +
+      SDK_REVIEW_DIMENSIONS + '\n\n' +
       'Return structured findings.',
-      { schema: RT_SCHEMA, label: 'rt:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam',
-        agentType: 'redteam' }
-    )
-
-    // RT-004 (ported from wave-cycle.js): null redteam response is unknown state —
-    // must not be treated as clean (fail-open). This is the exact LRN-020/023/030
-    // fail-open family: null and zero-findings must never share a branch. Do NOT
-    // reset prevSigs on null — preserve the last real finding set so stall detection
-    // against the most recent real finding set remains intact.
-    if (!rt) {
-      log('WARNING: unit redteam agent returned null for group ' + group.label + ' round ' + uRound + ' — treating as unknown (not clean); preserving last known sig set')
-      if (uRound >= 5) {
-        log('Null responses exceeded round budget for group ' + group.label + ' — deferring')
-        await callAgent(
-          'Write workspace/todos/deferred/' + wave.waveId + '-group-' + group.label + '-rt-null-budget.md\n\n' +
-          'Include: wave ID (' + wave.waveId + '), group (' + group.label + '), date (' + TODAY + '),\n' +
-          'round (' + uRound + '), reason: unit redteam agent returned null on every round — unknown state.\n' +
-          'Instruction: "Re-run /wave ' + wave.waveId + ' to retry unit redteam for this group."',
-          { label: 'defer:unit:' + group.label + ':rt-null-budget', phase: 'Unit Redteam' }
-        )
-        // RT-003 (this wave, LRN-032; ported from wave-cycle.js): an UNKNOWN verdict
-        // (persistent null response) must block archive at least as hard as one where
-        // findings actually survived — writing a deferred note without setting a blocking
-        // flag was fail-open, the exact LRN-019/LRN-023/LRN-028/LRN-030 class.
-        protocolBlocked = true
-        redteamUnknownBlocked = true
-        break
-      }
-      continue
-    }
-
-    // Cross-validate findingsCount against findings.length — an agent returning
-    // findingsCount=0 with a non-empty array would break clean despite real findings.
-    if (rt.findingsCount === 0 && rt.findings.length > 0) {
-      log('WARNING: findingsCount=0 but findings array has ' + rt.findings.length + ' item(s) — treating as non-clean')
-      rt.findingsCount = rt.findings.length
-    }
-
-    // RT-007 / GH-132 (ported from wave-cycle.js): the inverse mismatch — findingsCount>0
-    // with an EMPTY findings array — is schema-valid (RT_SCHEMA sets no minItems) but would
-    // break the loop clean on `blocking.length === 0` below, since blocking is derived from
-    // rt.findings, not findingsCount. Treat exactly like a null response — unknown state,
-    // fail closed — with the same round-budget/deferred-note handling as the null-response
-    // branch above; do not fall through to the severity-floor exit check.
-    if (rt.findingsCount > 0 && rt.findings.length === 0) {
-      log('WARNING: findingsCount=' + rt.findingsCount + ' but findings array is empty for group ' +
-          group.label + ' round ' + uRound + ' — treating as unknown (not clean); preserving last known sig set')
-      if (uRound >= 5) {
-        log('Findings-count mismatch exceeded round budget for group ' + group.label + ' — deferring')
-        await callAgent(
-          'Write workspace/todos/deferred/' + wave.waveId + '-group-' + group.label + '-rt-mismatch-budget.md\n\n' +
-          'Include: wave ID (' + wave.waveId + '), group (' + group.label + '), date (' + TODAY + '),\n' +
-          'round (' + uRound + '), reason: unit redteam agent reported findingsCount=' + rt.findingsCount +
-          ' with an empty findings array on every round — unknown state.\n' +
-          'Instruction: "Re-run /wave ' + wave.waveId + ' to retry unit redteam for this group."',
-          { label: 'defer:unit:' + group.label + ':rt-mismatch-budget', phase: 'Unit Redteam' }
-        )
-        // RT-003 (this wave, LRN-032; ported from wave-cycle.js): this exit fails closed
-        // exactly like the null-response branch above — a findingsCount/findings mismatch
-        // on every round is an UNKNOWN verdict, not a clean one; block archive via
-        // redteamUnknownBlocked.
-        protocolBlocked = true
-        redteamUnknownBlocked = true
-        break
-      }
-      continue
-    }
-
-    // GH-132: severity floor — only critical/high findings block the loop. Gating on raw
-    // findingsCount (every severity) meant a routine low-severity nit alone forced the round
-    // cap every time. RT-009: medium/low findings are accumulated (deduped) into
-    // groupNonBlocking every round and written to ONE deferred note after the loop ends —
-    // on every exit path, not only when the loop happens to exit clean.
-    const blocking = blockingFindings(rt.findings)
-    const nonBlocking = nonBlockingFindings(rt.findings)
-    accumulateNonBlocking(groupNonBlocking, groupNonBlockingSigs, rt.findings)
-
-    if (blocking.length === 0) {
-      log('Group ' + group.label + ' clean at round ' + uRound + ' (no critical/high findings)' +
-          (nonBlocking.length > 0 ? '; ' + nonBlocking.length + ' medium/low finding(s) deferred' : ''))
-      break
-    }
-
-    log('Group ' + group.label + ' round ' + uRound + ': ' + blocking.length + ' blocking finding(s)' +
-        (nonBlocking.length > 0 ? ' (+' + nonBlocking.length + ' medium/low, non-blocking)' : ''))
-
-    const curSigs = sigs(blocking)
-    const stalled = uRound > 1 && sigsEqual(curSigs, prevSigs)
-
-    // RT-001 (ported from wave-cycle.js): codify accumulation MUST happen before the
-    // round-budget exit below (and every other exit path from here on) — GH-132's severity
-    // floor means reaching the round cap now signals SURVIVING critical/high findings, not a
-    // leftover low nit, so they must reach the Codify LRN pass / SDK-issue scan even when the
-    // loop is about to give up on this group.
-    const highFindings = blocking.filter(function(f) { return f.codify })
-    allHighFindings.push.apply(allHighFindings, highFindings)
-
-    // Deferred-exit check before debug — avoids wasting a debug agent call that's immediately
-    // abandoned. RT-001: also marks the wave as blocked — reaching this cap means critical/high
-    // findings survived every fix attempt, so the wave must not archive as if clean.
-    if (uRound >= 5) {
-      log('Round budget exhausted for group ' + group.label + ' — deferring and blocking archive (surviving critical/high findings)')
-      await callAgent(
-        'Write workspace/todos/deferred/' + wave.waveId + '-group-' + group.label + '-budget-exhausted.md\n\n' +
-        'Include: wave ID (' + wave.waveId + '), group (' + group.label + '), date (' + TODAY + '),\n' +
-        'round count (' + uRound + '), and the final findings:\n' +
-        JSON.stringify(rt.findings, null, 2) + '\n\n' +
-        'Instruction: "Fix remaining findings, then re-run /wave ' + wave.waveId + '".',
-        { label: 'defer:unit:' + group.label, phase: 'Unit Redteam' }
-      )
-      unitBudgetBlocked = true
-      protocolBlocked = true
-      break
-    }
-
-    // Mutate-and-verify critical section — serialised across groups by gateLock (see the
-    // phase preamble). Resolves true when this round hit a loop-exit path (null gate, or
-    // re-gate still red after the test-fix) so the caller breaks out of the round loop.
-    const exitLoop = await withGateLock(async function() {
-      // GH-132: debug REPLACES the fix fan-out (rather than running alongside it) at
-      // round 4+ (uRound > 3) or on stall — the debug agent already fixes at the root
-      // itself (see its prompt below), so also dispatching the fix fan-out in the same
-      // round duplicated the fix work and compounded agent cost.
-      const escalateToDebug = uRound > 3 || stalled
-      if (escalateToDebug) {
-        log((stalled ? 'Stall detected — ' : 'Round 4+ — ') + 'escalating to debug agent (replaces fix fan-out this round)')
-        await callAgent(
-          'Fix-loop requires fresh-lens analysis' + (stalled ? ' (stalled: same findings across 2 rounds)' : ' (round ' + uRound + ')') + '.\n\n' +
-          'Prior findings:\n' + JSON.stringify(blocking, null, 2) + '\n\n' +
-          'Scope:\n' + group.scope.join('\n') + '\n\n' +
-          'Read code cold. Diagnose root cause. Fix at the root.',
-          { label: 'debug:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam', agentType: 'debug' }
-        )
-      }
-      prevSigs = curSigs
-
-      if (!escalateToDebug) {
-        // GH-132: batch into ONE agent covering every file this round unless the
-        // round's blocking findings span more files than FIX_BATCH_FILE_THRESHOLD —
-        // past that, fall back to the original one-agent-per-file parallel fan-out.
-        const byFile = {}
-        for (const f of blocking) {
-          if (!byFile[f.file]) byFile[f.file] = []
-          byFile[f.file].push(f)
-        }
-        const files = Object.keys(byFile)
-
-        const fixTasks = files.length > FIX_BATCH_FILE_THRESHOLD
-          ? files.map(function(file) {
-              return function() {
-                return callAgent(
-                  'Fix these findings in ' + file + ':\n\n' +
-                  JSON.stringify(byFile[file], null, 2) + '\n\n' +
-                  'Run `.venv/bin/pytest -q tests/` (scoped to changed files) after fixing.',
-                  { label: 'fix:unit:' + group.label + ':r' + uRound + ':' + file.replace(/\//g, '-'),
-                    phase: 'Unit Redteam', agentType: 'python-implementer' }
-                )
-              }
-            })
-          : [function() {
-              return callAgent(
-                'Fix these findings, grouped by file:\n\n' +
-                JSON.stringify(byFile, null, 2) + '\n\n' +
-                'Run `.venv/bin/pytest -q tests/` (scoped to changed files) after fixing.',
-                { label: 'fix:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam', agentType: 'python-implementer' }
-              )
-            }]
-
-        await parallel(fixTasks)
-      }
-
-      const unitGate = await callAgent(
-        'Run: .venv/bin/pytest -q tests/\n' +
-        'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures (list of\n' +
-        '"test_file.py::test_name: reason" for each failing test). Return all fields.',
-        { schema: GATE_SCHEMA, label: 'gate:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam' }
-      )
-      if (unitGate && unitGate.exitCode !== 0) {
-        testsRed = true
-        log('Gate RED (' + unitGate.failCount + ' failing) — dispatching test-fix agent')
-        await callAgent(
-          'Fix the failing tests. Read the test file and the source it covers.\n' +
-          'Failing tests:\n' + unitGate.failures.join('\n') + '\n\n' +
-          'Run `.venv/bin/pytest -q <failing-test-file>` to confirm GREEN before finishing.',
-          { label: 'fix:tests:unit:' + group.label + ':r' + uRound, phase: 'Unit Redteam' }
-        )
-      }
-      return false
-    })
-    if (exitLoop) break
-  }
-
-  // RT-009: written ONCE, after the loop, from ONE place — covers every exit path (clean,
-  // null-round budget, findings-mismatch budget, round-budget-exhausted, null-gate,
-  // tests-red), not only the clean-exit branch that used to write this inline.
-  if (groupNonBlocking.length > 0) {
-    await callAgent(
-      'Write workspace/todos/deferred/' + wave.waveId + '-group-' + group.label + '-medium-low.md\n\n' +
-      'Include: wave ID (' + wave.waveId + '), group (' + group.label + '), date (' + TODAY + '),\n' +
-      'non-blocking (medium/low) findings accumulated across every unit redteam round for this ' +
-      'group (deduped by file+description):\n' +
-      JSON.stringify(groupNonBlocking, null, 2) + '\n\n' +
-      'Instruction in the file: "Non-blocking — these did not block ' + wave.waveId + '\'s archive. ' +
-      'Address opportunistically or fold into a future wave."',
-      { label: 'defer:unit:' + group.label + ':medium-low', phase: 'Unit Redteam' }
-    )
-  }
-  return { label: group.label, rounds: uRound }
+  })
+  applyLoopOutcome(res.outcome, 'unit')
+  return { label: group.label, rounds: res.rounds }
 }
 
 if (scopeOverlaps.length > 0) {
@@ -1388,11 +1278,8 @@ if (scopeOverlaps.length > 0) {
   const unitResults = await parallel(wave.groups.map(function(group) {
     return function() { return runUnitRedteamForGroup(group) }
   }))
-  // parallel() resolves a thrown thunk to null instead of rejecting — surface it so a group
-  // whose round loop aborted mid-way is not mistaken for a clean exit. Fail closed: an
-  // aborted group never established a verdict, so archive must not proceed as if clean.
-  // A budget-exceeded throw inside a group thunk is also mapped to null by parallel() —
-  // re-raise it here so the hard backstop still stops the wave loudly.
+  // parallel() maps a thrown thunk to null: re-raise a budget throw, and treat any other
+  // aborted group as unknown — it never established a verdict.
   if (agentCallCount > AGENT_CALL_BUDGET) {
     throw new Error('agent-call budget exceeded (' + AGENT_CALL_BUDGET + ' calls) for this wave')
   }
@@ -1405,332 +1292,94 @@ if (scopeOverlaps.length > 0) {
   })
 }
 
-// ─── phase 4: phase redteam ───────────────────────────────────────────────────
+// ─── phase 4: phase redteam (whole wave, zero-tolerance) ─────────────────────
 phase('Phase Redteam')
 
-if (!wave.allScope || wave.allScope.length === 0) {
-  log('ERROR: phase redteam aborted — scope (Creates: ∪ Modifies:) is empty (a harness bug, not a clean wave)')
-  return { error: 'empty-scope-phase-redteam', waveId: wave.waveId }
-}
-
-let pRound   = 0
-let prevSigs = new Set()
-// RT-009: accumulates every round's non-blocking findings, across ALL loop-exit paths —
-// written once, after the loop, regardless of which break fired.
-let phaseNonBlocking = []
-let phaseNonBlockingSigs = new Set()
-
-// LRN-136: Phase Redteam reviews wave.allScope — the UNION of every group's scope. On a
-// single-group wave that union IS the one group's scope, which Unit Redteam has just
-// zero-tolerance-cleared with the same review dimensions, the same debug escalation
-// (round 4+ / stall) and the same fix → gate machinery. A second pass over the same files
-// adds no coverage — there is no second group, so no cross-group interaction surface —
-// while adding up to 8 more rounds of dispatches. Multi-group waves MUST still run it:
-// only a whole-wave pass can catch e.g. group A changing a signature that group B's
-// already-reviewed code calls. Skipping leaves every downstream variable in the state a
-// clean pass would (pRound stays 0) — nothing after this block special-cases it.
+// On a single-group wave the union scope IS the group's scope, which Unit Redteam just
+// cleared with the same machinery; only multi-group waves have a cross-group surface.
+let pRound = 0
 if (wave.groups.length === 1) {
   log('Phase Redteam skipped — single-group wave (' + wave.groups[0].label + '): Unit Redteam already reviewed this exact scope ' +
       'with the same review dimensions; no cross-group interaction surface exists.')
 } else {
-  while (true) {
-    pRound++
-
-    const rt = await callAgent(
+  const res = await redteamFixLoop({
+    base: 'phase',
+    stem: wave.waveId + '-phase',
+    phase: 'Phase Redteam',
+    maxRounds: PHASE_MAX_ROUNDS,
+    scope: wave.allScope,
+    withLock: noLock,
+    reviewPrompt:
       'Adversarial review of the full wave ' + wave.waveId + ' in the a2a-sdk repo.\n\n' +
-      'Scope (all Creates: AND Modifies: paths):\n' + wave.allScope.join('\n') + '\n\n' +
-      'Also check transitive callers and importers. Re-expand scope every round.\n\n' +
-      'Review dimensions: protocol spec conformance, type correctness, test coverage,\n' +
-      'public API stability, error handling, code quality, backward compatibility.\n' +
-      'Dimension 5: no partial implementations, stubs, TODOs, or placeholder returns —\n' +
-      'every AC in the todo body must be satisfied in the landed code.\n\n' +
+      'Scope (all Creates: AND Modifies: paths across every group):\n' +
+      wave.allScope.join('\n') + '\n\n' +
+      'Also check transitive callers and importers, and the interactions between groups.\n\n' +
+      SDK_REVIEW_DIMENSIONS + '\n\n' +
       'Return structured findings.',
-      { schema: RT_SCHEMA, label: 'rt:phase:r' + pRound, phase: 'Phase Redteam', agentType: 'redteam' }
-    )
-
-    // RT-004 (ported from wave-cycle.js): null redteam response is unknown state —
-    // must not be treated as clean (fail-open). Do NOT reset prevSigs on null —
-    // preserve the last real finding set so stall detection remains valid.
-    if (!rt) {
-      log('WARNING: phase redteam agent returned null at round ' + pRound + ' — treating as unknown (not clean)')
-      if (pRound >= 8) {
-        log('Null responses exceeded phase round budget — deferring')
-        await callAgent(
-          'Write workspace/todos/deferred/' + wave.waveId + '-phase-rt-null-budget.md\n\n' +
-          'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '),\n' +
-          'round (' + pRound + '), reason: phase redteam agent returned null on every round — unknown state.\n' +
-          'Instruction: "Re-run /wave ' + wave.waveId + ' to retry phase redteam."',
-          { label: 'defer:phase:rt-null-budget', phase: 'Phase Redteam' }
-        )
-        // RT-003 (this wave, LRN-032; ported from wave-cycle.js): mirrors the unit loop's
-        // null-response budget fix — an UNKNOWN verdict must block archive at least as hard
-        // as one where findings actually survived.
-        protocolBlocked = true
-        redteamUnknownBlocked = true
-        break
-      }
-      continue
-    }
-
-    if (rt.findingsCount === 0 && rt.findings.length > 0) {
-      log('WARNING: findingsCount=0 but findings array has ' + rt.findings.length + ' item(s) — treating as non-clean')
-      rt.findingsCount = rt.findings.length
-    }
-
-    // RT-007 / GH-132 (ported from wave-cycle.js): the inverse mismatch — findingsCount>0
-    // with an EMPTY findings array — is schema-valid (RT_SCHEMA sets no minItems) but would
-    // break the loop clean on `blocking.length === 0` below, since blocking is derived from
-    // rt.findings, not findingsCount. Treat exactly like a null response — unknown state,
-    // fail closed — with the same round-budget/deferred-note handling as the null-response
-    // branch above; do not fall through to the severity-floor exit check.
-    if (rt.findingsCount > 0 && rt.findings.length === 0) {
-      log('WARNING: findingsCount=' + rt.findingsCount + ' but findings array is empty at round ' +
-          pRound + ' — treating as unknown (not clean)')
-      if (pRound >= 8) {
-        log('Findings-count mismatch exceeded phase round budget — deferring')
-        await callAgent(
-          'Write workspace/todos/deferred/' + wave.waveId + '-phase-rt-mismatch-budget.md\n\n' +
-          'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '),\n' +
-          'round (' + pRound + '), reason: phase redteam agent reported findingsCount=' + rt.findingsCount +
-          ' with an empty findings array on every round — unknown state.\n' +
-          'Instruction: "Re-run /wave ' + wave.waveId + ' to retry phase redteam."',
-          { label: 'defer:phase:rt-mismatch-budget', phase: 'Phase Redteam' }
-        )
-        // RT-003 (this wave, LRN-032; ported from wave-cycle.js): this exit fails closed
-        // exactly like the null-response branch above — an UNKNOWN verdict must block
-        // archive via redteamUnknownBlocked.
-        protocolBlocked = true
-        redteamUnknownBlocked = true
-        break
-      }
-      continue
-    }
-
-    // GH-132: severity floor — only critical/high findings block the loop. RT-009:
-    // medium/low findings are accumulated (deduped) into phaseNonBlocking every round and
-    // written to ONE deferred note after the loop ends — on every exit path, not only when
-    // the loop happens to exit clean.
-    const blocking = blockingFindings(rt.findings)
-    const nonBlocking = nonBlockingFindings(rt.findings)
-    accumulateNonBlocking(phaseNonBlocking, phaseNonBlockingSigs, rt.findings)
-
-    if (blocking.length === 0) {
-      log('Phase redteam clean at round ' + pRound + ' (no critical/high findings)' +
-          (nonBlocking.length > 0 ? '; ' + nonBlocking.length + ' medium/low finding(s) deferred' : ''))
-      break
-    }
-
-    log('Phase redteam round ' + pRound + ': ' + blocking.length + ' blocking finding(s)' +
-        (nonBlocking.length > 0 ? ' (+' + nonBlocking.length + ' medium/low, non-blocking)' : ''))
-
-    const curSigs = sigs(blocking)
-    const pStalled = pRound > 1 && sigsEqual(curSigs, prevSigs)
-
-    // RT-001 (ported from wave-cycle.js): codify accumulation MUST happen before the
-    // round-budget exit below (and every other exit path from here on) — GH-132's severity
-    // floor means reaching the round cap now signals SURVIVING critical/high findings, not a
-    // leftover low nit, so they must reach the Codify LRN pass / SDK-issue scan even when the
-    // loop is about to give up on the whole wave.
-    const highFindings = blocking.filter(function(f) { return f.codify })
-    allHighFindings.push.apply(allHighFindings, highFindings)
-
-    // Budget-exit check before debug — avoids wasting a debug agent call that's immediately
-    // abandoned. RT-001: also marks the wave as blocked and writes a deferred note (mirroring
-    // the unit loop's round-budget exit) — reaching this cap means critical/high findings
-    // survived every fix attempt across the whole wave, so it must not archive as if clean.
-    if (pRound >= 8) {
-      log('Phase round budget exhausted — deferring and blocking archive (surviving critical/high findings)')
-      await callAgent(
-        'Write workspace/todos/deferred/' + wave.waveId + '-phase-budget-exhausted.md\n\n' +
-        'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '),\n' +
-        'round count (' + pRound + '), and the final findings:\n' +
-        JSON.stringify(rt.findings, null, 2) + '\n\n' +
-        'Instruction in the file: "Fix remaining findings, then re-run /wave ' + wave.waveId + '".',
-        { label: 'defer:phase:budget-exhausted', phase: 'Phase Redteam' }
-      )
-      phaseBudgetBlocked = true
-      protocolBlocked = true
-      break
-    }
-
-    // GH-132: debug REPLACES the fix fan-out (rather than running alongside it) at
-    // round 4+ (pRound > 3) or on stall.
-    const pEscalateToDebug = pRound > 3 || pStalled
-    if (pEscalateToDebug) {
-      log((pStalled ? 'Stall detected — ' : 'Round 4+ — ') + 'escalating to debug agent (replaces fix fan-out this round)')
-      await callAgent(
-        'Phase fix-loop requires fresh-lens analysis' + (pStalled ? ' (stalled)' : ' (round ' + pRound + ')') + '.\n\n' +
-        'Findings:\n' + JSON.stringify(blocking, null, 2) + '\n\n' +
-        'Scope:\n' + wave.allScope.join('\n') + '\n\n' +
-        'Read cold; diagnose; fix at root.',
-        { label: 'debug:phase:r' + pRound, phase: 'Phase Redteam', agentType: 'debug' }
-      )
-    }
-    prevSigs = curSigs
-
-    if (!pEscalateToDebug) {
-      // GH-132: batch into ONE agent covering every file this round unless the round's
-      // blocking findings span more files than FIX_BATCH_FILE_THRESHOLD.
-      const byFile = {}
-      for (const f of blocking) {
-        if (!byFile[f.file]) byFile[f.file] = []
-        byFile[f.file].push(f)
-      }
-      const files = Object.keys(byFile)
-
-      const fixTasks = files.length > FIX_BATCH_FILE_THRESHOLD
-        ? files.map(function(file) {
-            return function() {
-              return callAgent(
-                'Fix findings in ' + file + ':\n\n' + JSON.stringify(byFile[file], null, 2) + '\n\n' +
-                'Run `.venv/bin/pytest -q tests/` after fixing.',
-                { label: 'fix:phase:r' + pRound + ':' + file.replace(/\//g, '-'), phase: 'Phase Redteam',
-                  agentType: 'python-implementer' }
-              )
-            }
-          })
-        : [function() {
-            return callAgent(
-              'Fix findings, grouped by file:\n\n' + JSON.stringify(byFile, null, 2) + '\n\n' +
-              'Run `.venv/bin/pytest -q tests/` after fixing.',
-              { label: 'fix:phase:r' + pRound, phase: 'Phase Redteam', agentType: 'python-implementer' }
-            )
-          }]
-
-      await parallel(fixTasks)
-    }
-
-    const phaseGate = await callAgent(
-      'Run: .venv/bin/pytest -q tests/\n' +
-      'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, and failures. Return all fields.',
-      { schema: GATE_SCHEMA, label: 'gate:phase:r' + pRound, phase: 'Phase Redteam' }
-    )
-    if (phaseGate && phaseGate.exitCode !== 0) {
-      testsRed = true
-      log('Gate RED (' + phaseGate.failCount + ' failing) — dispatching test-fix agent')
-      await callAgent(
-        'Fix the failing tests.\n' +
-        'Failing tests:\n' + phaseGate.failures.join('\n') + '\n\n' +
-        'Run `.venv/bin/pytest -q <failing-test-file>` to confirm GREEN.',
-        { label: 'fix:tests:phase:r' + pRound, phase: 'Phase Redteam' }
-      )
-    }
-  }
-}
-
-// RT-009: written ONCE, after the loop, from ONE place — covers every exit path (clean,
-// null-round budget, findings-mismatch budget, round-budget-exhausted, null-gate,
-// tests-red), not only the clean-exit branch that used to write this inline.
-if (phaseNonBlocking.length > 0) {
-  await callAgent(
-    'Write workspace/todos/deferred/' + wave.waveId + '-phase-medium-low.md\n\n' +
-    'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '),\n' +
-    'non-blocking (medium/low) findings accumulated across every phase redteam round ' +
-    '(deduped by file+description):\n' +
-    JSON.stringify(phaseNonBlocking, null, 2) + '\n\n' +
-    'Instruction in the file: "Non-blocking — these did not block ' + wave.waveId + '\'s archive. ' +
-    'Address opportunistically or fold into a future wave."',
-    { label: 'defer:phase:medium-low', phase: 'Phase Redteam' }
-  )
+  })
+  pRound = res.rounds
+  applyLoopOutcome(res.outcome, 'phase')
 }
 
 // ─── phase 5: protocol audit ──────────────────────────────────────────────────
 phase('Protocol Audit')
 
-// Protocol-surface detection must scan the full scope (Creates: ∪ Modifies:):
-// a modify-only wave that edits a route file still needs its protocol audit.
-const runA2A  = wave.allScope.some(function(p) {
-  return A2A_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
-})
-const runMCP  = wave.allScope.some(function(p) {
-  return MCP_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
-})
-const runAGUI = wave.allScope.some(function(p) {
-  return AGUI_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
-})
-const runA2UI = wave.allScope.some(function(p) {
-  return A2UI_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
-})
-const runProtocol = runA2A || runMCP || runAGUI || runA2UI
+function inSurface(surface) {
+  return function(p) { return surface.some(function(pp) { return p.indexOf(pp) !== -1 }) }
+}
+// Full scope (Creates: ∪ Modifies:): a modify-only wave that edits a route still gets audited.
+const PROTOCOLS = [
+  { key: 'a2a',  name: 'A2A',   agentType: 'a2a-advisor',   surface: A2A_SURFACE,
+    title: 'A2A v0.3.0 conformance audit of the SDK routes.',
+    check: 'Check: agent card shape, task/message/part/artifact shapes, streaming,\n' +
+           'error codes (-32001 through -32007 → correct HTTP status), auth surface.' },
+  { key: 'mcp',  name: 'MCP',   agentType: 'mcp-advisor',   surface: MCP_SURFACE,
+    title: 'MCP server + Claude.ai connector conformance audit.',
+    check: 'Check: Streamable-HTTP transport, OAuth 2.1 discovery chain,\n' +
+           'PKCE S256, token aud binding, CORS, initialize echo (protocolVersion gating),\n' +
+           'serverInfo.title version gating (present only at 2025-11-25+, absent at 2025-06-18),\n' +
+           'SUPPORTED_PROTOCOL_VERSIONS list, tools/list shape, isError vs JSON-RPC error split.' },
+  { key: 'agui', name: 'AG-UI', agentType: 'ag-ui-advisor', surface: AGUI_SURFACE,
+    title: 'AG-UI conformance audit.',
+    check: 'Check: SSE event catalog (34 types), RunAgentInput schema, camelCase wire,\n' +
+           'RUN_STARTED first / RUN_FINISHED last, CUSTOM event spec, bare data: frames.' },
+  { key: 'a2ui', name: 'A2UI',  agentType: 'a2ui-advisor',  surface: A2UI_SURFACE,
+    title: 'A2UI v0.9.1 + Standard Profile v1.1 conformance audit.',
+    check: 'Check: createSurface/updateComponents/updateDataModel/deleteSurface shapes,\n' +
+           'Standard Profile types, JSON-Pointer binding, A2A DataPart delivery,\n' +
+           'compact schema accuracy (? marks on optional fields only), field contracts.' },
+].filter(function(p) { return wave.allScope.some(inSurface(p.surface)) })
 
-if (!runProtocol) {
+if (PROTOCOLS.length === 0) {
   log('Protocol audit skipped — no protocol surfaces in scope (Creates: ∪ Modifies:)')
 } else {
-  log('Protocol audit triggered (A2A=' + runA2A + ' MCP=' + runMCP + ' AG-UI=' + runAGUI + ' A2UI=' + runA2UI + ')')
+  log('Protocol audit triggered (' + PROTOCOLS.map(function(p) { return p.name }).join(', ') + ')')
 
-  const advisorTasks = []
-
-  if (runA2A) {
-    advisorTasks.push(function() {
-      return callAgent(
-        'A2A v0.3.0 conformance audit of the SDK routes.\n\n' +
-        'Files to audit:\n' +
-        wave.allScope.filter(function(p) {
-          return A2A_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
-        }).join('\n') + '\n\n' +
-        'Check: agent card shape, task/message/part/artifact shapes, streaming,\n' +
-        'error codes (-32001 through -32007 → correct HTTP status), auth surface.\n\n' +
-        'Return structured findings. Set protocol="A2A" per finding.',
-        { schema: PROTO_SCHEMA, agentType: 'a2a-advisor', label: 'proto:a2a', phase: 'Protocol Audit' }
-      )
-    })
+  // A null advisor is a dropped verdict: unknown, never clean.
+  const runAdvisors = async function(tasks, what) {
+    const raw = await parallel(tasks)
+    const nulls = raw.filter(function(r) { return !r }).length
+    if (nulls > 0) {
+      log('WARNING: ' + nulls + ' protocol ' + what + ' advisor(s) returned null — treating as unknown (not clean); archive BLOCKED')
+      protocolBlocked = true
+    }
+    return raw.filter(Boolean)
   }
 
-  if (runMCP) {
-    advisorTasks.push(function() {
+  // The seam leg always runs, with the full scope, whenever any protocol surface is in scope:
+  // no specialist owns the seam, it reads several protocol surfaces together.
+  const protoResults = await runAdvisors(PROTOCOLS.map(function(p) {
+    return function() {
       return callAgent(
-        'MCP server + Claude.ai connector conformance audit.\n\n' +
-        'Files to audit:\n' +
-        wave.allScope.filter(function(p) {
-          return MCP_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
-        }).join('\n') + '\n\n' +
-        'Check: Streamable-HTTP transport, OAuth 2.1 discovery chain,\n' +
-        'PKCE S256, token aud binding, CORS, initialize echo (protocolVersion gating),\n' +
-        'serverInfo.title version gating (present only at 2025-11-25+, absent at 2025-06-18),\n' +
-        'SUPPORTED_PROTOCOL_VERSIONS list, tools/list shape, isError vs JSON-RPC error split.\n\n' +
-        'Return structured findings. Set protocol="MCP" per finding.',
-        { schema: PROTO_SCHEMA, agentType: 'mcp-advisor', label: 'proto:mcp', phase: 'Protocol Audit' }
+        p.title + '\n\nFiles to audit:\n' + wave.allScope.filter(inSurface(p.surface)).join('\n') + '\n\n' +
+        p.check + '\n\nReturn structured findings. Set protocol="' + p.name + '" per finding.',
+        { schema: PROTO_SCHEMA, agentType: p.agentType, label: 'proto:' + p.key, phase: 'Protocol Audit' }
       )
-    })
-  }
-
-  if (runAGUI) {
-    advisorTasks.push(function() {
-      return callAgent(
-        'AG-UI conformance audit.\n\n' +
-        'Files to audit:\n' +
-        wave.allScope.filter(function(p) {
-          return AGUI_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
-        }).join('\n') + '\n\n' +
-        'Check: SSE event catalog (34 types), RunAgentInput schema, camelCase wire,\n' +
-        'RUN_STARTED first / RUN_FINISHED last, CUSTOM event spec, bare data: frames.\n\n' +
-        'Return structured findings. Set protocol="AG-UI" per finding.',
-        { schema: PROTO_SCHEMA, agentType: 'ag-ui-advisor', label: 'proto:agui', phase: 'Protocol Audit' }
-      )
-    })
-  }
-
-  if (runA2UI) {
-    advisorTasks.push(function() {
-      return callAgent(
-        'A2UI v0.9.1 + Standard Profile v1.1 conformance audit.\n\n' +
-        'Files to audit:\n' +
-        wave.allScope.filter(function(p) {
-          return A2UI_SURFACE.some(function(pp) { return p.indexOf(pp) !== -1 })
-        }).join('\n') + '\n\n' +
-        'Check: createSurface/updateComponents/updateDataModel/deleteSurface shapes,\n' +
-        'Standard Profile types, JSON-Pointer binding, A2A DataPart delivery,\n' +
-        'compact schema accuracy (? marks on optional fields only), field contracts.\n\n' +
-        'Return structured findings. Set protocol="A2UI" per finding.',
-        { schema: PROTO_SCHEMA, agentType: 'a2ui-advisor', label: 'proto:a2ui', phase: 'Protocol Audit' }
-      )
-    })
-  }
-
-  advisorTasks.push(function() {
+    }
+  }).concat([function() {
     return callAgent(
       'Cross-protocol seam audit — consistency ACROSS protocol surfaces in the SDK.\n\n' +
-      'Read: agent_sdk/routes/ directory and any route files in the scope list.\n\n' +
+      'Read: agent_sdk/routes/ and any route files in the scope list.\n\n' +
       'Wave scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n\n' +
       'Check:\n' +
       '- MCP version negotiation drives which fields appear (e.g. serverInfo.title gating)\n' +
@@ -1740,145 +1389,85 @@ if (!runProtocol) {
       'Return structured findings. Set protocol="SEAM" per finding.',
       { schema: PROTO_SCHEMA, label: 'proto:seam', phase: 'Protocol Audit' }
     )
-  })
+  }]), 'audit')
 
-  // RT-001 (round-6 fresh-lens): fail-closed on a null advisor result — see the identical
-  // guard in wave-cycle.js. `(await parallel(advisorTasks)).filter(Boolean)` silently
-  // DISCARDED a crashed or schema-rejected advisor, so a protocol leg that never produced a
-  // verdict contributed 0 to protoCritical/protoHigh and the wave archived as protocol-clean
-  // without having been audited. A dropped verdict is UNKNOWN, never clean
-  // (LRN-019/022/023/024/026/029/030/031/063).
-  const rawProtoResults  = await parallel(advisorTasks)
-  const nullAdvisorCount = rawProtoResults.filter(function(r) { return !r }).length
-  if (nullAdvisorCount > 0) {
-    log('WARNING: ' + nullAdvisorCount + ' protocol advisor(s) returned null — treating as ' +
-        'unknown (not clean); archive BLOCKED')
-    protocolBlocked = true
-  }
-  const protoResults = rawProtoResults.filter(Boolean)
   let protoCritical = protoResults.reduce(function(n, r) { return n + (r.criticalCount || 0) }, 0)
   const protoHigh   = protoResults.reduce(function(n, r) { return n + (r.highCount || 0) }, 0)
-  const allProtoFindings = protoResults.reduce(function(acc, r) {
-    return acc.concat(r.findings || [])
-  }, [])
-
+  const allProtoFindings = protoResults.reduce(function(acc, r) { return acc.concat(r.findings || []) }, [])
   log('Protocol audit: ' + protoCritical + ' critical, ' + protoHigh + ' high')
 
-  allHighFindings.push.apply(allHighFindings,
-    allProtoFindings.filter(function(f) {
-      return (f.severity === 'critical' || f.severity === 'high') && f.codify
-    }).map(function(f) {
-      return {
-        id:          'proto-' + f.protocol + '-' + f.rule.replace(/[^a-z0-9]/gi, '-').toLowerCase(),
-        severity:    f.severity,
-        file:        'protocol-surface',
-        description: f.description,
-        fix:         f.fix || ('See protocol-audit findings for ' + f.protocol + ' rule ' + f.rule),
-        codify:      f.codify,
-      }
-    })
-  )
+  const protoBlocking = allProtoFindings.filter(function(f) {
+    return f.severity === 'critical' || f.severity === 'high'
+  })
+  const missingCodifyProto = protoBlocking.filter(function(f) { return !f.codify })
+  if (missingCodifyProto.length > 0) {
+    log('WARNING: ' + missingCodifyProto.length + ' critical/high protocol finding(s) missing a ' +
+        'Codify: line: ' + missingCodifyProto.map(function(f) { return f.protocol + ':' + f.rule }).join(', '))
+  }
+  allHighFindings.push.apply(allHighFindings, protoBlocking.map(function(f) {
+    return {
+      id:          'proto-' + f.protocol + '-' + f.rule.replace(/[^a-z0-9]/gi, '-').toLowerCase(),
+      severity:    f.severity,
+      file:        'protocol-surface',
+      description: f.description,
+      fix:         f.fix || ('See protocol-audit findings for ' + f.protocol + ' rule ' + f.rule),
+      codify:      f.codify,
+    }
+  }))
 
   if (protoCritical > 0) {
     log('Critical protocol findings — dispatching fix agent')
     await callAgent(
       'Fix ALL critical protocol conformance findings below. These block archive.\n\n' +
-      'Findings:\n' + JSON.stringify(
-        allProtoFindings.filter(function(f) { return f.severity === 'critical' }),
-        null, 2
-      ) + '\n\n' +
-      'Run `.venv/bin/pytest -q tests/` after fixing. Report files changed.',
+      'Findings:\n' + JSON.stringify(allProtoFindings.filter(function(f) { return f.severity === 'critical' }), null, 2) + '\n\n' +
+      'Run `' + PYTEST + ' tests/` after fixing. Report files changed.',
       { label: 'proto:fix', phase: 'Protocol Audit', agentType: 'python-implementer' }
     )
 
-    const protoFixGate = await callAgent(
-      'Run: .venv/bin/pytest -q tests/\n' +
-      'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, failures. Return all fields.',
-      { schema: GATE_SCHEMA, label: 'gate:proto:fix', phase: 'Protocol Audit' }
-    )
-    if (protoFixGate && protoFixGate.exitCode !== 0) {
-      testsRed = true
-      log('Gate RED after proto:fix — dispatching test-fix agent')
-      await callAgent(
-        'Fix the failing tests introduced by the protocol fix.\n' +
-        'Failing tests:\n' + protoFixGate.failures.join('\n') + '\n\n' +
-        'Run `.venv/bin/pytest -q <failing-test-file>` to confirm GREEN.',
-        { label: 'fix:tests:proto:fix', phase: 'Protocol Audit' }
-      )
-    }
-
-    const recheckTasks = []
-    if (runA2A) {
-      recheckTasks.push(function() {
-        return callAgent(
-          'A2A re-audit after preceding fix.\n' +
-          'Scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n' +
-          'Focus on previously-critical findings. Return structured findings.',
-          { schema: PROTO_SCHEMA, agentType: 'a2a-advisor', label: 'proto:recheck:a2a', phase: 'Protocol Audit' }
-        )
-      })
-    }
-    if (runMCP) {
-      recheckTasks.push(function() {
-        return callAgent(
-          'MCP re-audit after preceding fix.\n' +
-          'Scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n' +
-          'Focus on previously-critical findings. Return structured findings.',
-          { schema: PROTO_SCHEMA, agentType: 'mcp-advisor', label: 'proto:recheck:mcp', phase: 'Protocol Audit' }
-        )
-      })
-    }
-    if (runAGUI) {
-      recheckTasks.push(function() {
-        return callAgent(
-          'AG-UI re-audit after preceding fix.\n' +
-          'Scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n' +
-          'Focus on previously-critical findings. Return structured findings.',
-          { schema: PROTO_SCHEMA, agentType: 'ag-ui-advisor', label: 'proto:recheck:agui', phase: 'Protocol Audit' }
-        )
-      })
-    }
-    if (runA2UI) {
-      recheckTasks.push(function() {
-        return callAgent(
-          'A2UI re-audit after preceding fix.\n' +
-          'Scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n' +
-          'Focus on previously-critical findings. Return structured findings.',
-          { schema: PROTO_SCHEMA, agentType: 'a2ui-advisor', label: 'proto:recheck:a2ui', phase: 'Protocol Audit' }
-        )
-      })
-    }
-    recheckTasks.push(function() {
-      return callAgent(
-        'Cross-protocol seam re-audit after preceding fix.\n' +
-        'Scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n' +
-        'Focus on previously-critical SEAM findings. Return structured findings.',
-        { schema: PROTO_SCHEMA, label: 'proto:recheck:seam', phase: 'Protocol Audit' }
-      )
-    })
-    // RT-001 (round-6 fresh-lens): fail-closed, same as the initial fan-out above. A null
-    // recheck advisor drops the verdict on a protocol that ALREADY had a critical finding,
-    // so protoCritical recomputes to 0 and the wave archives as though the fix were verified.
-    const rawRecheckResults = await parallel(recheckTasks)
-    const nullRecheckCount  = rawRecheckResults.filter(function(r) { return !r }).length
-    if (nullRecheckCount > 0) {
-      log('WARNING: ' + nullRecheckCount + ' protocol recheck advisor(s) returned null — ' +
-          'previously-critical protocol left unverified; archive BLOCKED')
+    const protoGate = await gateWithTestFix('proto:fix', 'Protocol Audit', 'introduced by the protocol fix')
+    if (protoGate !== 'green') {
+      log('Proto gate ' + (protoGate === 'null' ? 'returned null' : 'still RED after test-fix') + ' — skipping recheck; archive will be blocked')
+      fixLoopTestsBlocked = true
       protocolBlocked = true
-    }
-    const recheckResults = rawRecheckResults.filter(Boolean)
-    protoCritical = recheckResults.reduce(function(n, r) { return n + (r.criticalCount || 0) }, 0)
-
-    if (protoCritical > 0) {
-      log('BLOCKED — critical protocol findings persist; wave will not archive')
-      protocolBlocked = true
-      await callAgent(
-        'Write workspace/todos/deferred/' + wave.waveId + '-protocol-blocked.md\n\n' +
-        'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '), unresolved critical\n' +
-        'findings from the recheck, and the instruction:\n' +
-        '"Fix protocol findings, then re-run /wave ' + wave.waveId + '".',
-        { label: 'proto:defer-note', phase: 'Protocol Audit' }
+      await deferNote(
+        wave.waveId + '-proto-tests-red.md',
+        'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '),\n' +
+        'reason: test suite ' + (protoGate === 'null' ? 'state unknown (gate returned null)' : 'RED') + ' after the protocol fix.\n' +
+        'Instruction: "Fix failing tests and re-run /wave ' + wave.waveId + '".',
+        'defer:proto:tests-red', 'Protocol Audit'
       )
+    } else {
+      const recheck = await runAdvisors(PROTOCOLS.map(function(p) {
+        return function() {
+          return callAgent(
+            p.name + ' re-audit after the preceding fix. Check the same surfaces.\n' +
+            'Scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n' +
+            'Focus on the previously-critical findings. Return structured findings. Set protocol="' + p.name + '" per finding.',
+            { schema: PROTO_SCHEMA, agentType: p.agentType, label: 'proto:recheck:' + p.key, phase: 'Protocol Audit' }
+          )
+        }
+      }).concat([function() {
+        return callAgent(
+          'Cross-protocol seam re-audit after the preceding fix.\n' +
+          'Scope paths (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n' +
+          'Focus on the previously-critical SEAM findings. Return structured findings. Set protocol="SEAM" per finding.',
+          { schema: PROTO_SCHEMA, label: 'proto:recheck:seam', phase: 'Protocol Audit' }
+        )
+      }]), 'recheck')
+      protoCritical = recheck.reduce(function(n, r) { return n + (r.criticalCount || 0) }, 0)
+      if (protoCritical > 0) {
+        log('BLOCKED — critical protocol findings persist; wave will not archive')
+        protocolBlocked = true
+        await deferNote(
+          wave.waveId + '-protocol-blocked.md',
+          'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '), the unresolved critical\n' +
+          'findings from the recheck:\n' + JSON.stringify(recheck.reduce(function(acc, r) {
+            return acc.concat((r.findings || []).filter(function(f) { return f.severity === 'critical' }))
+          }, []), null, 2) + '\n\nand the instruction:\n' +
+          '"Fix protocol findings, then re-run /wave ' + wave.waveId + '".',
+          'proto:defer-note', 'Protocol Audit'
+        )
+      }
     }
   }
 }
@@ -1896,21 +1485,15 @@ for (const f of allHighFindings) {
   }
 }
 
-// GH-132: hard cap on LRN files captured per wave (MAX_LRN_PER_WAVE, defined above).
-// Findings beyond the cap were already fixed by the redteam loops above — only
-// individual LRN codification is capped. The SDK issue scan below still classifies
-// the FULL toCodeify set.
+// Only individual LRN capture is capped; the SDK issue scan still sees every finding.
 const lrnCandidates = toCodeify.slice(0, MAX_LRN_PER_WAVE)
 if (toCodeify.length > MAX_LRN_PER_WAVE) {
   const overflowLrnCandidates = toCodeify.slice(MAX_LRN_PER_WAVE)
   log('WARNING: ' + toCodeify.length + ' critical/high finding(s) — capping LRN capture at ' +
       MAX_LRN_PER_WAVE + ' per wave (' + overflowLrnCandidates.length +
       ' finding(s) already fixed but not individually codified)')
-  // RT-006 (ported from wave-cycle.js): every other truncation/budget path in this file
-  // writes a deferred note — this cap dropped findings past MAX_LRN_PER_WAVE with only a
-  // transient log() line, losing them permanently instead of leaving a durable artifact.
-  await callAgent(
-    'Write workspace/todos/deferred/' + wave.waveId + '-lrn-cap-exceeded.md\n\n' +
+  await deferNote(
+    wave.waveId + '-lrn-cap-exceeded.md',
     'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '), MAX_LRN_PER_WAVE (' +
     MAX_LRN_PER_WAVE + '), and the ' + overflowLrnCandidates.length + ' finding(s) that exceeded ' +
     'the per-wave LRN capture cap (already fixed by the redteam loop, but not individually ' +
@@ -1919,13 +1502,14 @@ if (toCodeify.length > MAX_LRN_PER_WAVE) {
     'Instruction in the file: "These findings were already fixed but not codified as LRN files ' +
     'due to the ' + MAX_LRN_PER_WAVE + '-per-wave cap. Review and codify opportunistically, or ' +
     'fold into a future wave."',
-    { label: 'defer:codify:lrn-cap-exceeded', phase: 'Codify' }
+    'defer:codify:lrn-cap-exceeded', 'Codify'
   )
 }
 
 log('Codifying ' + lrnCandidates.length + ' critical/high finding(s)' +
     (toCodeify.length > MAX_LRN_PER_WAVE ? ' (of ' + toCodeify.length + ' total)' : ''))
 
+// SDK-level findings go to workspace/sdk-candidates.md for /sdk-issue-scan.
 if (toCodeify.length > 0) {
   const sdkScan = await callAgent(
     'Classify each finding as SDK-level or agent-domain.\n\n' +
@@ -1941,7 +1525,9 @@ if (toCodeify.length > 0) {
     { schema: SDK_SCAN_SCHEMA, label: 'sdk:scan', phase: 'Codify' }
   )
 
-  if (sdkScan && sdkScan.sdkCandidates.length > 0) {
+  if (!sdkScan) {
+    log('WARNING: SDK issue scan returned null — this wave\'s findings were NOT classified; run /sdk-issue-scan by hand')
+  } else if (sdkScan.sdkCandidates.length > 0) {
     sdkCandidatesCount = sdkScan.sdkCandidates.length
     const candidateLines = sdkScan.sdkCandidates.map(function(c, i) {
       return '## Candidate ' + (i + 1) + ': ' + c.description + '\n' +
@@ -1951,13 +1537,14 @@ if (toCodeify.length > 0) {
              '- Rationale: ' + c.rationale
     }).join('\n\n')
 
-    await callAgent(
+    const wrote = await callAgent(
       'Write workspace/sdk-candidates.md with exactly this content:\n\n' +
       '# SDK issue candidates — ' + wave.waveId + ' (' + TODAY + ')\n\n' +
       'Run `/sdk-issue-scan` to review and file as GitHub issues on `wailuen/a2a-sdk`.\n\n' +
       candidateLines,
-      { label: 'sdk:candidates', phase: 'Codify' }
+      { label: 'sdk:candidates', phase: 'Codify', effort: 'low' }
     )
+    if (!wrote) log('WARNING: workspace/sdk-candidates.md was not written (agent returned null)')
     log('SDK candidates: ' + sdkCandidatesCount + ' finding(s) → workspace/sdk-candidates.md')
     log('Run /sdk-issue-scan to file them')
   } else {
@@ -1966,15 +1553,11 @@ if (toCodeify.length > 0) {
 }
 
 if (lrnCandidates.length > 0) {
-  // LRN writes are batched ~LRN_BATCH_SIZE findings per codify agent (one dispatch writes
-  // N files) instead of one agent per finding — each agent pays full spin-up to write one
-  // small file, so a wide per-finding fan-out is mostly overhead. Numbering is unchanged:
-  // every finding carries lrnBase + its ORIGINAL index in lrnCandidates, computed before
-  // batching, so an ID never depends on batch position. Batches still run concurrently.
+  // Up to LRN_BATCH_SIZE files per codify agent. IDs come from each finding's index in
+  // lrnCandidates, never from batch position.
   const LRN_BATCH_SIZE = 5
   const lrnAssignments = lrnCandidates.map(function(f, i) {
-    const lrnNum = lrnBase + i
-    return { lrnId: 'LRN-' + String(lrnNum).padStart(3, '0'), finding: f }
+    return { lrnId: 'LRN-' + String(lrnBase + i).padStart(3, '0'), finding: f }
   })
   const lrnBatches = []
   for (let start = 0; start < lrnAssignments.length; start += LRN_BATCH_SIZE) {
@@ -1982,7 +1565,7 @@ if (lrnCandidates.length > 0) {
   }
   log('Writing ' + lrnAssignments.length + ' LRN file(s) in ' + lrnBatches.length + ' batch(es) of up to ' + LRN_BATCH_SIZE)
 
-  await parallel(lrnBatches.map(function(batch) {
+  const lrnResults = await parallel(lrnBatches.map(function(batch) {
     return function() {
       const ids = batch.map(function(a) { return a.lrnId })
       const entries = batch.map(function(a, k) {
@@ -2002,397 +1585,171 @@ if (lrnCandidates.length > 0) {
           'source: ' + (f.file === 'protocol-surface' ? 'protocol-audit' : 'redteam') + '\n' +
           'date: ' + TODAY + '\n' +
           '---\n\n' +
-          '## What happened\n<2-3 sentences>\n\n' +
+          '## What happened\n<2-3 sentences from the finding>\n\n' +
           '## Root cause\n<1-2 sentences>\n\n' +
           '## Check\n<specific grep or test to verify>\n\n' +
           '## Prevention\n<actionable planner constraint>\n\n' +
-          'Keep under 1KB.'
+          'Keep the file under 1KB.'
       }).join('\n\n')
       return callAgent(
         'Write ' + batch.length + ' learning file(s) — one file per entry below, each with its own\n' +
         'Write call, using exactly the Assigned ID and File path given for that entry.\n' +
-        'Do NOT touch workspace/learning/README.md yet.\n\n' +
+        'Leave workspace/learning/README.md for the index step.\n\n' +
         entries,
         { label: 'codify:' + ids[0] + (ids.length > 1 ? '..' + ids[ids.length - 1] : ''),
           phase: 'Codify', agentType: 'codify' }
       )
     }
   }))
+  const lostBatches = lrnResults.filter(function(r) { return !r }).length
+  if (lostBatches > 0) log('WARNING: ' + lostBatches + ' LRN batch(es) returned null — some learnings were not written')
 
-  await callAgent(
-    'Scan workspace/learning/ for every LRN-NNN-*.md file. Read each frontmatter.\n' +
-    'Rewrite workspace/learning/README.md:\n\n' +
+  const indexed = await callAgent(
+    'Scan workspace/learning/ for every LRN-NNN-*.md file. Read each file\'s\n' +
+    'frontmatter (id, title/description). Rewrite workspace/learning/README.md:\n\n' +
     '# Learning index\n\n' +
     'Entries ordered by LRN number.\n\n' +
     '| LRN | Description | File |\n' +
     '|-----|-------------|------|\n' +
-    '| LRN-NNN | <title> | [LRN-NNN](LRN-NNN-slug.md) |\n\n' +
+    '| LRN-NNN | <title from frontmatter> | [LRN-NNN](LRN-NNN-slug.md) |\n\n' +
     'One row per file, ordered by number.',
     { label: 'codify:readme', phase: 'Codify', agentType: 'codify' }
   )
+  if (!indexed) log('WARNING: workspace/learning/README.md index was not rebuilt (agent returned null)')
 }
 
 if (registryCandidates.length > 0) {
-  log('Registering ' + registryCandidates.length + ' new component candidate(s)')
-  await callAgent(
-    'Register new reusable components for wave ' + wave.waveId + '.\n\n' +
-    'Read workspace/components/README.md to find highest C-NNN ID.\n\n' +
+  log('Registering ' + registryCandidates.length + ' new component candidate(s) in workspace/components/README.md')
+  const registered = await callAgent(
+    'Register new reusable components discovered during wave ' + wave.waveId + '.\n\n' +
+    'Read workspace/components/README.md to find the highest existing C-NNN ID.\n\n' +
     'New candidates:\n' + JSON.stringify(registryCandidates, null, 2) + '\n\n' +
-    'For each: assign next C-NNN, determine status (present/planned), append row to README.\n' +
-    'Do NOT modify existing rows. Report: IDs assigned.',
-    { label: 'registry:register', phase: 'Codify' }
+    'For each candidate:\n' +
+    '1. Assign the next C-NNN ID (increment from highest existing)\n' +
+    '2. Determine status: if the location file already exists → "present"; else → "planned"\n' +
+    '3. Append ONE new row to the README.md table:\n' +
+    '   | C-NNN | <name> | <location> | <status> |\n\n' +
+    'Append only; existing rows stay as they are. Report: IDs assigned and their locations.',
+    { label: 'registry:register', phase: 'Codify', effort: 'low' }
   )
+  if (!registered) log('WARNING: component registration returned null — candidates were not registered')
 }
 
 // ─── phase 7: archive ─────────────────────────────────────────────────────────
 phase('Archive')
 
-const preArchiveGate = await callAgent(
-  'Run: .venv/bin/pytest -q tests/\n' +
-  'Report: exitCode (0=pass, non-zero=fail), passCount, failCount, failures. Return all fields.',
-  { schema: GATE_SCHEMA, label: 'gate:pre-archive', phase: 'Archive' }
-)
+// The suite must be green before the wave is marked complete; unknown is not green.
+const preArchiveGate = await runGate('gate:pre-archive', 'Archive')
 if (!preArchiveGate) {
-  // RT-001: gate agent failed — archive must not proceed on unknown state.
   testsRed = true
   protocolBlocked = true
   testsBlockedArchive = true
   log('WARNING: pre-archive gate agent failed (null response) — archive BLOCKED (gate agent failed; unknown test state)')
-  log('Re-run /wave ' + wave.waveId + ' to retry the pre-archive gate.')
 } else if (preArchiveGate.exitCode !== 0) {
-  // RT-003: track the cause separately so the archive-skip message is accurate.
   testsRed = true
   protocolBlocked = true
   testsBlockedArchive = true
   log('Suite is RED (' + preArchiveGate.failCount + ' failing) — archive BLOCKED.')
-  log('Fix the failing tests and re-run /wave ' + wave.waveId)
 }
 
-// GH-84: pre-archive commit check — all scope files (Creates: ∪ Modifies:) plus any
-// harness deliverable directories must be committed before archive. A wave that archives
-// with deliverables only in the working tree will silently lose them on `git checkout`.
-// GH-118 (LRN-119): step 5 below adds an import cross-check — a module extracted mid-wave
-// that is untracked, imported by a declared file, but absent from wave.allScope AND outside
-// the harness dirs produced no offending entry under the checks above and silently passed
-// this gate, risking an ImportError at boot on every importing surface. See
-// offendingUndeclaredImports on ARCHIVE_INTENT_SCHEMA above.
-// RT-001: step 5 also resolves RELATIVE intra-package imports (`from ..pkg.mod import X`),
-// not only absolute `agent_sdk.*` imports. Relative imports are the dominant style inside
-// agent_sdk/routes/ — the canonical LRN-119 module (agent_sdk/common/origin.py) is imported
-// there as `from ..common.origin import guard_origin`, which an absolute-only scan misses
-// entirely, defeating the gate on its own motivating scenario.
-// RT-004: step 5's ABSOLUTE and RELATIVE-with-module-path from-import forms now apply the
-// SAME four-way on-disk disambiguation (submodule → sub-package → pkg-path-as-module →
-// pkg-path-as-package) — previously the ABSOLUTE form had no pkg-path-as-module branch (so
-// `from agent_sdk.common.origin import guard_origin` missed the real file) and the RELATIVE-
-// with-module-path form had no sub-package branch (so an extracted-but-untracked sub-package
-// imported via `from ..common import newsubpkg` resolved to a nonexistent `<pkg-path>.py` and
-// was never flagged). Both gaps let a mid-wave extraction slip past the gate undetected.
 if (!protocolBlocked) {
   const archiveIntent = await callAgent(
-    'Run `git status --short` and parse the output.\n\n' +
-    'Scope paths for this wave (Creates: ∪ Modifies:):\n' + wave.allScope.join('\n') + '\n\n' +
-    'Steps:\n' +
-    '0. RT-004 (GH-131/GH-132/LRN-071/LRN-085): run `test -d template && echo yes || echo no`\n' +
-    '   UNCONDITIONALLY — before anything else below, regardless of whether git status ends up\n' +
-    '   clean or dirty — and set templateDirExists to true/false accordingly. This is\n' +
-    '   independent of step 4b below: step 4b only inspects template/\'s DIRTY state when it is\n' +
-    '   present; this step reports simply whether the directory EXISTS at all, which is the\n' +
-    '   only signal this gate has for whether a wave that declares a\n' +
-    '   template/.claude/workflows/<file>.js deliverable in Creates:/Modifies: can have its\n' +
-    '   propagation verified in this checkout.\n' +
-    '1. Run: git status --short\n' +
-    '2. Collect ALL paths that appear in the output (dirty or untracked).\n' +
-    '3. Cross-reference dirty paths against the scope list above for offendingPaths.\n' +
-    '   A dirty path is an offender when:\n' +
-    '   a. It exactly matches a scope entry, OR\n' +
-    '   b. It starts with a scope entry (the scope entry is a directory prefix), OR\n' +
-    '   c. A scope entry starts with the dirty path (dirty parent directory).\n' +
-    '4. Separately, collect any dirty/untracked paths whose relative path starts with\n' +
-    '   tests/, docs/, workspace/learning/, workspace/scenarios/results/, workspace/prd/,\n' +
-    '   .claude/workflows/, harness/workflows/, .claude/agents/, harness/agents/,\n' +
-    '   .claude/skills/, or harness/skills/, OR that exactly equal pyproject.toml (RT-007:\n' +
-    '   a pytest-gate/dependency edit there was previously invisible to every gate clause)\n' +
-    '   — put these in offendingHarnessPaths even if they do not appear in the scope list.\n' +
-    '4b. RT-001 (w036): template/.claude/workflows/ is a THIRD byte-identical mirror\n' +
-    '   (synced via test_workflow_sync.py) but lives inside template/, a nested peer git\n' +
-    '   repo that is gitignored in THIS repo — step 1\'s `git status --short` can NEVER\n' +
-    '   show a path under template/, no matter how dirty that nested repo\'s working tree\n' +
-    '   is, so it cannot be folded in via step 4 above. If a `template/` directory exists\n' +
-    '   at the repo root, separately run: git -C template status --short\n' +
-    '   For each line in THAT output whose path starts with .claude/workflows/, add\n' +
-    '   `template/` + that path (e.g. template/.claude/workflows/wave-cycle.js) to\n' +
-    '   offendingHarnessPaths. This is the only way this gate can see an uncommitted\n' +
-    '   template mirror — the mirror lives in a repo the top-level git status cannot see.\n' +
-    '   RT-001 (w047 round-5 debug): a COMMITTED but UNPUSHED mirror is just as unsynced —\n' +
-    '   agent repos pull the template from origin, not this working tree. Also run:\n' +
-    '   git -C template rev-list --count @{upstream}..HEAD\n' +
-    '   If it prints anything other than 0 (or fails, e.g. no upstream), add\n' +
-    '   template/.claude/workflows/wave-cycle.js to offendingHarnessPaths with the note\n' +
-    '   "template/ has unpushed commits: run git -C template push".\n' +
-    '5. GH-118 import cross-check (LRN-119 — mid-wave module extraction). RT-001: this step\n' +
-    '   MUST resolve RELATIVE intra-package imports (`from . import X`, `from .mod import Y`,\n' +
-    '   `from ..pkg.mod import Z`) in addition to ABSOLUTE `agent_sdk.*` imports. Relative\n' +
-    '   imports are the dominant style inside agent_sdk/routes/ (e.g.\n' +
-    '   `from ..common.origin import guard_origin`) — a scan that resolves only absolute\n' +
-    '   imports misses the canonical case this gate exists to catch, and quietly passes:\n' +
-    '   a. Identify every dirty or untracked .py file from the git status output.\n' +
-    '   b. For each .py file that is dirty/untracked OR listed in the scope above, read every\n' +
-    '      import statement in it — both ABSOLUTE (`import agent_sdk...`,\n' +
-    '      `from agent_sdk... import ...`) and RELATIVE (`from . import ...`,\n' +
-    '      `from .mod import ...`, `from ..pkg.mod import ...`) — and resolve any intra-\n' +
-    '      package target, whether spelled absolutely OR relatively, to the local .py file it\n' +
-    '      names. Four forms, resolved differently:\n' +
-    '        - ABSOLUTE, direct module: `import agent_sdk.<dotted-path>` (one or more dotted\n' +
-    '          segments — a SINGLE segment counts too, e.g. `import agent_sdk.foo`) → resolve\n' +
-    '          directly to `agent_sdk/<dotted-path-with-/-for-.>.py` (e.g.\n' +
-    '          `agent_sdk.common.origin` → `agent_sdk/common/origin.py`; `agent_sdk.foo` →\n' +
-    '          `agent_sdk/foo.py`).\n' +
-    '        - ABSOLUTE, from-import: `from agent_sdk[.<pkg-path>] import <name>` where\n' +
-    '          <pkg-path> is ZERO or more dotted segments at ANY depth — zero segments covers\n' +
-    '          the bare top-level form `from agent_sdk import <name>` → do NOT assume this\n' +
-    '          resolves to `agent_sdk/<pkg-path>/__init__.py`. First check whether\n' +
-    '          `agent_sdk/<pkg-path>/<name>.py` exists on disk (`<name>` is itself a submodule\n' +
-    '          file at that depth; when <pkg-path> is empty, check `agent_sdk/<name>.py`\n' +
-    '          directly), e.g. `from agent_sdk.common import origin` → check for\n' +
-    '          `agent_sdk/common/origin.py`. If the submodule file exists, resolve to it — this\n' +
-    '          is the case a mid-wave extraction produces, and the one this gate exists to\n' +
-    '          catch, no matter how many package levels deep the extraction landed. RT-001\n' +
-    '          (round-5): otherwise <name> may be a SUB-PACKAGE (a directory with its own\n' +
-    '          `__init__.py`) rather than a submodule file — check whether\n' +
-    '          `agent_sdk/<pkg-path>/<name>/__init__.py` exists on disk (when <pkg-path> is\n' +
-    '          empty, check `agent_sdk/<name>/__init__.py` directly); if it exists, <name> is\n' +
-    '          a sub-package and resolves to THAT file, e.g. `from agent_sdk import routes` →\n' +
-    '          `agent_sdk/routes.py` does NOT exist, but `agent_sdk/routes/__init__.py` DOES\n' +
-    '          (agent_sdk/routes/ is a package) → resolves to `agent_sdk/routes/__init__.py`.\n' +
-    '          RT-004: otherwise, when <pkg-path> is NON-EMPTY, check whether\n' +
-    '          `agent_sdk/<pkg-path>.py` exists on disk — <pkg-path> itself names a MODULE and\n' +
-    '          <name> is a symbol inside it (the from-clause names the module fully), e.g.\n' +
-    '          `from agent_sdk.common.origin import guard_origin` → <pkg-path> is\n' +
-    '          `common.origin`; neither `agent_sdk/common/origin/guard_origin.py` nor\n' +
-    '          `agent_sdk/common/origin/guard_origin/__init__.py` exists, but\n' +
-    '          `agent_sdk/common/origin.py` DOES → resolves to `agent_sdk/common/origin.py`,\n' +
-    '          NEVER to the nonexistent `agent_sdk/common/origin/__init__.py`. Only resolve to\n' +
-    '          `agent_sdk/<pkg-path>/__init__.py` as the ENCLOSING package (i.e. `<name>` is a\n' +
-    '          symbol re-exported from it, not a submodule, sub-package, or module) when NONE\n' +
-    '          of `agent_sdk/<pkg-path>/<name>.py`, `agent_sdk/<pkg-path>/<name>/__init__.py`,\n' +
-    '          nor (when <pkg-path> is non-empty) `agent_sdk/<pkg-path>.py` exists.\n' +
-    '        - RELATIVE, from-import with a module path: `from <dots><module-path> import\n' +
-    '          <name>` where <dots> is one or more leading dots and <module-path> is a\n' +
-    '          NON-EMPTY dotted path immediately following the dots (e.g.\n' +
-    '          `from ..common.origin import guard_origin`, `from ..credentials import forwarding`,\n' +
-    '          or `from .mod import Y`) → resolve the dots against the\n' +
-    '          directory that CONTAINS the importing file: one dot means that directory\n' +
-    '          itself; each additional dot walks up one more parent directory from there.\n' +
-    '          Append <module-path> (with `.` replaced by `/`) to that directory to get\n' +
-    '          <pkg-path>. Then disambiguate <name> using the SAME four-way on-disk order as\n' +
-    '          the ABSOLUTE from-import form above — never resolve straight to `<pkg-path>.py`\n' +
-    '          or straight to `<pkg-path>/__init__.py`: FIRST check whether\n' +
-    '          `<pkg-path>/<name>.py` exists on disk (<name> is itself a submodule file under\n' +
-    '          the <module-path> package) and resolve to THAT if it exists. RT-004: otherwise\n' +
-    '          check whether `<pkg-path>/<name>/__init__.py` exists on disk (<name> is a\n' +
-    '          SUB-PACKAGE — e.g. a freshly-extracted, still-untracked sub-package) and resolve\n' +
-    '          to THAT if it exists. Otherwise check whether `<pkg-path>.py` exists on disk\n' +
-    '          (<pkg-path> itself names a MODULE and <name> is a symbol inside it) and resolve\n' +
-    '          to THAT if it exists. Only when NONE of those three exist does `<name>` resolve\n' +
-    '          as a symbol re-exported from a package, in which case resolve to\n' +
-    '          `<pkg-path>/__init__.py`. Worked example (symbol-from-module):\n' +
-    '          `from ..common.origin import guard_origin` inside `agent_sdk/routes/a2a.py` —\n' +
-    '          that file lives in `agent_sdk/routes`, one dot keeps that directory, the second\n' +
-    '          dot walks up to `agent_sdk`; appending `common/origin` gives <pkg-path>\n' +
-    '          `agent_sdk/common/origin`; neither `agent_sdk/common/origin/guard_origin.py`\n' +
-    '          nor `agent_sdk/common/origin/guard_origin/__init__.py` exists, but\n' +
-    '          `agent_sdk/common/origin.py` DOES → resolves to `agent_sdk/common/origin.py`.\n' +
-    '          Worked example (submodule, RT-001):\n' +
-    '          `from ..credentials import forwarding` inside `agent_sdk/routes/a2a.py` —\n' +
-    '          <pkg-path> is `agent_sdk/credentials`; `agent_sdk/credentials/forwarding.py`\n' +
-    '          DOES exist, so `forwarding` is a submodule and this resolves to that tracked\n' +
-    '          file — NEVER to the nonexistent `agent_sdk/credentials.py`, which would be a\n' +
-    '          false-positive undeclared-import block on every wave that scopes a route file.\n' +
-    '          Worked example (sub-package, RT-004): `from ..common import newsubpkg` inside\n' +
-    '          `agent_sdk/routes/a2a.py` — <pkg-path> is `agent_sdk/common`;\n' +
-    '          `agent_sdk/common/newsubpkg.py` does NOT exist, but\n' +
-    '          `agent_sdk/common/newsubpkg/__init__.py` DOES → resolves to that file, not to\n' +
-    '          the nonexistent `agent_sdk/common.py` a two-step ladder would have stopped at.\n' +
-    '        - RELATIVE, bare: `from <dots> import <name>` where <dots> is one or more\n' +
-    '          leading dots with NO module path after them (e.g. `from . import origin`\n' +
-    '          inside `agent_sdk/common/foo.py`) → resolve the dots to a base directory\n' +
-    '          exactly as in the relative from-import form above, then check whether\n' +
-    '          `<base-dir>/<name>.py` exists on disk. If it exists, resolve to that file —\n' +
-    '          <name> is itself a submodule directly under that directory. RT-001 (round-5):\n' +
-    '          otherwise <name> may be a SUB-PACKAGE (a directory with its own `__init__.py`)\n' +
-    '          rather than a submodule file — check whether `<base-dir>/<name>/__init__.py`\n' +
-    '          exists on disk; if it exists, resolve to THAT file, e.g. `from . import routes`\n' +
-    '          inside `agent_sdk/__init__.py` → `<base-dir>/routes.py` does NOT exist, but\n' +
-    '          `<base-dir>/routes/__init__.py` DOES → resolves to it. Only resolve to\n' +
-    '          `<base-dir>/__init__.py` as the ENCLOSING package (i.e. `<name>` is a symbol\n' +
-    '          re-exported from it) when NEITHER `<base-dir>/<name>.py` NOR\n' +
-    '          `<base-dir>/<name>/__init__.py` exists.\n' +
-    '      Ignore stdlib and third-party imports. Resolve any intra-package target — whether\n' +
-    '      spelled ABSOLUTELY (rooted at `agent_sdk`) OR RELATIVELY (`from .`, `from ..`,\n' +
-    '      etc.) — do not skip relative forms just because they do not start with\n' +
-    '      `agent_sdk`.\n' +
-    '   c. For each resolved path, decide offender status. A resolved path is an offender\n' +
-    '      ONLY when ALL THREE hold: (i) it actually EXISTS on disk — the LRN-119 mid-wave-\n' +
-    '      extraction failure mode is a module that is PRESENT locally (so the import works\n' +
-    '      now) but untracked (so it vanishes on `git checkout`); (ii) `git ls-files <path>`\n' +
-    '      produces NO output (the file is untracked); and (iii) the path does not appear in\n' +
-    '      the scope list above. Add offenders to offendingUndeclaredImports. A resolved path\n' +
-    '      that does NOT exist on disk is a mis-resolution (or a genuine broken import the\n' +
-    '      RED-suite pre-archive gate already blocks on), never a mid-wave-extracted module —\n' +
-    '      NEVER flag it (RT-001: guards against a from-import whose <name> submodule is\n' +
-    '      mis-resolved to a nonexistent `<pkg>.py`). A resolved path that IS tracked\n' +
-    '      (git ls-files returns it) is never an offender either, even if it was also\n' +
-    '      modified — only newly-untracked local modules internal to this package that are\n' +
-    '      present on disk qualify, regardless of whether they were imported absolutely or\n' +
-    '      relatively.\n' +
-    '6. RT-003 (w036) undeclared-scope check: agent_sdk/**.py files that are TRACKED\n' +
-    '   (already existed before this wave) evade every check above if modified but never\n' +
-    '   declared — offendingPaths only fires when the path is in the scope list,\n' +
-    '   offendingHarnessPaths only watches specific harness dirs (agent_sdk/ is not one),\n' +
-    '   and offendingUndeclaredImports only inspects UNTRACKED .py files (`git ls-files`\n' +
-    '   empty). For every dirty path from step 2 that (a) matches agent_sdk/**/*.py\n' +
-    '   (anywhere under agent_sdk/, .py extension), (b) IS tracked — `git ls-files <path>`\n' +
-    '   returns it (equivalently: its git-status-short two-letter prefix is not `??`), AND\n' +
-    '   (c) is absent from the scope list above, where "present" means an EXACT string\n' +
-    '   match against a scope entry and NOTHING else — add it to offendingUndeclaredScope.\n' +
-    '   RT-001 (round-7 fresh-lens debug): do NOT reuse step 3\'s three offender rules\n' +
-    '   here. Step 3 asks "is this dirty path declared?" to FLAG it, so matching broadly\n' +
-    '   there is fail-closed; this step asks the same question to EXCUSE it, so the same\n' +
-    '   breadth is fail-OPEN. Under the old wording a single directory-shaped scope entry\n' +
-    '   (`agent_sdk/`, harvested from explanatory prose on a Creates: line) was a\n' +
-    '   directory prefix of every dirty file beneath it, so every one of them counted as\n' +
-    '   declared and this check could never fire. A scope entry declares exactly the one\n' +
-    '   file it names; it never covers a subtree, a sibling, or a parent.\n' +
-    '7. Return all seven fields.\n\n' +
-    'If the working tree is completely clean, gitStatusOutput is empty string,\n' +
-    'dirtyPaths is [], offendingPaths is [], offendingHarnessPaths is [],\n' +
-    'offendingUndeclaredImports is [], offendingUndeclaredScope is []. templateDirExists is\n' +
-    'NEVER defaulted by tree cleanliness — it always reflects step 0\'s independent\n' +
-    '`test -d template` check.',
-    { schema: ARCHIVE_INTENT_SCHEMA, label: 'gate:archive-commit', phase: 'Archive' }
+    'Run this command at the repo root exactly as written (do not edit it) and return the JSON\n' +
+    'object it prints, field for field. If it fails to run, set ok=false and put its error text in error.\n\n' +
+    'python3 - ' + shq(JSON.stringify(wave.allScope)) + " <<'ARCHIVE_GATE'\n" + ARCHIVE_GATE_PY + '\nARCHIVE_GATE',
+    { schema: ARCHIVE_INTENT_SCHEMA, label: 'gate:archive-commit', phase: 'Archive', effort: 'low' }
   )
 
-  if (!archiveIntent) {
+  const archiveKnown = archiveIntent && archiveIntent.ok === true &&
+    typeof archiveIntent.templateDirExists === 'boolean' &&
+    ARCHIVE_INTENT_LISTS.every(function(k) { return Array.isArray(archiveIntent[k]) })
+  if (!archiveKnown) {
     protocolBlocked = true
-    log('WARNING: archive-commit gate agent returned null — archive BLOCKED (unknown commit state). Re-run /wave ' + wave.waveId)
-    // WC-001 mirror: write a durable deferred note so the operator can inspect why archive
-    // was blocked even after the console output scrolls away.
-    await callAgent(
-      'Write workspace/todos/deferred/' + wave.waveId + '-archive-commit-null.md\n\n' +
+    log('WARNING: archive-commit gate returned no trustworthy result' +
+        (archiveIntent && archiveIntent.error ? ' (' + archiveIntent.error + ')' : '') +
+        ' — archive BLOCKED (unknown commit state). Re-run /wave ' + wave.waveId)
+    await deferNote(
+      wave.waveId + '-archive-commit-unknown.md',
       'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '),\n' +
-      'reason: archive-commit gate agent returned null (unknown working tree state).\n' +
+      'reason: the archive-commit gate returned no trustworthy result (unknown working tree state)' +
+      (archiveIntent && archiveIntent.error ? ': ' + archiveIntent.error : '') + '.\n' +
       'Instruction: "Re-run /wave ' + wave.waveId + ' to retry the archive-commit gate."',
-      { label: 'defer:archive-commit-null', phase: 'Archive' }
+      'defer:archive-commit-unknown', 'Archive'
     )
-  } else if ((archiveIntent.offendingPaths && archiveIntent.offendingPaths.length > 0) ||
-             (archiveIntent.offendingHarnessPaths && archiveIntent.offendingHarnessPaths.length > 0) ||
-             (archiveIntent.offendingUndeclaredImports && archiveIntent.offendingUndeclaredImports.length > 0) ||
-             (archiveIntent.offendingUndeclaredScope && archiveIntent.offendingUndeclaredScope.length > 0)) {  // RT-003 (w036)
-    protocolBlocked = true
-    if (archiveIntent.offendingPaths && archiveIntent.offendingPaths.length > 0) {
-      log('Archive BLOCKED — ' + archiveIntent.offendingPaths.length + ' scope file(s) are uncommitted:')
-      archiveIntent.offendingPaths.forEach(function(p) { log('  [uncommitted] ' + p) })
-    }
-    if (archiveIntent.offendingHarnessPaths && archiveIntent.offendingHarnessPaths.length > 0) {
-      log('Archive BLOCKED — ' + archiveIntent.offendingHarnessPaths.length + ' harness deliverable(s) are uncommitted:')
-      archiveIntent.offendingHarnessPaths.forEach(function(p) { log('  [uncommitted] ' + p) })
-    }
-    if (archiveIntent.offendingUndeclaredImports && archiveIntent.offendingUndeclaredImports.length > 0) {
-      // GH-118 / LRN-119: a module extracted mid-wave that a declared file imports, but
-      // which is itself untracked and outside wave.allScope — staging only declared paths
-      // would ship an ImportError at boot on every importing surface.
-      log('Archive BLOCKED — ' + archiveIntent.offendingUndeclaredImports.length + ' undeclared module(s) are imported by scope files:')
-      archiveIntent.offendingUndeclaredImports.forEach(function(p) { log('  [undeclared import] ' + p) })
-      log('Add the module(s) above to Creates: in the wave/todo and stage them explicitly, then re-run /wave ' + wave.waveId)
-    }
-    if (archiveIntent.offendingUndeclaredScope && archiveIntent.offendingUndeclaredScope.length > 0) {
-      // RT-003 (w036): a tracked agent_sdk/**.py file modified mid-wave but named only in a
-      // todo's Reuses:/SI: prose, never added to Creates:/Modifies: — invisible to
-      // offendingPaths (undeclared), offendingHarnessPaths (agent_sdk/ is not a harness
-      // dir), and offendingUndeclaredImports (untracked-.py-only). Staging without
-      // declaring it here loses the paper trail wave.allScope exists to guarantee.
-      log('Archive BLOCKED — ' + archiveIntent.offendingUndeclaredScope.length + ' tracked source file(s) are modified but undeclared:')
-      archiveIntent.offendingUndeclaredScope.forEach(function(p) { log('  [undeclared scope] ' + p) })
-      log('Add the file(s) above to Creates:/Modifies: in the wave/todo, then re-run /wave ' + wave.waveId)
-    }
-    log('Commit or stage the files above, then re-run /wave ' + wave.waveId)
   } else {
-    log('Commit check passed — all scope files and harness deliverables are committed')
-  }
+    const blocks = [
+      ['offendingPaths',             'scope file(s) are uncommitted',                          'uncommitted'],
+      ['offendingHarnessPaths',      'harness deliverable(s) are uncommitted',                 'uncommitted'],
+      ['offendingUndeclaredImports', 'undeclared module(s) are imported by scope files',       'undeclared import'],
+      ['offendingUndeclaredScope',   'tracked source file(s) are modified but undeclared',     'undeclared scope'],
+    ].filter(function(b) { return archiveIntent[b[0]].length > 0 })
+    if (blocks.length > 0) {
+      protocolBlocked = true
+      blocks.forEach(function(b) {
+        log('Archive BLOCKED — ' + archiveIntent[b[0]].length + ' ' + b[1] + ':')
+        archiveIntent[b[0]].forEach(function(p) { log('  [' + b[2] + '] ' + p) })
+      })
+      if (archiveIntent.offendingUndeclaredImports.length > 0 || archiveIntent.offendingUndeclaredScope.length > 0) {
+        log('Declare the undeclared file(s) above in Creates:/Modifies: in the wave/todo.')
+      }
+      log('Commit or stage the files above, then re-run /wave ' + wave.waveId)
+    } else {
+      log('Commit check passed — all scope files and harness deliverables are committed')
+    }
 
-  // RT-004 (LRN-131; GH-131/GH-132/LRN-071/LRN-085): hard-block archive when this wave declares
-  // a template/ deliverable but template/ is not checked out in this working tree — independent
-  // of the commit-check branches above, since a missing checkout means propagation cannot be
-  // verified at all, not merely that it is uncommitted. Steps 4/4b/6 above only ever detect a
-  // DIRTY template/ mirror; this is the only check in this gate that fires when template/ is
-  // absent entirely — an xfail(strict=True) test-report signal is not a substitute for it.
-  const declaresTemplateScope = wave.allScope.some(function(p) { return p.startsWith('template/') })
-  if (declaresTemplateScope && archiveIntent && archiveIntent.templateDirExists === false) {
-    protocolBlocked = true
-    templatePropagationBlocked = true
-    log('ARCHIVE BLOCKED — wave ' + wave.waveId + ' declares a template/ deliverable but template/ is not checked out in this working tree:')
-    wave.allScope.filter(function(p) { return p.startsWith('template/') })
-      .forEach(function(p) { log('  [template/ absent] ' + p) })
-    log('Clone the peer repo (wailuen/a2a-agent-template, LRN-071) into template/ at the repo root, ' +
-        'copy the declared file(s) in from their harness/workflows/ source, verify `diff` is empty, ' +
-        'then `git -C template/ commit && git -C template/ push`. Re-run /wave ' + wave.waveId +
-        ' once template/ is checked out and the propagation is verified.')
+    // Propagation of a declared template/ deliverable cannot be verified without the checkout.
+    const declaresTemplateScope = wave.allScope.some(function(p) { return p.startsWith('template/') })
+    if (declaresTemplateScope && archiveIntent.templateDirExists === false) {
+      protocolBlocked = true
+      templatePropagationBlocked = true
+      log('ARCHIVE BLOCKED — wave ' + wave.waveId + ' declares a template/ deliverable but template/ is not checked out in this working tree:')
+      wave.allScope.filter(function(p) { return p.startsWith('template/') })
+        .forEach(function(p) { log('  [template/ absent] ' + p) })
+    }
   }
 }
 
 if (protocolBlocked) {
-  // RT-003: use the actual block cause in the message — misdirected remediation wastes developer time.
+  // Name the actual cause; a misdirected remedy wastes developer time.
   if (testsBlockedArchive) {
-    const failCount = (preArchiveGate && preArchiveGate.failCount != null) ? preArchiveGate.failCount : '?'
     if (!preArchiveGate) {
       log('Archive SKIPPED — pre-archive gate agent failed (null response). Re-run /wave ' + wave.waveId + ' to retry.')
     } else {
-      log('Archive BLOCKED — test suite RED (' + failCount + ' failing). Fix failing tests and re-run /wave ' + wave.waveId + '.')
+      log('Archive BLOCKED — test suite RED (' + preArchiveGate.failCount + ' failing). Fix failing tests and re-run /wave ' + wave.waveId + '.')
     }
+  } else if (implementBlocked) {
+    log('Archive SKIPPED — wave ' + wave.waveId + ' blocked: at least one todo\'s implement agent died twice (see the WARNING lines above). Re-run /wave ' + wave.waveId + '.')
   } else if (templatePropagationBlocked) {
-    // RT-004 (LRN-131): distinct from the generic protocol-findings message below — this wave
-    // is blocked because template/ propagation is unverifiable, not a protocol audit finding.
-    // /agent-verify would not fix this; checking out template/ would.
     log('Archive SKIPPED — wave ' + wave.waveId + ' declares a template/ deliverable but template/ is not checked out (see ARCHIVE BLOCKED detail above).')
     log('Clone wailuen/a2a-agent-template into template/, land the propagated file(s), then re-run /wave ' + wave.waveId + '.')
-  } else if (redteamUnknownBlocked) {
-    // RT-003 (this wave, LRN-032; ported from wave-cycle.js): distinct from the generic
-    // protocol-findings message below — this wave is blocked because a redteam round budget
-    // was exhausted while the verdict itself was never established (persistent null
-    // response, or a findingsCount/findings mismatch), not because critical/high findings
-    // actually survived review. /agent-verify would not fix this; obtaining a trustworthy
-    // redteam verdict would.
-    log('Archive SKIPPED — wave ' + wave.waveId + ' blocked: redteam never returned a trustworthy verdict (persistent null response or findingsCount mismatch) within its round budget.')
-    log('See the workspace/todos/deferred/' + wave.waveId + '-*-rt-null-budget.md / -rt-mismatch-budget.md note(s), then re-run /wave ' + wave.waveId + '.')
   } else if (phaseBudgetBlocked) {
-    // RT-001 (ported from wave-cycle.js): distinct from the generic protocol-findings message
-    // below — this wave is blocked because the phase redteam round budget was exhausted with
-    // surviving critical/high findings, not a protocol audit finding. /agent-verify would not
-    // fix this; fixing the findings in the deferred note would.
     log('Archive SKIPPED — wave ' + wave.waveId + ' blocked: phase redteam round budget exhausted with surviving critical/high findings.')
     log('Fix the findings in workspace/todos/deferred/' + wave.waveId + '-phase-budget-exhausted.md, then re-run /wave ' + wave.waveId + '.')
   } else if (unitBudgetBlocked) {
-    // RT-001 (ported from wave-cycle.js): mirrors phaseBudgetBlocked above, for a per-group
-    // unit redteam round budget exhausted with surviving critical/high findings.
     log('Archive SKIPPED — wave ' + wave.waveId + ' blocked: unit redteam round budget exhausted with surviving critical/high findings for at least one group.')
     log('Fix the findings in the affected group\'s workspace/todos/deferred/' + wave.waveId + '-group-<label>-budget-exhausted.md, then re-run /wave ' + wave.waveId + '.')
+  } else if (redteamUnknownBlocked) {
+    log('Archive SKIPPED — wave ' + wave.waveId + ' blocked: redteam never returned a trustworthy verdict (persistent null response or findingsCount mismatch) within its round budget.')
+    log('See the workspace/todos/deferred/' + wave.waveId + '-*-rt-null-budget.md / -rt-mismatch-budget.md note(s), then re-run /wave ' + wave.waveId + '.')
+  } else if (fixLoopTestsBlocked) {
+    log('Archive SKIPPED — wave ' + wave.waveId + ' blocked: a fix loop stopped on a red or unknown test gate with findings unresolved.')
+    log('See the workspace/todos/deferred/' + wave.waveId + '-*-tests-red-*.md / -gate-null-*.md note(s), then re-run /wave ' + wave.waveId + '.')
   } else {
-    log('Archive SKIPPED — wave ' + wave.waveId + ' blocked by critical protocol findings')
-    log('Fix protocol issues, run /agent-verify, then re-run /wave ' + wave.waveId)
+    log('Archive SKIPPED — wave ' + wave.waveId + ' blocked by the protocol audit or the commit check (see BLOCKED lines above)')
+    log('Fix the issues above, then re-run /wave ' + wave.waveId)
   }
 } else {
-  await callAgent(
+  const waveFileTag = WAVE_FILE.replace('workspace/todos/', '')
+  const archived = await callAgent(
     'Archive wave ' + wave.waveId + '. Perform in order:\n\n' +
-    '1. RT-004 (never overwrite): check whether `workspace/todos/completed/' + WAVE_BASENAME +
-    '` already exists. It must NOT — the Parse-phase gate already hard-blocked this run if it did — ' +
-    'but if you find it exists anyway (e.g. created by a concurrent process since Parse ran), ' +
-    'STOP: do NOT move or overwrite it. Leave `' + WAVE_FILE + '` in place, report the collision, ' +
+    '1. Check whether `workspace/todos/completed/' + WAVE_BASENAME + '` already exists. Parse already ' +
+    'refused a colliding wave ID, so it should not; if it does (e.g. created by a concurrent process), ' +
+    'STOP: never move or overwrite it. Leave `' + WAVE_FILE + '` in place, report the collision, ' +
     'and skip the rest of this step. Otherwise, move `' + WAVE_FILE + '` → `workspace/todos/completed/` (same filename).\n\n' +
     '2. In `workspace/todos/plan.md`, find the row for ' + wave.waveId + ':\n' +
     '   - If a row already exists: change [ ] to [x] and append ✅ ' + TODAY + ' after the wave title.\n' +
     '   - If NO row exists (GH-issue waves are not pre-seeded): append a new row to the Wave summary table:\n' +
-    '     `| ' + wave.waveId.toUpperCase() + ' [x] ✅ ' + TODAY + ' | ' + WAVE_FILE.replace('workspace/todos/', '') + ' | G | — | — |`\n' +
+    '     `| ' + wave.waveId.toUpperCase() + ' [x] ✅ ' + TODAY + ' | ' + waveFileTag + ' | G | — | — |`\n' +
     '     Adjust the Slices column if you can determine the count from the file.\n\n' +
     '3. For each path in the scope list, find the matching FR in workspace/prd/ if any.\n' +
     '   If Implementation: says [pending], replace with the real path:symbol.\n' +
@@ -2404,22 +1761,69 @@ if (protocolBlocked) {
     'appended), FR fields updated.',
     { label: 'archive', phase: 'Archive' }
   )
+  if (!archived) log('WARNING: archive agent returned null — verifying what landed')
 
-  log('Wave ' + wave.waveId + ' archived — ' + lrnCandidates.length + ' LRN(s) captured')
+  // The archive agent's report is not trusted: verify the move and the ledger row (the row
+  // must name this wave's own file, since two waves can share a waveId), self-heal the row
+  // once, and block as incomplete if either is still missing.
+  const archiveCheckPrompt =
+    'Run each command at the repo root and report the results:\n' +
+    '1. grep -i ' + shq(wave.waveId) + ' workspace/todos/plan.md | grep -ci -F ' + shq(waveFileTag) + '\n' +
+    '   → matchCount (the printed number; 0 if nothing printed); rowPresent = matchCount >= 1.\n' +
+    '2. test -f ' + shq('workspace/todos/completed/' + WAVE_BASENAME) + ' && echo yes || echo no → archivedFileExists.\n' +
+    '3. test -f ' + shq(WAVE_FILE) + ' && echo yes || echo no → activeFileExists.'
+  let archiveCheck = await callAgent(archiveCheckPrompt,
+    { schema: ARCHIVE_CHECK_SCHEMA, label: 'gate:archive-plan-row', phase: 'Archive', effort: 'low' })
+
+  if (archiveCheck && archiveCheck.archivedFileExists && !archiveCheck.rowPresent) {
+    log('WARNING: workspace/todos/plan.md has no row for ' + wave.waveId + ' (file ' + waveFileTag + ') after archive — self-healing')
+    await callAgent(
+      'workspace/todos/plan.md is missing a ledger row for wave ' + wave.waveId + ' (file ' + waveFileTag + ') even though it was ' +
+      'just archived to workspace/todos/completed/. Append this exact row to the end of the Wave summary table this ' +
+      'wave belongs to (columns Wave | File | Parallel group | Slices | Depends). A row for this waveId whose File ' +
+      'column names a DIFFERENT file belongs to another wave that reused the ID — leave it untouched and append a ' +
+      'new row for THIS wave:\n' +
+      '`| ' + wave.waveId.toUpperCase() + ' [x] ✅ ' + TODAY + ' | ' + waveFileTag + ' | G | — | — |`\n' +
+      'Leave every other row as it is.',
+      { label: 'archive-plan-row-repair', phase: 'Archive', effort: 'low' }
+    )
+    archiveCheck = await callAgent(archiveCheckPrompt,
+      { schema: ARCHIVE_CHECK_SCHEMA, label: 'gate:archive-plan-row-recheck', phase: 'Archive', effort: 'low' })
+    if (archiveCheck && archiveCheck.rowPresent) {
+      log('plan.md row for ' + wave.waveId + ' (file ' + waveFileTag + ') appended by self-heal guard')
+    }
+  }
+
+  if (!archiveCheck || !archiveCheck.archivedFileExists || archiveCheck.activeFileExists || !archiveCheck.rowPresent) {
+    archivePlanRowMissing = true
+    log('BLOCKED — archive of ' + wave.waveId + ' is INCOMPLETE: ' + (!archiveCheck
+      ? 'the verification returned null (unknown state)'
+      : [!archiveCheck.archivedFileExists ? 'wave file not in workspace/todos/completed/' : null,
+         archiveCheck.activeFileExists ? 'wave file still in its active location' : null,
+         !archiveCheck.rowPresent ? 'no plan.md row naming ' + waveFileTag : null].filter(Boolean).join('; ')) +
+      '. Finish the archive by hand, then re-run /wave ' + wave.waveId + ' to confirm.')
+  } else {
+    log('Wave ' + wave.waveId + ' archived — ' + lrnCandidates.length + ' LRN(s) captured')
+  }
 }
 
 return {
-  waveId:             wave.waveId,
-  totalTodos:         totalTodos,
-  lrnsCaptured:       lrnCandidates.length,
-  cNnnRegistered:     registryCandidates.length,
-  sdkCandidates:      sdkCandidatesCount,
-  groupsExecuted:     wave.groups.length,
-  phaseRedteamRounds: pRound,
-  exhausted:          pRound >= 8,
-  protocolBlocked:    protocolBlocked,
-  testsRed:           testsRed,
-  redteamUnknownBlocked: redteamUnknownBlocked,  // RT-003 (this wave, LRN-032): a redteam round budget was exhausted with the verdict itself never established (null response or findingsCount mismatch)
-  unitBudgetBlocked:  unitBudgetBlocked,   // RT-001 (ported from wave-cycle.js): a group's unit redteam round budget was exhausted with surviving critical/high findings
-  phaseBudgetBlocked: phaseBudgetBlocked,  // RT-001 (ported from wave-cycle.js): the phase redteam round budget was exhausted with surviving critical/high findings
+  waveId:                wave.waveId,
+  totalTodos:            totalTodos,
+  lrnsCaptured:          lrnCandidates.length,
+  cNnnRegistered:        registryCandidates.length,
+  sdkCandidates:         sdkCandidatesCount,
+  groupsExecuted:        wave.groups.length,
+  planReviewRounds:      planRound,
+  phaseRedteamRounds:    pRound,
+  exhausted:             pRound >= PHASE_MAX_ROUNDS,
+  protocolBlocked:       protocolBlocked,
+  testsRed:              testsRed,
+  testsBlockedArchive:   testsBlockedArchive,
+  fixLoopTestsBlocked:   fixLoopTestsBlocked,
+  implementBlocked:      implementBlocked,
+  archivePlanRowMissing: archivePlanRowMissing,
+  unitBudgetBlocked:     unitBudgetBlocked,
+  phaseBudgetBlocked:    phaseBudgetBlocked,
+  redteamUnknownBlocked: redteamUnknownBlocked,
 }

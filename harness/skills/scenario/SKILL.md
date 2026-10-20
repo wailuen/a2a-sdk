@@ -1,7 +1,7 @@
 ---
 name: scenario
 category: project
-description: "Generate real-life, job-to-be-done usage scenarios for an agent-sdk agent from the perspective of a domain professional. Multi-turn by design: each scenario includes an initial query and a reactive follow-up grounded in what the agent actually returns. Writes structured scenario docs to workspace/scenarios/. Uses Opus."
+description: "Generate real-life, job-to-be-done usage scenarios for an agent-sdk agent from the perspective of a domain professional. Multi-turn by design: each scenario includes an initial query and a reactive follow-up grounded in what the agent actually returns. Writes structured scenario docs to workspace/scenarios/."
 ---
 
 # /scenario — Generate agent usage scenarios

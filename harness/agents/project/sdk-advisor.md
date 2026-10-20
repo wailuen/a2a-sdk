@@ -80,7 +80,7 @@ card's field shape + catalog coherence to `a2ui-advisor`.
 `make_settings()` factory; the `AGENT_SDK_` env prefix is reserved by the SDK. Skills
 are markdown under `src/skills/` with `name`/`description` frontmatter, exposed via the
 loop's `load_skill` tool. Tests use `agent_sdk.testing` (`FakeModelClient`, `reply`,
-`tool_call`) against an isolated `Agent` — **never call Bedrock in tests**.
+`tool_call`) against an isolated `Agent` — **never call the live model backend in tests**.
 
 **Escape hatches (DESIGN §10.3).** `build_app()` returns a plain FastAPI app. SDK auth
 is **per-route dependencies, not global middleware** — so team-mounted routes are

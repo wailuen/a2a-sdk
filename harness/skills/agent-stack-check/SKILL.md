@@ -80,16 +80,12 @@ Dispatch **one subagent per detected protocol, in parallel** (single message, mu
 calls). Use that protocol's **advisor agent** as the `subagent_type` (`mcp-advisor`, `a2a-advisor`,
 `ag-ui-advisor`, `a2ui-advisor`) so the deep-reasoning expert runs the audit.
 
-> **ANTI-PATTERN — single-advisor collapse (PROHIBITED):** Dispatching ONE advisor (e.g.
-> `a2ui-advisor`) and asking it to "also cover" MCP, A2A, or AG-UI is **not a valid Phase 1
-> implementation** — it silently drops entire protocol dimensions and produces false COMPLIANT
-> verdicts. Any scope cues in the call arguments (e.g. "focus on the A2UI regression") are
-> **Phase 3 emphasis hints only** — they narrow what Phase 3 highlights, never which protocols
-> Phase 1 audits. Every detected protocol MUST get its own dedicated advisor subagent.
-> This failure mode recurs when `/agent-stack-check` is triggered from the `/wave` Protocol Audit
-> phase or any call site — the full four-advisor fan-out is mandatory regardless of call site or
-> apparent narrowness of recent changes. Prior sessions lost MCP (M-001, M-002), A2A error-code
-> (D2-F1), and seam S1 (3 missing skills) to this collapse.
+> **One advisor per detected protocol, every time.** Do not dispatch a single advisor (e.g.
+> `a2ui-advisor`) and ask it to "also cover" the other protocols: it drops whole protocol
+> dimensions and produces false COMPLIANT verdicts. Scope cues in the call arguments (e.g.
+> "focus on the A2UI regression") only shape what Phase 3 highlights — they never narrow which
+> protocols Phase 1 audits. This holds for every call site, including the `/wave` Protocol Audit
+> phase and runs where the recent change looks narrow.
 
 Because a `subagent_type`-dispatched advisor runs as its own agent and **cannot invoke the parent's
 `/<protocol>-check` slash command**, the subagent prompt MUST tell it to **Read the check skill file

@@ -5,9 +5,9 @@ The canonical agent conventions file is **`template/CLAUDE.md`** (one level up, 
 of truth for the SI table, credential model, SDK conventions, and workflow disciplines.
 
 `harness/CLAUDE.md` (this file) intentionally contains no duplicated content.
-The `/upgrade` skill's `harness-sync` step regenerates `template/CLAUDE.md` from
-the SDK when invariants change — do not hand-edit the SI table or credential model
-here; change them in `template/CLAUDE.md` and let `/upgrade` propagate.
+Do not copy the SI table or credential model here; change them in
+`template/CLAUDE.md`. `/upgrade` does not touch an existing agent repo's
+`CLAUDE.md`, so invariant changes reach existing agents only by hand.
 
 ## Harness-specific rules
 

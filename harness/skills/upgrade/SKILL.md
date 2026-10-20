@@ -56,9 +56,9 @@ sync harness files in `.claude/` — showing every diff before writing anything.
    If `/changelog` fails (git clone unreachable, SSH error), warn and ask:
    "Cannot show changelog — git access failed. Proceed without reviewing changes,
    or abort?" Do not proceed silently without the changelog.
-   If `--dry-run`: do NOT stop here — continue to Phase 8 (step 10) in preview
-   mode. `--dry-run` exits after the Phase 8 classification report (step 10d),
-   having shown both the changelog and the harness diff without writing anything.
+   If `--dry-run`: do not stop here — continue to step 10 in preview mode.
+   `--dry-run` exits after the classification report (step 10e), having shown
+   both the changelog and the harness diff without writing anything.
 
 5. **Confirm before writing** (unless `--dry-run`).
    Echo: "Upgrading `agent-sdk` from `<current_sha7>` → `<target_sha7>`. Proceed?"
