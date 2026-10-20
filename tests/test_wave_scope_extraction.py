@@ -526,19 +526,17 @@ def test_gh164_still_rejected(token):
 
 @pytest.mark.parametrize(
     "wf_path",
-    # wave-cycle.js runs the same scan inside its preflight call; its abort-on-mismatch
-    # behaviour is pinned by tests/test_wave_cycle_behaviour.py.
+    # Both runners run the scan inside their preflight call; the abort-on-mismatch behaviour is
+    # pinned by tests/test_wave_cycle_behaviour.py and tests/test_sdk_wave_behaviour.py.
     [_REPO_ROOT / ".claude" / "workflows" / "sdk-wave.js"],
     ids=["sdk-wave.js"],
 )
 def test_gh164_parse_has_deterministic_scan_and_widened_rule(wf_path: Path) -> None:
     content = wf_path.read_text(encoding="utf-8")
-    assert "SCOPE_SCAN_SCHEMA" in content
-    assert "scope-scan-mismatch" in content
-    assert "allScope (final" in content
+    assert "const SCOPE_SCAN_PY = [" in content
+    assert content.find("scope-scan-mismatch") != -1
     prompt = _parse_prompt(wf_path)
     assert "uv.lock" in prompt and ".env.example" in prompt
-    assert content.find("label: 'parse:scope-scan'") != -1
     assert content.find("scope-scan-mismatch") < content.find("empty-scope")
 
 
@@ -668,11 +666,17 @@ def _run_inline_scan(wf_path: Path, wave_file: Path) -> list[str]:
     import sys
 
     js = wf_path.read_text(encoding="utf-8")
-    start = js.index("'python3 - ' + WAVE_FILE")
-    block = js[start : js.index("'PY',", start)]
-    lines = re.findall(r"^\s*'(.*)\\n' \+$", block, re.M)
-    body = [ln for ln in lines if not ln.startswith("python3 ")]
-    script = "\n".join(body).replace("\\\\", "\\").replace("\\'", "'")
+    m = re.search(r"const SCOPE_SCAN_PY = (\[.*?\n\])\.join\('\\n'\)", js, re.S)
+    if m:
+        # The scan lives in its own constant: evaluate it exactly as the runner builds it.
+        script = subprocess.run(["node", "-e", "process.stdout.write(" + m.group(1) + ".join('\\n'))"],
+                                capture_output=True, text=True, check=True).stdout
+    else:
+        start = js.index("'python3 - ' + WAVE_FILE")
+        block = js[start : js.index("'PY',", start)]
+        lines = re.findall(r"^\s*'(.*)\\n' \+$", block, re.M)
+        body = [ln for ln in lines if not ln.startswith("python3 ")]
+        script = "\n".join(body).replace("\\\\", "\\").replace("\\'", "'")
     out = subprocess.run(
         [sys.executable, "-", str(wave_file)],
         input=script,
