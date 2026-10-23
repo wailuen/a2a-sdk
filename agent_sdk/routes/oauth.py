@@ -1032,26 +1032,40 @@ def _basic_credentials(request: Request) -> tuple[str, str] | None:
     return unquote_plus(cid), unquote_plus(secret)
 
 
+def _basic_used(request: Request) -> bool:
+    """True when the caller sent HTTP Basic, so a 401 names the Basic scheme."""
+    return request.headers.get("authorization", "").split(" ", 1)[0].lower() == "basic"
+
+
 def _authenticate_client(
     request: Request, form: dict[str, str], store: OAuthTokenStore
 ) -> tuple[str, JSONResponse | None]:
     """Authenticate the calling client against its STORED registration.
 
     The required method comes from the stored record, never from the
-    request. Returns ``(client_id, error)``; an unknown client_id passes
-    through (the grant lookup rejects it) so existence is not disclosed here.
+    request. Returns ``(client_id, error)``. An unknown client_id that
+    presents no secret passes through (the grant lookup rejects it, so client
+    existence is not disclosed). A secret presented for an unknown, evicted
+    or malformed client record fails closed with ``invalid_client``: a
+    secret is never accepted unchecked. An empty ``client_secret`` (form or
+    Basic) counts as not presented, so public clients from generic OAuth
+    libraries keep working.
     """
     basic = _basic_credentials(request)
     client_id = form.get("client_id") or (basic[0] if basic else "")
     if basic and form.get("client_id") and basic[0] != form["client_id"]:
         return client_id, _invalid_client(False)
-    form_secret = form.get("client_secret")
+    form_secret = form.get("client_secret") or None
+    if basic is not None and not basic[1]:
+        basic = None if basic[0] == client_id else basic
     method = store.client_auth_method(client_id) if client_id else None
     if method is None:
+        if form_secret is not None or basic is not None:
+            return client_id, _invalid_client(_basic_used(request))
         return client_id, None
     if method == "none":
         if form_secret is not None or basic is not None:
-            return client_id, _invalid_client(False)
+            return client_id, _invalid_client(_basic_used(request))
         return client_id, None
     if method == "client_secret_post":
         ok = form_secret is not None and basic is None
@@ -1062,7 +1076,7 @@ def _authenticate_client(
     else:
         return client_id, _invalid_client(False)
     if not ok or not secret or not store.verify_client_secret(client_id, secret):
-        return client_id, _invalid_client(method == "client_secret_basic")
+        return client_id, _invalid_client(method == "client_secret_basic" or _basic_used(request))
     return client_id, None
 
 

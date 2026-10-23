@@ -251,3 +251,63 @@ async def test_confidential_client_eviction_and_consent_same(client):
     for _ in range(MAX_CLIENTS + 3):
         store.register_client([REDIRECT])
     assert store.get_client(unconsented) is None
+
+
+# --- v0.18.0 release-gate fixes (MCP static audit findings 1 and 2) ---------
+
+
+def _client_auth_case(store_method):
+    """Run _authenticate_client against a stub store with a fixed method."""
+    from types import SimpleNamespace
+
+    from agent_sdk.routes import oauth as oauth_routes
+
+    def run(form, auth_header=""):
+        headers = {"authorization": auth_header} if auth_header else {}
+        request = SimpleNamespace(headers=headers)
+        store = SimpleNamespace(
+            client_auth_method=lambda cid: store_method,
+            verify_client_secret=lambda cid, secret: secret == "right",
+        )
+        return oauth_routes._authenticate_client(request, form, store)[1]
+
+    return run
+
+
+def test_public_client_empty_form_secret_is_not_presented():
+    run = _client_auth_case("none")
+    assert run({"client_id": "pub", "client_secret": ""}) is None
+
+
+def test_public_client_empty_basic_secret_is_not_presented():
+    import base64
+
+    run = _client_auth_case("none")
+    hdr = "Basic " + base64.b64encode(b"pub:").decode()
+    assert run({}, hdr) is None
+
+
+def test_public_client_nonempty_secret_still_refused():
+    run = _client_auth_case("none")
+    assert run({"client_id": "pub", "client_secret": "x"}).status_code == 401
+
+
+def test_unknown_client_with_secret_fails_closed():
+    run = _client_auth_case(None)
+    assert run({"client_id": "gone", "client_secret": "right"}).status_code == 401
+
+
+def test_unknown_client_without_secret_passes_to_grant_lookup():
+    run = _client_auth_case(None)
+    assert run({"client_id": "gone"}) is None
+
+
+def test_malformed_auth_method_is_treated_as_unknown():
+    from agent_sdk.auth.oauth_tokens import OAuthTokenStore
+
+    rec = {"token_endpoint_auth_method": "private_key_jwt"}
+    fake = type("S", (), {"get_client": lambda self, cid: rec})()
+    assert OAuthTokenStore.client_auth_method(fake, "c") is None
+    rec2 = {}
+    fake2 = type("S", (), {"get_client": lambda self, cid: rec2})()
+    assert OAuthTokenStore.client_auth_method(fake2, "c") == "none"

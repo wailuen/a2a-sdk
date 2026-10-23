@@ -200,12 +200,15 @@ class OAuthTokenStore:
         return record if isinstance(record, dict) else None
 
     def client_auth_method(self, client_id: str) -> str | None:
-        """Registered auth method of a stored client; None if unknown."""
+        """Registered auth method of a stored client; None if unknown or the
+        record is malformed (callers fail closed on None)."""
         record = self.get_client(client_id)
         if record is None:
             return None
+        if "token_endpoint_auth_method" not in record:
+            return "none"  # pre-GH-222 records are public clients
         method = record.get("token_endpoint_auth_method")
-        return method if isinstance(method, str) else "none"
+        return method if method in ("none", "client_secret_post", "client_secret_basic") else None
 
     def verify_client_secret(self, client_id: str, secret: str) -> bool:
         """Constant-time check of ``secret`` against the stored hash."""

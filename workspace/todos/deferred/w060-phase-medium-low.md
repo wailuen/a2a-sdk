@@ -12,7 +12,7 @@ Non-blocking — these did not block w060's archive. Address opportunistically o
 - fix: Pass `basic is not None or method == "client_secret_basic"` to _invalid_client on every invalid_client return in _authenticate_client (mismatch, method none with Basic, wrong-method), and extend test_bad_secret_fails_everywhere to assert the Basic challenge whenever the request carried a Basic header.
 - sdkCandidate: true
 
-## RT-005 (medium) [SDK] — agent_sdk/routes/oauth.py:1053
+## RT-005 (medium) [SDK] — agent_sdk/routes/oauth.py:1053 — FIXED before v0.18.0 tag (empty secret = not presented)
 - quote: `if form_secret is not None or basic is not None:`
 - issue: Backward-compat break for existing public clients: a public client that sends an empty `client_secret=` form field (common in generic OAuth libraries) was accepted before GH-222 and now gets 401 invalid_client on token, refresh and revoke; the ruling's 'public client that presents a secret' does not require rejecting an empty value, and no test pins this case.
 - fix: Treat an empty form `client_secret` as absent for public clients (e.g. `if (form_secret not in (None, "")) or basic is not None`), and add a test that a public client sending `client_secret=` still completes code -> token -> refresh.
