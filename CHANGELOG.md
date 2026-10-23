@@ -4,7 +4,7 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
-## [Unreleased]
+## [0.18.0] — 2026-10-23
 
 ### Changed
 - GH-219: the agent card no longer repeats each tool's `outputSchema`. Skills drop `x-sdk.outputSchema` and `x-sdk.outputSchemaWireNote`; `x-sdk.inputSchema`, `tier` and `emits` stay. MCP `tools/list` still carries `outputSchema`. A search of `agent_sdk/` (routes, console JS, testing, a2ui) found no reader of the card field; only the RT-004 tests used it, and they are rewritten. Also: boot logs one warning when `AGENT_DESCRIPTION` is blank (the display-name fallback stays), and `docs/tools.md` examples show `tags=`. Ruling: https://github.com/wailuen/a2a-sdk/issues/219#issuecomment-6345507008. Changed: `agent_sdk/routes/agent_card.py`, `agent_sdk/app.py`, `agent_sdk/agent/registry.py` (`output_schema()` docstring), DESIGN.md, `docs/tools.md`. Tests: `tests/test_gh219_card_remainders.py`, `tests/test_mcp_conformance_w9.py`.
