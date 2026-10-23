@@ -51,7 +51,7 @@ const SCENARIO_RESULT_SCHEMA = {
     aguiTurns:    { type: 'array', items: TURN_SCHEMA },
     failureClass: {
       type: 'string',
-      enum: ['none', 'transport-divergence', 'code-bug', 'content-type-gap', 'persona-gap', 'upstream-issue', 'bad-scenario', 'harness-contamination'],
+      enum: ['none', 'transport-divergence', 'code-bug', 'content-type-gap', 'persona-gap', 'upstream-issue', 'bad-scenario', 'harness-contamination', 'rate-limited'],
     },
     failureDetail: { type: 'string' },
   },
@@ -99,7 +99,7 @@ function buildScenarioPrompt(s, a) {
 
     '━━━ INSTRUCTIONS ━━━\n\n' +
     'Run this scenario on ' + (runA2A && runAGUI ? 'BOTH transports in sequence' : transports[0].toUpperCase() + ' transport only') + '.\n' +
-    'Score each transport independently. Both must score ≥ 7 for passed=true.\n\n' +
+    'Score each transport independently (rate-limited turns excluded). Both must score ≥ 7 for passed=true.\n\n' +
 
     // ── A2A transport ──────────────────────────────────────────────────────────
     (runA2A ? (
@@ -108,73 +108,19 @@ function buildScenarioPrompt(s, a) {
 
     'For EACH A2A turn:\n\n' +
 
-    '1. Write and run this Python script (substitute ACC_QUERY env var with the actual query):\n\n' +
-    '   Write to /tmp/acc-' + runKey + '-a2a-turn.py:\n' +
-    '   ─────────────────────────────────────────────\n' +
-    '   import asyncio, httpx, json, os\n' +
-    '   from pathlib import Path\n\n' +
-    '   BASE_URL = "' + a.baseUrl + '"\n' +
-    '   TOKEN    = Path("' + a._keyFile + '").read_text().strip()\n' +
-    '   RUN_KEY  = "' + runKey + '"\n' +
-    '   QUERY    = os.environ["ACC_QUERY"]\n' +
-    '   TASKID_F = Path(f"/tmp/acc-{RUN_KEY}-a2a-task.txt")\n' +
-    '   CTXID_F  = Path(f"/tmp/acc-{RUN_KEY}-a2a-ctx.txt")\n' +
-    '   STATE_F  = Path(f"/tmp/acc-{RUN_KEY}-a2a-state.txt")\n\n' +
-    '   async def main():\n' +
-    '       headers = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}\n' +
-    '       task_id    = TASKID_F.read_text().strip() if TASKID_F.exists() else None\n' +
-    '       context_id = CTXID_F.read_text().strip()  if CTXID_F.exists()  else None\n' +
-    '       last_state = STATE_F.read_text().strip()   if STATE_F.exists()  else None\n' +
-    '       import uuid as _uuid\n' +
-    '       msg = {"role": "user", "messageId": _uuid.uuid4().hex, "parts": [{"kind": "text", "text": QUERY}]}\n' +
-    '       # Turn 2+: reuse taskId only when the prior task is still input-required or\n' +
-    '       # auth-required (both are non-terminal interrupt states per A2A spec §interrupt);\n' +
-    '       # for completed/failed tasks send contextId so the server starts a new task\n' +
-    '       # in the same conversation context instead of re-addressing a terminal task.\n' +
-    '       if task_id and last_state in ("input-required", "auth-required"):\n' +
-    '           msg["taskId"] = task_id\n' +
-    '       elif context_id:\n' +
-    '           msg["contextId"] = context_id\n' +
-    '       body = {"message": msg}\n' +
-    '       reply_parts, ctypes = [], []\n' +
-    '       cur_task_id = None\n' +
-    '       cur_ctx_id  = None\n' +
-    '       cur_state   = None\n' +
-    '       async with httpx.AsyncClient(base_url=BASE_URL, headers=headers, timeout=600) as c:\n' +
-    '           async with c.stream("POST", "/v1/message:stream", json=body) as r:\n' +
-    '               r.raise_for_status()\n' +
-    '               async for line in r.aiter_lines():\n' +
-    '                   if not line.startswith("data:"): continue\n' +
-    '                   ev = json.loads(line[5:].strip())\n' +
-    '                   if ev.get("kind") == "task":\n' +
-    '                       if not cur_task_id: cur_task_id = ev.get("id", "")\n' +
-    '                       if not cur_ctx_id:  cur_ctx_id  = ev.get("contextId", "")\n' +
-    '                   elif ev.get("kind") == "status-update":\n' +
-    '                       if not cur_task_id: cur_task_id = ev.get("taskId", "")\n' +
-    '                       if not cur_ctx_id:  cur_ctx_id  = ev.get("contextId", "")\n' +
-    '                       st = ev.get("status", {}).get("state") or ""\n' +
-    '                       if st: cur_state = st\n' +
-    '                       if ev.get("final") or st == "completed":\n' +
-    '                           reply_parts = [p["text"] for p in (ev.get("status",{}).get("message") or {}).get("parts",[]) if p.get("kind") == "text"]\n' +
-    '                   elif ev.get("kind") == "artifact-update":\n' +
-    '                       art = ev.get("artifact") or {}\n' +
-    '                       art_name = art.get("name")\n' +
-    '                       art_meta = art.get("metadata") or {}\n' +
-    '                       art_dtype = art_meta.get("data_type") or art_name\n' +
-    '                       for part in art.get("parts",[]):\n' +
-    '                           if part.get("kind") == "data":\n' +
-    '                               meta = part.get("metadata") or {}\n' +
-    '                               ctype = art_dtype or meta.get("data_type") or meta.get("mimeType")\n' +
-    '                               if ctype and ctype not in ctypes: ctypes.append(ctype)\n' +
-    '       if cur_task_id: TASKID_F.write_text(cur_task_id)\n' +
-    '       if cur_ctx_id:  CTXID_F.write_text(cur_ctx_id)\n' +
-    '       if cur_state:   STATE_F.write_text(cur_state)\n' +
-    '       print(json.dumps({"reply": "\\n".join(reply_parts), "contentTypes": ctypes}))\n\n' +
-    '   asyncio.run(main())\n' +
-    '   ─────────────────────────────────────────────\n\n' +
-
-    '   Run it:   ACC_QUERY="QUERY_TEXT" .venv/bin/python3 /tmp/acc-' + runKey + '-a2a-turn.py\n' +
-    '   Parse:    {reply, contentTypes}\n\n' +
+    '1. Run the turn helper (throttled to 3 concurrent turns across all scenarios; retries\n' +
+    '   429 / "too many requests" / failed task / empty reply with back-off inside a 540 s budget;\n' +
+    '   task/context ids are saved only on success). Do NOT write your own httpx script:\n\n' +
+    '   ACC_QUERY="QUERY_TEXT" .venv/bin/python3 -m agent_sdk.testing.turns --transport a2a \\\n' +
+    '       --base-url ' + a.baseUrl + ' --key-file ' + a._keyFile + ' --run-key ' + runKey + '\n\n' +
+    '   Run this Bash command with timeout 600000 (ms). The default Bash timeout (120 s) is shorter\n' +
+    '   than the helper budget and would kill it before it prints. The helper always prints one JSON\n' +
+    '   line before 600 s. Never score a turn from a killed or empty Bash call.\n\n' +
+    '   Parse the JSON on stdout: {ok, reply, contentTypes, attempts} on success, or\n' +
+    '   {ok:false, failureClass, reason, status, attempts} on failure. Never print the key.\n' +
+    '   If ok=false and failureClass="rate-limited", the turn was throttled by the server\n' +
+    '   even after retries: do NOT score it 1–2. Mark the turn rate-limited (leave it out of\n' +
+    '   the min score) and use failureClass "rate-limited" if no scored turn failed.\n\n' +
 
     '   Note: tool names are not observable on the A2A stream (the protocol surfaces\n' +
     '   text/data artifacts, not tool call events). Infer tool usage from the reply\n' +
@@ -195,7 +141,7 @@ function buildScenarioPrompt(s, a) {
     '   from the prior A2A reply (not generic).\n\n' +
 
     'After all A2A turns: compute a2aMinScore = min of all turn scores.\n' +
-    'Clean up /tmp/acc-' + runKey + '-a2a-* files (task, ctx, and state files).\n\n'
+    'Clean up the helper state files /tmp/acc-' + runKey + '-a2a-* (task, ctx, and state).\n\n'
     ) : '') +
 
     // ── AG-UI transport ────────────────────────────────────────────────────────
@@ -206,40 +152,14 @@ function buildScenarioPrompt(s, a) {
 
     'For EACH AG-UI turn:\n\n' +
 
-    '1. Write and run this Python script:\n\n' +
-    '   Write to /tmp/acc-' + runKey + '-agui-turn.py:\n' +
-    '   ─────────────────────────────────────────────\n' +
-    '   import asyncio, httpx, json, os\n' +
-    '   from pathlib import Path\n' +
-    '   from agent_sdk.testing import ChatDriver\n\n' +
-    '   BASE_URL  = "' + a.baseUrl + '"\n' +
-    '   TOKEN     = Path("' + a._keyFile + '").read_text().strip()\n' +
-    '   THREAD_ID = "' + runKey + '-agui"\n' +
-    '   MSGS_FILE = Path("/tmp/acc-' + runKey + '-agui-msgs.json")\n' +
-    '   QUERY     = os.environ["ACC_QUERY"]\n\n' +
-    '   async def main():\n' +
-    '       msgs = json.loads(MSGS_FILE.read_text()) if MSGS_FILE.exists() else []\n' +
-    '       tools, ctypes = [], []\n' +
-    '       async with httpx.AsyncClient(\n' +
-    '           base_url=BASE_URL,\n' +
-    '           headers={"Authorization": f"Bearer {TOKEN}"},\n' +
-    '           timeout=600\n' +
-    '       ) as client:\n' +
-    '           driver = ChatDriver(client)\n' +
-    '           reply  = await driver.agui_turn(\n' +
-    '               QUERY, THREAD_ID, msgs,\n' +
-    '               emit={\n' +
-    '                   "tool_start": lambda n: tools.append(n),\n' +
-    '                   "artifact":   lambda dt, t: ctypes.append(dt),\n' +
-    '               }\n' +
-    '           )\n' +
-    '       MSGS_FILE.write_text(json.dumps(msgs))\n' +
-    '       print(json.dumps({"reply": reply, "toolsCalled": tools, "contentTypes": ctypes}))\n\n' +
-    '   asyncio.run(main())\n' +
-    '   ─────────────────────────────────────────────\n\n' +
-
-    '   Run it:   ACC_QUERY="QUERY_TEXT" .venv/bin/python3 /tmp/acc-' + runKey + '-agui-turn.py\n' +
-    '   Parse:    {reply, toolsCalled, contentTypes}\n\n' +
+    '1. Run the turn helper (same throttle and retry rules as A2A; the message list is\n' +
+    '   restored on a failed attempt so a retry never duplicates the user message):\n\n' +
+    '   ACC_QUERY="QUERY_TEXT" .venv/bin/python3 -m agent_sdk.testing.turns --transport agui \\\n' +
+    '       --base-url ' + a.baseUrl + ' --key-file ' + a._keyFile + ' --run-key ' + runKey + '\n\n' +
+    '   Run this Bash command with timeout 600000 (ms) (the helper prints one JSON line before 600 s;\n' +
+    '   the default 120 s Bash timeout would kill it first).\n\n' +
+    '   Parse: {ok, reply, toolsCalled, contentTypes, attempts}. A failure with\n' +
+    '   failureClass="rate-limited" is handled exactly as for A2A (not scored 1–2).\n\n' +
 
     '2. Score the AG-UI reply 1–10 (content coherency):\n' +
     '   9–10 Correct tool called + correct content type + reply directly addresses query\n' +
@@ -255,7 +175,7 @@ function buildScenarioPrompt(s, a) {
     '   from the prior AG-UI reply (not generic).\n\n' +
 
     'After all AG-UI turns: compute aguiMinScore = min of all turn scores.\n' +
-    'Clean up /tmp/acc-' + runKey + '-agui-* files.\n\n'
+    'Clean up the helper state file /tmp/acc-' + runKey + '-agui-msgs.json.\n\n'
     ) : '') +
 
     // ── scoring and classification ─────────────────────────────────────────────
@@ -269,6 +189,9 @@ function buildScenarioPrompt(s, a) {
     '  persona-gap            — agent lacks the capability entirely (needs a new wave)\n' +
     '  upstream-issue         — failure due to source adapter / credential problem on both transports\n' +
     '  bad-scenario           — seed query is malformed or unanswerable by design\n' +
+    '  rate-limited           — turns throttled by the server (HTTP 429 / "too many requests") even after\n' +
+    '                           helper retries; infrastructure, NOT an agent failure. Never score 1–2; excluded\n' +
+    '                           from min scores and from self-heal fixes (re-run later with fewer slots)\n' +
     '  harness-contamination  — cross-run bleed detected; flag when ALL THREE conditions hold:\n' +
     '                           (1) tool names from a different scenario appear in this turn context,\n' +
     '                           (2) this scenario\'s min score is anomalously low vs a single-run baseline,\n' +
@@ -276,6 +199,8 @@ function buildScenarioPrompt(s, a) {
     '  none                   — all turns ≥ 7 on all transports\n\n' +
 
     'RULES:\n' +
+    '- A rate-limited turn (helper failureClass "rate-limited") is never scored 1–2; omit it from min scores.\n' +
+    '  If every turn on a transport was rate-limited, set that transport's minScore to 1 (schema minimum, not a score), passed=false and failureClass "rate-limited". Untested turns are "not run", never 10/10.\n' +
     '- Never hard-fail on a network timeout — score the turn 1, rationale "timeout".\n' +
     '- If only one transport was run (--transport flag), set the other minScore to 10 and turns to [].\n' +
     '- Return structured output matching the schema exactly.\n'
@@ -329,7 +254,10 @@ const rawResults = await pipeline(
 const ranA2A  = transports.indexOf('a2a') !== -1
 const ranAGUI = transports.indexOf('agui') !== -1
 const results = rawResults.map(function(r, i) {
-  if (r != null) return r
+  if (r != null) {
+    // Infrastructure failure class must never count as a pass (GH-210).
+    return r.failureClass === 'rate-limited' ? Object.assign({}, r, { passed: false }) : r
+  }
   const s = scenarios[i]
   return {
     scenarioId:    s.id,
@@ -349,9 +277,11 @@ if (results.length !== scenarios.length) {
 }
 
 const passed     = results.filter(function(r) { return r.passed }).length
-const failed     = results.filter(function(r) { return !r.passed }).length
-const a2aMin     = results.length > 0 ? results.reduce(function(m, r) { return Math.min(m, r.a2aMinScore) }, 10) : 0
-const aguiMin    = results.length > 0 ? results.reduce(function(m, r) { return Math.min(m, r.aguiMinScore) }, 10) : 0
+const rateLimited = results.filter(function(r) { return r.failureClass === 'rate-limited' }).length
+const failed     = results.filter(function(r) { return !r.passed && r.failureClass !== 'rate-limited' }).length
+const scored     = results.filter(function(r) { return r.failureClass !== 'rate-limited' })
+const a2aMin     = scored.length > 0 ? scored.reduce(function(m, r) { return Math.min(m, r.a2aMinScore) }, 10) : 0
+const aguiMin    = scored.length > 0 ? scored.reduce(function(m, r) { return Math.min(m, r.aguiMinScore) }, 10) : 0
 const diverged   = results.filter(function(r) { return r.failureClass === 'transport-divergence' }).length
 
 log(
@@ -359,6 +289,7 @@ log(
   '  |  A2A min: ' + a2aMin + '/10' +
   '  |  AG-UI min: ' + aguiMin + '/10' +
   (diverged ? '  |  transport-divergence: ' + diverged : '') +
+  (rateLimited ? '  |  not run (rate-limited): ' + rateLimited : '') +
   '  |  failed: ' + failed
 )
 

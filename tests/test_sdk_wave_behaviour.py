@@ -564,7 +564,7 @@ def test_archive_gate_sees_nested_template_repo(tmp_path: Path) -> None:
     _commit_all(tpl)
     out = _gate(repo, ["agent_sdk/routes/a2a.py"])
     assert out["templateDirExists"] is True
-    assert any(p.startswith("template/ (unpushed or no upstream") for p in out["offendingHarnessPaths"])
+    assert any(p.startswith("template/ (unpushed or not on origin/main") for p in out["offendingHarnessPaths"])
     _write(tpl, ".claude/workflows/wave-cycle.js", "b")
     assert "template/.claude/workflows/wave-cycle.js" in _gate(repo, ["agent_sdk/routes/a2a.py"])["offendingHarnessPaths"]
 
@@ -573,3 +573,107 @@ def test_archive_gate_outside_git_is_not_ok(tmp_path: Path) -> None:
     (tmp_path / "plain").mkdir()
     out = _py(_script("ARCHIVE_GATE_PY"), tmp_path / "plain", "[]")
     assert out["ok"] is False and out["error"]
+
+
+# ─── stale redteam findings (GH-211) ──────────────────────────────────────────
+
+
+def _quoted(n: int) -> dict:
+    return dict(finding(n), line=3, quote="x = 1")
+
+
+def test_sdk_wave_quote_seen_present_then_gone_is_dropped_and_not_blocking(tmp_path: Path) -> None:
+    out = run([("^rt:unit:A:", [rt(_quoted(1)), rt(_quoted(1))]),
+               ("^stale:unit:A:", [{"ok": True, "stale": [], "present": [0]}, {"ok": True, "stale": [0], "present": []}])],
+              tmp_path=tmp_path)
+    assert "fix:unit:A:r2" not in labels(out) and "debug:unit:A:r2" not in labels(out)
+    assert logged(out, "stale finding dropped")
+    assert not out["result"]["protocolBlocked"]
+
+
+def test_sdk_wave_unverifiable_round_one_quote_stays_blocking(tmp_path: Path) -> None:
+    out = run([("^rt:unit:A:", [rt(_quoted(1)), CLEAN_RT]),
+               ("^stale:unit:A:", [{"ok": True, "stale": [0], "present": []}])], tmp_path=tmp_path)
+    assert "fix:unit:A:r1" in labels(out)
+    assert logged(out, "unverifiable quote")
+
+
+def test_sdk_wave_null_stale_check_keeps_every_finding(tmp_path: Path) -> None:
+    out = run([("^rt:unit:A:", [rt(_quoted(1)), CLEAN_RT]), ("^stale:unit:A:", [None])], tmp_path=tmp_path)
+    assert "fix:unit:A:r1" in labels(out)
+
+
+def test_sdk_wave_rt_schema_requires_quote_and_line() -> None:
+    text = SDK.read_text()
+    block = text[text.index("const RT_SCHEMA"):text.index("const PROTO_SCHEMA")]
+    req = re.search(r"required: \['id'[^\]]*\]", block).group(0)
+    assert "'quote'" in req and "'line'" in req
+
+
+# ─── GH-208: deliverable gate pinned against the SDK layout ───────────────────
+
+
+def test_missing_creates_path_prunes_dependent_group(tmp_path: Path) -> None:
+    wv = sdk_wave([group("A", ["agent_sdk/a.py"]), group("B", ["agent_sdk/b.py"])], {"A": [], "B": ["A"]})
+    miss = {"ok": True, "checked": ["A", "B"], "missing": [{"label": "A", "paths": ["agent_sdk/a.py"]}]}
+    out = run([("^deliv:tier1", [miss])], wv=wv, tmp_path=tmp_path)
+    ls = [c["label"] for c in out["calls"]]
+    assert "impl:B-1" not in ls and "defer:incomplete:A" in ls
+    assert out["result"]["failedGroups"] == ["A"] and out["result"]["prunedGroups"] == ["B"]
+    assert "archive" not in ls
+
+
+# ─── GH-223: SDK candidate re-check + opt-in auto-filing ──────────────────────
+
+from tests import test_wave_cycle_behaviour as _wc  # noqa: E402
+
+_SDK_FILE = "agent_sdk/a.py"
+
+
+def _sdk_run(rules, *, args, tmp_path):
+    return run(rules, args=args, tmp_path=tmp_path)
+
+
+def test_sdk_wave_default_files_nothing(tmp_path: Path) -> None:
+    _wc.check_default_files_nothing(_sdk_run, _SDK_FILE, tmp_path)
+
+
+def test_sdk_wave_fixed_in_wave_needs_prior_presence(tmp_path: Path) -> None:
+    _wc.check_fixed_in_wave_needs_prior_presence(_sdk_run, _SDK_FILE, tmp_path)
+
+
+def test_sdk_wave_candidate_status_fails_closed(tmp_path: Path) -> None:
+    _wc.check_fail_closed_statuses(_sdk_run, _SDK_FILE, tmp_path)
+
+
+def test_sdk_wave_recheck_reuses_stale_script(tmp_path: Path) -> None:
+    _wc.check_recheck_reuses_stale_script(_sdk_run, _SDK_FILE, tmp_path)
+
+
+def test_sdk_wave_auto_files_only_still_open(tmp_path: Path) -> None:
+    _wc.check_auto_files_only_still_open(_sdk_run, _SDK_FILE, tmp_path)
+
+
+def test_sdk_wave_auto_with_nothing_open_does_not_call_gh(tmp_path: Path) -> None:
+    _wc.check_auto_with_nothing_open_does_not_call_gh(_sdk_run, _SDK_FILE, tmp_path)
+
+
+@pytest.mark.parametrize("filed", [None, {"ok": True, "ghAvailable": False, "results": []}, {"ok": False, "ghAvailable": False, "results": []}])
+def test_sdk_wave_auto_falls_back_to_file(tmp_path: Path, filed: object) -> None:
+    _wc.check_auto_falls_back_to_file(_sdk_run, _SDK_FILE, tmp_path, filed)
+
+
+def test_sdk_wave_quote_never_leaves_the_runner(tmp_path: Path) -> None:
+    _wc.check_quote_never_leaves_the_runner(_sdk_run, _SDK_FILE, tmp_path)
+
+
+def test_sdk_wave_flag_default_false_and_string_true(tmp_path: Path) -> None:
+    _wc.check_flag_default_false_and_string_true(_sdk_run, _SDK_FILE, tmp_path)
+
+
+def test_sdk_wave_classifier_keeps_id_and_quote(tmp_path: Path) -> None:
+    _wc.check_classifier_keeps_id_and_quote(_sdk_run, _SDK_FILE, tmp_path)
+
+
+def test_sdk_wave_candidate_logic_matches_wave_cycle() -> None:
+    _wc.test_candidate_logic_matches_across_runners()

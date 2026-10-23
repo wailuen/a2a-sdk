@@ -76,3 +76,12 @@ workspace/todos/
   every todo in the group can launch simultaneously. The planner enforces this
   at generation time; the redteam loop verifies it; `/implement` validates it
   again before launch.
+
+## HUMAN GATE marker
+
+A todo that needs a human decision before it runs carries an explicit marker line
+`- HUMAN GATE: <reason>`. The wave runner holds that todo's group (it is not
+dispatched, its dependents are pruned, and archive is blocked) until the todo also has
+a release line `- Release: https://github.com/<org>/<repo>/issues/<n>` citing the
+GitHub issue that records the approval. Record the approval in the issue first, then
+add the line. Free text such as `Status: NOT DONE` does not gate.

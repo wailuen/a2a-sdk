@@ -563,8 +563,9 @@ def test_gh164_template_mirror_is_committed_and_pushed():
     """RT-001 (w047 round-5 fresh-lens debug): the template copy is only 'synced' once it is
     PUBLISHED. Comparing the local working tree let an uncommitted, unpushed edit pass as
     synced while agent repos still pulled the old backtick-only scan from origin/main. This
-    compares the harness copy against the template's upstream-tracking commit, and fails on a
-    dirty mirror or unpushed local commits. Uses the last-fetched tracking ref (no network)."""
+    compares the harness copy against the template's origin/main (never @{upstream}, which can be
+    a feature branch), and fails on a dirty mirror or a HEAD not reachable from origin/main. Uses
+    the last-fetched ref (no network)."""
     rel = ".claude/workflows/wave-cycle.js"
     harness_copy = (_REPO_ROOT / "harness" / "workflows" / "wave-cycle.js").read_bytes()
     dirty = _template_git("status", "--porcelain", "--", ".claude/workflows/")
@@ -573,37 +574,29 @@ def test_gh164_template_mirror_is_committed_and_pushed():
         "template/ has uncommitted workflow mirror changes; commit and push them:\n"
         + dirty.stdout.decode()
     )
-    ahead = _template_git("rev-list", "--count", "@{upstream}..HEAD")
-    assert ahead.returncode == 0, ahead.stderr  # no upstream = cannot prove it is pushed
-    assert ahead.stdout.strip() == b"0", "template/ has unpushed commits; run git -C template push"
-    published = _template_git("show", f"@{{upstream}}:{rel}")
+    contained = _template_git("merge-base", "--is-ancestor", "HEAD", "origin/main")
+    assert contained.returncode == 0, (
+        "template/ HEAD is not reachable from origin/main (a feature-branch upstream does not count): "
+        "open and merge a template PR"
+    )
+    published = _template_git("show", f"origin/main:{rel}")
     assert published.returncode == 0, published.stderr
     assert published.stdout == harness_copy, (
-        "template's pushed wave-cycle.js differs from harness/workflows/wave-cycle.js"
+        "template origin/main's wave-cycle.js differs from harness/workflows/wave-cycle.js"
     )
 
 
 def test_gh164_inline_scan_excludes_template_mirror_paths(tmp_path):
-    import json
-    import subprocess
-    import sys
-
-    js = (_REPO_ROOT / "harness" / "workflows" / "wave-cycle.js").read_text(encoding="utf-8")
-    start = js.index("'python3 - ' + WAVE_FILE")
-    block = js[start : js.index("'PY',", start)]
-    lines = re.findall(r"^\s*'(.*)\\n' \+$", block, re.M)
-    body = [ln for ln in lines if not ln.startswith("python3 -") and not ln.startswith("python3 ")]
-    script = "\n".join(body).replace("\\\\", "\\").replace("\\'", "'")
     wave = tmp_path / "w.md"
     wave.write_text(
         "Modifies: `harness/workflows/wave-cycle.js`, "
         "`template/.claude/workflows/wave-cycle.js`, `tests/test_x.py`\n",
         encoding="utf-8",
     )
-    out = subprocess.run(
-        [sys.executable, "-", str(wave)], input=script, capture_output=True, text=True, check=True
-    ).stdout
-    assert json.loads(out) == ["harness/workflows/wave-cycle.js", "tests/test_x.py"]
+    assert _run_inline_scan(_REPO_ROOT / "harness" / "workflows" / "wave-cycle.js", wave) == [
+        "harness/workflows/wave-cycle.js",
+        "tests/test_x.py",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -739,3 +732,33 @@ def test_rt001_parse_prompt_accepts_bare_paths(wf_path: Path) -> None:
     prompt = _parse_prompt(wf_path)
     assert "backticked or bare" in prompt.lower()
     assert "**Creates:**" in prompt
+
+
+# ---------------------------------------------------------------------------
+# GH-208: the Creates: deliverable gate and the per-round scope re-scan must reuse
+# DECLARED_PATH_SCAN (SCOPE_SCAN_PY) — no third path classifier in either runner.
+# ---------------------------------------------------------------------------
+
+_GATE_RUNNERS = [
+    _REPO_ROOT / "harness" / "workflows" / "wave-cycle.js",
+    _REPO_ROOT / ".claude" / "workflows" / "sdk-wave.js",
+]
+
+
+@pytest.mark.parametrize("wf_path", _GATE_RUNNERS, ids=lambda p: p.name)
+def test_gh208_gate_and_rescan_reuse_the_scope_scan_rule(wf_path: Path) -> None:
+    js = wf_path.read_text(encoding="utf-8")
+    assert js.count("const EXT") == 0 and js.count("'EXT=(") == 1  # one extension list in the runner
+    assert "const PATH_RULE_PY = SCOPE_SCAN_PY.slice(0, SCOPE_SCAN_PY.indexOf(" in js
+    gate = js[js.index("const DELIVERABLE_GATE_PY") : js.index("const DELIVERABLE_SCHEMA")]
+    assert "PATH_RULE_PY + " in gate
+    assert "EXT=" not in gate and "DOT=" not in gate and "endswith(" not in gate
+    rescan = js[js.index("async function rescanScope") : js.index("// Tier-based execution")]
+    assert "SCOPE_SCAN_PY" in rescan and "EXT=" not in rescan
+
+
+@pytest.mark.parametrize("wf_path", _GATE_RUNNERS, ids=lambda p: p.name)
+def test_gh208_rescan_script_is_the_scan_script_and_sees_new_paths(wf_path: Path, tmp_path: Path) -> None:
+    wave = tmp_path / "w.md"
+    wave.write_text("- Creates: src/a.py\n- Modifies: uv.lock, src/late.py (not `foo()` or src/dir/)\n", encoding="utf-8")
+    assert _run_inline_scan(wf_path, wave) == ["src/a.py", "src/late.py", "uv.lock"]

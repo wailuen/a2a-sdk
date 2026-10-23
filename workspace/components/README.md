@@ -43,6 +43,18 @@
 | C-050 | safe_validation_message (pydantic ValidationError -> loc + error type only, never the rejected value; SI-2) | agent_sdk/agent/loop.py::safe_validation_message (move to agent_sdk/common/redact.py beside C-007 planned) | present |
 | C-051 | wait_until_settled (implemented as _wait_blocking: block until final/terminal-or-interrupt or deadline) | agent_sdk/routes/a2a.py::_wait_blocking | present |
 | C-052 | CredentialStore.list_items (single-query {field: plaintext} namespace read; base-class list_fields+get fallback) | agent_sdk/credentials/store.py::CredentialStore.list_items (overrides in azure_table.py, encrypted_sqlite.py) | present |
+| C-053 | cancel_task_record (shared run teardown: cancel worker + bg task, fail resume future, transcript repair via C-018, CANCELED via C-019; takes identity-scoped TaskRecord, SI-5) | agent_sdk/routes/a2a.py::cancel_task_record (move to agent_sdk/agent/runner.py beside C-019 planned; used by A2A tasks/cancel + AG-UI disconnect) | present |
+| C-054 | _check_mcp_session (Mcp-Session-Id >64 chars -> 400; unknown/expired/other-owner -> 404; one helper for mcp_post/mcp_get/mcp_delete/messages) | agent_sdk/routes/mcp.py | planned |
+| C-055 | agent_sdk.testing.turns throttled turn (cross-process file-lock slot limit + 429/empty-reply back-off, AG-UI message-list rollback) | agent_sdk/testing/turns.py | present |
+| C-056 | agent_sdk.testing.mcp McpTestClient (initialize + paginated tools/list + tools/call; key file; MCP_INTERRUPT_SUFFIX) | agent_sdk/testing/mcp.py | present |
+| C-057 | CREATES_GATE (deterministic per-tier deliverable check; fail closed on null; cross-runner parity test) | .claude/workflows/sdk-wave.js + harness/workflows/wave-cycle.js (+ mirrors) | planned |
+| C-058 | STALE_FINDING_FILTER (grep -F quote check per redteam finding; fail closed on empty/null; cross-runner parity test) | .claude/workflows/sdk-wave.js + harness/workflows/wave-cycle.js (+ mirrors) | planned |
+| C-059 | Generic A2UI data renderer (renderGeneric) + shared MAX_ROWS row cap | agent_sdk/console/static/a2ui.js | present |
+| C-060 | strip_schema_titles (recursive removal of pydantic auto `title` keys across properties/items/anyOf/$defs; keeps properties literally named `title`) | agent_sdk/common/schema.py (new; GH-221 tools/list call site in agent_sdk/routes/mcp.py) | planned |
+| C-061 | secret_digest / verify_secret_digest (sha256-at-rest + hmac.compare_digest for opaque secrets; replaces private `_hash` in oauth_tokens.py and api_keys.py) | agent_sdk/auth/ (new helper; current duplicates agent_sdk/auth/oauth_tokens.py ~73, agent_sdk/auth/api_keys.py ~36) | planned |
+| C-062 | authenticate_oauth_client (stored-record token_endpoint_auth_method: none / client_secret_post / client_secret_basic with RFC 6749 §2.3.1 form-urldecode; WWW-Authenticate: Basic on 401; public client with secret rejected; shared by code grant, refresh grant, /oauth/revoke) | agent_sdk/routes/oauth.py (GH-222) | planned |
+| C-063 | SDK_CANDIDATE_RECHECK (codify-phase fixed-in-wave/still-open re-check, fail closed; opt-in auto-file deduped via gh issue list, cap 10/run, file fallback; cross-runner parity test) | .claude/workflows/sdk-wave.js + harness/workflows/wave-cycle.js (+ mirrors) | planned |
+| C-064 | CREDENTIAL_PATTERN_REDACT / redactCredentialPatterns (JS sibling of C-007: sk-/ak_ keys, bearer tokens, long hex/base64; still-matches predicate; for off-box issue titles/bodies/gh --search; cross-runner parity test LRN-159) | .claude/workflows/sdk-wave.js + harness/workflows/wave-cycle.js (+ mirrors; GH-223) | planned |
 
 ## Descriptions
 

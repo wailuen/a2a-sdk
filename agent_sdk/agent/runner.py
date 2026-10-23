@@ -843,7 +843,7 @@ async def _run_deferred_background(
     def publish(frame: dict[str, Any] | None, ev: Any, *, final: bool = False) -> None:
         store.publish(record.task.id, StreamItem(frame=frame, event=ev, final=final))
 
-    def _fail(error_msg: str, *, code: int = -32603) -> None:
+    def _fail(error_msg: str, *, code: int = -32603, category: str = "internal") -> None:
         """Single terminal FAILED exit for every PRE-TERMINAL failure branch
         of the deferred background task — timeout, cancellation, tool
         failure, a raise while building / serialising the terminal artifact,
@@ -915,7 +915,7 @@ async def _run_deferred_background(
             )
             publish(
                 _status_frame(record, final=True),
-                DoneEvent(ok=False, error=error_msg),
+                DoneEvent(ok=False, error=error_msg, code=category),
                 final=True,
             )
         finally:
@@ -931,7 +931,7 @@ async def _run_deferred_background(
             event.deferred, tool_name=event.tool_name, handle_timeout=_handle_timeout
         )
     except asyncio.TimeoutError:
-        _fail("deferred job timed out")
+        _fail("deferred job timed out", category="timeout")
         return
     except asyncio.CancelledError:
         # W025-GH87-CANCEL-001: transition to FAILED and close streams so that
@@ -1124,7 +1124,7 @@ async def _run_deferred_background(
             "deferred artifact build failed error_type=%s", type(exc).__name__
         )
         if isinstance(exc, ValueError):
-            _fail("invalid agent response", code=-32006)
+            _fail("invalid agent response", code=-32006, category="validation")
         else:
             _fail("internal error")
         return
@@ -1511,7 +1511,7 @@ async def run_task_worker(
         # publish() failure inside this except-handler must not itself skip
         # stream teardown (mirrors _fail()'s identical guard above).
         try:
-            publish(_status_frame(record, final=True), DoneEvent(ok=False, error=err.message), final=True)
+            publish(_status_frame(record, final=True), DoneEvent(ok=False, error=err.message, code=err.category.value), final=True)
         finally:
             store.close_streams(task.id)
     except Exception as exc:
@@ -1552,7 +1552,7 @@ async def run_task_worker(
             repaired=repaired,
         )
         try:
-            publish(_status_frame(record, final=True), DoneEvent(ok=False, error=msg), final=True)
+            publish(_status_frame(record, final=True), DoneEvent(ok=False, error=msg, code="validation" if isinstance(exc, ValueError) else "internal"), final=True)
         finally:
             store.close_streams(task.id)
     else:

@@ -12,12 +12,15 @@ FORM = {"Content-Type": "application/x-www-form-urlencoded"}
 # Captured from the pre-GH-152-D code (client_id normalised to "CID").
 # GOLDEN_PAGE_SHA re-captured for the v0.17.4 consent page redesign
 # (routes/_consent_ui.py); headers, CSP and metadata goldens are unchanged.
+# The authorization-server metadata golden was re-captured for GH-222
+# (token_endpoint_auth_methods_supported gained client_secret_post and
+# client_secret_basic; ruling issues/222#issuecomment-6355272603).
 GOLDEN_PAGE_SHA = "2f845c327d3a9436cb1f7c2e0c9eb7e4522ff7507a0f7fd96b3aae6c14c9eedd"
 GOLDEN_HEADERS_SHA = "5f7b58a2285f74070fa7f269df9d18bdc47875025ecf8a5b6f3a0243567d3ea6"
 GOLDEN_METADATA = {
     "/.well-known/oauth-protected-resource": "069fbf6e2a3e60df506cdd56b8386b5d06421a38b30dd805b2291db28c2e8ab5",
     "/.well-known/oauth-protected-resource/mcp": "661ef4ff5930e6ba9bc20172830c89cec3316981fe5772c3bc59bf30c94e13cd",
-    "/.well-known/oauth-authorization-server": "456c95e48989fc7419c95098ead2a4cca09a0b4e7cdfeae874c0a7539191d876",
+    "/.well-known/oauth-authorization-server": "a60d7febb298579e452af65fc87852d1d91cd0c6f018ba88ae26a0012af0c4d8",
 }
 
 

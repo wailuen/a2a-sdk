@@ -82,6 +82,8 @@ class ToolResultEvent(LoopEvent):
     ok: bool
     result: Any = None
     error: str | None = None  # human-safe message; never an AgentError object
+    # GH-220: ErrorCategory value of the failure (None when ok or unclassified)
+    code: str | None = None
 
 
 @dataclass(slots=True)
@@ -131,3 +133,6 @@ class DoneEvent(LoopEvent):
     error: str | None = None  # human-safe message; never an AgentError object
     # GH-155: user-facing summary/notice of a cap-exit failure (also streamed as TextEvent)
     summary: str | None = None
+    # GH-220: ErrorCategory value of the failure (None when ok or unclassified);
+    # appended after existing fields so positional construction is unchanged
+    code: str | None = None

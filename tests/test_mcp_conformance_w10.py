@@ -2,9 +2,10 @@
 
 M-1  (reversed by GH-201) POST /mcp without Mcp-Session-Id on a non-initialize
      request is dispatched normally, whatever sessions the caller holds.
-L-1  tools/call with an unknown tool name returns JSON-RPC -32601 (method not
-     found), not -32602.  tools/call with a valid name but non-dict arguments
-     still returns -32602 (invalid params).
+L-1  tools/call with an unknown tool name returns JSON-RPC -32602 (invalid
+     params), as the MCP spec says.  Wave 10 first pinned -32601 here; GH-221
+     reversed that (it was a sweep item, not an owner ruling).  tools/call with
+     a valid name but non-dict arguments also returns -32602.
 """
 
 from __future__ import annotations
@@ -75,13 +76,13 @@ async def test_m1_absent_session_id_before_any_init_is_ok(client: httpx.AsyncCli
 
 
 # ---------------------------------------------------------------------------
-# L-1: unknown tool → -32601; bad arguments → -32602
+# L-1: unknown tool → -32602 (GH-221); bad arguments → -32602
 # ---------------------------------------------------------------------------
 
 
-async def test_l1_unknown_tool_returns_method_not_found(client: httpx.AsyncClient) -> None:
+async def test_l1_unknown_tool_returns_invalid_params(client: httpx.AsyncClient) -> None:
     """tools/call with a tool name that does not exist must return a JSON-RPC
-    error with code -32601 (Method Not Found), not -32602."""
+    error with code -32602 (Invalid Params), not -32601 (GH-221)."""
     headers = await _mcp_init(client)
 
     r = await client.post(
@@ -98,8 +99,8 @@ async def test_l1_unknown_tool_returns_method_not_found(client: httpx.AsyncClien
     body = r.json()
     assert "error" in body, f"Expected a JSON-RPC error object; got: {body}"
     code = body["error"]["code"]
-    assert code == -32601, (
-        f"Unknown tool must return -32601 (Method Not Found); got {code}"
+    assert code == -32602, (
+        f"Unknown tool must return -32602 (Invalid Params); got {code}"
     )
 
 

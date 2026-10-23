@@ -11,7 +11,7 @@ SC-C7  MarketBriefing MCP outputSchema + structuredContent are a JSON object
        or the field dict (GH-105, MCP 2025-06-18 object-only requirement)
 SC-C8  openWorldHint reflects whether a tool is SourceAdapter-backed, not
        tier/read_only (GH-52, corrected by GH-134)
-RT-004 Agent-card x-sdk.outputSchema mirrors the MCP object schema for a
+RT-004 Agent card omits x-sdk.outputSchema (GH-219); MCP carries it for a
        MarketBriefing-emitting tool
 """
 
@@ -607,59 +607,41 @@ async def test_sc_c7_market_briefing_structured_content_is_object(sc_c7_client):
     )
 
 
-async def test_rt004_agent_card_output_schema_mirrors_mcp_for_market_briefing(sc_c7_client):
-    """RT-004: the A2A agent card's x-sdk.outputSchema for a MarketBriefing-
-    emitting tool must equal the same object schema advertised on the MCP
-    surface ({"markdown": ...}), not {"type": "string"} — even though the
-    actual A2A DataPart wire value for MarketBriefing stays a bare markdown
-    string (translator.py, untouched). The card deliberately mirrors the MCP
-    outputSchema (DESIGN.md, registry.output_schema()); this test pins that
-    so the divergence from the A2A wire shape isn't mistaken for a bug."""
+async def test_rt004_agent_card_omits_output_schema_mcp_keeps_it(sc_c7_client):
+    """RT-004 (rewritten, GH-219): the agent card no longer repeats each
+    skill's outputSchema; MCP tools/list is the one place that carries it,
+    including the MarketBriefing object wrapper (GH-105).
+    Ruling: https://github.com/wailuen/a2a-sdk/issues/219#issuecomment-6345507008"""
     card_r = await sc_c7_client.get("/.well-known/agent-card.json")
     assert card_r.status_code == 200, card_r.text
     card = card_r.json()
     briefing_skill = next((s for s in card["skills"] if s["id"] == "briefing_tool"), None)
     assert briefing_skill is not None, "briefing_tool skill not found in agent card"
-    output_schema = briefing_skill["x-sdk"].get("outputSchema")
-    assert output_schema == {
-        "type": "object",
-        "properties": {"markdown": {"type": "string"}},
-        "required": ["markdown"],
-    }, (
-        f"agent card x-sdk.outputSchema for MarketBriefing-emitting tool must mirror "
-        f"the MCP object schema wrapping 'markdown', got: {output_schema!r}"
-    )
+    assert "outputSchema" not in briefing_skill["x-sdk"]
+    assert "inputSchema" in briefing_skill["x-sdk"]
 
-
-async def test_rt001_agent_card_flags_market_briefing_wire_divergence(sc_c7_client):
-    """RT-001 (agent_card.py): a MarketBriefing-emitting skill's x-sdk block
-    must carry an explicit sibling note (outside outputSchema itself, so
-    RT-004's exact-match pin is untouched) telling strict consumers the A2A
-    DataPart wire value is a bare markdown string, not the advertised
-    outputSchema object shape — so they don't schema-validate the DataPart
-    against outputSchema and get a false mismatch."""
-    card_r = await sc_c7_client.get("/.well-known/agent-card.json")
-    assert card_r.status_code == 200, card_r.text
-    card = card_r.json()
-    briefing_skill = next((s for s in card["skills"] if s["id"] == "briefing_tool"), None)
-    assert briefing_skill is not None, "briefing_tool skill not found in agent card"
-    x_sdk = briefing_skill["x-sdk"]
-    note = x_sdk.get("outputSchemaWireNote")
-    assert isinstance(note, str) and note, (
-        "x-sdk.outputSchemaWireNote must be a non-empty string for a "
-        f"MarketBriefing-emitting skill, got: {note!r}"
+    headers = await _mcp_init(sc_c7_client)
+    r_list = await sc_c7_client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        headers=headers,
     )
-    assert "markdown" in note.lower() and "outputschema" in note.lower(), (
-        f"outputSchemaWireNote must mention the bare-markdown DataPart wire "
-        f"value diverging from outputSchema, got: {note!r}"
-    )
-    # RT-004 pin must remain untouched: the note lives beside outputSchema,
-    # never inside it.
-    assert x_sdk["outputSchema"] == {
+    tools = r_list.json()["result"]["tools"]
+    briefing = next(t for t in tools if t["name"] == "briefing_tool")
+    assert briefing["outputSchema"] == {
         "type": "object",
         "properties": {"markdown": {"type": "string"}},
         "required": ["markdown"],
     }
+
+
+async def test_rt001_agent_card_has_no_wire_note(sc_c7_client):
+    """RT-001 (rewritten, GH-219): with outputSchema gone from the card, the
+    outputSchemaWireNote that guarded it is gone too.
+    Ruling: https://github.com/wailuen/a2a-sdk/issues/219#issuecomment-6345507008"""
+    card = (await sc_c7_client.get("/.well-known/agent-card.json")).json()
+    briefing_skill = next(s for s in card["skills"] if s["id"] == "briefing_tool")
+    assert "outputSchemaWireNote" not in briefing_skill["x-sdk"]
 
 
 # ---------------------------------------------------------------------------

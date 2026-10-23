@@ -270,6 +270,24 @@ raising it reintroduces per-process isolation and is unsupported.
   tokens take effect at once on every replica. Only in-memory access tokens (at most
   1 hour) and MCP sessions stay valid on the other replicas until they expire or restart.
 
+## Behind a TLS gateway (GH-218)
+
+Uvicorn only trusts forwarded headers (`X-Forwarded-For`, `X-Forwarded-Proto`)
+from `127.0.0.1` by default. Behind a gateway on another address, the SDK sees
+the gateway as the client. To fix that, set uvicorn's `FORWARDED_ALLOW_IPS`
+environment variable to the gateway's address range, for example
+`FORWARDED_ALLOW_IPS=10.0.0.0/16`. Use the same values as
+`AGENT_SDK_TRUSTED_PROXIES`, so uvicorn and the rate limiter agree on who the
+gateway is (see [Rate limiting and proxies](security.md#rate-limiting-and-proxies)).
+
+Never set `FORWARDED_ALLOW_IPS='*'` (or `--forwarded-allow-ips='*'`). It makes
+uvicorn believe forwarded headers from any caller, so a client can forge its
+own address. That defeats the `AGENT_SDK_TRUSTED_PROXIES` trust model and lets
+a client dodge the per-IP rate limit.
+
+Note: `/mcp/` (trailing slash) is already served without a redirect, so no
+gateway setting is needed for it.
+
 ## Key rotation
 
 `python -m agent_sdk rotate-master-key` — offline only (refuses while

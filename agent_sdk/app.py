@@ -592,6 +592,12 @@ class Agent:
         allowed_components = settings.a2ui_allowed_components
         self._validate_emits(registry, allowed_components=allowed_components)
 
+        if not settings.agent_description.strip():
+            logger.warning(
+                "AGENT_DESCRIPTION is blank — the agent card falls back to the display name. "
+                "Set AGENT_DESCRIPTION to say what this agent does.",
+            )
+
         for entry in registry.all():
             if not entry.decl.tags:
                 logger.warning(

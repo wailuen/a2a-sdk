@@ -10,6 +10,7 @@ tools = ToolSet()
 
 @tools.tool(
     tier=1,                      # 1 = query (A2A + MCP), 2 = composite (A2A only)
+    tags=["prices", "equities"], # card discovery tags (no default; empty tags log a warning)
     emits=TimeSeriesChart,       # structured artifact type (optional)
     sample={"symbol": "AAPL"},   # console "Try" sample (optional)
 )
@@ -52,6 +53,34 @@ To accept extra keys, set `model_config = ConfigDict(extra="allow")` on the
 input model, or pass `allow_extra_args=True` to `@tools.tool(...)`. Both make
 the schema advertise `additionalProperties: true`. The SDK never edits your
 model class.
+
+## "ID A or ID B" inputs
+
+To say that a caller must give at least one of two fields, make both fields
+optional and add an `anyOf` of `required` lists through `json_schema_extra`.
+The keyword goes unchanged into the schema the model sees and into MCP
+`tools/list` (the SDK does not strip or enforce it):
+
+```python
+class LookupInput(BaseModel):
+    model_config = {
+        "json_schema_extra": {"anyOf": [{"required": ["a"]}, {"required": ["b"]}]}
+    }
+
+    a: str | None = Field(default=None, description="ID A. Give A or B (at least one).")
+    b: str | None = Field(default=None, description="ID B. Give A or B (at least one).")
+```
+
+Also say the rule in the field descriptions, and check it inside the tool (or
+in a pydantic `model_validator`) so the model gets a clear error when it
+ignores the schema.
+
+Caution: some model APIs reject a top-level `anyOf`, `oneOf` or `allOf` in a
+tool's input schema. If a model or MCP client you target does this, drop the
+`json_schema_extra` and rely on the descriptions plus the validator.
+
+`tools/list` drops pydantic's auto-generated `title` keys from tool schemas;
+a field you name `title` is kept.
 
 ## MCP annotations
 

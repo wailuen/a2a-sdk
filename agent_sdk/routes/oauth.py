@@ -46,7 +46,7 @@ import logging
 import re
 import secrets
 from typing import Any
-from urllib.parse import ParseResult, parse_qsl, urlencode, urlparse
+from urllib.parse import ParseResult, parse_qsl, unquote_plus, urlencode, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -211,7 +211,7 @@ async def oauth_authorization_server(request: Request) -> Response:
             "response_types_supported": ["code"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
             "code_challenge_methods_supported": ["S256"],
-            "token_endpoint_auth_methods_supported": ["none"],
+            "token_endpoint_auth_methods_supported": list(_AUTH_METHODS),
             "scopes_supported": [],
             "resource_indicators_supported": True,
         },
@@ -323,14 +323,21 @@ def _valid_redirect_uri(uri: str) -> bool:
     return _validated_origin(parsed) is not None
 
 
+_AUTH_METHODS = ("none", "client_secret_post", "client_secret_basic")
+
+
 def _too_large() -> HTTPException:
     return HTTPException(status_code=413, detail="request body too large")
 
 
 @router.post("/oauth/register", dependencies=[Depends(unauth_rate_limit)])
 async def oauth_register(request: Request) -> JSONResponse:
-    """Unauthenticated DCR (rate-limited per §6). Public clients only —
-    ``token_endpoint_auth_method: "none"`` + PKCE; no client secrets exist."""
+    """Unauthenticated DCR (rate-limited per §6). ``token_endpoint_auth_method``
+    ∈ {none (default), client_secret_post, client_secret_basic}; PKCE S256 is
+    mandatory for all. A confidential registration returns ``client_secret``
+    exactly once (only its sha256 is stored). Open-DCR secrets are a
+    compatibility measure, not a trust boundary — consent at /authorize is
+    the real gate (GH-222)."""
 
     def _reg_error(code: str, description: str) -> JSONResponse:
         # RFC 7591 §3.2.2 error shape; never echoes the offending value.
@@ -370,9 +377,21 @@ async def oauth_register(request: Request) -> JSONResponse:
         ):
             return _reg_error("invalid_client_metadata", "client_name is invalid")
 
+    method = body.get("token_endpoint_auth_method")
+    if method is None:
+        method = "none"
+    if not isinstance(method, str) or method not in _AUTH_METHODS:
+        return _reg_error(
+            "invalid_client_metadata", "unsupported token_endpoint_auth_method"
+        )
+    client_secret = secrets.token_urlsafe(32) if method != "none" else None
+
     try:
         record = _oauth(request).register_client(
-            list(redirect_uris), client_name=client_name
+            list(redirect_uris),
+            client_name=client_name,
+            token_endpoint_auth_method=method,
+            client_secret=client_secret,
         )
     except AgentError:
         return _reg_error("invalid_client_metadata", "registration capacity reached")
@@ -383,11 +402,16 @@ async def oauth_register(request: Request) -> JSONResponse:
         "redirect_uris": record["redirect_uris"],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
-        "token_endpoint_auth_method": "none",
+        "token_endpoint_auth_method": method,
     }
     if client_name is not None:
         response["client_name"] = client_name
-    return JSONResponse(status_code=201, content=response)
+    if client_secret is not None:
+        response["client_secret"] = client_secret
+        response["client_secret_expires_at"] = 0
+    return JSONResponse(
+        status_code=201, content=response, headers={"Cache-Control": "no-store"}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -977,9 +1001,75 @@ def _token_success(pair: dict[str, Any]) -> JSONResponse:
     return JSONResponse(content=body, headers={"Cache-Control": "no-store"})
 
 
+def _invalid_client(basic: bool) -> JSONResponse:
+    headers = {"Cache-Control": "no-store"}
+    if basic:
+        headers["WWW-Authenticate"] = 'Basic realm="oauth"'
+    return JSONResponse(
+        status_code=401,
+        content={
+            "error": "invalid_client",
+            "error_description": "client authentication failed",
+        },
+        headers=headers,
+    )
+
+
+def _basic_credentials(request: Request) -> tuple[str, str] | None:
+    """``Authorization: Basic`` → (client_id, secret), each form-urldecoded
+    (RFC 6749 §2.3.1). None when absent or malformed."""
+    header = request.headers.get("authorization", "")
+    scheme, _, value = header.partition(" ")
+    if scheme.lower() != "basic" or not value.strip():
+        return None
+    try:
+        decoded = base64.b64decode(value.strip(), validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    cid, sep, secret = decoded.partition(":")
+    if not sep:
+        return None
+    return unquote_plus(cid), unquote_plus(secret)
+
+
+def _authenticate_client(
+    request: Request, form: dict[str, str], store: OAuthTokenStore
+) -> tuple[str, JSONResponse | None]:
+    """Authenticate the calling client against its STORED registration.
+
+    The required method comes from the stored record, never from the
+    request. Returns ``(client_id, error)``; an unknown client_id passes
+    through (the grant lookup rejects it) so existence is not disclosed here.
+    """
+    basic = _basic_credentials(request)
+    client_id = form.get("client_id") or (basic[0] if basic else "")
+    if basic and form.get("client_id") and basic[0] != form["client_id"]:
+        return client_id, _invalid_client(False)
+    form_secret = form.get("client_secret")
+    method = store.client_auth_method(client_id) if client_id else None
+    if method is None:
+        return client_id, None
+    if method == "none":
+        if form_secret is not None or basic is not None:
+            return client_id, _invalid_client(False)
+        return client_id, None
+    if method == "client_secret_post":
+        ok = form_secret is not None and basic is None
+        secret = form_secret
+    elif method == "client_secret_basic":
+        ok = basic is not None and form_secret is None
+        secret = basic[1] if basic else None
+    else:
+        return client_id, _invalid_client(False)
+    if not ok or not secret or not store.verify_client_secret(client_id, secret):
+        return client_id, _invalid_client(method == "client_secret_basic")
+    return client_id, None
+
+
 @router.post("/oauth/token", dependencies=[Depends(unauth_rate_limit)])
 async def oauth_token(request: Request) -> JSONResponse:
-    """Unauthenticated by design (public client + PKCE), per-IP rate-limited.
+    """No Bearer needed (PKCE; confidential clients also present their
+    registered ``client_secret``, GH-222), per-IP rate-limited.
     ``resource`` is NOT required here — the audience bound at authorize rides
     the code metadata and survives refresh rotation (§5.5)."""
     store = _oauth(request)
@@ -990,9 +1080,13 @@ async def oauth_token(request: Request) -> JSONResponse:
 
     grant_type = form.get("grant_type")
 
+    if grant_type in ("authorization_code", "refresh_token"):
+        client_id, auth_error = _authenticate_client(request, form, store)
+        if auth_error is not None:
+            return auth_error
+
     if grant_type == "authorization_code":
         code = form.get("code", "")
-        client_id = form.get("client_id", "")
         redirect_uri = form.get("redirect_uri", "")
         code_verifier = form.get("code_verifier", "")
         if not (code and client_id and redirect_uri and code_verifier):
@@ -1019,7 +1113,6 @@ async def oauth_token(request: Request) -> JSONResponse:
 
     if grant_type == "refresh_token":
         refresh_token = form.get("refresh_token", "")
-        client_id = form.get("client_id", "")
         if not (refresh_token and client_id):
             return _token_error("invalid_request", "missing required parameter")
         pair2 = store.rotate_refresh(refresh_token, client_id=client_id)
@@ -1046,7 +1139,8 @@ async def oauth_revoke(request: Request) -> JSONResponse:
     """RFC 7009 revocation — authenticated and public-client paths.
     admin api_key callers may revoke any token; oauth-kind, user and service
     callers self-revoke (silent no-op for tokens they do not own);
-    public clients (no Bearer) authenticate via client_id in the body.
+    clients (no Bearer) authenticate via client_id in the body — public
+    clients by client_id alone, confidential ones with their secret.
     Always 200 for a well-formed request — existence never disclosed."""
     runtime = _runtime(request)
     store = _oauth(request)
@@ -1078,8 +1172,11 @@ async def oauth_revoke(request: Request) -> JSONResponse:
             )
         store.revoke_by_value(token, caller=identity)
         return JSONResponse(content={})
-    # No Bearer — try public-client path: client_id in body.
-    client_id = form.get("client_id", "")
+    # No Bearer — client path: client_id in body (or Basic); confidential
+    # clients must authenticate with their secret (RFC 7009 §2.1).
+    client_id, auth_error = _authenticate_client(request, form, store)
+    if auth_error is not None:
+        return auth_error  # type: ignore[return-value]
     if not client_id:
         raise HTTPException(
             status_code=401,

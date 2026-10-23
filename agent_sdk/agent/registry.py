@@ -767,10 +767,9 @@ class ToolEntry:
         string) — but MCP 2025-06-18 requires Tool.outputSchema to always be
         a JSON object (GH-105), so the markdown is wrapped in an object
         under a "markdown" key rather than advertised as {"type": "string"}.
-        This method backs both advertisement surfaces — MCP's tools/list
-        outputSchema and the agent card's x-sdk.outputSchema (agent_card.py,
-        RT-004) — so the object-wrapper appears in both. Only the A2A
-        DataPart wire itself (translator.py) stays a bare markdown string.
+        This method backs MCP's tools/list outputSchema only (the agent card
+        no longer repeats it, GH-219). The A2A DataPart wire itself
+        (translator.py) stays a bare markdown string.
         """
         from ..models.content_types import MarketBriefing
 

@@ -1316,11 +1316,11 @@ async def run_loop(
         # repaired its transcript — stop before folding another assistant
         # turn onto the list it is now the sole author of. See ``sealed``.
         if is_sealed():
-            yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR)
+            yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR, code="internal")
             return
         if deadline.exceeded():
             bridge_trailing_user(messages)
-            yield DoneEvent(ok=False, error="task deadline exceeded")
+            yield DoneEvent(ok=False, error="task deadline exceeded", code="timeout")
             return
         if total_tokens > policies.token_budget:
             summary_tokens = _summary_max_tokens(policies)
@@ -1339,11 +1339,12 @@ async def run_loop(
                     summary = ev.text
                 yield ev
             if is_sealed():
-                yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR)
+                yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR, code="internal")
                 return
             yield DoneEvent(
                 ok=False,
                 error="task token budget exceeded",
+                code="budget",
                 summary=summary or None,
             )
             return
@@ -1359,7 +1360,7 @@ async def run_loop(
             )
         except AgentError as err:
             bridge_trailing_user(messages)
-            yield DoneEvent(ok=False, error=err.message)
+            yield DoneEvent(ok=False, error=err.message, code=err.category.value)
             return
 
         # RT-006 (debug round 4 follow-up): ``await model.converse(...)``
@@ -1375,7 +1376,7 @@ async def run_loop(
         # transcript with no answering toolResult, GH-150's exact failure
         # shape.
         if is_sealed():
-            yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR)
+            yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR, code="internal")
             return
 
         total_tokens += response.input_tokens + response.output_tokens
@@ -1420,7 +1421,7 @@ async def run_loop(
                         total_tokens += ev.input_tokens + ev.output_tokens
                     yield ev
                 if is_sealed():
-                    yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR)
+                    yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR, code="internal")
                     return
             else:
                 bridge_trailing_user(messages)
@@ -1883,7 +1884,7 @@ async def run_loop(
         # runtime-only turn state, never serialised).
         if is_sealed():
             result_blocks.clear()
-            yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR)
+            yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR, code="internal")
             return
         # RT-B-001: commit a COPY — ``result_blocks`` may be the caller's
         # ``pending_results`` list, which is cleared below (and at the next
@@ -1895,7 +1896,7 @@ async def run_loop(
 
     if deadline.exceeded():
         bridge_trailing_user(messages)
-        yield DoneEvent(ok=False, error="task deadline exceeded")
+        yield DoneEvent(ok=False, error="task deadline exceeded", code="timeout")
         return
     turns_summary_tokens = _summary_max_tokens(policies)
     summary = ""
@@ -1913,10 +1914,11 @@ async def run_loop(
             summary = ev.text
         yield ev
     if is_sealed():
-        yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR)
+        yield DoneEvent(ok=False, error=_SEALED_TRANSCRIPT_ERROR, code="internal")
         return
     yield DoneEvent(
         ok=False,
         error=f"max turns ({policies.max_turns}) exceeded",
+        code="budget",
         summary=summary or None,
     )

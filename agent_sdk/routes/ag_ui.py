@@ -45,6 +45,7 @@ from ..common import sse as _sse
 from ..common.sse import HEARTBEAT, SSE_HEADERS, sse_data
 from ..credentials import forwarding
 from ..models.content_types import ContentModel, MarketBriefing
+from ..models.a2a import TERMINAL_STATES
 from ..tasks.store import StreamTerminated, TaskRecord
 # RT-002: POST /ag-ui/run is the THIRD authenticated, indefinitely-held
 # text/event-stream on the same single-process connection pool, and it
@@ -54,6 +55,7 @@ from ..tasks.store import StreamTerminated, TaskRecord
 # across GET /mcp and GET /mcp/sse: capping one transport is trivially
 # bypassed by calling the other.
 from .a2a import _admit as _admit_stream
+from .a2a import cancel_task_record
 from ..agent.events import (
     ArtifactEvent,
     DoneEvent,
@@ -273,15 +275,17 @@ class _RunMapper:
             "threadId": self.thread_id,
             "runId": self.run_id,
         }
-        if outcome is not None:
-            frame["outcome"] = outcome
+        frame["outcome"] = outcome if outcome is not None else {"type": "success"}
         frames.append(frame)
         self.terminal_sent = True
         return frames
 
-    def run_error(self, message: str) -> list[dict[str, Any]]:
+    def run_error(self, message: str, code: str | None = None) -> list[dict[str, Any]]:
         frames = self._close_step()
-        frames.append({"type": "RUN_ERROR", "message": message})
+        frame: dict[str, Any] = {"type": "RUN_ERROR", "message": message}
+        if code is not None:
+            frame["code"] = code
+        frames.append(frame)
         self.terminal_sent = True
         return frames
 
@@ -486,7 +490,8 @@ class _RunMapper:
             if event.ok:
                 return self.run_finished()
             return self.run_error(
-                str(event.error) if event.error is not None else "run failed"
+                str(event.error) if event.error is not None else "run failed",
+                event.code or "internal",
             )
 
         # UsageEvent, AuditEvent (RT-009: internal audit records must never
@@ -671,9 +676,26 @@ async def ag_ui_run(
                 )
                 # the bad frame may itself have been the terminal one
                 mapper.terminal_sent = False
-                out.extend(sse_data(f) for f in mapper.run_error(what))
+                out.extend(sse_data(f) for f in mapper.run_error(what, "internal"))
                 break
         return b"".join(out)
+
+    owned: list[TaskRecord] = []
+
+    def _cancel_if_unfinished() -> None:
+        # GH-217: a run whose stream ends before its terminal frame (client
+        # disconnect or cancellation) is cancelled; a run parked on an
+        # interrupt already sent its terminal RUN_FINISHED and is left alone.
+        if mapper.terminal_sent or not owned:
+            return
+        run_record = owned.pop()
+        if run_record.task.status.state in TERMINAL_STATES:
+            return
+        cancel_task_record(run_record, store)
+
+    async def _finish() -> None:
+        _cancel_if_unfinished()
+        await slot.release()
 
     async def _run() -> AsyncIterator[bytes]:
         # Transport-level rejections (Origin 403, Content-Type 415, body
@@ -699,24 +721,24 @@ async def ag_ui_run(
         record: TaskRecord | None = None
         try:
             if parsed_body is None:
-                yield _emit(mapper.run_error("malformed RunAgentInput body"))
+                yield _emit(mapper.run_error("malformed RunAgentInput body", "validation"))
                 return
             if (problem := _validate(body)) is not None:
-                yield _emit(mapper.run_error(problem))
+                yield _emit(mapper.run_error(problem, "validation"))
                 return
 
             resume_raw = body.get("resume")
             resume = resume_raw if isinstance(resume_raw, list) else []
             if resume:
                 if not isinstance(resume[0], dict):
-                    yield _emit(mapper.run_error("invalid resume entry"))
+                    yield _emit(mapper.run_error("invalid resume entry", "validation"))
                     return
                 entry = resume[0]
                 # accept both casings; emit camelCase (interruptId) ourselves
                 interrupt_id = _resume_interrupt_id(body)
                 record = store.find_interrupt(interrupt_id, identity)
                 if record is None:
-                    yield _emit(mapper.run_error("unknown or expired interrupt"))
+                    yield _emit(mapper.run_error("unknown or expired interrupt", "not_found"))
                     return
                 # RT-001 (round 6): subscribe THROUGH the admission slot, never
                 # against the store directly. That is what registers this task
@@ -734,15 +756,16 @@ async def ag_ui_run(
                     ),
                 )
                 if not delivered:
-                    yield _emit(mapper.run_error("interrupt is no longer resumable"))
+                    yield _emit(mapper.run_error("interrupt is no longer resumable", "not_found"))
                     return
+                owned.append(record)
             else:
                 folded = _fold_history(
                     body.get("messages") or [],
                     request.app.state.settings.agui_max_message_chars,
                 )
                 if folded is None:
-                    yield _emit(mapper.run_error("no user message in input"))
+                    yield _emit(mapper.run_error("no user message in input", "validation"))
                     return
                 task = new_task(thread_id)
                 record = store.create(task, identity)
@@ -774,6 +797,7 @@ async def ag_ui_run(
                     extra_resolved_messages=prior,
                     user_timezone=_user_timezone(body),
                 )
+                owned.append(record)
 
             while not mapper.terminal_sent:
                 try:
@@ -805,13 +829,13 @@ async def ag_ui_run(
                 frame_locations(exc),
             )
             if not mapper.terminal_sent:
-                yield _emit(mapper.run_error("internal error"))
+                yield _emit(mapper.run_error("internal error", "internal"))
         finally:
             if sub is not None and record is not None:
                 store.unsubscribe(record.task.id, sub)
 
         if not mapper.terminal_sent:
-            yield _emit(mapper.run_error("stream ended unexpectedly"))
+            yield _emit(mapper.run_error("stream ended unexpectedly", "internal"))
 
     async def stream() -> AsyncIterator[bytes]:
         # RT-002: release the admission slot however the run ends. Layered
@@ -824,11 +848,12 @@ async def ag_ui_run(
             async for chunk in _run():
                 yield chunk
         finally:
+            _cancel_if_unfinished()
             await slot.release()
 
     return StreamingResponse(
         stream(),
         media_type="text/event-stream",
         headers=SSE_HEADERS,
-        background=BackgroundTask(slot.release),
+        background=BackgroundTask(_finish),
     )

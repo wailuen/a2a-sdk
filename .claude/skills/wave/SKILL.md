@@ -68,6 +68,13 @@ For each wave whose `Depends:` items are all in `completed/`:
    `args.agentBudget` (optional, default `150`) overrides the hard agent-call
    ceiling described in the Phase Redteam bullet below — e.g.
    `args: { waveFile, today, agentBudget: 300 }`.
+   `args.autoFileSdkIssues` (optional boolean, default `false`) turns on auto-filing at
+   codify: each SDK candidate is re-checked against the final tree and tagged
+   `Status: fixed-in-wave | still-open` in `workspace/sdk-candidates.md`; only `still-open`
+   ones are filed on `wailuen/a2a-sdk` (deduped, at most 10, credential-redacted, `-R` on
+   every `gh` call, title and body from classified fields only). The issue URL is written
+   back to the file. If `gh` is missing or unauthenticated the candidates stay in the file
+   and the wave still finishes. Default `false` files nothing; use `/sdk-issue-scan`.
 
    The workflow runs 8 phases for this wave:
    - **Parse** — reads wave file; extracts groups, creates paths, `groupDeps` map, and LRN baseline.
@@ -158,3 +165,12 @@ Steps:
 - **`/implement`** runs all waves autonomously via model-driven `Agent` calls
   (trades Workflow-visible fan-out for fully-unattended end-to-end execution).
 - **`/redteam`** can be run standalone at any point between waves.
+
+## HUMAN GATE marker
+
+A todo that needs a human decision before it runs carries an explicit marker line
+`- HUMAN GATE: <reason>`. The wave runner holds that todo's group (it is not
+dispatched, its dependents are pruned, and archive is blocked) until the todo also has
+a release line `- Release: https://github.com/<org>/<repo>/issues/<n>` citing the
+GitHub issue that records the approval. Record the approval in the issue first, then
+add the line. Free text such as `Status: NOT DONE` does not gate.

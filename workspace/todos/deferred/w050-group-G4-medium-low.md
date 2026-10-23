@@ -12,6 +12,7 @@ round is folded in. The IDs below are renumbered for this note; they do not matc
 ## Findings
 
 ### RT-001
+- status: card half closed by GH-219 (the agent card no longer carries `x-sdk.outputSchema`, so it cannot drift); the MCP `tools/list` outputSchema half stays open.
 - severity: medium
 - file: agent_sdk/models/content_types.py
 - description: Raised in two rounds. The GH-177 remap is a model-wide `@model_serializer(mode='wrap')` on DocumentItem (around lines 1430-1442). It runs on every serialization, not just wire(). Verified: `DocumentItem(web_url='u', last_modified='d').model_dump()` has no web_url/last_modified, so `DocumentItem.model_validate(doc.model_dump()).last_modified is None`. model_dump() in python mode and model_dump_json() both lose the fields, although the ruling kept them on the model because a downstream agent reads last_modified. Also: `model_dump(exclude={'link'})` still emits 'link' because the serializer adds it back, and `DocumentList.model_json_schema(mode='serialization')` collapses DocumentItem to `{'type':'object','additionalProperties':true}` because the serializer is annotated `-> dict[str, Any]`. The CHANGELOG says 'Both stay readable on the model' / 'the model attributes are unchanged' and does not mention that model_dump changed.

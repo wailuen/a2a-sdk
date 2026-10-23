@@ -83,8 +83,17 @@ class A2uiCapabilities:
         if not isinstance(raw, dict):
             return cls()
         tier = raw.get("tier") or "core"
-        catalogs = raw.get("catalogs")
-        if not isinstance(catalogs, list) or not catalogs:
+        nested = raw.get("v0.9")
+        candidates = [
+            raw.get("catalogs"),
+            nested.get("supportedCatalogIds") if isinstance(nested, dict) else None,
+            raw.get("supportedCatalogIds"),
+        ]
+        # GH-213: `catalogs` (SDK profile key) wins; then upstream A2UI v0.9.1
+        # client_capabilities.json `{"v0.9": {"supportedCatalogIds": [...]}}`;
+        # then the flat `supportedCatalogIds` as a lenient fallback.
+        catalogs = next((c for c in candidates if isinstance(c, list) and c), None)
+        if catalogs is None:
             catalogs = [CATALOG_ID]
         return cls(tier=str(tier), catalogs=[str(c) for c in catalogs])
 

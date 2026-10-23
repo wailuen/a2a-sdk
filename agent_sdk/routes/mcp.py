@@ -110,13 +110,16 @@ from ..common.admission import (
 )
 from ..common.json_strict import dumps_strict, loads_strict
 from ..common.origin import guard_origin
-from ..common.redact import frame_locations
+from ..common.redact import TITLE_TEXT_MAX_LEN, frame_locations, safe_line_text, sanitize_text
 from ..common.sse import HEARTBEAT, SSE_HEADERS
 from ..agent.loop import ToolInterrupt, resolve_tool_timeout, safe_validation_message
 from ..agent.registry import ToolInputValidationError
 from ..credentials import forwarding
 from ..models.content_types import ContentModel, MarketBriefing
 from ..models.errors import AgentError
+
+MCP_INTERRUPT_SUFFIX = "This action needs user input that this connection cannot collect."
+_MCP_INTERRUPT_FALLBACK = "tool requires interactive confirmation, unsupported over MCP."
 
 logger = logging.getLogger(__name__)
 
@@ -465,8 +468,8 @@ async def _dispatch(app: Any, message: dict[str, Any]) -> dict[str, Any] | None:
             result = await _handle_tools_call(app, params)
             if isinstance(result, dict) and "__jrpc_error__" in result:
                 return _error(request_id, _INVALID_PARAMS, result["__jrpc_error__"])
-            if isinstance(result, dict) and "__jrpc_not_found__" in result:
-                return _error(request_id, _METHOD_NOT_FOUND, result["__jrpc_not_found__"])
+            if isinstance(result, dict) and "__jrpc_unknown_tool__" in result:
+                return _error(request_id, _INVALID_PARAMS, result["__jrpc_unknown_tool__"])
             return _result(request_id, result)
         # SI-2: never reflect user-supplied method name in error text.
         return _error(request_id, _METHOD_NOT_FOUND, "method not found")
@@ -555,6 +558,32 @@ def _encode_cursor(offset: int) -> str:
     return base64.b64encode(str(offset).encode()).decode()
 
 
+_SCHEMA_MAPS = ("properties", "$defs", "definitions", "patternProperties")
+_SCHEMA_NODES = ("items", "additionalProperties", "not", "if", "then", "else", "contains", "propertyNames")
+_SCHEMA_LISTS = ("anyOf", "oneOf", "allOf", "prefixItems")
+
+
+def _strip_titles(node: Any) -> Any:
+    """GH-221: copy of a JSON Schema without pydantic's auto-generated
+    ``title`` keys. Only schema positions are walked, so a property *named*
+    ``title`` and data keywords (``default``, ``enum``, ``examples``) survive."""
+    if not isinstance(node, dict):
+        return node
+    out: dict[str, Any] = {}
+    for key, value in node.items():
+        if key == "title" and isinstance(value, str):
+            continue
+        if key in _SCHEMA_MAPS and isinstance(value, dict):
+            out[key] = {k: _strip_titles(v) for k, v in value.items()}
+        elif key in _SCHEMA_NODES:
+            out[key] = _strip_titles(value)
+        elif key in _SCHEMA_LISTS and isinstance(value, list):
+            out[key] = [_strip_titles(v) for v in value]
+        else:
+            out[key] = value
+    return out
+
+
 def _handle_tools_list(app: Any, params: dict[str, Any] | None = None) -> dict[str, Any]:
     """Tier 1 only (§5.6). ``outputSchema`` appears ONLY when the tool
     declares ``emits`` — structuredContent is never emitted unclaimed.
@@ -572,13 +601,13 @@ def _handle_tools_list(app: Any, params: dict[str, Any] | None = None) -> dict[s
         tool: dict[str, Any] = {
             "name": entry.name,
             "description": entry.description,
-            "inputSchema": entry.input_schema(),
+            "inputSchema": _strip_titles(entry.input_schema()),
         }
         if entry.title:
             tool["title"] = entry.title
         output_schema = entry.output_schema()
         if output_schema is not None:
-            tool["outputSchema"] = output_schema
+            tool["outputSchema"] = _strip_titles(output_schema)
         if entry.annotations:
             tool["annotations"] = entry.annotations
         tools.append(tool)
@@ -611,8 +640,8 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
     """Validate → invoke → fold. Protocol-shape faults surface via sentinels:
     - ``__jrpc_error__``: invalid-params (-32602) — missing/non-string name,
       non-dict arguments.
-    - ``__jrpc_not_found__``: method-not-found (-32601) — unknown tool name
-      (Tier 2 tools are indistinguishable from unknown on this surface, §5.6).
+    - ``__jrpc_unknown_tool__``: invalid-params (-32602, per the MCP spec) —
+      unknown tool name (Tier 2 tools are indistinguishable from unknown on this surface, §5.6).
     Anything raised INSIDE the tool — AgentError or otherwise — is an
     ``isError: true`` RESULT, never a JSON-RPC error (§5.5)."""
     name = params.get("name")
@@ -629,7 +658,7 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
     # surface (§5.6 — MCP exposes Tier 1 only).
     if entry is None or entry.tier != 1:
         # SI-2: never reflect user-supplied tool name in error text.
-        return {"__jrpc_not_found__": "tool not found"}
+        return {"__jrpc_unknown_tool__": "tool not found"}
 
     timeout = resolve_tool_timeout(name, entry, app.state.loop_policies)
     try:
@@ -644,20 +673,18 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
         # repr, including the raw handle coroutine object, must never reach
         # the wire, and the handle must never be silently dropped unawaited).
         artifact = await entry.invoke_any(arguments, app.state.adapters, timeout=timeout)
-    except ToolInterrupt:
-        # RT-001: mirror agent/loop.py's dedicated ToolInterrupt branches
-        # (lines 474/498) rather than falling through to the generic
-        # Exception fallback below. MCP has no HITL/resume channel (no
-        # wait_resume equivalent) to service the interrupt, so surface a
-        # distinct, diagnosable isError instead of an opaque generic failure.
-        logger.warning("mcp tool interrupt tool=%s", name)
+    except ToolInterrupt as interrupt:
+        # RT-001: MCP has no HITL/resume channel, so surface a distinct,
+        # diagnosable isError. GH-204: show the tool-authored message (already
+        # on the wire over A2A/AG-UI) sanitized and capped, then the fixed
+        # marker suffix so the cap never cuts it. Log the reason only (SI-2).
+        logger.warning(
+            "mcp tool interrupt tool=%s reason=%s", name, sanitize_text(interrupt.reason)
+        )
+        message = safe_line_text(str(interrupt.message), max_len=TITLE_TEXT_MAX_LEN)
+        lead = message or _MCP_INTERRUPT_FALLBACK
         return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": "tool requires interactive confirmation, unsupported over MCP",
-                }
-            ],
+            "content": [{"type": "text", "text": f"{lead} {MCP_INTERRUPT_SUFFIX}"}],
             "isError": True,
         }
     except AgentError as exc:
@@ -804,6 +831,16 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
+def _is_jsonrpc_response(message: dict[str, Any]) -> bool:
+    """id + result|error and no method: a client replying to a server request."""
+    return (
+        "method" not in message
+        and message.get("id") is not None
+        and ("result" in message or "error" in message)
+    )
+
+
+@router.post("/", include_in_schema=False)
 @router.post("")
 async def mcp_post(
     request: Request, identity: Identity = Depends(require_identity)
@@ -898,6 +935,9 @@ async def mcp_post(
                 fallback = rec[2]
         base_headers = {_PROTOCOL_VERSION_HEADER: fallback}
 
+    if _is_jsonrpc_response(message):
+        return Response(status_code=202, headers=base_headers)
+
     # Per-call forwarded credentials are request-scoped: bind around dispatch
     # (synchronous, same task as the tool invoke) and unbind in finally.
     token = forwarding.bind(forwarding.parse_header(request.headers.get(forwarding.HEADER_NAME)))
@@ -942,6 +982,7 @@ async def mcp_post(
     return JSONResponse(content=response, headers=headers)
 
 
+@router.get("/", response_model=None, include_in_schema=False)
 @router.get("", response_model=None)
 async def mcp_get(
     request: Request, identity: Identity = Depends(require_identity)
@@ -964,6 +1005,25 @@ async def mcp_get(
             content={"error": "unsupported MCP-Protocol-Version"},
             headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
         )
+
+    # GH-221: same Mcp-Session-Id checks as mcp_post. Static bodies (SI-2); an
+    # other-owner session is indistinguishable from an unknown one (SI-5).
+    presented_session = request.headers.get(_SESSION_ID_HEADER)
+    if presented_session is not None:
+        if len(presented_session) > 64:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "invalid session id"},
+                headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
+            )
+        sessions = _sessions(request.app)
+        _prune_sessions(sessions)
+        if not _session_alive(sessions, presented_session, _identity_key(identity)):
+            return JSONResponse(
+                status_code=404,
+                content={"error": "session not found"},
+                headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
+            )
 
     # GH-143: cap concurrent open heartbeat streams — global cap first (bounds
     # total process load, shared with mcp_sse below), then per-identity cap
@@ -1044,6 +1104,7 @@ async def mcp_get(
     )
 
 
+@router.delete("/", include_in_schema=False)
 @router.delete("")
 async def mcp_delete(
     request: Request, identity: Identity = Depends(require_identity)

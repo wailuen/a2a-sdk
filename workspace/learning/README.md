@@ -15,7 +15,7 @@ Entries ordered by LRN number.
 | LRN-009 | Anthropic model backend documented as functional but unimplemented in the SDK | [LRN-009](LRN-009-harness-skills-setup-SKILL-md.md) |
 | LRN-010 | SDK bootstrap token is emitted to stderr, not stdout; boot capture must use 2>&1 | [LRN-010](LRN-010-bootstrap-token-emitted-to-stderr.md) |
 | LRN-011 | Bootstrap token goes to stderr; agent-verify boot command must use 2>&1 | [LRN-011](LRN-011--Users-wailuen-Development-a2a-sdk-harness-skills-agent-verify-SKILL-md.md) |
-| LRN-012 | wave-cycle.js A2UI audit prompt misstated Standard Profile type counts as Core 7 + Extended 11 instead of Core 6 + Extended 8 | [LRN-012](LRN-012-harness-workflows-wave-cycle-js.md) |
+| LRN-012 | wave-cycle.js A2UI audit prompt misstated Standard Profile type counts as Core 7 + Extended 11 in... | [LRN-012](LRN-012-harness-workflows-wave-cycle-js.md) |
 | LRN-013 | AC "integration note" wording targets the Integration section, not step bodies | [LRN-013](LRN-013-harness-skills-upgrade-SKILL-md.md) |
 | LRN-014 | pytest -q tests/ bypasses addopts ignore exclusions | [LRN-014](LRN-014-pytest-explicit-path-bypasses-addopts.md) |
 | LRN-015 | MCP tools/call — emits coercion failure must return isError:True, never except:pass | [LRN-015](LRN-015-mcp-coercion-failure-must-return-iserror.md) |
@@ -50,7 +50,7 @@ Entries ordered by LRN number.
 | LRN-044 | ValidationError swallowed by catch-all loop — SI-2 requires explicit enrichment | [LRN-044](LRN-044-validationerror-swallowed-in-catch-all.md) |
 | LRN-045 | JSON parse failure must return -32700, not -32602 (invalid-params) | [LRN-045](LRN-045-json-parse-error-wrong-jsonrpc-code.md) |
 | LRN-046 | A2UI DataPart emitted unconditionally — requires X-A2A-Extensions opt-in gate | [LRN-046](LRN-046-a2ui-datapart-emitted-without-extension-optin.md) |
-| LRN-047 | Terminal re-message rule violated — _continue_from_terminal creates new task instead of returning error | [LRN-047](LRN-047-terminal-re-message-creates-task-instead-of-error.md) |
+| LRN-047 | Terminal re-message rule violated — _continue_from_terminal creates new task instead of returning... | [LRN-047](LRN-047-terminal-re-message-creates-task-instead-of-error.md) |
 | LRN-048 | Inbound Message mutated with server-assigned taskId/contextId before archiving in history | [LRN-048](LRN-048-inbound-message-contextid-mutation-in-history.md) |
 | LRN-049 | AG-UI CUSTOM events wrongly gated on catalog membership — must emit freely | [LRN-049](LRN-049-agui-custom-emit-freely-catalog-gate-wrong.md) |
 | LRN-050 | CLAUDE.md/gitignore consistency gap | [LRN-050](LRN-050-claudemd-gitignore-consistency-gap.md) |
@@ -77,7 +77,7 @@ Entries ordered by LRN number.
 | LRN-071 | template/ is a peer repo — wave todos must commit+push to wailuen/a2a-agent-template, not to a2a-sdk | [LRN-071](LRN-071-template-is-peer-repo-not-submodule.md) |
 | LRN-072 | git add on a directory containing .git creates a gitlink (mode 160000), not file tracking | [LRN-072](LRN-072-git-add-nested-repo-creates-gitlink-not-files.md) |
 | LRN-073 | Scenario runner filter(Boolean) turns crashed agents into silent pass-rate inflation | [LRN-073](LRN-073-acceptance-filter-boolean-nan-denominator.md) |
-| LRN-074 | inspect.get_annotations collapses explicit `-> None` and missing annotation to the same value | [LRN-074](LRN-074-inspect-get-annotations-none-ambiguity.md) |
+| LRN-074 | inspect.get_annotations collapses explicit -> None and missing annotation to the same value | [LRN-074](LRN-074-inspect-get-annotations-none-ambiguity.md) |
 | LRN-075 | Harness workflow fixes don't propagate to template peer repo | [LRN-075](LRN-075-harness-workflow-template-sync-gap.md) |
 | LRN-076 | Wave redteam fix loop must invoke debug agent unconditionally at round 4+ — not only on stall | [LRN-076](LRN-076-redteam-loop-must-call-debug-at-round-4.md) |
 | LRN-077 | Wire-up fixes in build_app() need their own integration test at the app.state seam | [LRN-077](LRN-077-build-app-wire-up-needs-integration-test.md) |
@@ -88,13 +88,13 @@ Entries ordered by LRN number.
 | LRN-082 | A2A probes using only mimeType miss ContentModel DataPart content-type signals | [LRN-082](LRN-082-probe-mimeType-only-content-signal.md) |
 | LRN-083 | Reverse HTTP→A2A error map must not attribute generic 404s to TaskNotFound | [LRN-083](LRN-083-reverse-http-a2a-error-map-over-attribution.md) |
 | LRN-084 | Dependency floor too low — mocked tests hide AttributeError on permitted versions | [LRN-084](LRN-084-dependency-floor-symbol-missing.md) |
-| LRN-085 | Wave todos touching harness/workflows/*.js must list the template/.claude/workflows/ peer-repo runtime copy as a deliverable | [LRN-085](LRN-085-harness-workflow-js-must-list-template-peer-copy.md) |
+| LRN-085 | Wave todos touching harness/workflows/*.js must list the template/.claude/workflows/ peer-repo ru... | [LRN-085](LRN-085-harness-workflow-js-must-list-template-peer-copy.md) |
 | LRN-086 | Companion SKILL.md re-documents broken wire protocol after workflow fix | [LRN-086](LRN-086-skill-companion-protocol-drift.md) |
 | LRN-087 | MCP serverInfo.title conservatively gated at 2025-11-25, not 2025-06-18 where spec adds it | [LRN-087](LRN-087-mcp-serverinfo-title-conservative-gate.md) |
 | LRN-088 | Inbound client Message mutated with server-assigned IDs before history storage | [LRN-088](LRN-088-inbound-message-mutation.md) |
 | LRN-089 | MCP version gate missing initialize carve-out in legacy handler | [LRN-089](LRN-089-mcp-version-gate-missing-initialize-carveout.md) |
 | LRN-090 | Protocol route rename leaves reference binding table stale | [LRN-090](LRN-090-protocol-route-rename-reference-table-drift.md) |
-| LRN-091 | MCP serverInfo.title version gate is conservatively correct — deliberate deviation from spec baseline | [LRN-091](LRN-091-mcp-serverinfo-title-version-gate.md) |
+| LRN-091 | MCP serverInfo.title version gate is conservatively correct — deliberate deviation from spec base... | [LRN-091](LRN-091-mcp-serverinfo-title-version-gate.md) |
 | LRN-092 | OAuth token endpoint does not enforce RFC 8707 resource param | [LRN-092](LRN-092-oauth-token-endpoint-resource-param-enforcement.md) |
 | LRN-093 | AG-UI route missing Content-Type enforcement unlike A2A and MCP | [LRN-093](LRN-093-content-type-enforcement-uniformity.md) |
 | LRN-094 | Agent card advertises tools absent from MCP tools/list | [LRN-094](LRN-094-card-mcp-surface-mismatch.md) |
@@ -105,10 +105,10 @@ Entries ordered by LRN number.
 | LRN-099 | A2A REST action suffix can differ from the JSON-RPC method name | [LRN-099](LRN-099-a2a-rest-suffix-differs-from-method-name.md) |
 | LRN-100 | Budget-exhausted deferred marker must be relocated once findings are resolved | [LRN-100](LRN-100-budget-exhausted-deferred-must-be-relocated.md) |
 | LRN-101 | Agent card description must never fall back to empty string | [LRN-101](LRN-101-agent-card-description-empty-string-fallback.md) |
-| LRN-102 | TOOL_PROGRESS CUSTOM event emitted in ag_ui.py but absent from CUSTOM_EVENTS tuple, card schema, DESIGN.md... | [LRN-102](LRN-102-tool-progress-custom-event-parity-gap.md) |
+| LRN-102 | TOOL_PROGRESS CUSTOM event emitted in ag_ui.py but absent from CUSTOM_EVENTS tuple, card schema,... | [LRN-102](LRN-102-tool-progress-custom-event-parity-gap.md) |
 | LRN-103 | A2A multi-turn continuation must use contextId, not taskId, for completed tasks | [LRN-103](LRN-103-a2a-multiturn-contextid-continuation.md) |
 | LRN-104 | deferred imports in model clients must not be silently caught by bare except Exception | [LRN-104](LRN-104-deferred-import-silent-wrap.md) |
-| LRN-105 | bare "except Exception" in model client invoke paths swallows distinct error categories (e.g.... | [LRN-105](LRN-105-broad-except-swallows-error-category.md) |
+| LRN-105 | bare "except Exception" in model client invoke paths swallows distinct error categories (e.g. Rat... | [LRN-105](LRN-105-broad-except-swallows-error-category.md) |
 | LRN-106 | caplog assertions on agent_sdk.* loggers false-green outside full-suite order | [LRN-106](LRN-106-caplog-propagate-false-order-dependent.md) |
 | LRN-107 | Fixed broken test idiom recurs uncaught in a sibling test | [LRN-107](LRN-107-duplicated-broken-test-idiom.md) |
 | LRN-108 | Unautomated documentation anchors drift silently | [LRN-108](LRN-108-unautomated-doc-anchor-drift.md) |
@@ -118,14 +118,14 @@ Entries ordered by LRN number.
 | LRN-112 | Monotonic clock value fed to datetime.fromtimestamp() as if it were epoch time | [LRN-112](LRN-112-monotonic-clock-epoch-confusion.md) |
 | LRN-113 | New abstractmethod on public ABC breaks external subclasses | [LRN-113](LRN-113-public-abc-new-abstractmethod.md) |
 | LRN-114 | Non-total content extraction crashes AG-UI SSE stream without terminal frame | [LRN-114](LRN-114-non-total-sse-validation-crash.md) |
-| LRN-115 | AG-UI _capabilities() fail-closed tier="none" default is intentional — do not "align" it to spec's tier="core | [LRN-115](LRN-115-agui-capabilities-fail-closed-tier-none-default.md) |
+| LRN-115 | AG-UI _capabilities() fail-closed tier="none" default is intentional — do not "align" it to spec'... | [LRN-115](LRN-115-agui-capabilities-fail-closed-tier-none-default.md) |
 | LRN-116 | MCP tools/call bypasses generator tool dispatch, breaking long-running Tier-1 tools | [LRN-116](LRN-116-mcp-tools-call-bypasses-generator-dispatch.md) |
 | LRN-117 | Allowlist must cover LLM system-prompt teaching surface | [LRN-117](LRN-117-allowlist-must-cover-llm-teaching-surface.md) |
 | LRN-118 | DESIGN.md MCP version-header rule stale after transport split | [LRN-118](LRN-118-protocol-doc-behavior-drift.md) |
 | LRN-119 | Mid-wave module extraction omitted from Creates: ships unimportable pkg | [LRN-119](LRN-119-mid-wave-module-extraction-untracked.md) |
 | LRN-120 | MCP tools/call folds unhandled DeferredResult via str(), leaking repr | [LRN-120](LRN-120-unhandled-deferred-result-leak.md) |
 | LRN-121 | Codified LRN Check exists as text but isn't wired into an enforced gate | [LRN-121](LRN-121-lrn-check-not-enforced-gate.md) |
-| LRN-122 | DeferredResult detection must run on every tool-result path in loop.py, not just the coroutine branch | [LRN-122](LRN-122-loop-deferred-detection-must-cover-generator-branch.md) |
+| LRN-122 | DeferredResult detection must run on every tool-result path in loop.py, not just the coroutine br... | [LRN-122](LRN-122-loop-deferred-detection-must-cover-generator-branch.md) |
 | LRN-123 | task.artifacts must be appended AFTER the wire frame serializes, not before | [LRN-123](LRN-123-artifact-append-must-follow-serialize.md) |
 | LRN-124 | Archive note describing a redteam fix must cover the full landed diff, not just its headline AC | [LRN-124](LRN-124-archive-note-must-cover-full-redteam-diff.md) |
 | LRN-125 | Terminal-artifact guard caught build/wire exceptions but not non-serializable payloads | [LRN-125](LRN-125-artifact-guard-serializability-gap.md) |
@@ -137,7 +137,7 @@ Entries ordered by LRN number.
 | LRN-131 | Cross-runner gate logic diverges when a fix lands in only one runner | [LRN-131](LRN-131-cross-runner-gate-logic-divergence.md) |
 | LRN-132 | Protocol surface classification must follow code sharing, not directory naming | [LRN-132](LRN-132-protocol-surface-classification-by-blast-radius.md) |
 | LRN-133 | Reversing a decision must supersede its learning's Check in the same wave | [LRN-133](LRN-133-learning-check-reversal-reconciliation.md) |
-| LRN-134 | A2UI-over-A2A DataPart "messages" wrapper key satisfies A2A v0.3.0 but contradicts A2UI v0.9.1's own literal binding — citation + known interop caveat | [LRN-134](LRN-134-a2ui-a2a-datapart-messages-key-not-spec-mandated.md) |
+| LRN-134 | A2UI-over-A2A DataPart "messages" wrapper key satisfies A2A v0.3.0 but contradicts A2UI v0.9.1's... | [LRN-134](LRN-134-a2ui-a2a-datapart-messages-key-not-spec-mandated.md) |
 | LRN-135 | Portable spec oracle rewritten to teach SDK-private deviation as canonical rule | [LRN-135](LRN-135-portable-oracle-encodes-deviation.md) |
 | LRN-136 | Phase Redteam duplicates Unit Redteam on single-group waves — skip when groups.length === 1 | [LRN-136](LRN-136-phase-redteam-single-group-duplicate-pass.md) |
 | LRN-137 | Wave-runner fixes land in wave-cycle.js copies but skip sibling sdk-wave.js | [LRN-137](LRN-137-cross-runner-fix-port-gap.md) |
@@ -218,7 +218,7 @@ Entries ordered by LRN number.
 | LRN-212 | Breaking CHANGELOG entry must move version/todos/register together | [LRN-212](LRN-212-release-state-artifact-desync.md) |
 | LRN-213 | Live-subscriber eviction guard was added at one call site, not as the store's invariant | [LRN-213](LRN-213-eviction-guard-fixed-one-call-site-not-the-invariant.md) |
 | LRN-214 | Catch-all logs raw ValidationError via logger.exception | [LRN-214](LRN-214-catchall-logs-validation-error-message.md) |
-| LRN-215 | Unit Redteam reviewed groups one at a time despite planner-guaranteed disjoint scope — run concurrently with a gate mutex | [LRN-215](LRN-215-unit-redteam-groups-run-concurrently.md) |
+| LRN-215 | Unit Redteam reviewed groups one at a time despite planner-guaranteed disjoint scope — run concur... | [LRN-215](LRN-215-unit-redteam-groups-run-concurrently.md) |
 | LRN-216 | Wrapper exception must not echo str(wrapped ValidationError) | [LRN-216](LRN-216-wrapper-exception-str-interpolation-leak.md) |
 | LRN-217 | Row-fabrication guard neutralised only CR/LF, missing Unicode/C0 breaks | [LRN-217](LRN-217-row-fabrication-partial-linebreak-neutralization.md) |
 | LRN-218 | Resolved-marker block skips JSON normalization, poisons message history | [LRN-218](LRN-218-unnormalized-marker-value-poisons-messages.md) |
@@ -438,3 +438,36 @@ Entries ordered by LRN number.
 | LRN-432 | Process-wide lock across store I/O starves the to_thread pool | [LRN-432](LRN-432-global-lock-starves-pool.md) |
 | LRN-433 | CHANGELOG must name every changed file and new public method | [LRN-433](LRN-433-changelog-names-every-file.md) |
 | LRN-434 | Fix-round test files and base-class changes missing from todo scope | [LRN-434](LRN-434-fix-round-test-files-unlisted.md) |
+| LRN-435 | CHANGELOG [Unreleased] missing entries for GH ids a group names in its AC | [LRN-435](LRN-435-changelog-entry-per-gh-id.md) |
+| LRN-436 | Breaking CHANGELOG bullet cites no spec clause or ruling URL | [LRN-436](LRN-436-breaking-entry-needs-citation.md) |
+| LRN-437 | Todo lists CHANGELOG.md in Creates but lands no line | [LRN-437](LRN-437-creates-changelog-unfulfilled.md) |
+| LRN-438 | New LoopEvent dataclass field inserted before existing fields | [LRN-438](LRN-438-event-field-inserted-midclass.md) |
+| LRN-439 | Disconnect-cancel hook skips the resume branch | [LRN-439](LRN-439-disconnect-cancel-misses-resume.md) |
+| LRN-440 | Every GH item needs its own CHANGELOG bullet, even additive card fields | [LRN-440](LRN-440-changelog-entry-per-gh-item.md) |
+| LRN-441 | Test file relaxed for a wire change must be declared in the todo | [LRN-441](LRN-441-relaxed-test-file-undeclared.md) |
+| LRN-442 | Verify where a foreign protocol field sits in its published schema | [LRN-442](LRN-442-foreign-protocol-field-location.md) |
+| LRN-443 | CHANGELOG Changed list must come from git diff, not headline fix | [LRN-443](LRN-443-changelog-changed-list-from-diff.md) |
+| LRN-444 | Breaking CHANGELOG bullet admitting no ruling URL blocks the wave | [LRN-444](LRN-444-breaking-bullet-needs-ruling-url.md) |
+| LRN-445 | Shared CHANGELOG hides a missing sibling GH entry | [LRN-445](LRN-445-shared-changelog-missing-sibling.md) |
+| LRN-446 | Split-out helper module missing from todo scope and CHANGELOG | [LRN-446](LRN-446-helper-module-unlisted.md) |
+| LRN-447 | JSON-Pointer setter lacks prototype-pollution guard | [LRN-447](LRN-447-jsonpointer-proto-pollution.md) |
+| LRN-448 | Deliverable gate classifies files by name substring | [LRN-448](LRN-448-gate-filename-substring-match.md) |
+| LRN-449 | Deliverable gate treats NNN placeholder paths as files | [LRN-449](LRN-449-gate-placeholder-paths-concrete.md) |
+| LRN-450 | Time-based workflow gate reads banned clock and fails open | [LRN-450](LRN-450-workflow-clock-gate-fails-open.md) |
+| LRN-451 | Stale-quote filter drops findings whose quote was never present | [LRN-451](LRN-451-stale-filter-drops-unseen-quotes.md) |
+| LRN-452 | Mirror-pushed test keyed to upstream hides undelivered mirror | [LRN-452](LRN-452-mirror-test-keyed-to-upstream.md) |
+| LRN-453 | Gate inputs re-read from model-relayed text are not deterministic | [LRN-453](LRN-453-gate-inputs-relayed-by-model.md) |
+| LRN-454 | Rate-limited scenarios scored as pass in acceptance gate | [LRN-454](LRN-454-excluded-failure-counted-as-pass.md) |
+| LRN-455 | Redteam findings must quote the current line so stale ones can be dropped | [LRN-455](LRN-455-stale-redteam-findings.md) |
+| LRN-456 | Documented tool-schema pattern not checked against model providers | [LRN-456](LRN-456-unsafe-schema-doc-recipe.md) |
+| LRN-457 | Docstring-only edit to a Reads-only file left undeclared | [LRN-457](LRN-457-docstring-edit-undeclared.md) |
+| LRN-458 | Re-captured golden hash test not declared in todo | [LRN-458](LRN-458-golden-hash-test-undeclared.md) |
+| LRN-459 | Auto-filing with gh --label fails when labels do not exist | [LRN-459](LRN-459-gh-issue-missing-label.md) |
+| LRN-460 | Runner copy repeats missing-label auto-filing defect | [LRN-460](LRN-460-runner-copy-missing-label.md) |
+| LRN-461 | Public-output redaction tested only on AC sample secrets | [LRN-461](LRN-461-redaction-untested-secret-formats.md) |
+| LRN-462 | Redaction fix must be mirrored across both wave runners | [LRN-462](LRN-462-runner-mirror-redaction-parity.md) |
+| LRN-463 | Redteam finding ids are not unique across rounds | [LRN-463](LRN-463-finding-id-join-collision.md) |
+| LRN-464 | Finding-id join defect repeated in sdk-wave.js | [LRN-464](LRN-464-sdk-wave-id-join-parity.md) |
+| LRN-465 | CHANGELOG template SHA taken before final fix round | [LRN-465](LRN-465-changelog-template-sha-stale.md) |
+| LRN-466 | Wave docs contradict maintainer ruling without re-ruling | [LRN-466](LRN-466-ruling-contradicted-by-docs.md) |
+| LRN-467 | CHANGELOG alias mention trips ratchet test unplanned | [LRN-467](LRN-467-changelog-alias-ratchet-test.md) |

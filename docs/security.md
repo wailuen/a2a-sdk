@@ -9,9 +9,11 @@ Every resolved identity is **kind-tagged**: `api_key` or `oauth`.
 | A2A, AG-UI | API key or OAuth token |
 | `/mcp` | API key or OAuth token |
 | `/admin/*`, key management | API key (admin) — `oauth` kind rejected |
-| `/oauth/token` | unauthenticated by design (public client + PKCE) |
+| `/oauth/token` | unauthenticated by design (PKCE; clients registered as confidential must also present their `client_secret` via their registered method) |
 | `/oauth/idp/callback`, `/oauth/idp/consent` | unauthenticated by design (single-use state, browser cookie, consent ticket; per-IP rate limited). Only active with `AGENT_SDK_OAUTH_IDP=oidc`. A documented SI-5 exception |
-| `/oauth/revoke` | oauth callers for their **own** tokens only |
+| `/oauth/revoke` | oauth callers for their **own** tokens only; without a Bearer, a public client by `client_id`, a confidential client with its secret |
+
+**Confidential DCR (GH-222).** `/oauth/register` can issue a `client_secret` (`client_secret_post` or `client_secret_basic`) because some connectors, such as Microsoft 365 Copilot, expect one. Registration is open, so anyone can obtain a secret: it is a compatibility measure, not a trust boundary. Consent at `/oauth/authorize` (admin key or IdP sign-in) remains the real gate. Only the sha256 of the secret is stored; it is shown once and never logged. The Microsoft requirement comes from Microsoft documentation and has not yet been validated on a live tenant.
 
 Task and interrupt access is identity-bound; a foreign id behaves exactly
 like a missing one (404, never 403 — existence is not leaked). Admin keys
@@ -76,7 +78,9 @@ ingress logs are not covered: scrub them there, or run uvicorn with
 Per-identity and unauthenticated limiters. Client IP derivation:
 with `AGENT_SDK_TRUSTED_PROXIES` set, the rightmost untrusted hop of
 `X-Forwarded-For`; with none set, the socket peer. `X-Forwarded-For` is
-never trusted blindly.
+never trusted blindly. Behind a TLS gateway, also set uvicorn's
+`FORWARDED_ALLOW_IPS` to the same range and never to `*`: see
+[Deployment: Behind a TLS gateway](deployment.md#behind-a-tls-gateway-gh-218).
 
 ## DEV_MODE
 

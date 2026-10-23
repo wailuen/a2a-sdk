@@ -60,6 +60,12 @@ Read in this order:
   test. `/redteam` fails closed on SIs; planning them in keeps the loop
   proactive, not reactive
 - `Depends:` = todo IDs that must complete first
+- `HUMAN GATE:` = optional explicit marker line on a todo that needs a human decision
+  before it may run (e.g. `- HUMAN GATE: owner sign-off on the schema change`). The
+  runner holds the todo's group and prunes its dependents until a release line is
+  present: `- Release: https://github.com/<org>/<repo>/issues/<n>` (the issue that
+  records the approval). Only this marker gates; free text such as `Status: NOT DONE`
+  never does
 - `‖ group:X` = parallel execution group
 
 ## SDK-specific constraints

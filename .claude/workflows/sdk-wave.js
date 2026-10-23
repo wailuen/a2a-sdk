@@ -17,6 +17,8 @@ export const meta = {
 // args.waveFile    : path to the active wave file
 // args.today       : ISO date string for plan.md timestamps (the sandbox bans Date)
 // args.agentBudget : optional positive override of the per-wave agent-call ceiling
+// args.autoFileSdkIssues : optional boolean (default false); true files still-open SDK candidates
+//                    on wailuen/a2a-sdk at codify (deduped, capped at 10, redacted)
 // args may arrive JSON-encoded as a string; fail fast naming whatever is missing.
 let normalizedArgs
 if (typeof args === 'string') {
@@ -74,7 +76,7 @@ const PYTEST = '$(test -x .venv/bin/python && echo .venv/bin/python || echo pyth
 // Filled verbatim from the preflight script's JSON (see PREFLIGHT_PY below).
 const PREFLIGHT_SCHEMA = {
   type: 'object',
-  required: ['ok', 'error', 'scopePaths'],
+  required: ['ok', 'error', 'scopePaths', 'todoFacts'],
   additionalProperties: false,
   properties: {
     ok:                  { type: 'boolean' },
@@ -86,6 +88,16 @@ const PREFLIGHT_SCHEMA = {
     behindCount:         { type: 'integer' },
     lrnNext:             { type: 'integer' },
     scopePaths:          { type: 'array', items: { type: 'string' }, description: 'The JSON list printed by the scope scan, unmodified' },
+    todoFacts: {
+      type: 'array',
+      description: 'The JSON list printed by the todo scan, unmodified',
+      items: {
+        type: 'object',
+        required: ['id', 'dependsText', 'held'],
+        additionalProperties: false,
+        properties: { id: { type: 'string' }, dependsText: { type: 'array', items: { type: 'string' } }, held: { type: 'boolean' } },
+      },
+    },
   },
 }
 
@@ -141,12 +153,14 @@ const RT_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['id', 'severity', 'file', 'description', 'fix'],
+        required: ['id', 'severity', 'file', 'line', 'quote', 'description', 'fix'],
         additionalProperties: false,
         properties: {
           id:           { type: 'string' },
           severity:     { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
           file:         { type: 'string' },
+          line:         { type: 'integer' },
+          quote:        { type: 'string' },
           description:  { type: 'string' },
           fix:          { type: 'string' },
           codify:       { type: 'string' },
@@ -266,9 +280,11 @@ const SDK_SCAN_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['description', 'severity', 'component', 'rationale'],
+        required: ['id', 'quote', 'description', 'severity', 'component', 'rationale'],
         additionalProperties: false,
         properties: {
+          id:          { type: 'string' },
+          quote:       { type: 'string' },
           description: { type: 'string' },
           severity:    { type: 'string' },
           component:   { type: 'string' },
@@ -399,8 +415,8 @@ const ARCHIVE_GATE_PY = [
   '    harness=[p for p in dirty if p.startswith(hdirs) or p=="pyproject.toml"]',
   '    if os.path.exists("template/.git"):',
   '        harness+=["template/"+p for _,p in paths(git("-C","template","status","--porcelain","-uall")) if p.startswith(".claude/workflows/")]',
-  '        r=subprocess.run(["git","-C","template","rev-list","--count","@{upstream}..HEAD"],capture_output=True,text=True)',
-  '        if r.returncode!=0 or r.stdout.strip()!="0": harness.append("template/ (unpushed or no upstream: run git -C template push)")',
+  '        r=subprocess.run(["git","-C","template","merge-base","--is-ancestor","HEAD","origin/main"],capture_output=True,text=True)',
+  '        if r.returncode!=0: harness.append("template/ (unpushed or not on origin/main: merge a template PR)")',
   '    targets=set()',
   '    for f in sorted({p for p in dirty+list(scope) if p.endswith(".py")}):',
   '        if not os.path.isfile(f): continue',
@@ -460,7 +476,135 @@ const SCOPE_SCAN_PY = [
   'print(json.dumps(sorted(set(out))))',
 ].join('\n')
 
+// Deterministic todo facts, read from the wave file itself (never from the model's relay of it):
+// per todo id, the raw text after each "Depends:" and whether an unreleased HUMAN GATE marker
+// holds it. Todos marked [~] are skipped, matching the scope scan.
+const TODO_SCAN_PY = [
+  'import json,re,sys',
+  'TODO=re.compile(r"^\\s*[-*+]\\s*\\[(.)\\]\\s*"+chr(96)+r"([^"+chr(96)+r"]+)"+chr(96))',
+  'GATE=re.compile(r"^\\s*(?:[-*+]\\s*)?(?:\\*\\*)?HUMAN GATE(?:\\*\\*)?\\s*:",re.M)',
+  'REL=re.compile(r"^\\s*(?:[-*+]\\s*)?(?:\\*\\*)?Release(?:\\*\\*)?\\s*:(?:\\*\\*)?[^\\n]*https://github\\.com/[\\w.-]+/[\\w.-]+/issues/\\d+",re.I|re.M)',
+  'out=[]; cur=None',
+  'def flush():',
+  '    if cur is None or cur["skip"]: return',
+  '    body="".join(cur["lines"])',
+  '    dep=[m.group(1).strip() for l in cur["lines"] for m in [re.search(r"Depends:(?:\\*\\*)?\\s*(.*)$",l,re.I)] if m]',
+  '    out.append({"id":cur["id"],"dependsText":dep,"held":bool(GATE.search(body)) and not REL.search(body)})',
+  'for l in open(sys.argv[1],encoding="utf-8"):',
+  '    m=TODO.match(l)',
+  '    if m:',
+  '        flush(); cur={"id":m.group(2).strip(),"skip":m.group(1)=="~","lines":[]}; continue',
+  '    if re.match(r"\\s*#{1,6}\\s",l):',
+  '        flush(); cur=None; continue',
+  '    if cur is not None: cur["lines"].append(l)',
+  'flush()',
+  'print(json.dumps(out))',
+].join('\n')
+
 function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'" }
+
+// Shared path rule for the deliverable gate: the scope scan's own head (EXT/ROOT/DOT lists and
+// ok()), sliced from SCOPE_SCAN_PY so there is exactly one path classifier in this runner.
+const PATH_RULE_PY = SCOPE_SCAN_PY.slice(0, SCOPE_SCAN_PY.indexOf('\nout=[]; skip=False'))
+
+// Deliverable gate: one run per Implement tier. A concrete Creates: path must exist; an
+// acceptance record (workspace/acceptance/*.md) must also carry a FIRST verdict of PASS (heading
+// form or "Verdict: X" line form) and no "[pending"; a pattern path (glob, or a planner
+// placeholder such as LRN-NNN / run-NNN / C-NNN) needs a match newer than Implement start. A
+// missing or malformed "since" counts every pattern path as missing.
+const DELIVERABLE_GATE_PY = PATH_RULE_PY + '\n' + [
+  'import os,glob',
+  'spec=json.loads(sys.argv[1])',
+  's=spec.get("since")',
+  'since=float(s) if isinstance(s,(int,float)) and not isinstance(s,bool) else None',
+  'PH=re.compile(r"(?<![A-Za-z])N{3,}(?![A-Za-z])")',
+  'V=re.compile(r"^[\\s>*_-]*(?:#+[\\s*_]*)?verdict\\b[\\s*_]*:?[\\s*_]*([A-Za-z]*)",re.I)',
+  'def has_ph(t): return PH.search(t) is not None',
+  'def pat(t): return ("*" in t or "?" in t or has_ph(t)) and ok(PH.sub("0",t).replace("*","x").replace("?","x"))',
+  'def concrete(t): return ok(t) and not has_ph(t)',
+  'def gl(t): return PH.sub("[0-9]*",t)',
+  'def record(p): return p.startswith("workspace/acceptance/") and p[-3:]==".md"',
+  'def verdict(s):',
+  '    ls=s.splitlines()',
+  '    for i,l in enumerate(ls):',
+  '        m=V.match(l)',
+  '        if not m: continue',
+  '        if m.group(1): return m.group(1).upper()',
+  '        for n in ls[i+1:]:',
+  '            if n.strip():',
+  '                k=re.match(r"^[\\s>*_-]*([A-Za-z]+)",n)',
+  '                return k.group(1).upper() if k else ""',
+  '        return ""',
+  '    return ""',
+  'def good(p):',
+  '    if not os.path.isfile(p): return False',
+  '    if not record(p): return True',
+  '    s=open(p,encoding="utf-8",errors="replace").read()',
+  '    return verdict(s)=="PASS" and "[pending" not in s.lower()',
+  'def fresh(g): return since is not None and any(os.path.isfile(m) and os.path.getmtime(m)>since for m in glob.glob(g,recursive=True))',
+  'bad=[]',
+  'for label,paths in spec["groups"].items():',
+  '    miss=[p for p in paths if (concrete(p) and not good(p)) or (pat(p) and not fresh(gl(p)))]',
+  '    if miss: bad.append({"label":label,"paths":miss})',
+  'print(json.dumps({"ok":True,"checked":sorted(spec["groups"]),"missing":bad}))',
+].join('\n')
+
+const DELIVERABLE_SCHEMA = {
+  type: 'object',
+  required: ['ok', 'checked', 'missing'],
+  additionalProperties: false,
+  properties: {
+    ok:      { type: 'boolean' },
+    error:   { type: 'string' },
+    checked: { type: 'array', items: { type: 'string' } },
+    missing: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['label', 'paths'],
+        additionalProperties: false,
+        properties: { label: { type: 'string' }, paths: { type: 'array', items: { type: 'string' } } },
+      },
+    },
+  },
+}
+
+const SCOPE_RESCAN_SCHEMA = {
+  type: 'object',
+  required: ['paths'],
+  additionalProperties: false,
+  properties: { paths: { type: 'array', items: { type: 'string' }, description: 'The JSON list printed by the scope scan, unmodified' } },
+}
+
+// A HUMAN GATE todo holds its group until a release line cites a GitHub issue URL. The hold
+// comes from TODO_SCAN_PY (a script reading the wave file), stamped on each group by parseWave.
+function groupIsHeld(g) {
+  return g.held === true
+}
+
+// Group deps derived from each todo's Depends: text as read by TODO_SCAN_PY, unioned with the
+// model's groupDeps.
+function deriveGroupDeps(w) {
+  const owner = {}
+  w.groups.forEach(function(g) { g.todos.forEach(function(t) { owner[t.id] = g.label }) })
+  const ids = Object.keys(owner)
+  const found = {}
+  w.groups.forEach(function(g) { found[g.label] = new Set((w.groupDeps && w.groupDeps[g.label]) || []) })
+  ;(w.todoFacts || []).forEach(function(f) {
+    const mine = owner[f.id]
+    if (mine === undefined) return
+    f.dependsText.forEach(function(text) {
+      ids.forEach(function(id) {
+        if (owner[id] === mine) return
+        const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        if (new RegExp('(^|[^A-Za-z0-9_-])' + esc + '($|[^A-Za-z0-9_-])').test(text)) found[mine].add(owner[id])
+      })
+    })
+  })
+  const out = {}
+  w.groups.forEach(function(g) { out[g.label] = Array.from(found[g.label]) })
+  return out
+}
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -631,6 +775,7 @@ let unitBudgetBlocked      = false   // unit round budget exhausted with survivi
 let phaseBudgetBlocked     = false   // phase round budget exhausted with surviving critical/high findings
 let redteamUnknownBlocked  = false   // a redteam never returned a trustworthy verdict
 let implementBlocked       = false   // an implement agent died twice on the same todo
+let deliverablesBlocked    = false   // a group's Creates: deliverables are missing/unverified, or a group is held at a HUMAN GATE
 let totalTodos             = 0
 let sdkCandidatesCount     = 0
 const allHighFindings      = []      // critical/high findings → Codify
@@ -640,17 +785,23 @@ phase('Parse')
 
 async function runPreflight(label) {
   const pf = await callAgent(
-    'Run the two commands below at the repo root exactly as written (do not edit them).\n' +
-    'Return the JSON object the first one prints, field for field, and set scopePaths to the\n' +
-    'JSON list the second one prints, unmodified. If a command fails to run, set ok=false and\n' +
+    'Run the three commands below at the repo root exactly as written (do not edit them).\n' +
+    'Return the JSON object the first one prints, field for field, set scopePaths to the\n' +
+    'JSON list the second one prints, unmodified, and set todoFacts to the JSON list the third\n' +
+    'one prints, unmodified. If a command fails to run, set ok=false and\n' +
     'put its error text in error.\n\n' +
     'python3 - ' + shq(WAVE_FILE) + " <<'PREFLIGHT'\n" + PREFLIGHT_PY + '\nPREFLIGHT\n\n' +
-    'python3 - ' + shq(WAVE_FILE) + " <<'SCOPE_SCAN'\n" + SCOPE_SCAN_PY + '\nSCOPE_SCAN',
+    'python3 - ' + shq(WAVE_FILE) + " <<'SCOPE_SCAN'\n" + SCOPE_SCAN_PY + '\nSCOPE_SCAN\n\n' +
+    'python3 - ' + shq(WAVE_FILE) + " <<'TODO_SCAN'\n" + TODO_SCAN_PY + '\nTODO_SCAN',
     { schema: PREFLIGHT_SCHEMA, label: label, phase: 'Parse', effort: 'low' }
   )
   // Unknown state is never "nothing found": a failed or malformed preflight stops the wave.
   const wellFormed = pf && pf.ok === true &&
     Array.isArray(pf.scopePaths) && Array.isArray(pf.otherActiveWaves) &&
+    Array.isArray(pf.todoFacts) && pf.todoFacts.every(function(f) {
+      return f && typeof f.id === 'string' && typeof f.held === 'boolean' &&
+        Array.isArray(f.dependsText) && f.dependsText.every(function(d) { return typeof d === 'string' })
+    }) &&
     ['completedFileExists', 'templateDirExists'].every(function(k) { return typeof pf[k] === 'boolean' }) &&
     ['dirtyPathCount', 'behindCount', 'lrnNext'].every(function(k) { return Number.isInteger(pf[k]) })
   if (!wellFormed) {
@@ -697,10 +848,24 @@ async function parseWave(pf, label) {
   w.allCreates  = uniq(w.allCreates)
   w.allModifies = uniq(w.allModifies)
   w.allScope    = uniq(w.allCreates.concat(w.allModifies))
+  // Deps and holds come from the todo scan of the wave file, not from the model's relay of it;
+  // a todo the scan found that the model's groups lack means Parse dropped text.
+  const modelIds = new Set()
+  w.groups.forEach(function(g) { g.todos.forEach(function(t) { modelIds.add(t && t.id) }) })
+  const unseen = pf.todoFacts.map(function(f) { return f.id }).filter(function(id) { return !modelIds.has(id) })
+  if (unseen.length > 0) {
+    log('ERROR: wave ' + w.waveId + ' Parse is missing ' + unseen.length + ' todo(s) the deterministic todo scan found: ' +
+        unseen.join(', ') + ' — aborting rather than running with dropped Depends:/HUMAN GATE text. Re-run.')
+    return { error: 'todo-scan-mismatch', waveId: w.waveId, missed: unseen }
+  }
+  w.todoFacts   = pf.todoFacts
+  const heldIds = new Set(pf.todoFacts.filter(function(f) { return f.held }).map(function(f) { return f.id }))
+  w.groupDeps   = deriveGroupDeps(w)
   for (const g of w.groups) {
     g.creates  = uniq(g.creates)
     g.modifies = uniq(g.modifies)
     g.scope    = uniq(g.creates.concat(g.modifies))
+    g.held     = g.todos.some(function(t) { return heldIds.has(t && t.id) })
   }
   // The scan is the ground truth for which paths exist on Creates:/Modifies: lines; a path
   // the read missed would silently narrow every gate keyed off allScope.
@@ -986,12 +1151,133 @@ async function implementTodo(todo) {
   return r
 }
 
+async function checkDeliverables(groups, since, label) {
+  const spec = { since: since, groups: {} }
+  groups.forEach(function(g) { spec.groups[g.label] = g.creates })
+  const checkable = groups.filter(function(g) { return g.creates.length > 0 })
+  const missing = {}
+  if (checkable.length === 0) return missing
+  const r = await callAgent(
+    'Run this command at the repo root exactly as written (do not edit it) and return the JSON\n' +
+    'object it prints, field for field. If it fails to run, set ok=false and put its error text in error.\n\n' +
+    'python3 - ' + shq(JSON.stringify(spec)) + " <<'DELIVERABLE_GATE'\n" + DELIVERABLE_GATE_PY + '\nDELIVERABLE_GATE',
+    { schema: DELIVERABLE_SCHEMA, label: label, phase: 'Implement', effort: 'low' }
+  )
+  const wellFormed = r && r.ok === true && Array.isArray(r.checked) && Array.isArray(r.missing) &&
+    checkable.every(function(g) { return r.checked.indexOf(g.label) !== -1 }) &&
+    r.missing.every(function(m) {
+      return m && typeof m.label === 'string' && Array.isArray(m.paths) && groups.some(function(g) { return g.label === m.label })
+    })
+  if (!wellFormed) {
+    log('WARNING: deliverable gate ' + label + ' returned no trustworthy result — every Creates: path counts as missing (fail closed)')
+    checkable.forEach(function(g) { missing[g.label] = g.creates.slice() })
+    return missing
+  }
+  r.missing.forEach(function(m) { if (m.paths.length > 0) missing[m.label] = m.paths })
+  return missing
+}
+
+// Re-reads Creates:/Modifies: from the wave file at the top of every redteam round; paths added
+// mid-run join the owning group's scope and wave.allScope (the archive gate's input). A null or
+// malformed scan returns false: the caller treats the round as unknown, never clean.
+async function rescanScope(base, round, group, phaseName) {
+  const r = await callAgent(
+    'Run this command at the repo root exactly as written (do not edit it). Set paths to the JSON\n' +
+    'list it prints, unmodified.\n\n' +
+    'python3 - ' + shq(WAVE_FILE) + " <<'SCOPE_SCAN'\n" + SCOPE_SCAN_PY + '\nSCOPE_SCAN',
+    { schema: SCOPE_RESCAN_SCHEMA, label: 'scan:scope:' + base + ':r' + round, phase: phaseName, effort: 'low' }
+  )
+  if (!r || !Array.isArray(r.paths) || !r.paths.every(function(p) { return typeof p === 'string' })) return false
+  const added = uniq(r.paths).filter(function(p) { return wave.allScope.indexOf(p) === -1 })
+  added.forEach(function(p) {
+    wave.allScope.push(p)
+    const owners = wave.groups.filter(function(g) {
+      return g.todos.some(function(t) { return String((t && t.body) || '').indexOf(p) !== -1 })
+    })
+    const targets = owners.length > 0 ? owners : (group ? [group] : [])
+    targets.forEach(function(g) { if (g.scope.indexOf(p) === -1) g.scope.push(p) })
+  })
+  if (added.length > 0) log('Scope re-scan (' + base + ' r' + round + ') added ' + added.length + ' path(s): ' + added.join(', '))
+  return true
+}
+
 // Tier-based execution: a tier is every group whose external deps are complete; groups in a
 // tier run in parallel (the planner groups conflicting todos together).
 const completedGroups = new Set()
+const failedGroups = new Set()    // deliverables missing at the gate, or held at a HUMAN GATE
+const heldGroups = new Set()
+const prunedGroups = new Set()    // transitively depend on a failed group; never dispatched
 const remainingGroups = wave.groups.slice()
+const CLOCK_SCHEMA = {
+  type: 'object',
+  required: ['now'],
+  additionalProperties: false,
+  properties: { now: { type: 'number' } },
+}
+
+// The sandbox bans Date, so the Implement start time comes from a deterministic shell step.
+// A null or malformed result returns null: the deliverable gate then counts every pattern
+// path as missing (fail closed).
+async function readImplementStart() {
+  const r = await callAgent(
+    'Run this command at the repo root exactly as written (do not edit it) and return the JSON\n' +
+    'object it prints, field for field.\n\n' +
+    'python3 -c ' + shq('import json,time;print(json.dumps({"now":time.time()}))'),
+    { schema: CLOCK_SCHEMA, label: 'clock:implement-start', phase: 'Implement', effort: 'low' }
+  )
+  if (r && typeof r.now === 'number' && isFinite(r.now) && r.now > 1e9) return r.now
+  log('WARNING: Implement start time unavailable — every pattern Creates: path counts as missing (fail closed)')
+  return null
+}
+
+const implementStartSec = await readImplementStart()
+let tierNo = 0
+
+function pruneDependents() {
+  const pruned = []
+  let changed = true
+  while (changed) {
+    changed = false
+    for (let i = remainingGroups.length - 1; i >= 0; i--) {
+      const g = remainingGroups[i]
+      const deps = (wave.groupDeps && wave.groupDeps[g.label]) || []
+      if (deps.some(function(d) { return failedGroups.has(d) || prunedGroups.has(d) })) {
+        remainingGroups.splice(i, 1)
+        prunedGroups.add(g.label)
+        pruned.push(g.label)
+        changed = true
+      }
+    }
+  }
+  return pruned
+}
 
 while (remainingGroups.length > 0) {
+  const heldNow = remainingGroups.filter(groupIsHeld)
+  for (const hg of heldNow) {
+    remainingGroups.splice(remainingGroups.indexOf(hg), 1)
+    failedGroups.add(hg.label)
+    heldGroups.add(hg.label)
+    deliverablesBlocked = true
+    protocolBlocked = true
+    log('HUMAN GATE — group ' + hg.label + ' held: a todo carries the HUMAN GATE marker and no Release: line citing a GitHub issue URL')
+    await deferNote(
+      wave.waveId + '-group-' + hg.label + '-held.md',
+      'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '), group (' + hg.label + '),\n' +
+      'reason: a todo in this group carries a HUMAN GATE marker with no `Release:` line citing a GitHub issue URL,\n' +
+      'so the group was not dispatched and its dependents are pruned.\n' +
+      'Instruction: "Record the approval in a GitHub issue, add `Release: <issue URL>` to the todo, ' +
+      'then re-run /wave ' + wave.waveId + '."',
+      'defer:held:' + hg.label, 'Implement'
+    )
+  }
+  const prunedEarly = pruneDependents()
+  if (prunedEarly.length > 0) {
+    deliverablesBlocked = true
+    protocolBlocked = true
+    log('Pruned (depend on a held/failed group): ' + prunedEarly.join(', '))
+  }
+  if (remainingGroups.length === 0) break
   const readyGroups = remainingGroups.filter(function(g) {
     const deps = (wave.groupDeps && wave.groupDeps[g.label]) || []
     return deps.every(function(dep) { return completedGroups.has(dep) })
@@ -1034,7 +1320,284 @@ while (remainingGroups.length > 0) {
   if (agentCallCount > AGENT_CALL_BUDGET) {
     throw new Error('agent-call budget exceeded (' + AGENT_CALL_BUDGET + ' calls) for this wave')
   }
-  for (const rg of readyGroups) completedGroups.add(rg.label)
+  tierNo++
+  const missingByGroup = await checkDeliverables(readyGroups, implementStartSec, 'deliv:tier' + tierNo)
+  const failedNow = readyGroups.filter(function(g) { return (missingByGroup[g.label] || []).length > 0 })
+  for (const rg of readyGroups) {
+    if (failedNow.indexOf(rg) === -1) completedGroups.add(rg.label)
+    else failedGroups.add(rg.label)
+  }
+  if (failedNow.length > 0) {
+    deliverablesBlocked = true
+    protocolBlocked = true
+    const prunedNow = pruneDependents()
+    if (prunedNow.length > 0) log('Pruned (depend on an incomplete group): ' + prunedNow.join(', '))
+    for (const fg of failedNow) {
+      log('Group ' + fg.label + ' INCOMPLETE — missing deliverable(s): ' + missingByGroup[fg.label].join(', '))
+      await deferNote(
+        wave.waveId + '-group-' + fg.label + '-incomplete.md',
+        'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '), group (' + fg.label + '),\n' +
+        'reason: the deliverable gate after Implement found these Creates: paths missing, unverified, or stale:\n' +
+        missingByGroup[fg.label].join('\n') + '\n' +
+        'Dependent groups pruned and not run: ' + (prunedNow.length > 0 ? prunedNow.join(', ') : 'none') + '.\n' +
+        'Instruction: "Finish the missing deliverables, then re-run /wave ' + wave.waveId + '."',
+        'defer:incomplete:' + fg.label, 'Implement'
+      )
+    }
+  }
+}
+
+// Stale-finding filter: a finding must quote the exact current source line it is about. One
+// deterministic script runs `grep -F` for each quote in its file; a quote that is gone means
+// the finding is about code that no longer exists. Fail closed: an empty quote, a missing or
+// unsafe path, a grep error, or an untrustworthy script result all KEEP the finding.
+const STALE_CHECK_PY = [
+  'import json, os, subprocess, sys',
+  'items = json.loads(sys.argv[1])',
+  'stale = []',
+  'present = []',
+  'for i, it in enumerate(items):',
+  '    f, q = it.get("file") or "", it.get("quote") or ""',
+  '    if not q.strip() or not f or os.path.isabs(f) or ".." in f.split("/") or not os.path.isfile(f):',
+  '        continue',
+  '    try:',
+  '        rc = subprocess.run(["grep", "-F", "-q", "-e", q, "--", f], capture_output=True, timeout=30).returncode',
+  '    except Exception:',
+  '        continue',
+  '    if rc == 1:',
+  '        stale.append(i)',
+  '    elif rc == 0:',
+  '        present.append(i)',
+  'print(json.dumps({"ok": True, "stale": stale, "present": present}))',
+].join('\n')
+
+const STALE_SCHEMA = {
+  type: 'object',
+  required: ['ok', 'stale'],
+  additionalProperties: false,
+  properties: {
+    ok:      { type: 'boolean' },
+    stale:   { type: 'array', items: { type: 'integer' } },
+    present: { type: 'array', items: { type: 'integer' } },
+  },
+}
+
+// Only a quote this loop has already seen present can go stale: a quote that was never in the
+// file (invented, elided with "...", carrying a line-number prefix) is unverifiable, and the
+// finding stays blocking. Round 1 therefore records presence and never drops.
+// GH-223: every file+quote pair seen present by any stale check this wave. A candidate whose
+// quote is gone now but was seen present earlier was fixed in-wave; a quote never seen present
+// stays still-open.
+const WAVE_VERIFIED_QUOTES = new Set()
+const staleKey = function(f) { return String(f.file) + '\u0000' + String(f.quote) }
+
+// Runs STALE_CHECK_PY over {file, quote} items; null unless the result is trustworthy.
+async function runStaleScript(items, label, phaseName) {
+  const r = await callAgent(
+    'Run this command at the repo root exactly as written (do not edit it) and return the JSON\n' +
+    'object it prints, field for field. If it fails to run, set ok=false and stale=[].\n\n' +
+    'python3 -c ' + shq(STALE_CHECK_PY) + ' ' + shq(JSON.stringify(items)),
+    { schema: STALE_SCHEMA, label: label, phase: phaseName, effort: 'low' }
+  )
+  const validIdx = function(i) { return Number.isInteger(i) && i >= 0 && i < items.length }
+  const trusted = r && r.ok === true && Array.isArray(r.stale) && r.stale.every(validIdx) &&
+    (r.present === undefined || (Array.isArray(r.present) && r.present.every(validIdx)))
+  return trusted ? r : null
+}
+
+async function dropStaleFindings(findings, base, round, phaseName, verified) {
+  const items = findings.map(function(f) { return { file: f && f.file, quote: f && f.quote } })
+  if (!items.some(function(it) { return typeof it.quote === 'string' && it.quote.trim() !== '' })) return findings
+  const r = await runStaleScript(items, 'stale:' + base + ':r' + round, phaseName)
+  if (!r) {
+    log('WARNING: stale-finding check for ' + base + ' returned no trustworthy result at round ' + round + ' — keeping every finding')
+    return findings
+  }
+  const keyOf = staleKey
+  const drop = new Set()
+  for (const i of r.stale) {
+    if (verified.has(keyOf(findings[i]))) {
+      drop.add(i)
+      log('stale finding dropped (quoted line no longer in ' + findings[i].file + '): ' + findings[i].id)
+    } else {
+      log('unverifiable quote kept (never found in ' + findings[i].file + '): ' + findings[i].id)
+    }
+  }
+  ;(r.present || []).forEach(function(i) { verified.add(keyOf(findings[i])); WAVE_VERIFIED_QUOTES.add(keyOf(findings[i])) })
+  return findings.filter(function(_f, i) { return !drop.has(i) })
+}
+
+// GH-223: opt-in auto-filing of still-open SDK candidates. The deterministic script below does the
+// redaction, the dedupe search and the filing; no model writes a gh command. Title and body come
+// only from classified fields (never quote or code), every gh call carries -R wailuen/a2a-sdk,
+// and the body goes through --body-file.
+const FILE_SDK_ISSUES_PY = [
+  'import json, re, shutil, subprocess, sys, tempfile, os',
+  'REPO = "wailuen/a2a-sdk"',
+  'CAP = 10',
+  'COMPONENTS = {"harness/skill", "harness/workflow", "harness/agent", "harness/template", "sdk/build", "sdk/loop", "sdk/credentials", "sdk/console", "protocol/a2a", "protocol/mcp", "protocol/ag-ui", "protocol/a2ui", "protocol/oauth", "security"}',
+  'KEYLIKE = re.compile(r"\\b(?:sk|ak)[-_][A-Za-z0-9_-]+", re.I)',
+  'TOKEN = re.compile(r"\\b(?:ghp|gho|ghu|ghs|github_pat|xox[abpr]|AKIA)[A-Za-z0-9_-]{8,}")',
+  'XOX = re.compile(r"\\bxox[a-z]-[A-Za-z0-9-]+")',
+  'GOOGLE = re.compile(r"\\bAIza[0-9A-Za-z_-]{35}")',
+  'JWT = re.compile(r"\\beyJ[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*")',
+  'BASIC = re.compile(r"\\bBasic\\s+[A-Za-z0-9+/]{12,}={0,2}")',
+  'GLPAT = re.compile(r"\\bglpat-[A-Za-z0-9_-]+")',
+  'STRIPE = re.compile(r"\\b(?:pk|rk|sk)_(?:live|test)_[A-Za-z0-9]+")',
+  'ASSIGN = re.compile(r"\\b(?:password|passwd|secret|token|api[_-]?key)\\s*[=:]\\s*\\S+", re.I)',
+  'BEARER = re.compile(r"\\bbearer\\s+[A-Za-z0-9._~+/=-]+", re.I)',
+  'HEX = re.compile(r"\\b[A-Fa-f0-9]{32,}\\b")',
+  'LONG = re.compile(r"[A-Za-z0-9+/._-]{32,}={0,2}")',
+  'PATS = (KEYLIKE, TOKEN, XOX, GOOGLE, JWT, BASIC, GLPAT, STRIPE, ASSIGN, BEARER, HEX)',
+  'LOOSE = re.compile(r"\\b(?:sk|ak)[-_]", re.I)',
+  'def mixed(m):',
+  '    s = m.group(0)',
+  '    return "[REDACTED]" if re.search(r"[a-z]", s) and re.search(r"[A-Z]", s) and re.search(r"[0-9]", s) else s',
+  'def redact(s):',
+  '    s = str(s or "")',
+  '    for p in PATS:',
+  '        s = p.sub("[REDACTED]", s)',
+  '    return LONG.sub(mixed, s)',
+  'def leaks(s):',
+  '    return any(p.search(s) for p in PATS + (LOOSE,)) or LONG.sub(mixed, s) != s',
+  'def ensure_label(name):',
+  '    try:',
+  '        return gh(["label", "create", name, "-R", REPO, "--force"]).returncode == 0',
+  '    except Exception:',
+  '        return False',
+  'def norm(t):',
+  '    return " ".join(str(t).lower().split())',
+  'def gh(argv):',
+  '    return subprocess.run(["gh"] + argv, capture_output=True, text=True, timeout=60)',
+  'data = json.loads(sys.argv[1])',
+  'out = {"ok": True, "ghAvailable": True, "results": []}',
+  'prepared = []',
+  'for c in data.get("candidates") or []:',
+  '    desc = redact(c.get("description")).strip()',
+  '    title = " ".join(desc.split())[:120]',
+  '    fields = [desc, redact(c.get("component")), redact(c.get("severity")), redact(c.get("file"))]',
+  '    if not title or any(leaks(f) for f in fields):',
+  '        out["results"].append({"index": c.get("index"), "status": "skipped-secret"})',
+  '    else:',
+  '        prepared.append((c.get("index"), title, desc, fields[1], fields[2], fields[3]))',
+  'if prepared and not shutil.which("gh"):',
+  '    out["ghAvailable"] = False',
+  '    prepared = []',
+  'filed = 0',
+  'for idx, title, desc, comp, sev, path in prepared:',
+  '    if filed >= CAP:',
+  '        out["results"].append({"index": idx, "status": "capped"})',
+  '        continue',
+  '    try:',
+  '        r = gh(["issue", "list", "-R", REPO, "--state", "open", "--search", title, "--json", "number,title,url", "--limit", "20"])',
+  '        if r.returncode != 0:',
+  '            raise RuntimeError("list failed")',
+  '        hits = [h for h in json.loads(r.stdout or "[]") if norm(h.get("title")) == norm(title)]',
+  '    except Exception:',
+  '        out["ghAvailable"] = False',
+  '        break',
+  '    if hits:',
+  '        out["results"].append({"index": idx, "status": "duplicate", "url": hits[0].get("url", "")})',
+  '        continue',
+  '    body = "Auto-filed from wave %s.\\n\\nComponent: %s\\nSeverity: %s\\nFile: %s\\n\\n%s\\n" % (redact(data.get("waveId")), comp, sev, path or "n/a", desc)',
+  '    fd, tmp = tempfile.mkstemp(suffix=".md")',
+  '    try:',
+  '        with os.fdopen(fd, "w") as fh:',
+  '            fh.write(body)',
+  '        argv = ["issue", "create", "-R", REPO, "--title", title, "--body-file", tmp]',
+  '        if ensure_label("auto-filed"):',
+  '            argv += ["--label", "auto-filed"]',
+  '        if comp in COMPONENTS and ensure_label(comp):',
+  '            argv += ["--label", comp]',
+  '        r = gh(argv)',
+  '        if r.returncode != 0 and "--label" in argv:',
+  '            r = gh(["issue", "create", "-R", REPO, "--title", title, "--body-file", tmp])',
+  '    except Exception:',
+  '        r = None',
+  '    finally:',
+  '        if os.path.exists(tmp):',
+  '            os.remove(tmp)',
+  '    if r is None or r.returncode != 0:',
+  '        out["results"].append({"index": idx, "status": "failed"})',
+  '        continue',
+  '    filed += 1',
+  '    lines = (r.stdout or "").strip().splitlines()',
+  '    out["results"].append({"index": idx, "status": "filed", "url": lines[-1] if lines else ""})',
+  'print(json.dumps(out))'
+].join('\n')
+const FILE_SCHEMA = {
+  type: 'object',
+  required: ['ok', 'ghAvailable', 'results'],
+  additionalProperties: false,
+  properties: {
+    ok:          { type: 'boolean' },
+    ghAvailable: { type: 'boolean' },
+    results: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['index', 'status'],
+        additionalProperties: false,
+        properties: {
+          index:  { type: 'integer' },
+          status: { type: 'string' },
+          url:    { type: 'string' },
+        },
+      },
+    },
+  },
+}
+
+const AUTO_FILE_SDK_ISSUES = normalizedArgs.autoFileSdkIssues === true || normalizedArgs.autoFileSdkIssues === 'true'
+
+function originalFinding(c) {
+  const hits = toCodeify.filter(function(f) { return f.id === c.id && f.file === c.file && f.quote === c.quote })
+  return hits.length === 1 ? hits[0] : null
+}
+
+// fixed-in-wave only when the quote is gone now AND was seen present earlier in this wave;
+// every other outcome (empty quote, never verified, bad path, untrusted result) is still-open.
+async function candidateStatuses(candidates) {
+  const statuses = candidates.map(function() { return 'still-open' })
+  const subjects = candidates.map(originalFinding)
+  const items = subjects.map(function(s, i) { return s ? { file: s.file, quote: s.quote } : { file: candidates[i].file, quote: '' } })
+  if (!items.some(function(it) { return typeof it.quote === 'string' && it.quote.trim() !== '' })) return statuses
+  const r = await runStaleScript(items, 'sdk:recheck', 'Codify')
+  if (!r) {
+    log('WARNING: SDK candidate re-check returned no trustworthy result — every candidate stays still-open')
+    return statuses
+  }
+  for (const i of r.stale) {
+    if (subjects[i] && WAVE_VERIFIED_QUOTES.has(staleKey(subjects[i]))) statuses[i] = 'fixed-in-wave'
+  }
+  return statuses
+}
+
+async function fileStillOpenCandidates(candidates, statuses) {
+  const urls = {}
+  const open = []
+  candidates.forEach(function(c, i) {
+    if (statuses[i] === 'still-open') {
+      open.push({ index: i, description: c.description, component: c.component, severity: c.severity, file: c.file || '' })
+    }
+  })
+  if (open.length === 0) { log('autoFileSdkIssues: no still-open candidates to file'); return urls }
+  const r = await callAgent(
+    'Run this command at the repo root exactly as written (do not edit it) and return the JSON\n' +
+    'object it prints, field for field. If it fails to run, set ok=false, ghAvailable=false, results=[].\n\n' +
+    'python3 -c ' + shq(FILE_SDK_ISSUES_PY) + ' ' + shq(JSON.stringify({ waveId: wave.waveId, candidates: open })),
+    { schema: FILE_SCHEMA, label: 'sdk:file', phase: 'Codify', effort: 'low' }
+  )
+  if (!r || r.ok !== true || !Array.isArray(r.results)) {
+    log('WARNING: autoFileSdkIssues returned no trustworthy result — candidates stay in workspace/sdk-candidates.md for /sdk-issue-scan')
+    return urls
+  }
+  if (r.ghAvailable === false) log('WARNING: gh is unavailable or unauthenticated — candidates stay in workspace/sdk-candidates.md for /sdk-issue-scan')
+  r.results.forEach(function(x) {
+    if (x.url && (x.status === 'filed' || x.status === 'duplicate')) urls[x.index] = x.status + ': ' + x.url
+    if (x.status === 'skipped-secret') log('autoFileSdkIssues: candidate ' + (x.index + 1) + ' still matches a secret pattern after redaction — left for manual /sdk-issue-scan')
+  })
+  return urls
 }
 
 // ─── redteam fix loop (shared by unit and phase) ──────────────────────────────
@@ -1053,13 +1616,16 @@ async function redteamFixLoop(cfg) {
   const nonBlockingStore = []
   const nonBlockingSigs = new Set()
   let outcome = 'clean'
+  const verifiedQuotes = new Set()   // file+quote pairs seen present in an earlier or current round
 
   while (true) {
     round++
-    const rt = await callAgent(cfg.reviewPrompt,
-      { schema: RT_SCHEMA, label: 'rt:' + cfg.base + ':r' + round, phase: cfg.phase, agentType: 'redteam' })
+    const scanOk = cfg.rescan ? await cfg.rescan(round) : true
+    const rt = scanOk ? await callAgent(cfg.reviewPrompt(),
+      { schema: RT_SCHEMA, label: 'rt:' + cfg.base + ':r' + round, phase: cfg.phase, agentType: 'redteam' }) : null
 
-    const unknown = !rt ? 'returned null'
+    const unknown = !scanOk ? 'skipped: Creates:/Modifies: scope re-scan returned no trustworthy result'
+      : !rt ? 'returned null'
       : (!Array.isArray(rt.findings) || rt.findingsCount !== rt.findings.length)
         ? 'reported findingsCount=' + rt.findingsCount + ' but findings array has ' + (Array.isArray(rt.findings) ? rt.findings.length : 'no') + ' item(s)'
         : null
@@ -1078,6 +1644,8 @@ async function redteamFixLoop(cfg) {
       }
       continue
     }
+
+    rt.findings = await dropStaleFindings(rt.findings, cfg.base, round, cfg.phase, verifiedQuotes)
 
     const blocking = blockingFindings(rt.findings)
     const nonBlocking = nonBlockingFindings(rt.findings)
@@ -1212,6 +1780,9 @@ const SDK_REVIEW_DIMENSIONS =
 // ─── phase 3: unit redteam (per group, zero-tolerance) ───────────────────────
 phase('Unit Redteam')
 
+// Held and pruned groups never ran; reviewing absent files only produces noise.
+const unitGroups = wave.groups.filter(function(g) { return !heldGroups.has(g.label) && !prunedGroups.has(g.label) })
+
 // Groups have disjoint scope, so their loops run concurrently. The pytest gate reads the
 // whole repo, so each round's mutate-and-verify section (fix → gate → re-gate) is serialised
 // across groups; reviews stay outside the lock.
@@ -1232,8 +1803,8 @@ function scopePathsOverlap(a, b) {
   return b.indexOf(aDir) === 0 || a.indexOf(bDir) === 0
 }
 const scopeOverlaps = []
-wave.groups.forEach(function(a, ai) {
-  wave.groups.slice(ai + 1).forEach(function(b) {
+unitGroups.forEach(function(a, ai) {
+  unitGroups.slice(ai + 1).forEach(function(b) {
     const shared = a.scope.filter(function(p) {
       return b.scope.some(function(q) { return scopePathsOverlap(p, q) })
     })
@@ -1250,12 +1821,13 @@ async function runUnitRedteamForGroup(group) {
     maxRounds: UNIT_MAX_ROUNDS,
     scope: group.scope,
     withLock: withGateLock,
-    reviewPrompt:
+    reviewPrompt: function() { return (
       'Adversarial review of the SDK files created/modified by group ' + group.label + '.\n\n' +
       'Scope (Creates: AND Modifies: paths for this group):\n' + group.scope.join('\n') + '\n\n' +
       'Also check their transitive callers and importers within agent_sdk/.\n\n' +
       SDK_REVIEW_DIMENSIONS + '\n\n' +
-      'Return structured findings.',
+      'Return structured findings.') },
+    rescan: function(r) { return rescanScope('unit:' + group.label, r, group, 'Unit Redteam') },
   })
   applyLoopOutcome(res.outcome, 'unit')
   return { label: group.label, rounds: res.rounds }
@@ -1267,15 +1839,15 @@ if (scopeOverlaps.length > 0) {
   })
   log('Scope overlap detected — planner disjointness invariant violated; running Unit Redteam ' +
       'one group at a time for this wave (concurrent path skipped)')
-  for (const group of wave.groups) {
+  for (const group of unitGroups) {
     await runUnitRedteamForGroup(group)
   }
 } else {
-  if (wave.groups.length > 1) {
-    log('Unit redteam — ' + wave.groups.length + ' groups concurrently (fix + gate serialised): ' +
-        wave.groups.map(function(g) { return g.label }).join(', '))
+  if (unitGroups.length > 1) {
+    log('Unit redteam — ' + unitGroups.length + ' groups concurrently (fix + gate serialised): ' +
+        unitGroups.map(function(g) { return g.label }).join(', '))
   }
-  const unitResults = await parallel(wave.groups.map(function(group) {
+  const unitResults = await parallel(unitGroups.map(function(group) {
     return function() { return runUnitRedteamForGroup(group) }
   }))
   // parallel() maps a thrown thunk to null: re-raise a budget throw, and treat any other
@@ -1285,7 +1857,7 @@ if (scopeOverlaps.length > 0) {
   }
   unitResults.forEach(function(r, i) {
     if (!r) {
-      log('WARNING: unit redteam for group ' + wave.groups[i].label + ' aborted with an error before a clean exit — not clean; re-run /wave ' + wave.waveId)
+      log('WARNING: unit redteam for group ' + unitGroups[i].label + ' aborted with an error before a clean exit — not clean; re-run /wave ' + wave.waveId)
       protocolBlocked = true
       redteamUnknownBlocked = true
     }
@@ -1309,13 +1881,14 @@ if (wave.groups.length === 1) {
     maxRounds: PHASE_MAX_ROUNDS,
     scope: wave.allScope,
     withLock: noLock,
-    reviewPrompt:
+    reviewPrompt: function() { return (
       'Adversarial review of the full wave ' + wave.waveId + ' in the a2a-sdk repo.\n\n' +
       'Scope (all Creates: AND Modifies: paths across every group):\n' +
       wave.allScope.join('\n') + '\n\n' +
       'Also check transitive callers and importers, and the interactions between groups.\n\n' +
       SDK_REVIEW_DIMENSIONS + '\n\n' +
-      'Return structured findings.',
+      'Return structured findings.') },
+    rescan: function(r) { return rescanScope('phase', r, null, 'Phase Redteam') },
   })
   pRound = res.rounds
   applyLoopOutcome(res.outcome, 'phase')
@@ -1521,6 +2094,11 @@ if (toCodeify.length > 0) {
     'harness/skill | harness/workflow | harness/agent | harness/template |\n' +
     'sdk/build | sdk/loop | sdk/credentials | sdk/console |\n' +
     'protocol/a2a | protocol/mcp | protocol/ag-ui | protocol/a2ui | protocol/oauth | security\n\n' +
+    'Copy each candidate\'s finding id and quote UNCHANGED from the finding (you may rewrite the\n' +
+    'description, never id or quote).\n\n' +
+    'If this repo is the a2a-sdk repo itself (it has an agent_sdk/ package), EXCLUDE findings\n' +
+    'about the wave\'s own process: CHANGELOG entries, todo Creates:/scope declarations,\n' +
+    'template-mirror hygiene.\n\n' +
     'Findings:\n' + JSON.stringify(toCodeify, null, 2),
     { schema: SDK_SCAN_SCHEMA, label: 'sdk:scan', phase: 'Codify' }
   )
@@ -1529,24 +2107,34 @@ if (toCodeify.length > 0) {
     log('WARNING: SDK issue scan returned null — this wave\'s findings were NOT classified; run /sdk-issue-scan by hand')
   } else if (sdkScan.sdkCandidates.length > 0) {
     sdkCandidatesCount = sdkScan.sdkCandidates.length
+    const statuses = await candidateStatuses(sdkScan.sdkCandidates)
+    const issueUrls = AUTO_FILE_SDK_ISSUES ? await fileStillOpenCandidates(sdkScan.sdkCandidates, statuses) : {}
     const candidateLines = sdkScan.sdkCandidates.map(function(c, i) {
       return '## Candidate ' + (i + 1) + ': ' + c.description + '\n' +
              '- Severity: ' + c.severity + '\n' +
              '- Component: ' + c.component + '\n' +
              '- File: ' + (c.file || 'n/a') + '\n' +
+             '- Status: ' + statuses[i] + '\n' +
+             (issueUrls[i] ? '- Issue: ' + issueUrls[i] + '\n' : '') +
              '- Rationale: ' + c.rationale
     }).join('\n\n')
 
     const wrote = await callAgent(
-      'Write workspace/sdk-candidates.md with exactly this content:\n\n' +
+      'Write the file workspace/sdk-candidates.md with exactly this content:\n\n' +
       '# SDK issue candidates — ' + wave.waveId + ' (' + TODAY + ')\n\n' +
-      'Run `/sdk-issue-scan` to review and file as GitHub issues on `wailuen/a2a-sdk`.\n\n' +
+      'These critical/high findings from wave ' + wave.waveId + ' are classified as\n' +
+      'SDK-level. Status is re-checked against the final tree: fixed-in-wave candidates were\n' +
+      'already fixed by this wave; run `/sdk-issue-scan` on the still-open ones to file them on\n' +
+      '`wailuen/a2a-sdk`. ' + (AUTO_FILE_SDK_ISSUES
+        ? 'autoFileSdkIssues was on: still-open candidates carry an Issue line when filed.'
+        : 'One confirmation per filing — nothing is filed automatically.') + '\n\n' +
       candidateLines,
       { label: 'sdk:candidates', phase: 'Codify', effort: 'low' }
     )
     if (!wrote) log('WARNING: workspace/sdk-candidates.md was not written (agent returned null)')
-    log('SDK candidates: ' + sdkCandidatesCount + ' finding(s) → workspace/sdk-candidates.md')
-    log('Run /sdk-issue-scan to file them')
+    log('SDK issue candidates: ' + sdkScan.sdkCandidates.length + ' finding(s) (' +
+        statuses.filter(function(s) { return s === 'still-open' }).length + ' still-open) written to workspace/sdk-candidates.md')
+    log('Run /sdk-issue-scan to file the still-open ones as GitHub issues on wailuen/a2a-sdk')
   } else {
     log('SDK issue scan: no SDK-level findings in this wave')
   }
@@ -1717,6 +2305,8 @@ if (protocolBlocked) {
     } else {
       log('Archive BLOCKED — test suite RED (' + preArchiveGate.failCount + ' failing). Fix failing tests and re-run /wave ' + wave.waveId + '.')
     }
+  } else if (deliverablesBlocked) {
+    log('Archive SKIPPED — wave ' + wave.waveId + ' blocked: Creates: deliverables missing/unverified or a group is held at a HUMAN GATE (failed: ' + Array.from(failedGroups).join(', ') + '; pruned: ' + Array.from(prunedGroups).join(', ') + '). See workspace/todos/deferred/' + wave.waveId + '-group-*-incomplete.md / -held.md. Re-run /wave ' + wave.waveId + '.')
   } else if (implementBlocked) {
     log('Archive SKIPPED — wave ' + wave.waveId + ' blocked: at least one todo\'s implement agent died twice (see the WARNING lines above). Re-run /wave ' + wave.waveId + '.')
   } else if (templatePropagationBlocked) {
@@ -1822,6 +2412,9 @@ return {
   testsBlockedArchive:   testsBlockedArchive,
   fixLoopTestsBlocked:   fixLoopTestsBlocked,
   implementBlocked:      implementBlocked,
+  deliverablesBlocked:   deliverablesBlocked,
+  failedGroups:          Array.from(failedGroups),
+  prunedGroups:          Array.from(prunedGroups),
   archivePlanRowMissing: archivePlanRowMissing,
   unitBudgetBlocked:     unitBudgetBlocked,
   phaseBudgetBlocked:    phaseBudgetBlocked,

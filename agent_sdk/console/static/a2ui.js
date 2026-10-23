@@ -13,8 +13,8 @@
  *   RFC-6901-literal one-segment pointer to the child key "" here.
  *   pointerTokens() folds both to the empty token list.
  * - Renders the 14 FROZEN Standard Profile types; MarketBriefing is prose
- *   (no card chrome); unknown components render the artifact's text
- *   fallback. Display-only: no input binding, no action dispatch.
+ *   (no card chrome); unknown components bound to an object render a generic
+ *   card (GH-215); other unknowns render the artifact's text fallback. Display-only: no input binding, no action dispatch.
  * - ChildList template expansion ({path, componentId} form) is out of scope
  *   for this display-only renderer.
  * - Untrusted-output invariant: every dynamic value lands via
@@ -28,6 +28,10 @@ const surfaces = new Map();
 
 /* ── JSON Pointer (RFC 6901) ── */
 
+function isRelativePointer(pointer) {
+  return typeof pointer === "string" && pointer !== "" && !pointer.startsWith("/");
+}
+
 function pointerTokens(pointer) {
   // A2UI v0.9.1: "Omit path or use '/' to replace the whole data model" —
   // "/" is a SPEC ALIAS for the omitted path, not the RFC-6901-literal
@@ -35,18 +39,26 @@ function pointerTokens(pointer) {
   // fold to the empty token list so pointerSet/pointerGet treat them
   // identically (whole-document replace / whole-document read).
   if (pointer === "" || pointer === "/" || pointer === null || pointer === undefined) return [];
+  // GH-215: a relative pointer ("name", "0/name") has no scope at this layer;
+  // it must never fold to the model root. null = unresolvable.
+  if (typeof pointer === "string" && !pointer.startsWith("/")) return null;
   return String(pointer)
     .split("/")
     .slice(1)
     .map((t) => t.replace(/~1/g, "/").replace(/~0/g, "~"));
 }
 
+const UNSAFE_TOKENS = new Set(["__proto__", "constructor", "prototype"]);
+
 export function pointerGet(doc, pointer) {
+  const tokens = pointerTokens(pointer);
+  if (tokens === null) return undefined;
   let cur = doc;
-  for (const token of pointerTokens(pointer)) {
+  for (const token of tokens) {
     if (cur === null || cur === undefined) return undefined;
+    if (UNSAFE_TOKENS.has(token)) return undefined;
     if (Array.isArray(cur)) cur = cur[Number(token)];
-    else if (typeof cur === "object") cur = cur[token];
+    else if (typeof cur === "object") cur = Object.hasOwn(cur, token) ? cur[token] : undefined;
     else return undefined;
   }
   return cur;
@@ -54,12 +66,16 @@ export function pointerGet(doc, pointer) {
 
 function pointerSet(doc, pointer, value) {
   const tokens = pointerTokens(pointer);
+  if (tokens === null) return doc;
   if (!tokens.length) return value === undefined ? doc : value;
+  if (tokens.some((t) => UNSAFE_TOKENS.has(t))) {
+    throw new Error("unsafe JSON Pointer token rejected");
+  }
   let cur = doc;
   for (let i = 0; i < tokens.length - 1; i++) {
     const token = tokens[i];
     const key = Array.isArray(cur) ? Number(token) : token;
-    if (cur[key] === null || cur[key] === undefined || typeof cur[key] !== "object") {
+    if (!Object.hasOwn(cur, key) || cur[key] === null || typeof cur[key] !== "object") {
       cur[key] = /^\d+$/.test(tokens[i + 1]) ? [] : {};
     }
     cur = cur[key];
@@ -91,22 +107,30 @@ export function renderA2ui(messages, opts = {}) {
   const notes = [];
 
   // 1) fold the whole array atomically — no painting yet
-  for (const msg of list) {
-    if (!msg || typeof msg !== "object") continue;
+  list.forEach((msg, index) => {
+    try {
+      foldMessage(msg);
+    } catch (err) {
+      notes.push(`message ${index} skipped: ${(err && err.message) || err}`);
+    }
+  });
+
+  function foldMessage(msg) {
+    if (!msg || typeof msg !== "object") return;
     if (!msg.version || typeof msg.version !== "string") {
       console.warn("[a2ui] message missing required version — skipped", msg);
-      continue;
+      return;
     }
     if (msg.createSurface) {
       const { surfaceId, catalogId } = msg.createSurface;
-      if (!surfaceId) continue;
+      if (!surfaceId) return;
       const existing = surfaces.get(surfaceId);
       if (existing && existing.closed) {
         notes.push(`createSurface rejected: surface ${surfaceId} is closed`);
-        continue;
+        return;
       } else if (existing && !existing.closed) {
         console.warn("[a2ui] protocol error: duplicate createSurface for open surface", surfaceId);
-        continue;
+        return;
       }
       if (!existing) {
         surfaces.set(surfaceId, {
@@ -124,7 +148,7 @@ export function renderA2ui(messages, opts = {}) {
       const entry = surfaces.get(surfaceId);
       if (!entry || entry.closed) {
         notes.push(`updateComponents dropped: unknown/closed surface ${surfaceId}`);
-        continue;
+        return;
       }
       if (!entry._componentMap) entry._componentMap = new Map();
       if (Array.isArray(components)) {
@@ -139,9 +163,13 @@ export function renderA2ui(messages, opts = {}) {
       const entry = surfaces.get(surfaceId);
       if (!entry || entry.closed) {
         notes.push(`updateDataModel dropped: unknown/closed surface ${surfaceId}`);
-        continue;
+        return;
       }
       // Absent "value" key means delete; explicit null means set to null.
+      if (isRelativePointer(path)) {
+        notes.push(`updateDataModel rejected: relative path ${JSON.stringify(path)} has no scope`);
+        return;
+      }
       const value = "value" in msg.updateDataModel ? msg.updateDataModel.value : undefined;
       entry.dataModel = pointerSet(entry.dataModel, path || "", value);
       touched.add(surfaceId);
@@ -156,7 +184,13 @@ export function renderA2ui(messages, opts = {}) {
   for (const surfaceId of touched) {
     const entry = surfaces.get(surfaceId);
     if (!entry || entry.closed) continue;
-    const painted = paintSurface(entry, fallbackText, notes);
+    let painted;
+    try {
+      painted = paintSurface(entry, fallbackText, notes);
+    } catch (err) {
+      notes.push(`surface ${surfaceId} paint failed: ${(err && err.message) || err}`);
+      painted = fallbackNode(fallbackText, `render error for surface ${surfaceId}`);
+    }
     if (entry.node && entry.node.parentNode) {
       entry.node.replaceWith(painted); // repaint in place (same transcript slot)
     } else {
@@ -183,15 +217,21 @@ function paintSurface(entry, fallbackText, notes) {
     return fallbackNode(fallbackText, entry.components.length ? "surface has no root component" : "surface has no components");
   }
   const binding = root.data && root.data.path !== undefined ? root.data.path : null;
+  if (isRelativePointer(binding)) {
+    notes.push(`root binding rejected: relative path ${JSON.stringify(binding)} has no scope`);
+    return fallbackNode(fallbackText, "relative data path rejected");
+  }
   const value = binding !== null ? pointerGet(entry.dataModel, binding) : entry.dataModel;
-  const renderer = RENDERERS[root.component];
+  let renderer = Object.prototype.hasOwnProperty.call(RENDERERS, root.component) ? RENDERERS[root.component] : null;
   if (!renderer) {
-    notes.push(`unknown component ${String(root.component)} — JSON fallback rendered`);
     const resolvedValue = value === undefined ? null : value;
-    if (resolvedValue !== null && typeof resolvedValue === "object") {
-      return jsonFallbackNode(root.component, resolvedValue);
+    if (resolvedValue === null || typeof resolvedValue !== "object" || Array.isArray(resolvedValue)) {
+      notes.push(`unknown component ${String(root.component)} — text fallback rendered`);
+      return fallbackNode(fallbackText, `unknown component: ${String(root.component)}`);
     }
-    return fallbackNode(fallbackText, `unknown component: ${String(root.component)}`);
+    notes.push(`unknown component ${String(root.component)} — generic renderer used`);
+    const name = root.component;
+    renderer = (data) => renderGeneric(name, data);
   }
   try {
     const resolved = value === undefined ? {} : value;
@@ -348,18 +388,101 @@ function fallbackNode(fallbackText, reason) {
   return node;
 }
 
-/**
- * Render an unknown structured component as formatted JSON so that new domain
- * content types are inspectable in the console even before a dedicated renderer
- * is registered. Uses <pre class="a2ui-json"> — same pattern as chat.js fmtJson.
- */
-function jsonFallbackNode(componentName, data) {
-  const node = el("div", { class: "a2ui-surface a2ui-fallback" });
-  node.appendChild(el("div", { class: "dim" }, `unknown component: ${String(componentName)}`));
+/* ── row cap (GH-215): one constant for every list/table renderer ── */
+
+export const MAX_ROWS = 100;
+
+function capRows(items) {
+  return items.length > MAX_ROWS ? items.slice(0, MAX_ROWS) : items;
+}
+
+function moreNote(items) {
+  const extra = items.length - MAX_ROWS;
+  return extra > 0 ? el("div", { class: "dim a2ui-more" }, `${extra} more`) : null;
+}
+
+/* ── generic data-driven renderer for components with no dedicated one ── */
+
+function titleFromComponent(name) {
+  return String(name)
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .trim();
+}
+
+function isScalar(v) {
+  return v === null || v === undefined || typeof v !== "object";
+}
+
+function scalarText(v) {
+  if (v === null || v === undefined) return "—";
+  return typeof v === "number" ? fmtNum(v) : String(v);
+}
+
+function compactText(v) {
+  if (isScalar(v)) return scalarText(v);
+  let text;
+  try {
+    text = Array.isArray(v) && v.every(isScalar) ? v.map(scalarText).join(", ") : JSON.stringify(v);
+  } catch (_e) {
+    text = "(unserializable)";
+  }
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+}
+
+function genericTable(rows) {
+  const columns = [];
+  for (const r of rows) {
+    for (const [k, v] of Object.entries(r)) {
+      if (isScalar(v) && !columns.includes(k) && columns.length < 8) columns.push(k);
+    }
+  }
+  const shown = capRows(rows);
+  return el(
+    "table",
+    { class: "tbl a2ui-table" },
+    el("thead", null, el("tr", null, columns.map((c) => el("th", null, c)))),
+    el(
+      "tbody",
+      null,
+      shown.map((r) =>
+        el("tr", null, columns.map((c) => el("td", { class: typeof r[c] === "number" ? "mono" : null }, scalarText(r[c]))))
+      )
+    )
+  );
+}
+
+function renderGeneric(componentName, data) {
+  const scalarRows = [];
+  const sections = [];
+  for (const [key, value] of Object.entries(data)) {
+    if (key === "metadata") continue; // rendered once by appendMetadataFootnote
+    const isRowArray =
+      Array.isArray(value) && value.length > 0 && value.every((x) => x && typeof x === "object" && !Array.isArray(x));
+    if (isRowArray) {
+      sections.push(el("div", { class: "a2ui-card-sub" }, key), genericTable(value), moreNote(value));
+    } else {
+      scalarRows.push([key, compactText(value)]);
+    }
+  }
+  const children = [];
+  if (scalarRows.length) {
+    children.push(
+      el(
+        "table",
+        { class: "tbl tbl-kv" },
+        el("tbody", null, scalarRows.map(([k, v]) => el("tr", null, el("th", null, k), el("td", null, v))))
+      )
+    );
+  }
+  children.push(...sections);
+  const raw = el("details", { class: "a2ui-raw" }, el("summary", null, "Raw JSON"));
   const pre = el("pre", { class: "a2ui-json" });
   pre.appendChild(document.createTextNode(JSON.stringify(data, null, 2)));
-  node.appendChild(pre);
-  return node;
+  raw.appendChild(pre);
+  children.push(raw);
+  return card(titleFromComponent(componentName) || "Details", null, ...children);
 }
 
 /* ── shared bits ── */
@@ -459,7 +582,7 @@ function renderKpiCard(data) {
   const grid = el(
     "div",
     { class: "a2ui-kpi-grid" },
-    metrics.map((m) =>
+    capRows(metrics).map((m) =>
       el(
         "div",
         { class: "a2ui-kpi" },
@@ -469,7 +592,7 @@ function renderKpiCard(data) {
       )
     )
   );
-  return card(data.title || null, null, grid);
+  return card(data.title || null, null, grid, moreNote(metrics));
 }
 
 function renderTimeSeriesChart(data) {
@@ -539,7 +662,7 @@ function renderComparisonTable(data) {
     el(
       "tbody",
       null,
-      rows.map((row) =>
+      capRows(rows).map((row) =>
         el(
           "tr",
           null,
@@ -551,7 +674,7 @@ function renderComparisonTable(data) {
       )
     )
   );
-  return card(data.title || null, null, table);
+  return card(data.title || null, null, table, moreNote(rows));
 }
 
 function renderBarChart(data) {
@@ -581,7 +704,7 @@ function renderEntityList(data) {
   const list = el(
     "div",
     { class: "a2ui-list" },
-    items.map((item) =>
+    capRows(items).map((item) =>
       el(
         "div",
         { class: "a2ui-list-row" },
@@ -595,7 +718,8 @@ function renderEntityList(data) {
   return card(
     data.title || `${data.entity_type || "entity"} list`,
     `showing ${showing} of ${total}${data.has_more ? " · more available" : ""}`,
-    list
+    list,
+    moreNote(items)
   );
 }
 
@@ -743,7 +867,7 @@ function renderEmailList(data) {
   const list = el(
     "div",
     { class: "a2ui-list" },
-    messages.map((m) => {
+    capRows(messages).map((m) => {
       const from = m.from || {};
       return el(
         "div",
@@ -764,7 +888,7 @@ function renderEmailList(data) {
   const sub = [`${data.total_count !== undefined ? data.total_count : messages.length} message(s)`];
   if (data.folder) sub.push(data.folder);
   if (data.has_more) sub.push("more available");
-  return card("Mail", sub.join(" · "), list);
+  return card("Mail", sub.join(" · "), list, moreNote(messages));
 }
 
 function renderCalendarEvents(data) {
@@ -773,7 +897,7 @@ function renderCalendarEvents(data) {
   const list = el(
     "div",
     { class: "a2ui-list" },
-    events.map((e) => {
+    capRows(events).map((e) => {
       const loc = e.location || {};
       const online = e.is_online || loc.is_online;
       return el(
@@ -805,7 +929,8 @@ function renderCalendarEvents(data) {
   return card(
     "Calendar",
     `${data.total_count !== undefined ? data.total_count : events.length} event(s)${range.start ? ` · ${range.start} – ${range.end}` : ""}${data.has_more ? " · more available" : ""}`,
-    list
+    list,
+    moreNote(events)
   );
 }
 
@@ -843,7 +968,7 @@ function renderUserList(data) {
   const list = el(
     "div",
     { class: "a2ui-list" },
-    users.map((u) =>
+    capRows(users).map((u) =>
       el(
         "div",
         { class: "a2ui-list-row" },
@@ -860,7 +985,8 @@ function renderUserList(data) {
   return card(
     "People",
     `${data.total_count !== undefined ? data.total_count : users.length} user(s)${data.query ? ` · "${data.query}"` : ""}${data.has_more ? " · more available" : ""}`,
-    list
+    list,
+    moreNote(users)
   );
 }
 
@@ -884,7 +1010,7 @@ function renderDocumentList(data) {
   const list = el(
     "div",
     { class: "a2ui-list" },
-    documents.map((d) => {
+    capRows(documents).map((d) => {
       // GH-177: contract keys first (modified, link); the pre-GH-177 keys
       // (last_modified, web_url) are only a fallback for older payloads.
       const when = d.modified || d.last_modified;
@@ -903,7 +1029,7 @@ function renderDocumentList(data) {
       );
     })
   );
-  return card("Documents", `${data.total_count !== undefined ? data.total_count : documents.length} document(s)`, list);
+  return card("Documents", `${data.total_count !== undefined ? data.total_count : documents.length} document(s)`, list, moreNote(documents));
 }
 
 const RENDERERS = {

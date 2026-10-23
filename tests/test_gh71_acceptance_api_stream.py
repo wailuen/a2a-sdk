@@ -45,39 +45,32 @@ from .conftest import sse_frames
 
 # ── Template-content guard (RT-003) ────────────────────────────────────────
 #
-# acceptance-api.js embeds the A2A Python script as a JS string literal inside
-# buildScenarioPrompt().  We extract only the lines that make up that embedded
-# block (they begin with spaces and a single-quoted Python fragment) so we can
-# assert on the four GH-71 invariants without running Node.
-#
-# The block runs from the first '   import asyncio' line to the
-# '   asyncio.run(main())\n' sentinel (inclusive).
+# GH-210 moved the A2A turn script out of acceptance-api.js (where it was an
+# embedded string) into ``agent_sdk.testing.turns``; acceptance-api.js now
+# tells the scenario agent to run ``python -m agent_sdk.testing.turns
+# --transport a2a``.  The guard below checks the GH-71 / GH-90 invariants on
+# the helper's A2A code (``_a2a_attempt`` plus the state-file wiring in
+# ``run_turn``) and checks that acceptance-api.js still calls the helper.
 
 _JS_FILE = Path(__file__).parent.parent / "harness" / "workflows" / "acceptance-api.js"
 
 
-def _extract_a2a_script_block(js_text: str) -> str:
-    """Return the Python lines embedded in the A2A section of buildScenarioPrompt."""
-    lines = js_text.splitlines()
-    in_block = False
-    block_lines: list[str] = []
-    for line in lines:
-        if not in_block:
-            if "import asyncio, httpx, json, os" in line:
-                in_block = True
-                block_lines.append(line)
-        else:
-            block_lines.append(line)
-            if "asyncio.run(main())" in line:
-                break
-    assert block_lines, "Could not locate the A2A Python script block in acceptance-api.js"
-    return "\n".join(block_lines)
+def _extract_a2a_script_block() -> str:
+    """Return the source of the A2A turn helper used by acceptance-api.js."""
+    from agent_sdk.testing import turns
+
+    js_text = _JS_FILE.read_text(encoding="utf-8")
+    assert "-m agent_sdk.testing.turns --transport a2a" in js_text, (
+        "acceptance-api.js no longer runs the A2A turn via agent_sdk.testing.turns"
+    )
+    block = inspect.getsource(turns._a2a_attempt) + "\n" + inspect.getsource(turns.run_turn)
+    assert block.strip(), "Could not read the A2A turn helper source"
+    return block
 
 
 @pytest.fixture(scope="module")
 def a2a_script_block() -> str:
-    js_text = _JS_FILE.read_text(encoding="utf-8")
-    return _extract_a2a_script_block(js_text)
+    return _extract_a2a_script_block()
 
 
 def test_template_uses_colon_path(a2a_script_block: str) -> None:
@@ -118,8 +111,8 @@ def test_template_no_jsonrpc_wrapper(a2a_script_block: str) -> None:
 
 def test_template_kind_status_update_parsing(a2a_script_block: str) -> None:
     """ev.get(\"kind\") == \"status-update\" must be present in the A2A script."""
-    assert 'ev.get("kind") == "status-update"' in a2a_script_block or (
-        "ev.get('kind') == 'status-update'" in a2a_script_block
+    assert 'kind = ev.get("kind")' in a2a_script_block and (
+        'kind == "status-update"' in a2a_script_block
     ), (
         "acceptance-api.js A2A script block does not parse SSE events using "
         "ev.get('kind') == 'status-update' — GH-71 AC 4 requires kind-based parsing."
@@ -128,8 +121,8 @@ def test_template_kind_status_update_parsing(a2a_script_block: str) -> None:
 
 def test_template_kind_artifact_update_parsing(a2a_script_block: str) -> None:
     """ev.get(\"kind\") == \"artifact-update\" must be present in the A2A script."""
-    assert 'ev.get("kind") == "artifact-update"' in a2a_script_block or (
-        "ev.get('kind') == 'artifact-update'" in a2a_script_block
+    assert 'kind = ev.get("kind")' in a2a_script_block and (
+        'kind == "artifact-update"' in a2a_script_block
     ), (
         "acceptance-api.js A2A script block does not parse SSE events using "
         "ev.get('kind') == 'artifact-update' — GH-71 AC 4 requires kind-based parsing."
@@ -369,7 +362,7 @@ def _run_extraction_algorithm(raw_sse: str) -> tuple[str, list[str]]:
     Returns ``(reply_text, content_types)`` identical to the embedded script's
     ``{"reply": ..., "contentTypes": ...}`` JSON output.
 
-    Algorithm mirrors lines 127–151 of harness/workflows/acceptance-api.js.
+    Algorithm mirrors ``agent_sdk.testing.turns._a2a_attempt`` (GH-210).
     The key correctness rule: collect reply text ONLY from the final or
     completed status-update so that intermediate working status-updates —
     which each carry only the most-recent text segment — do not duplicate the
@@ -509,7 +502,7 @@ _EXTRACTION_INVARIANTS = (
     ),
     # (2) art_dtype = metadata.data_type or name
     (
-        'art_dtype = art_meta.get("data_type") or art_name',
+        'dtype = (art.get("metadata") or {}).get("data_type") or art.get("name")',
         'art_dtype = art_meta.get("data_type") or art.get("name")',
     ),
 )
@@ -535,16 +528,14 @@ def test_template_continuation_state_gating(a2a_script_block: str) -> None:
     one — this test makes such a regression immediately visible.
     """
     # (1) state-gating condition
-    assert 'last_state in ("input-required", "auth-required")' in a2a_script_block or (
-        "last_state in ('input-required', 'auth-required')" in a2a_script_block
-    ), (
+    assert 'state.get("state") in ("input-required", "auth-required")' in a2a_script_block, (
         "acceptance-api.js A2A script block does not gate taskId reuse on "
         '`last_state in ("input-required", "auth-required")` — GH-90 requires '
         "state-conditional continuation logic."
     )
 
     # (2) prior state is read from STATE_F / a2a-state.txt before the decision
-    has_state_file_read = "STATE_F" in a2a_script_block or "a2a-state.txt" in a2a_script_block
+    has_state_file_read = "a2a-state.txt" in a2a_script_block and '_read(files["state"])' in a2a_script_block
     assert has_state_file_read, (
         "acceptance-api.js A2A script block does not read STATE_F / a2a-state.txt "
         "before deciding which field to send on turn 2+ — GH-90 requires the prior "

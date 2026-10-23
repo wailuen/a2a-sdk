@@ -58,6 +58,7 @@ A2uiCapabilities.allows(); AG-UI CUSTOM bypass via for_custom_emit()/any_catalog
 - fix: Move the GH-180 entry under "### 🔴 Breaking changes" with its migration note, and release as a minor (0.15.0), not 0.14.1. Drop the "New tests" bullet or move it under a Tests/Fixed heading.
 
 ### RT-008
+- status: CLOSED by GH-213
 - severity: medium
 - file: agent_sdk/a2ui/translator.py
 - description: GH-180 cites A2UI v0.9.1 negotiation, but from_metadata() (lines ~81-88) reads only the SDK profile key `catalogs`. A2UI's own a2uiClientCapabilities names the client's catalog list `supportedCatalogIds`. A third-party client that declares a domain catalog only under `supportedCatalogIds` falls back to [CATALOG_ID], and allows() now gates its domain surfaces off; before GH-180 that client received them. (PLAUSIBLE: the advisor's Standard Profile binding uses `catalogs`.)
@@ -76,6 +77,7 @@ A2uiCapabilities.allows(); AG-UI CUSTOM bypass via for_custom_emit()/any_catalog
 - fix: Match with `e.uri === "https://a2ui.org/a2a-extension/a2ui/v0.9.1"`, ideally through one shared const used by both the card lookup and the X-A2A-Extensions header.
 
 ### RT-011
+- status: CLOSED by GH-213
 - severity: low
 - file: docs/protocols.md
 - description: Raised in two rounds. Line 137 says the card's A2UI extension carries `catalogIds`. The real param is `supportedCatalogIds` (catalog.py:382), which this wave corrected only in docs/content-types.md. The page also does not mention the new A2A catalog-negotiation gate.

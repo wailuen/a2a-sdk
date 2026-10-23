@@ -1,39 +1,45 @@
-# SDK issue candidates — w058 (2026-10-19)
+# SDK issue candidates — w060 (2026-10-23)
 
 Run `/sdk-issue-scan` to review and file as GitHub issues on `wailuen/a2a-sdk`.
 
-## Candidate 1: RT-001: A revoked API key can come back. verify() now runs in a worker thread and writes the whole old record back for last_used. If revoke() deletes the row in between, the upsert re-creates it with the hash, so the key works again (Azure MERGE upsert and SQLite ON CONFLICT both re-create the row). Fix: one threading.Lock in ApiKeyStore; re-read before the last_used write and skip it if the row is gone or the hash changed; hold the lock across revoke's read, admin check and delete; add forced-interleaving tests; note cross-replica race in DESIGN.md section 6.
-- Severity: critical
-- Component: security
-- File: agent_sdk/auth/api_keys.py
-- Rationale: Core SDK auth code (agent_sdk/auth/api_keys.py, middleware, oauth and admin routes). It breaks key revocation for every agent built on the SDK. Not agent-domain code.
-
-## Candidate 2: RT-002: Two revokes at the same time can delete the last two admin keys. Both pass the other-admin check (api_keys.py:134-138) and both delete, leaving zero admin keys. This breaks the 'lockout is impossible' promise in the module docstring and DESIGN.md section 6. Fix: hold the same ApiKeyStore lock across all of revoke(); add a Barrier test asserting one succeeds and one raises AgentError(VALIDATION).
+## Candidate 1: RT-001 (line 64): The 'ID A or ID B' recipe puts anyOf at the top level of a tool's input schema via model_config json_schema_extra. The schema goes unchanged to the model (loop.py -> bedrock.py inputSchema.json / openai_client.py parameters) and to MCP clients via tools/list. Anthropic rejects top-level oneOf/allOf/anyOf in input_schema with a 400, so following the doc breaks every Claude-on-Bedrock turn and Claude MCP connector tool lists. tests/test_gh221_tools_list_titles.py::test_any_of_required_reaches_tools_list pins the unsafe shape. Fix: warn against top-level combinators, recommend optional fields + in-tool/model_validator check; optionally have C-056 _check_list and boot validation flag top-level combinators in tier-1 inputSchema.
 - Severity: high
-- Component: security
-- File: agent_sdk/auth/api_keys.py
-- Rationale: SDK auth invariant (last-admin-key protection) in agent_sdk/auth and agent_sdk/routes/admin.py. Affects all SDK agents.
+- Component: sdk/loop
+- File: docs/tools.md
+- Rationale: SDK documentation for tool input schemas plus SDK loop/provider adapters and MCP tools/list behaviour; affects every agent built on the SDK, not one agent's domain code.
 
-## Candidate 3: RT-001 (lock contention): _touch_last_used blocks on one process-wide _write_lock and holds it across two store round trips; revoke() holds it across a full list_items scan. With many active keys on Azure Table, waiting threads fill the shared asyncio.to_thread pool and stall auth traffic, similar to GH-202. Fix: make the last_used write best-effort with a non-blocking acquire, or use per-key locks plus a separate last-admin lock; add a test that a verify of another stale key returns quickly while revoke is paused in list_items.
-- Severity: high
-- Component: sdk/credentials
-- File: agent_sdk/auth/api_keys.py
-- Rationale: SDK internals: API key store and credential store I/O in the shared thread pool. Applies to every deployment using the SDK key store.
-
-## Candidate 4: RT-001 (test gap): test_admin_listing_does_not_block_event_loop does not prove list_keys/count/revoke run off the event loop. The slow store also slows the auth verify, so the /health probe finishes during auth. Reverting the GH-202 admin route fix still passes. revoke_key and overview count() have no off-loop test. Fix: make only list_items slow (or pre-set last_used), assert the thread id differs from the loop thread, add the same check for DELETE /admin/api/keys/{id} and GET /admin/api/overview, and confirm the test fails with the fix reverted.
-- Severity: high
-- Component: sdk/console
-- File: tests/test_gh202_api_key_store_off_loop.py
-- Rationale: SDK regression test for the admin console routes (agent_sdk/routes/admin.py). It is the SDK's own test suite, not an agent test, and leaves the GH-202 fix unguarded.
-
-## Candidate 5: RT-002 (changelog): The [Unreleased] entry fails LRN-379 and LRN-202. Five of seven changed agent_sdk files are not named. New public method CredentialStore.list_items has no ### Added line. The lock and race fixes and tests/test_gh202_api_key_races.py are not mentioned. Fix: add an ### Added bullet for list_items, name every changed file, describe the lock and re-read-before-write, list both test files.
-- Severity: high
-- Component: sdk/build
-- File: CHANGELOG.md
-- Rationale: SDK release documentation and public API record; required by the SDK release gate.
-
-## Candidate 6: RT-003 (scope check): LRN-361 fails. tests/test_gh202_api_key_races.py and tests/test_gh183_184_service_key_mint_step.py are on no Creates/Modifies line. The second change hides a behavior change: stores passed to ApiKeyStore must now subclass CredentialStore (or provide list_items), or count() raises AttributeError at startup via bootstrap.arm_if_needed(). Fix: add both paths to the todo; note the new subclass requirement in the todo and CHANGELOG.
+## Candidate 2: RT-001 (line 1499): FILE_SDK_ISSUES_PY always runs `gh issue create ... --label auto-filed --label <component>`, but those labels do not exist on wailuen/a2a-sdk, so gh refuses every create, every candidate ends `failed`, nothing is filed, and fileStillOpenCandidates does not log the failure. Fake-gh tests accept any label. Fix: create/check labels first (gh label create --force) or fall back to no labels; add a fake-gh test where an unknown label makes create fail.
 - Severity: high
 - Component: harness/workflow
-- File: workspace/todos/active/w058-gh-issues.md
-- Rationale: Wave workflow scope tracking for SDK work, plus an SDK credential-store contract change. Not agent-domain.
+- File: harness/workflows/wave-cycle.js
+- Rationale: Defect in the shared harness wave workflow script that ships to agent repos via the template.
+
+## Candidate 3: RT-002 (line 1494): Same missing-label defect in the sdk-wave.js copy of FILE_SDK_ISSUES_PY; with autoFileSdkIssues=true every gh issue create fails and nothing is filed. Fix identically to wave-cycle.js and keep the scripts identical (test_candidate_logic_matches_across_runners).
+- Severity: high
+- Component: harness/workflow
+- File: .claude/workflows/sdk-wave.js
+- Rationale: Defect in the SDK-repo wave runner workflow script (harness tooling).
+
+## Candidate 4: RT-003 (line 1448): Redaction before public GitHub issue filing misses common secrets: LONG regex `[A-Za-z0-9+_-]{40,}` excludes '/' (standard base64, e.g. AWS secret keys) and '.', and the 40-char floor misses 39-char Google AIza keys; Basic auth, JWT headers (eyJ...), glpat-, pk_live_, password=..., xoxb- all pass with leaks()=False. Fix: add '/' and '.' to the class, lower floor to ~32, add named patterns (AIza, eyJ, Basic, glpat-, pk|rk_live|test_, password/secret/token/api_key=...), use them in leaks(), extend test_filer_never_puts_secrets_in_gh_argv_or_body, mirror in sdk-wave.js.
+- Severity: high
+- Component: security
+- File: harness/workflows/wave-cycle.js
+- Rationale: Secret-leak path in harness automation that posts to a public repo with no human check; security issue in shared harness code.
+
+## Candidate 5: RT-004 (line 1443): Same redaction gap in the sdk-wave.js filer: base64 with '/', 39-char Google keys, Basic auth, JWT headers, glpat/pk_live tokens and password= values pass redaction and can be posted to a public issue. Apply the same pattern changes as wave-cycle.js and keep runners identical.
+- Severity: high
+- Component: security
+- File: .claude/workflows/sdk-wave.js
+- Rationale: Security gap in SDK-repo harness workflow that publishes content to GitHub.
+
+## Candidate 6: RT-005 (line 1542): originalFinding joins candidates to findings by id (+file) with an id-only fallback, but redteam IDs restart at RT-001 every call. A still-open candidate can match an earlier fixed finding with the same id/file and be marked fixed-in-wave, so it is neither filed nor sent to /sdk-issue-scan (fails open). Fix: match on id+file+quote exactly; on zero or multiple matches mark still-open and skip the stale check; drop id-only fallback; add a two-RT-001 behaviour test; mirror in sdk-wave.js.
+- Severity: high
+- Component: harness/workflow
+- File: harness/workflows/wave-cycle.js
+- Rationale: Logic defect in shared harness wave workflow candidate tracking.
+
+## Candidate 7: RT-006 (line 1537): Same id-collision defect in sdk-wave.js originalFinding; repeated RT-NNN ids across units/rounds let a still-open SDK candidate be marked fixed-in-wave. Fix: id+file+quote exact match, fail closed to still-open, drop id-only fallback, keep parity with wave-cycle.js.
+- Severity: high
+- Component: harness/workflow
+- File: .claude/workflows/sdk-wave.js
+- Rationale: Logic defect in SDK-repo wave runner workflow.

@@ -75,6 +75,8 @@ Fix 5 protocol conformance bugs surfaced by downstream agents after the 0.4.0 re
 | W35 [x] ✅ 2026-07-19 (GH-118, GH-122; target 0.5.42) | w035-gh-issues.md | G | 2 | — |
 | W36 [x] ✅ 2026-07-24 (GH-123 AUTH_SURFACE reconciliation; landed on main v0.5.44, commit 376f6cc) | completed/w036-gh-issues.md | G | 1 | — |
 | W39 [x] ✅ 2026-08-16 (GH-129–GH-139; renamed from W36 per RT-004 — the original id collided with the completed W36 row above, whose archive `mv` would have overwritten it) | completed/w039-gh-issues.md | G | 8 | — |
+| W59 [x] ✅ 2026-10-23 (GH-204B, GH-208–GH-211, GH-213, GH-215–GH-221 partial/whole; archived by hand — wave gate blocked only on template PR #2 merge, which pairs with the 0.18.0 release) | completed/w059-gh-issues.md | G | 13 | — |
+| W60 [x] ✅ 2026-10-23 (GH-218 docs, GH-219 parts 1/2/4, GH-221 parts 4–6, GH-222, GH-223; archived by hand — wave gate blocked only on template PR #2 merge, which pairs with the 0.18.0 release) | completed/w060-gh-issues.md | G | 5 | — |
 
 ## Dependency graph
 

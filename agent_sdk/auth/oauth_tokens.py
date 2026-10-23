@@ -162,9 +162,14 @@ class OAuthTokenStore:
         redirect_uris: list[str],
         *,
         client_name: str | None = None,
+        token_endpoint_auth_method: str = "none",
+        client_secret: str | None = None,
     ) -> dict[str, Any]:
-        """Persist a public-client registration; returns the stored record.
-        Enforces the registration cap with LRU eviction (a flood of junk DCRs
+        """Persist a client registration; returns the stored record.
+        A confidential client (``client_secret_post`` / ``client_secret_basic``)
+        stores only the sha256 of ``client_secret`` — the plaintext is never
+        persisted or logged, and public records never gain the hash field
+        (GH-222). Enforces the registration cap with LRU eviction (a flood of junk DCRs
         can never displace an admin-approved client or a live connector)."""
         self._evict_clients_if_needed()
         client_id = secrets.token_urlsafe(16)
@@ -172,10 +177,14 @@ class OAuthTokenStore:
             "client_id": client_id,
             "client_name": client_name,
             "redirect_uris": list(redirect_uris),
-            "token_endpoint_auth_method": "none",
+            "token_endpoint_auth_method": token_endpoint_auth_method,
             "consented": False,
             "created_at": _now(),
         }
+        if token_endpoint_auth_method != "none":
+            if not client_secret:
+                raise ValueError("confidential client requires a secret")
+            record["client_secret_hash"] = _hash(client_secret)
         self._store.set(NS_OAUTH_CLIENTS, client_id, json.dumps(record))
         logger.info("oauth client registered client_id=%s...", client_id[:8])
         return record
@@ -189,6 +198,22 @@ class OAuthTokenStore:
         except json.JSONDecodeError:
             return None
         return record if isinstance(record, dict) else None
+
+    def client_auth_method(self, client_id: str) -> str | None:
+        """Registered auth method of a stored client; None if unknown."""
+        record = self.get_client(client_id)
+        if record is None:
+            return None
+        method = record.get("token_endpoint_auth_method")
+        return method if isinstance(method, str) else "none"
+
+    def verify_client_secret(self, client_id: str, secret: str) -> bool:
+        """Constant-time check of ``secret`` against the stored hash."""
+        record = self.get_client(client_id)
+        stored = record.get("client_secret_hash") if record else None
+        if not isinstance(stored, str):
+            return False
+        return hmac.compare_digest(_hash(secret), stored)
 
     def mark_consented(self, client_id: str) -> None:
         """ADMIN approval only (admin-key consent POST, provision-org CLI).

@@ -16,6 +16,7 @@
 import { el, clear, fmtJson, postSse, readSse, uuid } from "./api.js";
 import { renderA2ui } from "./a2ui.js";
 import { postWithRetry } from "./retry.js";
+import { buildResumePayload, buildPayloadFromValues, formFields } from "./interrupt.js";
 
 /**
  * Minimal Markdown → DOM nodes renderer (no external deps, CSP-safe).
@@ -334,9 +335,13 @@ export function render(pane, ctx) {
   }
 
   function renderA2uiMessages(messages, fallbackText) {
-    const { nodes, notes } = renderA2ui(messages, { fallbackText });
-    nodes.forEach(attach);
-    notes.forEach((n) => systemLine(`a2ui: ${n}`));
+    try {
+      const { nodes, notes } = renderA2ui(messages, { fallbackText });
+      nodes.forEach(attach);
+      notes.forEach((n) => systemLine(`a2ui: ${n}`));
+    } catch (err) {
+      systemLine(`a2ui: render failed: ${(err && err.message) || err}`);
+    }
   }
 
   /* ── A2A mode (§5.1) ── */
@@ -360,9 +365,10 @@ export function render(pane, ctx) {
       /* keep the Standard Profile default */
     }
   }
-  loadCatalogIds();
+  const catalogIdsReady = loadCatalogIds();
 
   async function sendA2a(text) {
+    await catalogIdsReady;
     const message = {
       kind: "message",
       role: "user",
@@ -471,11 +477,48 @@ export function render(pane, ctx) {
   // pending interrupt from the last run; consumed on next send
   let pendingInterrupt = null;
 
-  async function sendAgui(text) {
+  function interruptForm(pending) {
+    const schema = pending.responseSchema;
+    const fields = formFields(schema) || [];
+    const inputs = {};
+    const err = el("div", { class: "chat-system dim" }, "");
+    const form = el("form", { class: "chat-system" });
+    for (const name of fields) {
+      const inp = el("input", { type: "text", name, placeholder: name });
+      inputs[name] = inp;
+      form.appendChild(el("label", {}, name + " ", inp));
+    }
+    form.appendChild(el("button", { type: "submit" }, "Resume"));
+    form.appendChild(err);
+    form.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      const values = {};
+      for (const name of fields) values[name] = inputs[name].value;
+      const r = buildPayloadFromValues(schema, values);
+      if (!r.ok) { err.textContent = r.error; return; }
+      form.remove();
+      sendAgui("", r.payload);
+    });
+    transcript.appendChild(form);
+    transcript.scrollTop = transcript.scrollHeight;
+  }
+
+  async function sendAgui(text, payloadOverride) {
+    await catalogIdsReady;
     let body;
     if (pendingInterrupt) {
-      // resume path: wrap the user's text as the interrupt payload
-      const { interruptId } = pendingInterrupt;
+      // resume path: coerce the user's text per the interrupt's responseSchema
+      // (GH-216); bad input shows an error and keeps the interrupt pending.
+      const { interruptId, responseSchema } = pendingInterrupt;
+      let payload = payloadOverride;
+      if (payload === undefined) {
+        const r = buildResumePayload(responseSchema, text);
+        if (!r.ok) {
+          systemLine(`invalid response: ${r.error}`);
+          return;
+        }
+        payload = r.payload;
+      }
       pendingInterrupt = null;
       body = {
         threadId: state.threadId,
@@ -488,7 +531,7 @@ export function render(pane, ctx) {
         // payload must be an object carrying `decision` — gate.py's parse_decision()
         // only reads a decision out of a dict payload; a bare string payload is
         // discarded and the resume lands on Outcome.UNCLEAR regardless of intent.
-        resume: [{ interruptId, status: "resolved", payload: { decision: text } }],
+        resume: [{ interruptId, status: "resolved", payload }],
       };
     } else {
       state.aguiMessages.push({ id: uuid(), role: "user", content: [{ type: "text", text: text }] });
@@ -578,7 +621,8 @@ export function render(pane, ctx) {
                 systemLine(`interrupted: ${fmtJson(interrupts)}`);
                 if (interrupts.length > 0) {
                   // store interrupt so the next send() becomes a resume POST
-                  pendingInterrupt = { interruptId: interrupts[0].id };
+                  pendingInterrupt = { interruptId: interrupts[0].id, responseSchema: interrupts[0].responseSchema };
+                  if (formFields(interrupts[0].responseSchema)) interruptForm(pendingInterrupt);
                   const msg = interrupts[0].message || "Agent requires input to continue.";
                   systemLine(`↩ resume required — type your response and send (${msg})`);
                   input.placeholder = `Resume: ${msg}`;

@@ -178,6 +178,56 @@ Update `workspace/scenarios/README.md` with one row per new file.
 
 ---
 
+## Phase 1.5 — MCP tools gate
+
+Runs after Phase 1 and before any model run (Phase 2A/2B). Requires
+`agent-sdk >=0.18.0` (`agent_sdk.testing.mcp`). It calls every tier-1 tool
+directly over MCP, so a broken tool fails here with its name instead of
+showing up as a judged conversation.
+
+**Samples.** The service key from Phase 0 cannot open `/admin` (so it cannot
+read `GET /admin/api/tools`), and `tools/list` does not carry `sample=`. Take
+each tier-1 tool's `sample=` from the `@tools.tool(...)` decorators already
+read in Phase 0 step 4 and write them to a JSON file (not secret):
+`{"tool_name": {"arg": "value"}, "other_tool": null}`. Use `null` when the
+tool has no `sample=`. Never fetch samples with the admin key, never put any
+key in `.env`, in argv, or in this file.
+
+**Run** (the key is read from `<service_key_file>`; there is no key argument):
+
+```bash
+python -m agent_sdk.testing.mcp --base-url <base_url> --key-file <service_key_file> \
+  --samples-file <samples.json> --expected-count <N tier-1 tools> \
+  [--allow-error <tool>]... [--opt-in <tool>]...
+```
+
+It does, in order:
+
+1. `initialize`, then `tools/list` (all pages). Fails when the tool count
+   differs from the registered tier-1 count, an input field has no
+   description, an `inputSchema` has `$ref` or `$defs`, or the list is over
+   the size budget (default 120000 bytes, `--size-budget`).
+2. One `tools/call` per tool with its `sample=` args, only when the tool is
+   read-only (`annotations.readOnlyHint == true`, i.e. `read_only=True`).
+   - `sample=None`: skipped with a warning (not a failure).
+   - Not read-only: skipped with a warning, even with a `sample=`, so a
+     sample never sends mail or writes a record on every run. Opt-in is off
+     by default; name a tool with `--opt-in <tool>` only when its sample is
+     safe to run every time.
+   - Interrupt (`isError: true` whose text ends with `MCP_INTERRUPT_SUFFIX`
+     from `agent_sdk.routes.mcp`): reported "needs user input, skipped" as a
+     warning; the gate goes on.
+   - Any other `isError: true` not on the allow-list (`--allow-error <tool>`,
+     use sparingly and record why): the gate stops at once. Stop acceptance
+     before any model run and report the tool name and its `sample=` args.
+
+Output names the tool and `sample=` args only. It never prints the
+Authorization header or the raw `tools/call` error body (SI-2, SI-6). Exit
+code 1 means stop; copy the `FAIL:` lines into the report and fix the tool
+before re-running.
+
+---
+
 ## Phase 2A — Dual-path API (A2A + AG-UI, default)
 
 Each scenario runs on **both** transports concurrently. A scenario passes only
@@ -256,7 +306,16 @@ include depends on the state of the prior task:
   { "message": { "role": "user", "messageId": "<new-uuid4-hex>", "contextId": "<context-id>", "parts": [ ... ] } }
   ```
 
-The harness Python script captures `contextId` from `kind:"task"` and
+**Turn helper (GH-210).** Scenario agents do not write their own scripts. Each turn runs
+`ACC_QUERY=... python -m agent_sdk.testing.turns --transport a2a|agui --base-url ... --key-file <keyFile> --run-key ...`
+(`agent_sdk >= 0.18.0`). The helper reads the key from the key file only, allows 3
+concurrent turns across all scenarios (file locks; `--slots N` to change), and retries
+HTTP 429, "too many requests" text, a failed task or an empty reply with exponential
+back-off inside a 540 s budget. AG-UI messages are restored after a failed attempt and
+A2A ids are saved only on success. If retries run out on rate limiting it returns
+`failureClass: "rate-limited"`.
+
+The helper captures `contextId` from `kind:"task"` and
 `kind:"status-update"` SSE events on turn 1, persists it to
 `/tmp/acc-{RUN_KEY}-a2a-ctx.txt`, and persists the last observed `state` to
 `/tmp/acc-{RUN_KEY}-a2a-state.txt`. On turns 2+, it reads both files to
@@ -423,6 +482,12 @@ BOTH transports with the same root cause):
 - Mark this scenario ESCALATED and exclude it from further rounds.
   (A persona-gap does NOT block other scenarios from reaching 100%.)
 
+**`rate-limited`** — the server throttled the turns (HTTP 429 / "too many requests")
+even after helper retries:
+- Infrastructure, not an agent defect. Never score these turns 1–2 and never spawn a fix.
+- Re-run the scenario later with fewer slots (`--slots 1`) or fewer parallel scenarios.
+  Does not count toward the 100% pass gate until re-run.
+
 **`upstream-issue`** — source adapter / credential failure:
 - Spawn a diagnose agent: read the source adapter + check health via
   `GET /admin/api/overview` (admin bearer) and read `adapters[].healthy` for
@@ -478,6 +543,7 @@ Recommended actions:
   persona-gap          → /analyze update prd → add FR → /wave → /acceptance
   code-bug             → /debug <scenario-id> rationale  → fix → /acceptance
   upstream-issue       → /diagnose source <name>
+  rate-limited         → re-run /acceptance --scenario <id> with fewer slots (no fix)
   bad-scenario         → /acceptance --scenario <id> --regenerate
 ```
 

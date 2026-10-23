@@ -63,6 +63,7 @@ global.parallel = async function(thunks) {
 global.phase = function(t) { phases.push(t) }
 global.log = function(m) { logs.push(String(m)) }
 global.args = scenario.args
+if (scenario.deleteDate) delete globalThis.Date
 const body = fs.readFileSync(wfPath, 'utf8').replace(/^export const meta/m, 'const meta')
 const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor
 const out = function(extra) {
@@ -77,6 +78,30 @@ PF = {
     "templateDirExists": False, "otherActiveWaves": [], "dirtyPathCount": 0, "behindCount": 0,
     "lrnNext": 7, "scopePaths": ["src/tools/a.py"],
 }
+
+
+def _todo_scan_script(wf: Path) -> str:
+    js = (
+        "const s=require('fs').readFileSync(process.argv[1],'utf8');"
+        "const m=s.match(/const TODO_SCAN_PY = (\\[[\\s\\S]*?\\]\\.join\\('\\\\n'\\))/);"
+        "console.log(eval(m[1]))"
+    )
+    return subprocess.run(["node", "-e", js, str(wf)], capture_output=True, text=True, check=True).stdout
+
+
+def facts_for(wv: dict, wf: Path, tmp_path: Path) -> list:
+    """Run the runner's real todo scan over a wave file built from the scripted wave's bodies."""
+    lines = ["# Wave w010", "**Depends:** (none)", ""]
+    for g in wv["groups"]:
+        for t in g["todos"]:
+            lines.append("- [ ] `%s` %s \u2016 group:%s" % (t["id"], t["title"], g["label"]))
+            lines.extend("  " + b if b.strip() else b for b in t["body"].split("\n"))
+    md = tmp_path / "facts-wave.md"
+    md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    scan = tmp_path / "todo_scan.py"
+    scan.write_text(_todo_scan_script(wf), encoding="utf-8")
+    proc = subprocess.run([sys.executable, str(scan), str(md)], capture_output=True, text=True, check=True)
+    return json.loads(proc.stdout)
 
 
 def todo(tid: str) -> dict:
@@ -119,10 +144,17 @@ def rt(*findings: dict) -> dict:
 
 
 def run(rules: list | None = None, *, pf: dict | None = None, wv: dict | None = None,
-        args: object = None, wf: Path = WC, tmp_path: Path) -> dict:
+        args: object = None, wf: Path = WC, tmp_path: Path, no_date: bool = False) -> dict:
+    wv_default = wv or wave()
+    pf_final = dict(pf or PF)
+    if "todoFacts" not in pf_final:
+        pf_final["todoFacts"] = facts_for(wv_default, wf, tmp_path)
     defaults = [
-        ("^parse:preflight", [pf or PF]),
-        ("^parse(:replan)?$", [wv or wave()]),
+        ("^parse:preflight", [pf_final]),
+        ("^clock:", [{"now": 2000000000.0}]),
+        ("^parse(:replan)?$", [wv_default]),
+        ("^deliv:", [{"ok": True, "checked": [g["label"] for g in wv_default["groups"]], "missing": []}]),
+        ("^scan:scope:", [{"paths": sorted(set(wv_default["allCreates"]) | set(wv_default["allModifies"]))}]),
         ("^rt:todos:", [CLEAN_PLAN]),
         ("^rt:", [CLEAN_RT]),
         ("^gate:archive-commit$", [ARCH_OK]),
@@ -134,6 +166,7 @@ def run(rules: list | None = None, *, pf: dict | None = None, wv: dict | None = 
     ]
     scenario = {
         "args": args if args is not None else {"waveFile": "workspace/todos/active/w010-x.md", "today": "2026-10-20"},
+        "deleteDate": no_date,
         "rules": [{"match": m, "responses": r} for m, r in (rules or []) + defaults],
     }
     sc = tmp_path / "scenario.json"
@@ -798,7 +831,7 @@ def test_archive_gate_sees_nested_template_repo(tmp_path: Path) -> None:
     _commit_all(tpl)
     out = _gate(repo, ["src/tools/quote.py"])
     assert out["templateDirExists"] is True
-    assert any(p.startswith("template/ (unpushed or no upstream") for p in out["offendingHarnessPaths"])
+    assert any(p.startswith("template/ (unpushed or not on origin/main") for p in out["offendingHarnessPaths"])
     _write(tpl, ".claude/workflows/wave-cycle.js", "b")
     assert "template/.claude/workflows/wave-cycle.js" in _gate(repo, ["src/tools/quote.py"])["offendingHarnessPaths"]
 
@@ -807,3 +840,736 @@ def test_archive_gate_outside_git_is_not_ok(tmp_path: Path) -> None:
     (tmp_path / "plain").mkdir()
     out = _py(_script("ARCHIVE_GATE_PY"), tmp_path / "plain", "[]")
     assert out["ok"] is False and out["error"]
+
+
+# ─── stale redteam findings (GH-211) ──────────────────────────────────────────
+
+WF = WC
+
+
+def quoted(n: int, quote: str = "x = 1", file: str = "src/tools/a.py") -> dict:
+    return dict(finding(n, file=file), line=3, quote=quote)
+
+
+def _stale_script(wf: Path) -> str:
+    js = (
+        "const s=require('fs').readFileSync(process.argv[1],'utf8');"
+        "const m=s.match(/const STALE_CHECK_PY = (\\[[\\s\\S]*?\\]\\.join\\('\\\\n'\\))/);"
+        "console.log(eval(m[1]))"
+    )
+    return subprocess.run(["node", "-e", js, str(wf)], capture_output=True, text=True, check=True).stdout
+
+
+def test_quote_seen_present_then_gone_is_dropped_and_not_blocking(tmp_path: Path) -> None:
+    out = run([("^rt:unit:A:", [rt(quoted(1)), rt(quoted(1))]),
+               ("^stale:unit:A:", [{"ok": True, "stale": [], "present": [0]}, {"ok": True, "stale": [0], "present": []}])],
+              wf=WF, tmp_path=tmp_path)
+    ls = labels(out)
+    assert "fix:unit:A:r1" in ls and "stale:unit:A:r2" in ls
+    assert "fix:unit:A:r2" not in ls and "debug:unit:A:r2" not in ls
+    assert logged(out, "stale finding dropped")
+    assert not out["result"]["protocolBlocked"]
+
+
+def test_quote_never_seen_present_stays_blocking_at_round_one(tmp_path: Path) -> None:
+    out = run([("^rt:unit:A:", [rt(quoted(1)), CLEAN_RT]),
+               ("^stale:unit:A:", [{"ok": True, "stale": [0], "present": []}])], wf=WF, tmp_path=tmp_path)
+    assert "fix:unit:A:r1" in labels(out)
+    assert logged(out, "unverifiable quote")
+    assert not logged(out, "stale finding dropped")
+
+
+def test_null_stale_check_keeps_every_finding(tmp_path: Path) -> None:
+    out = run([("^rt:unit:A:", [rt(quoted(1), quoted(2)), CLEAN_RT]), ("^stale:unit:A:", [None])],
+              wf=WF, tmp_path=tmp_path)
+    assert "fix:unit:A:r1" in labels(out)
+    assert logged(out, "keeping every finding")
+
+
+def test_untrustworthy_stale_indices_keep_findings(tmp_path: Path) -> None:
+    out = run([("^rt:unit:A:", [rt(quoted(1)), CLEAN_RT]), ("^stale:unit:A:", [{"ok": True, "stale": [7]}])],
+              wf=WF, tmp_path=tmp_path)
+    assert "fix:unit:A:r1" in labels(out)
+
+
+def test_findings_without_quotes_skip_the_check_and_stay(tmp_path: Path) -> None:
+    out = run([("^rt:unit:A:", [rt(dict(finding(1), quote=""), finding(2)), CLEAN_RT])], wf=WF, tmp_path=tmp_path)
+    assert not [l for l in labels(out) if l.startswith("stale:")]
+    assert "fix:unit:A:r1" in labels(out)
+
+
+def test_stale_check_script_greps_fixed_strings_and_fails_closed(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("x = 1\ny = [2]\n")
+    items = [
+        {"file": "a.py", "quote": "x = 1"},
+        {"file": "a.py", "quote": "gone = 9"},
+        {"file": "a.py", "quote": "y = [2]"},
+        {"file": "a.py", "quote": ""},
+        {"file": "missing.py", "quote": "x = 1"},
+        {"file": "../a.py", "quote": "nope"},
+    ]
+    proc = subprocess.run([sys.executable, "-c", _stale_script(WF), json.dumps(items)],
+                          cwd=tmp_path, capture_output=True, text=True)
+    assert json.loads(proc.stdout) == {"ok": True, "stale": [1], "present": [0, 2]}
+
+
+def test_rt_schema_requires_quote_and_line() -> None:
+    for wf in WAVE_CYCLE_COPIES:
+        text = wf.read_text()
+        block = text[text.index("const RT_SCHEMA"):text.index("const PROTO_SCHEMA")]
+        req = re.search(r"required: \['id'[^\]]*\]", block).group(0)
+        assert "'quote'" in req and "'line'" in req, wf
+
+
+# ─── deliverable gate, derived deps, scope re-scan, HUMAN GATE (GH-208) ───────
+
+_SDK_WAVE = REPO_ROOT / ".claude" / "workflows" / "sdk-wave.js"
+RUNNERS = [p for p in (WC, _SDK_WAVE) if p.exists()]
+RUNNER_IDS = [p.name for p in RUNNERS]
+
+
+def two_dep_groups(b_body: str = "body of B-1", deps: dict | None = None) -> dict:
+    a = group("A", ["src/tools/a.py"])
+    b = group("B", ["src/tools/b.py"])
+    b["todos"][0]["body"] = b_body
+    return wave([a, b], deps if deps is not None else {"A": [], "B": ["A"]})
+
+
+def deliv_missing(label: str, *paths: str) -> dict:
+    return {"ok": True, "checked": ["A", "B"], "missing": [{"label": label, "paths": list(paths)}]}
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_dependent_not_dispatched_when_creates_path_is_missing(tmp_path: Path, wf: Path) -> None:
+    out = run([("^deliv:tier1", [deliv_missing("A", "src/tools/a.py")])], wv=two_dep_groups(), wf=wf, tmp_path=tmp_path)
+    ls = labels(out)
+    assert "impl:A-1" in ls
+    assert "impl:B-1" not in ls
+    assert "defer:incomplete:A" in ls
+    assert "Write workspace/todos/deferred/w010-group-A-incomplete.md" in call(out, "defer:incomplete:A")["prompt"]
+    assert not [l for l in ls if l.startswith("rt:unit:B")]
+    assert "archive" not in ls
+    r = out["result"]
+    assert r["deliverablesBlocked"] and r["protocolBlocked"]
+    assert r["failedGroups"] == ["A"] and r["prunedGroups"] == ["B"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("bad", [None, {"ok": False, "checked": [], "missing": []}, {"ok": True, "checked": ["A"]},
+                                 {"ok": True, "checked": [], "missing": []}])
+def test_null_or_malformed_deliverable_gate_counts_every_path_missing(tmp_path: Path, wf: Path, bad: object) -> None:
+    out = run([("^deliv:", [bad])], wv=two_dep_groups(), wf=wf, tmp_path=tmp_path)
+    assert "impl:B-1" not in labels(out)
+    assert out["result"]["failedGroups"] == ["A"]
+    assert "src/tools/a.py" in call(out, "defer:incomplete:A")["prompt"]
+    assert logged(out, "fail closed")
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_depends_line_adds_dep_the_model_parse_missed(tmp_path: Path, wf: Path) -> None:
+    wv = two_dep_groups("body of B-1\n  - Depends: A-1", deps={"A": [], "B": []})
+    out = run([("^deliv:tier1", [deliv_missing("A", "src/tools/a.py")])], wv=wv, wf=wf, tmp_path=tmp_path)
+    assert "impl:B-1" not in labels(out)
+    assert out["result"]["prunedGroups"] == ["B"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_depends_line_orders_dependent_after_its_dependency(tmp_path: Path, wf: Path) -> None:
+    wv = two_dep_groups("body of B-1\n  - Depends: A-1", deps={"A": [], "B": []})
+    ls = labels(run(wv=wv, wf=wf, tmp_path=tmp_path))
+    assert ls.index("impl:A-1") < ls.index("deliv:tier1") < ls.index("impl:B-1")
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_complete_groups_run_dependents_and_archive(tmp_path: Path, wf: Path) -> None:
+    out = run(wv=two_dep_groups(), wf=wf, tmp_path=tmp_path)
+    assert {"impl:A-1", "impl:B-1", "archive"} <= set(labels(out))
+    assert not out["result"]["deliverablesBlocked"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_scope_added_mid_run_reaches_review_and_archive_gate(tmp_path: Path, wf: Path) -> None:
+    out = run([("^scan:scope:unit:A:r1", [{"paths": ["src/tools/a.py", "src/tools/late.py"]}]),
+               ("^scan:scope:", [{"paths": ["src/tools/a.py", "src/tools/late.py"]}])], tmp_path=tmp_path, wf=wf)
+    assert "src/tools/late.py" in call(out, "rt:unit:A:r1")["prompt"]
+    assert "src/tools/late.py" in call(out, "gate:archive-commit")["prompt"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_null_scope_rescan_is_unknown_not_clean(tmp_path: Path, wf: Path) -> None:
+    out = run([("^scan:scope:", [None])], tmp_path=tmp_path, wf=wf)
+    assert not [l for l in labels(out) if l.startswith("rt:unit:")]
+    assert out["result"]["redteamUnknownBlocked"] and out["result"]["protocolBlocked"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_phase_round_rescans_scope_too(tmp_path: Path, wf: Path) -> None:
+    out = run(wv=two_dep_groups(), tmp_path=tmp_path, wf=wf)
+    assert "scan:scope:phase:r1" in labels(out)
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_status_not_done_free_text_does_not_gate(tmp_path: Path, wf: Path) -> None:
+    out = run(wv=two_dep_groups("body of B-1\n  - Status: NOT DONE"), wf=wf, tmp_path=tmp_path)
+    assert "impl:B-1" in labels(out)
+    assert not out["result"]["deliverablesBlocked"]
+
+
+HUMAN = "body of B-1\n  - HUMAN GATE: owner sign-off required"
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_human_gate_without_release_line_holds_group_and_prunes_dependents(tmp_path: Path, wf: Path) -> None:
+    a = group("A", ["src/tools/a.py"])
+    a["todos"][0]["body"] = HUMAN
+    b = group("B", ["src/tools/b.py"])
+    out = run(wv=wave([a, b], {"A": [], "B": ["A"]}), wf=wf, tmp_path=tmp_path)
+    ls = labels(out)
+    assert "impl:A-1" not in ls and "impl:B-1" not in ls
+    assert "defer:held:A" in ls
+    assert not [l for l in ls if l.startswith("rt:unit:")]
+    assert out["result"]["deliverablesBlocked"] and "archive" not in ls
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_human_gate_with_release_issue_url_runs(tmp_path: Path, wf: Path) -> None:
+    body = HUMAN + "\n  - Release: https://github.com/wailuen/a2a-sdk/issues/208"
+    out = run(wv=two_dep_groups(body), wf=wf, tmp_path=tmp_path)
+    assert "impl:B-1" in labels(out)
+    assert not out["result"]["deliverablesBlocked"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_human_gate_release_line_without_issue_url_still_holds(tmp_path: Path, wf: Path) -> None:
+    out = run(wv=two_dep_groups(HUMAN + "\n  - Release: approved by email"), wf=wf, tmp_path=tmp_path)
+    assert "impl:B-1" not in labels(out)
+
+
+def _gate_script(wf: Path) -> str:
+    src = wf.read_text(encoding="utf-8")
+    scan = re.search(r"const SCOPE_SCAN_PY = (\[.*?\n\])\.join\('\\n'\)", src, re.S).group(0)
+    gate = (re.search(r"const PATH_RULE_PY = [^\n]*\n", src).group(0)
+            + re.search(r"const DELIVERABLE_GATE_PY = PATH_RULE_PY .*?\]\.join\('\\n'\)", src, re.S).group(0))
+    js = scan + "\n" + gate + "\nprocess.stdout.write(DELIVERABLE_GATE_PY)"
+    return subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_deliverable_script_checks_existence_acceptance_verdict_and_patterns(tmp_path: Path, wf: Path) -> None:
+    import os
+    import time
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/present.py").write_text("x")
+    (tmp_path / "workspace/acceptance").mkdir(parents=True)
+    (tmp_path / "workspace/acceptance/pass.md").write_text("# Acceptance\n\n**Verdict:** PASS\n")
+    (tmp_path / "workspace/acceptance/pending.md").write_text("Verdict: PASS\nTest: [pending]\n")
+    (tmp_path / "workspace/acceptance/fail.md").write_text("Verdict: FAIL\n")
+    (tmp_path / "src/old_x.py").write_text("x")
+    old = time.time() - 1000
+    os.utime(tmp_path / "src/old_x.py", (old, old))
+    (tmp_path / "src/new_y.py").write_text("y")
+    groups = {
+        "ok": ["src/present.py", "workspace/acceptance/pass.md", "src/new_*.py"],
+        "bad": ["src/absent.py", "workspace/acceptance/pending.md", "workspace/acceptance/fail.md", "src/old_*.py", "src/none_*.py"],
+    }
+    spec = json.dumps({"since": time.time() - 100, "groups": groups})
+    out = _py(_gate_script(wf), tmp_path, spec)
+    assert out["ok"] is True and out["checked"] == ["bad", "ok"]
+    assert out["missing"] == [{"label": "bad", "paths": groups["bad"]}]
+
+
+# ─── review fixes: gate classification, placeholders, clock, todo scan ────────
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_deliverable_script_only_treats_workspace_acceptance_md_as_record(tmp_path: Path, wf: Path) -> None:
+    for d in ("harness/workflows", "tests", "workspace/acceptance"):
+        (tmp_path / d).mkdir(parents=True)
+    (tmp_path / "harness/workflows/acceptance-api.js").write_text("x")
+    (tmp_path / "tests/test_gh71_acceptance_api_stream.py").write_text("x")
+    rec = tmp_path / "workspace/acceptance"
+    (rec / "heading.md").write_text("# Acceptance\n\n## Verdict\n\nPASS - all green\n")
+    (rec / "heading-colon.md").write_text("## Verdict: PASS\n")
+    (rec / "first-fails.md").write_text("Verdict: FAIL\n\nlater rerun\nVerdict: PASS\n")
+    (rec / "heading-fail-then-pass.md").write_text("## Verdict\nFAIL\n\n**Verdict:** PASS\n")
+    (rec / "empty.md").write_text("no verdict here\n")
+    groups = {
+        "ok": ["harness/workflows/acceptance-api.js", "tests/test_gh71_acceptance_api_stream.py",
+               "workspace/acceptance/heading.md", "workspace/acceptance/heading-colon.md"],
+        "bad": ["workspace/acceptance/first-fails.md", "workspace/acceptance/heading-fail-then-pass.md",
+                "workspace/acceptance/empty.md", "workspace/acceptance/absent.md"],
+    }
+    out = _py(_gate_script(wf), tmp_path, json.dumps({"since": 1.0, "groups": groups}))
+    assert out["missing"] == [{"label": "bad", "paths": groups["bad"]}]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_planner_placeholders_are_patterns_not_files(tmp_path: Path, wf: Path) -> None:
+    import os
+    import time
+
+    scan = tmp_path / "scan.py"
+    scan.write_text(_scan_script(wf), encoding="utf-8")
+    wave_md = tmp_path / "w.md"
+    wave_md.write_text(
+        "- [ ] `G5-1` learnings\n  - Creates: (modifies `CHANGELOG.md`, new `workspace/learning/LRN-NNN-stale-redteam-findings.md`,"
+        " `workspace/acceptance/run-NNN.json`)\n", encoding="utf-8")
+    scanned = json.loads(subprocess.run([sys.executable, str(scan), str(wave_md)], capture_output=True, text=True,
+                                        check=True).stdout)
+    placeholders = [p for p in scanned if "NNN" in p]
+    assert len(placeholders) == 2
+    (tmp_path / "workspace/learning").mkdir(parents=True)
+    (tmp_path / "workspace/learning/LRN-455-stale-redteam-findings.md").write_text("x")
+    paths = placeholders
+    stale_since = time.time() + 100
+    out = _py(_gate_script(wf), tmp_path, json.dumps({"since": time.time() - 100, "groups": {"G5": paths}}))
+    assert out["missing"] == [{"label": "G5", "paths": ["workspace/acceptance/run-NNN.json"]}]
+    out = _py(_gate_script(wf), tmp_path, json.dumps({"since": stale_since, "groups": {"G5": paths}}))
+    assert out["missing"] == [{"label": "G5", "paths": paths}]
+    old = time.time() - 1000
+    os.utime(tmp_path / "workspace/learning/LRN-455-stale-redteam-findings.md", (old, old))
+
+
+@pytest.mark.parametrize("since", [None, "soon", True])
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_missing_or_malformed_since_counts_every_pattern_missing(tmp_path: Path, wf: Path, since: object) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/new_y.py").write_text("y")
+    (tmp_path / "src/present.py").write_text("x")
+    spec = json.dumps({"since": since, "groups": {"g": ["src/present.py", "src/new_*.py"]}})
+    out = _py(_gate_script(wf), tmp_path, spec)
+    assert out["missing"] == [{"label": "g", "paths": ["src/new_*.py"]}]
+
+
+def _scan_script(wf: Path) -> str:
+    src = wf.read_text(encoding="utf-8")
+    scan = re.search(r"const SCOPE_SCAN_PY = (\[.*?\n\])\.join\('\\n'\)", src, re.S).group(0)
+    return subprocess.run(["node", "-e", scan + "\nprocess.stdout.write(SCOPE_SCAN_PY)"],
+                          capture_output=True, text=True, check=True).stdout
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_runner_never_reads_the_clock_in_the_sandbox(tmp_path: Path, wf: Path) -> None:
+    out = run(wv=two_dep_groups(), wf=wf, tmp_path=tmp_path, no_date=True)
+    assert "error" not in out, out
+    assert "clock:implement-start" in labels(out) and "archive" in labels(out)
+    assert '"since":2000000000' in call(out, "deliv:tier1")["prompt"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("bad", [None, {"now": 0}, {"now": "x"}, "done"])
+def test_untrustworthy_clock_passes_null_since_to_the_gate(tmp_path: Path, wf: Path, bad: object) -> None:
+    out = run([("^clock:", [bad])], wf=wf, tmp_path=tmp_path)
+    assert '"since":null' in call(out, "deliv:tier1")["prompt"]
+    assert logged(out, "Implement start time unavailable")
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_deps_and_hold_come_from_the_wave_file_not_the_model_relay(tmp_path: Path, wf: Path) -> None:
+    # The model's Parse dropped both the Depends: line and the HUMAN GATE marker from the bodies.
+    a = group("A", ["src/tools/a.py"])
+    b = group("B", ["src/tools/b.py"])
+    wv = wave([a, b], {"A": [], "B": []})
+    facts = [{"id": "A-1", "dependsText": [], "held": True},
+             {"id": "B-1", "dependsText": ["A-1"], "held": False}]
+    out = run(wv=wv, pf=dict(PF, todoFacts=facts), wf=wf, tmp_path=tmp_path)
+    ls = labels(out)
+    assert "impl:A-1" not in ls and "impl:B-1" not in ls
+    assert "defer:held:A" in ls
+    assert out["result"]["prunedGroups"] == ["B"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_todo_found_by_scan_but_missing_from_parse_aborts(tmp_path: Path, wf: Path) -> None:
+    facts = [{"id": "A-1", "dependsText": [], "held": False}, {"id": "Z-9", "dependsText": [], "held": False}]
+    out = run(pf=dict(PF, todoFacts=facts), wf=wf, tmp_path=tmp_path)
+    assert out["result"] == {"error": "todo-scan-mismatch", "waveId": "w010", "missed": ["Z-9"]}
+    assert "impl:A-1" not in labels(out)
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("bad", [{"id": "A-1", "held": False}, {"id": "A-1", "dependsText": [1], "held": False},
+                                 {"id": "A-1", "dependsText": [], "held": "yes"}])
+def test_malformed_todo_facts_stop_before_parse(tmp_path: Path, wf: Path, bad: dict) -> None:
+    out = run(pf=dict(PF, todoFacts=[bad]), wf=wf, tmp_path=tmp_path)
+    assert out["result"]["error"] == "preflight-failed" and labels(out) == ["parse:preflight"]
+
+
+def test_todo_scan_script_reads_depends_hold_and_skips_marked_todos(tmp_path: Path) -> None:
+    md = tmp_path / "w.md"
+    md.write_text(
+        "# Wave\n**Depends:** WAVE-0\n\n## G1\n"
+        "- [ ] `A-1` first\n  - Depends: (none)\n"
+        "- [ ] `B-1` second ‖ group:B\n  - **Depends:** A-1, `C-2`\n  - HUMAN GATE: owner sign-off\n"
+        "- [ ] `C-2` third\n  - HUMAN GATE: x\n  - Release: https://github.com/wailuen/a2a-sdk/issues/208\n"
+        "- [~] `D-3` skipped\n  - HUMAN GATE: y\n"
+        "\n## G2\n  - Depends: STRAY\n", encoding="utf-8")
+    script = tmp_path / "todo_scan.py"
+    script.write_text(_todo_scan_script(WC), encoding="utf-8")
+    got = json.loads(subprocess.run([sys.executable, str(script), str(md)], capture_output=True, text=True,
+                                    check=True).stdout)
+    assert got == [
+        {"id": "A-1", "dependsText": ["(none)"], "held": False},
+        {"id": "B-1", "dependsText": ["A-1, `C-2`"], "held": True},
+        {"id": "C-2", "dependsText": [], "held": False},
+    ]
+
+
+# ─── SDK candidate re-check + opt-in auto-filing (GH-223) ─────────────────────
+
+SDK_WAVE_JS = REPO_ROOT / ".claude" / "workflows" / "sdk-wave.js"
+SECRET_QUOTE = "API_KEY = 'sk-live1234567890abcdef'"
+
+
+def cand(n: int, file: str, quote: str = "x = 1", description: str | None = None,
+         component: str = "harness/workflow") -> dict:
+    return {"id": "F%d" % n, "quote": quote, "description": description or "problem %d" % n,
+            "severity": "high", "component": component, "rationale": "r", "file": file}
+
+
+def candidate_run(run_fn, tmp_path: Path, cands: list[dict], *, seen_present: bool = True,
+                  recheck: object = None, filed: object = "unset", auto: bool | None = None,
+                  file_default: bool = True) -> dict:
+    findings = [dict(finding(int(c["id"][1:]), file=c["file"]), line=3, quote=c["quote"],
+                     description=c["description"]) for c in cands]
+    present = list(range(len(cands))) if seen_present else []
+    rules = [
+        ("^rt:unit:A:", [rt(*findings), CLEAN_RT]),
+        ("^stale:unit:A:", [{"ok": True, "stale": [], "present": present}]),
+        ("^sdk:scan$", [{"sdkCandidates": cands}]),
+        ("^sdk:recheck$", [recheck if recheck is not None else {"ok": True, "stale": [], "present": []}]),
+    ]
+    if filed != "unset":
+        rules.append(("^sdk:file$", [filed]))
+    args = {"waveFile": "workspace/todos/active/w010-x.md", "today": "2026-10-20"}
+    if auto is not None:
+        args["autoFileSdkIssues"] = auto
+    return run_fn(rules, args=args, tmp_path=tmp_path)
+
+
+def candidates_prompt(out: dict) -> str:
+    return call(out, "sdk:candidates")["prompt"]
+
+
+def check_default_files_nothing(run_fn, file: str, tmp_path: Path) -> None:
+    out = candidate_run(run_fn, tmp_path, [cand(1, file)])
+    assert "sdk:file" not in labels(out)
+    assert "Status: still-open" in candidates_prompt(out)
+    assert "nothing is filed automatically" in candidates_prompt(out)
+
+
+def check_fixed_in_wave_needs_prior_presence(run_fn, file: str, tmp_path: Path) -> None:
+    gone = {"ok": True, "stale": [0], "present": []}
+    (tmp_path / "a").mkdir()
+    out = candidate_run(run_fn, tmp_path / "a", [cand(1, file)], recheck=gone)
+    assert "Status: fixed-in-wave" in candidates_prompt(out)
+    (tmp_path / "b").mkdir()
+    out = candidate_run(run_fn, tmp_path / "b", [cand(1, file)], recheck=gone, seen_present=False)
+    assert "Status: still-open" in candidates_prompt(out)
+
+
+def check_fail_closed_statuses(run_fn, file: str, tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    out = candidate_run(run_fn, tmp_path / "a", [cand(1, file, quote="")])
+    assert "sdk:recheck" not in labels(out) and "Status: still-open" in candidates_prompt(out)
+    (tmp_path / "b").mkdir()
+    out = candidate_run(run_fn, tmp_path / "b", [cand(1, file)], recheck={"ok": False, "stale": [0]})
+    assert "Status: still-open" in candidates_prompt(out) and logged(out, "no trustworthy result")
+    (tmp_path / "c").mkdir()
+    out = candidate_run(run_fn, tmp_path / "c", [cand(1, file)], recheck={"ok": True, "stale": [5]})
+    assert "Status: still-open" in candidates_prompt(out)
+
+
+def check_recheck_reuses_stale_script(run_fn, file: str, tmp_path: Path) -> None:
+    out = candidate_run(run_fn, tmp_path, [cand(1, file)])
+    p = call(out, "sdk:recheck")["prompt"]
+    assert "import json, os, subprocess, sys" in p and "grep" in p
+
+
+def check_auto_files_only_still_open(run_fn, file: str, tmp_path: Path) -> None:
+    cands = [cand(1, file, description="fixed one"), cand(2, file, description="open one")]
+    out = candidate_run(
+        run_fn, tmp_path, cands, auto=True,
+        recheck={"ok": True, "stale": [0], "present": [1]},
+        filed={"ok": True, "ghAvailable": True,
+               "results": [{"index": 1, "status": "filed", "url": "https://github.com/wailuen/a2a-sdk/issues/901"}]})
+    p = call(out, "sdk:file")["prompt"]
+    assert "open one" in p and "fixed one" not in p
+    cp = candidates_prompt(out)
+    assert "Status: fixed-in-wave" in cp and "https://github.com/wailuen/a2a-sdk/issues/901" in cp
+    assert "-R" in p and "--body-file" in p and "wailuen/a2a-sdk" in p
+
+
+def check_auto_with_nothing_open_does_not_call_gh(run_fn, file: str, tmp_path: Path) -> None:
+    out = candidate_run(run_fn, tmp_path, [cand(1, file)], auto=True,
+                        recheck={"ok": True, "stale": [0], "present": []})
+    assert "sdk:file" not in labels(out)
+
+
+@pytest.mark.parametrize("filed", [None, {"ok": True, "ghAvailable": False, "results": []}, {"ok": False, "ghAvailable": False, "results": []}])
+def check_auto_falls_back_to_file(run_fn, file: str, tmp_path: Path, filed: object) -> None:
+    out = candidate_run(run_fn, tmp_path, [cand(1, file)], auto=True, filed=filed)
+    assert "error" not in out, out.get("error")
+    assert "sdk:candidates" in labels(out) and "archive" in labels(out)
+    assert logged(out, "stay in workspace/sdk-candidates.md")
+
+
+def check_quote_never_leaves_the_runner(run_fn, file: str, tmp_path: Path) -> None:
+    out = candidate_run(run_fn, tmp_path, [cand(1, file, quote=SECRET_QUOTE, description="hard-coded key in config")],
+                        auto=True, filed={"ok": True, "ghAvailable": True, "results": []})
+    for label in ("sdk:file", "sdk:candidates"):
+        assert "sk-live1234567890abcdef" not in call(out, label)["prompt"], label
+
+
+def check_flag_default_false_and_string_true(run_fn, file: str, tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    out = candidate_run(run_fn, tmp_path / "a", [cand(1, file)], auto="false")
+    assert "sdk:file" not in labels(out)
+    (tmp_path / "b").mkdir()
+    out = candidate_run(run_fn, tmp_path / "b", [cand(1, file)], auto="true",
+                        filed={"ok": True, "ghAvailable": True, "results": []})
+    assert "sdk:file" in labels(out)
+
+
+def check_classifier_keeps_id_and_quote(run_fn, file: str, tmp_path: Path) -> None:
+    out = candidate_run(run_fn, tmp_path, [cand(1, file)])
+    p = call(out, "sdk:scan")["prompt"]
+    assert "UNCHANGED" in p and "template-mirror hygiene" in p
+
+
+def _wc_run(rules, *, args, tmp_path):
+    return run(rules, args=args, tmp_path=tmp_path)
+
+
+def test_candidate_with_reused_finding_id_is_matched_by_quote(tmp_path: Path) -> None:
+    file = "src/tools/a.py"
+    fixed, still_open = cand(1, file, quote="old = 1"), cand(1, file, quote="new = 2")
+    findings = [dict(finding(1, file=file), line=3, quote=c["quote"], description=c["description"] + str(i))
+                for i, c in enumerate((fixed, still_open))]
+    rules = [
+        ("^rt:unit:A:", [rt(*findings), CLEAN_RT]),
+        ("^stale:unit:A:", [{"ok": True, "stale": [], "present": [0, 1]}]),
+        ("^sdk:scan$", [{"sdkCandidates": [still_open]}]),
+        ("^sdk:recheck$", [{"ok": True, "stale": [], "present": [0]}]),
+    ]
+    out = run(rules, args={"waveFile": "workspace/todos/active/w010-x.md", "today": "2026-10-20"}, tmp_path=tmp_path)
+    p = call(out, "sdk:recheck")["prompt"]
+    assert "new = 2" in p and "old = 1" not in p
+    assert "Status: still-open" in candidates_prompt(out)
+
+
+def test_candidate_with_no_exact_original_skips_recheck(tmp_path: Path) -> None:
+    out = candidate_run(_wc_run, tmp_path, [cand(1, "src/tools/a.py")], recheck={"ok": True, "stale": [0], "present": []})
+    assert "Status: fixed-in-wave" in candidates_prompt(out)
+    ghost = dict(cand(1, "src/tools/a.py"), quote="never reviewed")
+    rules = [
+        ("^rt:unit:A:", [rt(dict(finding(1, file="src/tools/a.py"), line=3, quote="x = 1", description="d")), CLEAN_RT]),
+        ("^stale:unit:A:", [{"ok": True, "stale": [], "present": [0]}]),
+        ("^sdk:scan$", [{"sdkCandidates": [ghost]}]),
+    ]
+    (tmp_path / "b").mkdir()
+    out = run(rules, args={"waveFile": "workspace/todos/active/w010-x.md", "today": "2026-10-20"}, tmp_path=tmp_path / "b")
+    assert "sdk:recheck" not in labels(out) and "Status: still-open" in candidates_prompt(out)
+
+
+def test_default_files_nothing(tmp_path: Path) -> None:
+    check_default_files_nothing(_wc_run, "src/tools/a.py", tmp_path)
+
+
+def test_fixed_in_wave_needs_prior_presence(tmp_path: Path) -> None:
+    check_fixed_in_wave_needs_prior_presence(_wc_run, "src/tools/a.py", tmp_path)
+
+
+def test_candidate_status_fails_closed(tmp_path: Path) -> None:
+    check_fail_closed_statuses(_wc_run, "src/tools/a.py", tmp_path)
+
+
+def test_recheck_reuses_stale_script(tmp_path: Path) -> None:
+    check_recheck_reuses_stale_script(_wc_run, "src/tools/a.py", tmp_path)
+
+
+def test_auto_files_only_still_open(tmp_path: Path) -> None:
+    check_auto_files_only_still_open(_wc_run, "src/tools/a.py", tmp_path)
+
+
+def test_auto_with_nothing_open_does_not_call_gh(tmp_path: Path) -> None:
+    check_auto_with_nothing_open_does_not_call_gh(_wc_run, "src/tools/a.py", tmp_path)
+
+
+@pytest.mark.parametrize("filed", [None, {"ok": True, "ghAvailable": False, "results": []}, {"ok": False, "ghAvailable": False, "results": []}])
+def test_auto_falls_back_to_file(tmp_path: Path, filed: object) -> None:
+    check_auto_falls_back_to_file(_wc_run, "src/tools/a.py", tmp_path, filed)
+
+
+def test_quote_never_leaves_the_runner(tmp_path: Path) -> None:
+    check_quote_never_leaves_the_runner(_wc_run, "src/tools/a.py", tmp_path)
+
+
+def test_flag_default_false_and_string_true(tmp_path: Path) -> None:
+    check_flag_default_false_and_string_true(_wc_run, "src/tools/a.py", tmp_path)
+
+
+def test_classifier_keeps_id_and_quote(tmp_path: Path) -> None:
+    check_classifier_keeps_id_and_quote(_wc_run, "src/tools/a.py", tmp_path)
+
+
+# The filing script, run for real against a fake `gh` on PATH.
+
+FAKE_GH = """#!/usr/bin/env python3
+import json, os, sys
+argv = sys.argv[1:]
+log = os.environ["GH_LOG"]
+rec = {"argv": argv}
+if "--body-file" in argv:
+    rec["bodyfile"] = argv[argv.index("--body-file") + 1]
+    rec["body"] = open(rec["bodyfile"]).read()
+open(log, "a").write(json.dumps(rec) + "\\n")
+if argv[:2] == ["issue", "list"]:
+    if os.environ.get("GH_LIST_FAIL"):
+        sys.exit(1)
+    print(os.environ.get("GH_LIST", "[]"))
+elif argv[:2] == ["issue", "create"]:
+    if "--label" in argv and os.environ.get("GH_NO_LABELS"):
+        sys.exit(1)
+    n = sum(1 for _ in open(log))
+    print("https://github.com/wailuen/a2a-sdk/issues/%d" % (900 + n))
+"""
+
+
+def _file_script(wf: Path) -> str:
+    js = (
+        "const s=require('fs').readFileSync(process.argv[1],'utf8');"
+        "const m=s.match(/const FILE_SDK_ISSUES_PY = (\\[[\\s\\S]*?\\]\\.join\\('\\\\n'\\))/);"
+        "console.log(eval(m[1]))"
+    )
+    return subprocess.run(["node", "-e", js, str(wf)], capture_output=True, text=True, check=True).stdout
+
+
+def run_filer(tmp_path: Path, cands: list[dict], *, wf: Path = WC, gh: bool = True, env_extra: dict | None = None):
+    import os
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    if gh:
+        g = bindir / "gh"
+        g.write_text(FAKE_GH)
+        g.chmod(0o755)
+    log = tmp_path / "gh.log"
+    env = {"PATH": str(bindir), "GH_LOG": str(log), **(env_extra or {})}
+    if gh:
+        env["PATH"] = str(bindir) + os.pathsep + os.environ["PATH"]
+    payload = {"waveId": "w010", "candidates": [dict(c, index=i) for i, c in enumerate(cands)]}
+    proc = subprocess.run([sys.executable, "-c", _file_script(wf), json.dumps(payload)],
+                          cwd=tmp_path, capture_output=True, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+    calls = [json.loads(l) for l in log.read_text().splitlines()] if log.exists() else []
+    return json.loads(proc.stdout), calls
+
+
+def fcand(desc: str, **kw) -> dict:
+    return dict({"description": desc, "component": "harness/workflow", "severity": "high", "file": "harness/workflows/x.js"}, **kw)
+
+
+FILER_WFS = [WC, SDK_WAVE_JS]
+
+
+@pytest.mark.parametrize("wf", FILER_WFS)
+def test_filer_passes_R_and_body_file_and_labels(tmp_path: Path, wf: Path) -> None:
+    res, calls = run_filer(tmp_path, [fcand("missing guard")], wf=wf)
+    assert res["results"][0]["status"] == "filed" and res["results"][0]["url"].startswith("https://github.com/wailuen/a2a-sdk/issues/")
+    assert [c["argv"][:2] for c in calls] == [["issue", "list"], ["label", "create"], ["label", "create"], ["issue", "create"]]
+    for c in calls:
+        assert c["argv"][c["argv"].index("-R") + 1] == "wailuen/a2a-sdk"
+    assert [c["argv"][2] for c in calls[1:3]] == ["auto-filed", "harness/workflow"]
+    calls = [calls[0], calls[3], calls[3]]
+    create = calls[1]["argv"]
+    assert "--body-file" in create and "--body" not in create
+    assert create.count("--label") == 2 and "auto-filed" in create and "harness/workflow" in create
+    assert not Path(calls[1]["bodyfile"]).exists()
+    assert "missing guard" in calls[1]["body"] and "harness/workflows/x.js" in calls[1]["body"]
+
+
+@pytest.mark.parametrize("wf", FILER_WFS)
+def test_filer_caps_at_ten(tmp_path: Path, wf: Path) -> None:
+    res, calls = run_filer(tmp_path, [fcand("distinct problem number %d" % i) for i in range(13)], wf=wf)
+    statuses = [r["status"] for r in res["results"]]
+    assert statuses.count("filed") == 10 and statuses.count("capped") == 3
+    assert sum(1 for c in calls if c["argv"][:2] == ["issue", "create"]) == 10
+
+
+@pytest.mark.parametrize("wf", FILER_WFS)
+def test_filer_dedupes_against_open_issues(tmp_path: Path, wf: Path) -> None:
+    listing = json.dumps([{"number": 5, "title": "Missing Guard", "url": "https://github.com/wailuen/a2a-sdk/issues/5"}])
+    res, calls = run_filer(tmp_path, [fcand("missing guard")], wf=wf, env_extra={"GH_LIST": listing})
+    assert res["results"][0] == {"index": 0, "status": "duplicate", "url": "https://github.com/wailuen/a2a-sdk/issues/5"}
+    assert not [c for c in calls if c["argv"][:2] == ["issue", "create"]]
+
+
+@pytest.mark.parametrize("wf", FILER_WFS)
+def test_filer_without_gh_reports_unavailable(tmp_path: Path, wf: Path) -> None:
+    res, calls = run_filer(tmp_path, [fcand("missing guard")], wf=wf, gh=False)
+    assert res["ok"] is True and res["ghAvailable"] is False and res["results"] == [] and calls == []
+
+
+@pytest.mark.parametrize("wf", FILER_WFS)
+def test_filer_unauthenticated_list_failure_falls_back(tmp_path: Path, wf: Path) -> None:
+    res, calls = run_filer(tmp_path, [fcand("a"), fcand("b")], wf=wf, env_extra={"GH_LIST_FAIL": "1"})
+    assert res["ghAvailable"] is False
+    assert not [c for c in calls if c["argv"][:2] == ["issue", "create"]]
+
+
+@pytest.mark.parametrize("wf", FILER_WFS)
+@pytest.mark.parametrize("secret", ["sk-live1234567890abcdef", "ak_9f8e7d6c5b4a3210", "sk-ab", "Bearer eyJhbGciOiJIUzI1NiJ9.abc.def",
+                                    "a" * 8 + "0123456789abcdef0123456789abcdef",
+                                    "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "AIzaSyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q",
+                                    "Basic dXNlcjpwYXNzd29yZA==", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+                                    "glpat-abcdEFGH1234", "pk_live_abcd1234", "password=Hunter2Secret!", "xoxb-123"])
+def test_filer_never_puts_secrets_in_gh_argv_or_body(tmp_path: Path, wf: Path, secret: str) -> None:
+    res, calls = run_filer(tmp_path, [fcand("hard-coded %s in config" % secret, file="src/%s.py" % secret)], wf=wf)
+    blob = json.dumps(calls)
+    assert secret not in blob
+    for needle in ("sk-", "ak_"):
+        assert needle not in blob
+    assert res["results"][0]["status"] in ("filed", "skipped-secret")
+
+
+@pytest.mark.parametrize("wf", FILER_WFS)
+def test_filer_files_without_labels_when_labels_are_refused(tmp_path: Path, wf: Path) -> None:
+    res, calls = run_filer(tmp_path, [fcand("missing guard")], wf=wf, env_extra={"GH_NO_LABELS": "1"})
+    assert res["results"][0]["status"] == "filed"
+    creates = [c["argv"] for c in calls if c["argv"][:2] == ["issue", "create"]]
+    assert len(creates) == 2 and "--label" in creates[0] and "--label" not in creates[1]
+
+
+@pytest.mark.parametrize("wf", FILER_WFS)
+def test_filer_search_text_is_the_redacted_title(tmp_path: Path, wf: Path) -> None:
+    res, calls = run_filer(tmp_path, [fcand("key sk-live1234567890abcdef leaks")], wf=wf)
+    search = calls[0]["argv"][calls[0]["argv"].index("--search") + 1]
+    assert "sk-" not in search and "[REDACTED]" in search
+
+
+@pytest.mark.parametrize("wf", FILER_WFS)
+def test_filer_leaves_unredactable_candidate_unsearched_and_unfiled(tmp_path: Path, wf: Path) -> None:
+    res, calls = run_filer(tmp_path, [fcand("keys look like sk- followed by text")], wf=wf)
+    assert res["results"] == [{"index": 0, "status": "skipped-secret"}]
+    assert calls == []
+
+
+# ─── cross-runner parity (sdk-wave.js is outside the byte-identical guard) ────
+
+
+def _fn(text: str, name: str) -> str:
+    start = text.index(name)
+    return text[start:text.index("\n}\n", start) + 3]
+
+
+def test_candidate_logic_matches_across_runners() -> None:
+    a, b = WC.read_text(), SDK_WAVE_JS.read_text()
+    for name in ("const FILE_SDK_ISSUES_PY", "const STALE_CHECK_PY", "const FILE_SCHEMA", "async function runStaleScript",
+                 "async function candidateStatuses", "async function fileStillOpenCandidates", "function originalFinding",
+                 "async function dropStaleFindings", "const AUTO_FILE_SDK_ISSUES"):
+        assert _fn(a, name).split("\n}\n")[0] == _fn(b, name).split("\n}\n")[0], name
+    for text in (a, b):
+        block = text[text.index("const SDK_SCAN_SCHEMA"):text.index("const GATE_SCHEMA")]
+        req = re.search(r"required: \['id'[^\]]*\]", block).group(0)
+        assert "'quote'" in req and "id:" in block and "quote:" in block
+        assert "wailuen/a2a-sdk" in text and "autoFileSdkIssues" in text.split("normalizedArgs")[0]

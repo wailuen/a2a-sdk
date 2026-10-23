@@ -2,8 +2,8 @@
 
 LRN-094: build_agent_card() previously used registry.all() (tier-1 + tier-2)
 while MCP tools/list uses registry.tier1() only.  An MCP consumer discovering
-a tier-2 skill from the card and calling tools/call would receive -32601
-method-not-found — a silent contract violation with no prior hint.
+a tier-2 skill from the card and calling tools/call would receive -32602
+invalid-params — a silent contract violation with no prior hint.
 
 After the fix, build_agent_card() uses registry.tier1(), so card skills and
 MCP tools/list are identical sets.
@@ -48,7 +48,7 @@ async def test_card_skills_match_mcp_tools(client):
     assert list_r.status_code == 200
     mcp_tool_names = {t["name"] for t in list_r.json()["result"]["tools"]}
 
-    # Every card skill must be callable on MCP — no extras that would produce -32601.
+    # Every card skill must be callable on MCP — no extras that would produce -32602.
     assert card_skill_ids == mcp_tool_names, (
         f"Card skills not in MCP tools/list: {card_skill_ids - mcp_tool_names}\n"
         f"MCP tools not in card: {mcp_tool_names - card_skill_ids}"

@@ -165,7 +165,11 @@ async def test_card_advertises_credential_extension(probe_app):
     assert cred["params"]["header"] == "X-Agent-Credentials"
     assert cred["params"]["sources"] == {"probe": ["api_key"]}
     # the credential header must NOT masquerade as the agent's own auth
-    assert card["securitySchemes"] == {"bearer": {"type": "http", "scheme": "bearer"}}
+    # GH-219: the card also advertises the SDK's own OAuth server (`oauth2`);
+    # the credential header must not appear as any auth scheme.
+    assert set(card["securitySchemes"]) == {"bearer", "oauth2"}
+    assert card["securitySchemes"]["bearer"] == {"type": "http", "scheme": "bearer"}
+    assert card["securitySchemes"]["oauth2"]["type"] == "oauth2"
     assert "X-Agent-Credentials" not in json.dumps(card["securitySchemes"])
 
 

@@ -35,6 +35,7 @@ from agent_sdk.agent.events import ToolProgressEvent
 from agent_sdk.agent.loop import ToolInterrupt
 from agent_sdk.agent.registry import ToolSet
 from agent_sdk.example.agent import make_agent
+from agent_sdk.routes.mcp import MCP_INTERRUPT_SUFFIX
 
 
 class _StrictInput(BaseModel):
@@ -75,6 +76,27 @@ async def rt001_interrupt_gen_tool() -> AsyncGenerator[Any, None]:
     """Async-generator tool that raises ToolInterrupt mid-drain."""
     yield ToolProgressEvent(message="working", tool_name="rt001_interrupt_gen_tool")
     raise ToolInterrupt("confirm", "please confirm this action")
+
+
+_NOISY_MESSAGE = "pay \x1b[31m$5\x9b now\x00" + "x" * 3000
+
+
+@rt004_tools.tool(tier=1, tool_timeout_override=5.0)
+async def gh204_message_tool() -> str:
+    """Raises ToolInterrupt with a tool-authored message."""
+    raise ToolInterrupt("confirm", "Delete invoice INV-7?")
+
+
+@rt004_tools.tool(tier=1, tool_timeout_override=5.0)
+async def gh204_empty_message_tool() -> str:
+    """Raises ToolInterrupt with an empty message."""
+    raise ToolInterrupt("confirm", "")
+
+
+@rt004_tools.tool(tier=1, tool_timeout_override=5.0)
+async def gh204_noisy_tool() -> str:
+    """Raises ToolInterrupt with control chars, over-long message, noisy reason."""
+    raise ToolInterrupt("re\x1b[0mason\nforged", _NOISY_MESSAGE)
 
 
 @pytest.fixture
@@ -209,8 +231,8 @@ async def test_mcp_tools_call_interrupt_is_diagnostic_not_generic(rt004_client) 
     assert text != "tool execution failed", (
         f"a ToolInterrupt must not collapse into the generic fallback; got {text!r}"
     )
-    assert "confirmation" in text and "MCP" in text, (
-        f"expected a distinct interrupt diagnostic, got {text!r}"
+    assert text == f"please confirm this action {MCP_INTERRUPT_SUFFIX}", (
+        f"expected the tool message plus the interrupt marker, got {text!r}"
     )
 
 
@@ -226,6 +248,53 @@ async def test_mcp_tools_call_generator_interrupt_is_diagnostic_not_generic(
     assert text != "tool execution failed", (
         f"a ToolInterrupt must not collapse into the generic fallback; got {text!r}"
     )
-    assert "confirmation" in text and "MCP" in text, (
-        f"expected a distinct interrupt diagnostic, got {text!r}"
+    assert text == f"please confirm this action {MCP_INTERRUPT_SUFFIX}", (
+        f"expected the tool message plus the interrupt marker, got {text!r}"
     )
+
+
+async def test_gh204_interrupt_shows_tool_message_then_suffix(rt004_client) -> None:
+    headers = await _mcp_init(rt004_client)
+    result = await _call(rt004_client, headers, "gh204_message_tool")
+    assert result.get("isError") is True
+    text = result["content"][0]["text"]
+    assert text.startswith("Delete invoice INV-7?")
+    assert text.endswith(MCP_INTERRUPT_SUFFIX)
+
+
+async def test_gh204_empty_message_falls_back_to_fixed_text(rt004_client) -> None:
+    headers = await _mcp_init(rt004_client)
+    result = await _call(rt004_client, headers, "gh204_empty_message_tool")
+    assert result.get("isError") is True
+    text = result["content"][0]["text"]
+    assert text.startswith("tool requires interactive confirmation, unsupported over MCP")
+    assert text.endswith(MCP_INTERRUPT_SUFFIX)
+
+
+async def test_gh204_action_gate_interrupt_over_mcp_is_error(rt004_client) -> None:
+    headers = await _mcp_init(rt004_client)
+    result = await _call(rt004_client, headers, "rt001_interrupt_coroutine_tool")
+    assert result.get("isError") is True
+    text = result["content"][0]["text"]
+    assert text.startswith("please confirm this action")
+    assert text.endswith(MCP_INTERRUPT_SUFFIX)
+
+
+async def test_gh204_si2_wire_text_stripped_capped_and_log_reason_only(
+    rt004_client, caplog
+) -> None:
+    import logging
+
+    headers = await _mcp_init(rt004_client)
+    with caplog.at_level(logging.WARNING):
+        result = await _call(rt004_client, headers, "gh204_noisy_tool")
+    text = result["content"][0]["text"]
+    assert result.get("isError") is True
+    assert text.endswith(MCP_INTERRUPT_SUFFIX)
+    assert not any(ord(c) < 0x20 or 0x7F <= ord(c) < 0xA0 for c in text)
+    assert len(text) <= 1024 + 1 + len(MCP_INTERRUPT_SUFFIX)
+    assert text.startswith("pay")
+    log = "\n".join(r.getMessage() for r in caplog.records if "interrupt" in r.getMessage())
+    assert "reason=re [0mason forged" in log
+    assert "\x1b" not in log and "\n" not in log
+    assert "pay" not in log and "xxxx" not in log

@@ -160,12 +160,16 @@ def test_agui_resume_payload_matches_action_gate_contract():
     intent, breaking every action_gate-gated tool confirmation driven from the
     console's AG-UI tab.
 
-    RT-003 (source-text pin, no JS runtime available — see the assistant-turn
-    fold test above for the same caveat): tolerates whitespace/comment
-    reformatting but cannot distinguish `{ decision: text }` from a
-    behavior-preserving wrapper.
+    GH-216: the payload is now built by `buildResumePayload()` in
+    interrupt.js from the interrupt's responseSchema. With no schema (or the
+    action_gate confirm schema, whose sole property is `decision`) it still
+    yields `{ decision: text }`; tests/test_gh216_console_interrupt_schema.py
+    runs that under node. This pin checks the wiring: chat.js sends the
+    builder's (object) payload, and the no-schema fallback stays a
+    `decision` object.
     """
     chat_js = (CONSOLE_STATIC / "chat.js").read_text()
+    interrupt_js = (CONSOLE_STATIC / "interrupt.js").read_text()
 
     resume_body = re.search(
         r"resume:\s*\[\{([\s\S]*?)\}\]",
@@ -174,10 +178,15 @@ def test_agui_resume_payload_matches_action_gate_contract():
     assert resume_body, "AG-UI resume body (`resume: [{...}]`) not found in chat.js"
     body_expr = re.sub(r"//.*", "", resume_body.group(1))
     body_expr = re.sub(r"\s+", " ", body_expr).strip()
-    assert re.search(r"payload:\s*\{\s*decision:\s*text\s*\}", body_expr), (
-        "AG-UI resume payload must be an object carrying `decision` (e.g. "
-        "`payload: { decision: text }`), not a bare string — gate.py's "
-        f"parse_decision() silently discards non-dict payloads; got: {body_expr!r}"
+    assert re.search(r"\bpayload\b", body_expr), (
+        f"AG-UI resume body must carry `payload`; got: {body_expr!r}"
+    )
+    assert re.search(r"buildResumePayload\(\s*responseSchema\s*,\s*text\s*\)", chat_js), (
+        "chat.js must build the resume payload via buildResumePayload(responseSchema, text)"
+    )
+    assert re.search(r"payload:\s*\{\s*decision:\s*text\s*\}", interrupt_js), (
+        "interrupt.js buildResumePayload() must fall back to `{ decision: text }` "
+        "— gate.py's parse_decision() silently discards non-dict payloads"
     )
 
 

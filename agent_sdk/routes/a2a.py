@@ -1101,35 +1101,13 @@ async def tasks_get(
     return _strict_json_response(_task_wire(record, historyLength), dict(response.headers))
 
 
-@router.post("/v1/tasks/{task_id}:cancel")
-async def tasks_cancel(
-    task_id: str, request: Request, response: Response, identity: Identity = Depends(require_identity)
-) -> Any:
-    guard_origin(request)
-    store = request.app.state.task_store
-    record = store.get(task_id, identity)
-    if record is None:
-        return a2a_error(
-            A2A_TASK_NOT_FOUND, "task not found", headers=dict(response.headers)
-        )
-    if record.task.status.state in TERMINAL_STATES:
-        return a2a_error(
-            A2A_TASK_NOT_CANCELABLE,
-            "task is already terminal",
-            headers=dict(response.headers),
-        )
-    # RT-002 (debug round 4): tasks/cancel activates NEITHER extension — it
-    # never calls _capabilities() and never calls forwarding.bind/parse_header
-    # — so it must not echo either URI merely because the request asked. Its
-    # response body is the full canceled Task, exactly like tasks/get's, so it
-    # uses the same activation-accurate helper: echo A2UI only when the Task
-    # actually being returned carries a real A2UI part. Placed after the
-    # not-found / not-cancelable returns for the same reason tasks/get places
-    # it after its own: with no Task there is nothing that could have been
-    # activated, so those error responses carry no echo (matching
-    # test_tasks_get_not_found_never_echoes_credential_forwarding).
-    _echo_a2ui_if_present([record.task], request, response)
-    hdrs = dict(response.headers)  # RT-B-005: see message_send's identical comment
+def cancel_task_record(record: TaskRecord, store: Any) -> None:
+    """Shared teardown for an already identity-scoped, non-terminal record.
+
+    Used by ``tasks/cancel`` and by the AG-UI route when its SSE stream ends
+    before a terminal frame. Takes a record, never a task id: callers resolve
+    the record under the request identity first (SI-5).
+    """
     if record.worker is not None and not record.worker.done():
         record.worker.cancel()
     # RT-B-001: mirrors InMemoryTaskStore.evict — a long_running (GH-87) tool
@@ -1172,7 +1150,7 @@ async def tasks_cancel(
             "repair_dangling_tool_use_safe reported an unrepaired transcript "
             "for task %s during cancel; the CANCELED status will not be "
             "durably persisted over it — see its own error log line above",
-            task_id,
+            record.task.id,
         )
     set_task_status(record, TaskState.CANCELED, store=store, repaired=repaired)
     frame = TaskStatusUpdateEvent(
@@ -1190,7 +1168,7 @@ async def tasks_cancel(
         # — instead of falling through to the generic "stream ended
         # unexpectedly" once the frame loop exits with terminal_sent unset.
         store.publish(
-            task_id,
+            record.task.id,
             StreamItem(
                 frame=frame,
                 event=DoneEvent(ok=False, error=_CANCELLED_RUN_ERROR_TEXT),
@@ -1198,7 +1176,40 @@ async def tasks_cancel(
             ),
         )
     finally:
-        store.close_streams(task_id)
+        store.close_streams(record.task.id)
+
+
+@router.post("/v1/tasks/{task_id}:cancel")
+async def tasks_cancel(
+    task_id: str, request: Request, response: Response, identity: Identity = Depends(require_identity)
+) -> Any:
+    guard_origin(request)
+    store = request.app.state.task_store
+    record = store.get(task_id, identity)
+    if record is None:
+        return a2a_error(
+            A2A_TASK_NOT_FOUND, "task not found", headers=dict(response.headers)
+        )
+    if record.task.status.state in TERMINAL_STATES:
+        return a2a_error(
+            A2A_TASK_NOT_CANCELABLE,
+            "task is already terminal",
+            headers=dict(response.headers),
+        )
+    # RT-002 (debug round 4): tasks/cancel activates NEITHER extension — it
+    # never calls _capabilities() and never calls forwarding.bind/parse_header
+    # — so it must not echo either URI merely because the request asked. Its
+    # response body is the full canceled Task, exactly like tasks/get's, so it
+    # uses the same activation-accurate helper: echo A2UI only when the Task
+    # actually being returned carries a real A2UI part. Placed after the
+    # not-found / not-cancelable returns for the same reason tasks/get places
+    # it after its own: with no Task there is nothing that could have been
+    # activated, so those error responses carry no echo (matching
+    # test_tasks_get_not_found_never_echoes_credential_forwarding).
+    _echo_a2ui_if_present([record.task], request, response)
+    hdrs = dict(response.headers)  # RT-B-005: see message_send's identical comment
+    cancel_task_record(record, store)
+    body = _task_wire(record)
     # spec-required: HTTP 200 with the full canceled Task (§5.1)
     return _strict_json_response(body, hdrs)
 

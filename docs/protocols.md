@@ -105,6 +105,14 @@ The two are merged REJECT-WINS (a contradictory pair always denies); an
 unrecognized `status` with no `payload.decision` is UNCLEAR → default-deny,
 without aborting the run.
 
+`RUN_FINISHED` always carries `outcome`: `{type: "success"}` on a normal
+finish, `{type: "interrupt", ...}` when paused. `RUN_ERROR` carries `code` — one
+of the `ErrorCategory` values: `rate_limited`, `upstream`, `auth`, `timeout`,
+`budget`, `internal` (from the failing `AgentError.category` or a fixed code),
+`validation` (malformed body, invalid resume, no user message, non-text part)
+and `not_found` (unknown, expired or no-longer-resumable interrupt). `code` is
+never built from client input.
+
 Inbound history is processed, not rejected: >50 messages or messages over
 `AGENT_SDK_AGUI_MAX_MESSAGE_CHARS` (default 32000) keep head and tail with an omission marker, blank assistant turns are skipped, consecutive
 same-role messages merge. Control characters are stripped, not rejected —
@@ -123,6 +131,15 @@ never `RUN_ERROR`.
   `system`). Max 4000 characters; setting both is a build error. Every MCP
   client model sees this text, so it must contain no secrets.
 - Sessions via `Mcp-Session-Id`; CORS preflight is an exact-origin table.
+  `GET /mcp` with an `Mcp-Session-Id` applies the same checks as `POST`: over
+  64 characters → 400; unknown, expired or other-owner session → 404 (same
+  static body for all three 404 cases). No header → 200 SSE, as before.
+- `tools/call` for an unknown or Tier 2 tool returns JSON-RPC `-32602`
+  (invalid params) with the fixed message `tool not found`; the requested
+  name is never echoed. An unknown MCP *method* still returns `-32601`.
+- A `POST /mcp` body that is a JSON-RPC response (`id` plus `result` or
+  `error`, no `method`) returns `202 Accepted` with an empty body, after the
+  auth, origin and session checks. Requests still get `application/json`.
 - **Concurrent-stream cap.** `GET /mcp` and the legacy `GET /mcp/sse` both
   hold an indefinite `text/event-stream` and share one admission budget —
   global, then per-identity (`AGENT_SDK_MAX_MCP_STREAMS_PER_IDENTITY`). At
@@ -140,6 +157,8 @@ never `RUN_ERROR`.
 
 `/.well-known/agent-card.json` (ETag + 304; `agent.json` is a
 byte-identical alias): `protocolVersion: "0.3.0"`, HTTP+JSON transport,
-`capabilities.extensions` = the A2UI extension with `catalogIds`,
+`capabilities.extensions` = the A2UI extension with `supportedCatalogIds`,
 `x-sdk` per-skill metadata (tier, schemas, emits), and the `x-agui` block
 (transport, endpoint, customEvents). All URLs derive from `PUBLIC_URL`.
+
+A2A clients must list a domain catalog in `a2uiClientCapabilities.catalogs` to receive its surfaces (GH-180). Upstream A2UI v0.9.1's `{"v0.9": {"supportedCatalogIds": [...]}}` shape (client_capabilities.json) is accepted too when `catalogs` is absent or unusable, then a flat root `supportedCatalogIds` as a lenient fallback; `catalogs` wins when present (GH-213).

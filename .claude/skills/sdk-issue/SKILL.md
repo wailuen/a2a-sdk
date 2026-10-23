@@ -190,6 +190,9 @@ LRN:       captured | skipped
   misattributes blame.
 - **Never file without user confirmation** (step 10). This skill creates a
   public (or repo-visible) record — the user must approve the title and body.
+  Sole exception: a wave run with `args.autoFileSdkIssues: true` (default `false`) may
+  file its `still-open` candidates itself. The classification gate and the no-credentials
+  rule below still apply to that path; this skill's own flow always asks.
 - **One issue per finding.** If the finding contains multiple distinct bugs,
   split them: run `/sdk-issue` once per bug.
 - **No credentials in issue bodies.** If reproducing the bug requires a
