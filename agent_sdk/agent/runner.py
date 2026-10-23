@@ -42,6 +42,7 @@ from ..models.content_types import A2UI_MIME_TYPE, ContentModel
 from ..models.errors import AgentError, ErrorCategory, WireError
 from ..tasks.store import TaskRecord, TaskStore
 from .deferred import DeferredEvent
+from .registry import match_emits_type
 from .events import (
     ArtifactEvent,
     AuditEvent,
@@ -383,6 +384,24 @@ def split_a2ui_delivery_validated(
             "translate() output"
         )
     return open_messages, close_messages
+
+
+def build_text_only_artifact(event: ArtifactEvent) -> Artifact:
+    """GH-225: TextPart-only artifact for a declared-``emits`` tool whose result
+    matches no declared member — no A2UI card, no DataPart."""
+    payload = event.model
+    text = payload.to_plain_text() if isinstance(payload, ContentModel) else str(payload)
+    artifact = Artifact(
+        artifactId=uuid.uuid4().hex,
+        name=event.tool_name,
+        parts=[TextPart(text=text)],
+        metadata={"data_type": event.tool_name, "tool_name": event.tool_name},
+    )
+    try:
+        dumps_strict(artifact.wire())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("text-only artifact is not JSON-serializable") from exc
+    return artifact
 
 
 def build_artifact(
@@ -1090,14 +1109,21 @@ async def _run_deferred_background(
             overrides={event.tool_call_id: (content_blocks, "success")},
             bridge_text=_DEFERRED_SUCCESS_BRIDGE_TEXT,
         )
+        # GH-225: a declared tool's result that matches no emits member gets a
+        # text-only artifact (no A2UI card); a matching one is labelled with
+        # that member's data_type; an emits-less tool is unchanged.
+        matched = match_emits_type(event.emits_types, raw_result)
         artifact_ev = ArtifactEvent(
-            data_type=getattr(event.emits, "data_type", event.tool_name)
-            if event.emits is not None
+            data_type=getattr(matched, "data_type", event.tool_name)
+            if matched is not None
             else event.tool_name,
             tool_name=event.tool_name,
             model=raw_result,
         )
-        artifact = build_artifact(artifact_ev, capabilities)
+        if event.emits_types and matched is None:
+            artifact = build_text_only_artifact(artifact_ev)
+        else:
+            artifact = build_artifact(artifact_ev, capabilities)
         # RT-002: serialize the wire frame HERE (inside the guarded block) but
         # do NOT mutate task.artifacts yet — the append is deferred to AFTER
         # publish() has actually delivered the frame (second try block below).
@@ -1130,7 +1156,12 @@ async def _run_deferred_background(
         return
 
     try:
-        publish(artifact_frame, artifact_ev)
+        # GH-225: a no-match text-only artifact publishes no loop event, so
+        # AG-UI renders no AGENT_ARTIFACT / A2UI card (same as the inline path).
+        publish(
+            artifact_frame,
+            None if event.emits_types and matched is None else artifact_ev,
+        )
         # RT-002: append to task.artifacts ONLY AFTER the artifact frame has
         # actually been delivered on the stream. If the publish() above raises
         # (e.g. a persistent TaskStore's durable write), the artifact is never

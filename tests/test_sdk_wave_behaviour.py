@@ -38,6 +38,7 @@ from tests.test_wave_cycle_behaviour import (
     labels,
     logged,
     rt,
+    scan_reply,
     wave,
 )
 from tests.test_wave_cycle_behaviour import run as _run
@@ -677,3 +678,36 @@ def test_sdk_wave_classifier_keeps_id_and_quote(tmp_path: Path) -> None:
 
 def test_sdk_wave_candidate_logic_matches_wave_cycle() -> None:
     _wc.test_candidate_logic_matches_across_runners()
+
+
+# ─── GH-228: final scope re-scans, owner assignment ───────────────────────────
+
+
+@pytest.mark.parametrize("label", ["scan:scope:final-pre-audit", "scan:scope:final-pre-archive"])
+def test_gh228_untrustworthy_final_rescan_blocks_archive(tmp_path: Path, label: str) -> None:
+    out = run([("^" + label + "$", [None])], tmp_path=tmp_path)
+    assert label in labels(out)
+    assert out["result"]["protocolBlocked"] and "archive" not in labels(out)
+    assert logged(out, "final scope re-scan returned no trustworthy result \u2014 archive BLOCKED")
+
+
+def test_gh228_path_added_after_protocol_audit_reaches_archive_gate(tmp_path: Path) -> None:
+    reply = scan_reply(sdk_wave(), ("agent_sdk/after_codify.py", "A-1", "modify"))
+    out = run([("^scan:scope:final-pre-archive$", [reply])], tmp_path=tmp_path)
+    assert "agent_sdk/after_codify.py" in call(out, "gate:archive-commit")["prompt"]
+
+
+def test_gh228_unowned_new_path_blocks_wave_and_is_assigned_to_no_group(tmp_path: Path) -> None:
+    reply = scan_reply(sdk_wave(), ("agent_sdk/late.py", None, "create"))
+    out = run([("^scan:scope:", [reply])], tmp_path=tmp_path)
+    assert logged(out, "scope re-scan: path agent_sdk/late.py has no owning todo \u2014 wave BLOCKED")
+    assert not [l for l in labels(out) if l.startswith("rt:unit:")]
+    assert out["result"]["protocolBlocked"] and "archive" not in labels(out)
+
+
+def test_gh228_new_path_is_assigned_to_the_declaring_group(tmp_path: Path) -> None:
+    wv = two_groups()
+    reply = scan_reply(wv, ("agent_sdk/late.py", "B-1", "create"))
+    out = run([("^scan:scope:", [reply])], wv=wv, tmp_path=tmp_path)
+    assert "agent_sdk/late.py" in call(out, "rt:unit:B:r1")["prompt"]
+    assert "agent_sdk/late.py" not in call(out, "rt:unit:A:r1")["prompt"]

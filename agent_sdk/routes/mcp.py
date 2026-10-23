@@ -113,7 +113,7 @@ from ..common.origin import guard_origin
 from ..common.redact import TITLE_TEXT_MAX_LEN, frame_locations, safe_line_text, sanitize_text
 from ..common.sse import HEARTBEAT, SSE_HEADERS
 from ..agent.loop import ToolInterrupt, resolve_tool_timeout, safe_validation_message
-from ..agent.registry import ToolInputValidationError
+from ..agent.registry import ToolInputValidationError, match_emits_type
 from ..credentials import forwarding
 from ..models.content_types import ContentModel, MarketBriefing
 from ..models.errors import AgentError
@@ -745,7 +745,7 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
             "isError": True,
         }
 
-    emits_type = entry.decl.emits
+    emits_members = entry.decl.emits_types
     # RT-001/RT-002: a drained async-generator with no terminal yield resolves
     # to ToolTerminalResult(value=None) (registry.py's invoke_gen), and a plain
     # coroutine tool may simply `return None` — symmetric cases, and this holds
@@ -764,15 +764,27 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
         logger.info(
             "mcp tool produced no result tool=%s emits_declared=%s",
             name,
-            emits_type is not None,
+            bool(emits_members),
         )
-    elif emits_type is not None and not isinstance(artifact, BaseModel):
+    elif emits_members and not isinstance(artifact, BaseModel):
         # SC-C1: if the tool declares emits but the artifact is a raw dict/scalar,
         # attempt to coerce it into the declared emits model so structuredContent
         # can be emitted (MCP §4 MUST when outputSchema is advertised).
-        try:
-            artifact = emits_type.model_validate(artifact)
-        except Exception as exc:
+        # GH-225: members are tried in declaration order; the first that
+        # validates wins. Per-member ValidationError text carries raw tool
+        # output, so only exception type names are kept (SI-2).
+        coerced: BaseModel | None = None
+        failure_types: list[str] = []
+        for member in emits_members:
+            try:
+                coerced = member.model_validate(artifact)
+                break
+            except Exception as member_exc:
+                failure_types.append(type(member_exc).__name__)
+        if coerced is not None:
+            artifact = coerced
+        else:
+            exc_types = ",".join(failure_types)
             # MCP §4: structuredContent MUST be present when outputSchema is declared.
             # Coercion failure → surface as isError so clients can detect the contract
             # violation rather than receiving a silent success with no structuredContent.
@@ -781,12 +793,27 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
             logger.warning(
                 "mcp tool output coercion failed tool=%s exc_type=%s",
                 name,
-                type(exc).__name__,
+                exc_types,
             )
             return {
                 "content": [{"type": "text", "text": "tool output coercion failed"}],
                 "isError": True,
             }
+
+    elif emits_members and match_emits_type(emits_members, artifact) is None:
+        # LRN-469: a model of an undeclared type under an advertised
+        # outputSchema can neither carry conforming structuredContent nor
+        # succeed without it (MCP §4), so it is a tool fault. SI-2: the type
+        # name goes to the log only.
+        logger.warning(
+            "mcp tool output type not declared in emits tool=%s type=%s",
+            name,
+            type(artifact).__name__,
+        )
+        return {
+            "content": [{"type": "text", "text": "tool output does not match its declared type"}],
+            "isError": True,
+        }
 
     result: dict[str, Any] = {
         "content": [{"type": "text", "text": _tool_text(artifact)}],
@@ -804,7 +831,10 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
     # {"markdown": to_markdown()}; content[0].text still carries the raw
     # markdown unchanged, and the AG-UI/A2A bare-string wire contract
     # (translator.py) is untouched.
-    if entry.output_schema() is not None and isinstance(artifact, BaseModel):
+    if (
+        entry.output_schema() is not None
+        and isinstance(artifact, BaseModel)
+    ):
         result["structuredContent"] = (
             {"markdown": artifact.to_markdown()}
             if isinstance(artifact, MarketBriefing)

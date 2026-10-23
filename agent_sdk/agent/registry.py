@@ -394,7 +394,7 @@ class ToolDecl:
     name: str
     description: str
     tier: int
-    emits: type | None
+    emits: type | tuple[type, ...] | None
     sample: dict[str, Any] | None
     input_model: type[BaseModel] | None
     adapter_params: dict[str, type[SourceAdapter]]  # param name -> adapter class
@@ -443,6 +443,46 @@ class ToolDecl:
     # GH-196: True → unknown argument keys are not rejected (and the schema
     # advertises additionalProperties: true).
     allow_extra_args: bool = False
+    # GH-225: normalized tuple form of ``emits`` — () when the tool declares
+    # none, (X,) for ``emits=X``, (A, B, ...) for a tuple. Derived from
+    # ``emits`` when not passed.
+    emits_types: tuple[type, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.emits_types:
+            self.emits_types = normalize_emits(self.emits)
+
+    def match_emits(self, result: Any) -> type | None:
+        """The declared member ``result`` is an instance of (exact type first,
+        then declaration order), or None when it matches none."""
+        return match_emits_type(self.emits_types, result)
+
+
+def match_emits_type(members: tuple[type, ...], result: Any) -> type | None:
+    for member in members:
+        if type(result) is member:
+            return member
+    for member in members:
+        if isinstance(result, member):
+            return member
+    return None
+
+
+def normalize_emits(emits: type | tuple[type, ...] | None) -> tuple[type, ...]:
+    """GH-225: ``emits`` as one tuple. Raises ValueError for an empty tuple,
+    a non-class member or duplicate members."""
+    if emits is None:
+        return ()
+    if not isinstance(emits, tuple):
+        return (emits,)
+    if not emits:
+        raise ValueError("emits tuple must not be empty")
+    for member in emits:
+        if not isinstance(member, type):
+            raise ValueError("emits tuple members must be classes")
+    if len(set(emits)) != len(emits):
+        raise ValueError("emits tuple must not contain duplicate types")
+    return emits
 
 
 class ToolSet:
@@ -455,7 +495,7 @@ class ToolSet:
         self,
         *,
         tier: int = 1,
-        emits: type | None = None,
+        emits: type | tuple[type, ...] | None = None,
         sample: dict[str, Any] | None = None,
         name: str | None = None,
         title: str | None = None,
@@ -468,6 +508,7 @@ class ToolSet:
     ) -> Callable:
         if tier not in (1, 2):
             raise ValueError("tier must be 1 (query: A2A+MCP) or 2 (composite: A2A only)")
+        emits_types = normalize_emits(emits)
         # ``read_only=True`` seeds the safe hints for a pure query; an explicit
         # ``annotations`` dict overrides field-by-field. ``openWorldHint`` is
         # NOT seeded here — GH-134: it must reflect whether the tool talks to
@@ -631,6 +672,7 @@ class ToolSet:
                     description=description.strip(),
                     tier=tier,
                     emits=emits,
+                    emits_types=emits_types,
                     sample=sample,
                     input_model=input_model,
                     adapter_params=adapter_params,
@@ -771,11 +813,35 @@ class ToolEntry:
         no longer repeats it, GH-219). The A2A DataPart wire itself
         (translator.py) stays a bare markdown string.
         """
+        members = self.decl.emits_types
+        if not members:
+            return None
+        if not isinstance(self.decl.emits, tuple):
+            return self._member_schema(members[0])
+        schemas: list[dict[str, Any]] = []
+        merged_defs: dict[str, Any] = {}
+        for member in members:
+            schema = self._member_schema(member)
+            if schema is None:
+                continue
+            schema = dict(schema)
+            for def_name, definition in (schema.pop("$defs", None) or {}).items():
+                if def_name in merged_defs and merged_defs[def_name] != definition:
+                    raise ValueError(
+                        f"tool {self.decl.name!r}: emits members define $defs "
+                        f"entry {def_name!r} differently"
+                    )
+                merged_defs[def_name] = definition
+            schemas.append(schema)
+        out: dict[str, Any] = {"type": "object", "anyOf": schemas}
+        if merged_defs:
+            out["$defs"] = merged_defs
+        return out
+
+    @staticmethod
+    def _member_schema(emits: type) -> dict[str, Any] | None:
         from ..models.content_types import MarketBriefing
 
-        emits = self.decl.emits
-        if emits is None:
-            return None
         if not issubclass(emits, BaseModel):
             return None
         if issubclass(emits, MarketBriefing):

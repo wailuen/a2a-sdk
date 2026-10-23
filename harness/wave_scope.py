@@ -37,6 +37,10 @@ _SCOPE_LINE_RE = re.compile(
 )
 # A heading or a todo checkbox line starts a new todo; `[~]` marks one that cannot land here.
 _TODO_START_RE = re.compile(r"\s*(?:[-*]\s*)?(?:#{1,6}\s|\[.\])")
+# GH-228: indented lines directly after a Creates:/Modifies: line (up to a blank line or the
+# next "- " field, heading or checkbox) are the wrapped tail of that line.
+_CONTINUATION_RE = re.compile(r"[ \t]+\S")
+_CONTINUATION_STOP_RE = re.compile(r"\s*(?:[-*+]\s|#{1,6}\s|\[.\])")
 _KEYWORD_RE = re.compile(r"\b(modifies|adds)\b", re.IGNORECASE)
 _PATH_EXTENSIONS = (".py", ".js", ".ts", ".md", ".json", ".toml", ".yaml", ".yml", ".lock")
 _ROOT_LEVEL_EXTENSIONS = (".md", ".json", ".toml", ".yaml", ".yml", ".lock")
@@ -172,6 +176,8 @@ def extract_scope_paths(line: str) -> tuple[list[str], list[str]]:
 def extract_wave_scope(todo_text: str) -> tuple[list[str], list[str]]:
     """Scan every Creates:/Modifies: line in a wave file's todo bodies.
 
+    GH-228: indented lines that directly follow a Creates:/Modifies: line belong to it.
+
     Args:
         todo_text: Full text of a wave markdown file.
 
@@ -183,17 +189,32 @@ def extract_wave_scope(todo_text: str) -> tuple[list[str], list[str]]:
     all_creates: list[str] = []
     all_modifies: list[str] = []
     skip = False
+    pending: list[str] = []
+
+    def flush() -> None:
+        # RT-003: both buckets for Creates: AND Modifies: lines. ONE logical line can carry
+        # both spans — a `Modifies:` line ending in "; adds `c/d.py`" opens a CREATE
+        # span — so discarding either bucket drops real paths out of allScope.
+        if pending:
+            creates, modifies = extract_scope_paths(" ".join(pending))
+            all_creates.extend(creates)
+            all_modifies.extend(modifies)
+            pending.clear()
+
     for raw_line in todo_text.splitlines():
         # A todo marked [~] (out-of-repo / cannot land here) contributes no scope,
         # until the next heading or todo checkbox line (same rule as the inline scan).
         if _TODO_START_RE.match(raw_line):
+            flush()
             skip = "[~]" in raw_line
-        if skip or not _SCOPE_LINE_RE.match(raw_line):
+        if skip:
             continue
-        # RT-003: both buckets for Creates: AND Modifies: lines. ONE line can carry
-        # both spans — a `Modifies:` line ending in "; adds `c/d.py`" opens a CREATE
-        # span — so discarding either bucket drops real paths out of allScope.
-        creates, modifies = extract_scope_paths(raw_line.strip())
-        all_creates.extend(creates)
-        all_modifies.extend(modifies)
+        if _SCOPE_LINE_RE.match(raw_line):
+            flush()
+            pending.append(raw_line.strip())
+        elif pending and _CONTINUATION_RE.match(raw_line) and not _CONTINUATION_STOP_RE.match(raw_line):
+            pending.append(raw_line.strip())
+        else:
+            flush()
+    flush()
     return all_creates, all_modifies

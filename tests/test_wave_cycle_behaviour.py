@@ -143,6 +143,14 @@ def rt(*findings: dict) -> dict:
     return {"findingsCount": len(findings), "findings": list(findings)}
 
 
+def scan_reply(wv: dict, *extra: tuple[str, str | None, str]) -> dict:
+    """A scope re-scan response: the flat paths plus per-todo rows. `extra` rows are (path, todoId, kind)."""
+    rows = [{"todoId": g["todos"][0]["id"], "path": p, "kind": "create"} for g in wv["groups"] for p in g["creates"]]
+    rows += [{"todoId": g["todos"][0]["id"], "path": p, "kind": "modify"} for g in wv["groups"] for p in g["modifies"]]
+    rows += [{"todoId": t, "path": p, "kind": k} for p, t, k in extra]
+    return {"paths": sorted({r["path"] for r in rows}), "rows": rows}
+
+
 def run(rules: list | None = None, *, pf: dict | None = None, wv: dict | None = None,
         args: object = None, wf: Path = WC, tmp_path: Path, no_date: bool = False) -> dict:
     wv_default = wv or wave()
@@ -154,7 +162,7 @@ def run(rules: list | None = None, *, pf: dict | None = None, wv: dict | None = 
         ("^clock:", [{"now": 2000000000.0}]),
         ("^parse(:replan)?$", [wv_default]),
         ("^deliv:", [{"ok": True, "checked": [g["label"] for g in wv_default["groups"]], "missing": []}]),
-        ("^scan:scope:", [{"paths": sorted(set(wv_default["allCreates"]) | set(wv_default["allModifies"]))}]),
+        ("^scan:scope:", [scan_reply(wv_default)]),
         ("^rt:todos:", [CLEAN_PLAN]),
         ("^rt:", [CLEAN_RT]),
         ("^gate:archive-commit$", [ARCH_OK]),
@@ -989,10 +997,59 @@ def test_complete_groups_run_dependents_and_archive(tmp_path: Path, wf: Path) ->
 
 @pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
 def test_scope_added_mid_run_reaches_review_and_archive_gate(tmp_path: Path, wf: Path) -> None:
-    out = run([("^scan:scope:unit:A:r1", [{"paths": ["src/tools/a.py", "src/tools/late.py"]}]),
-               ("^scan:scope:", [{"paths": ["src/tools/a.py", "src/tools/late.py"]}])], tmp_path=tmp_path, wf=wf)
+    reply = scan_reply(wave(), ("src/tools/late.py", "A-1", "create"))
+    out = run([("^scan:scope:unit:A:r1", [reply]), ("^scan:scope:", [reply])], tmp_path=tmp_path, wf=wf)
     assert "src/tools/late.py" in call(out, "rt:unit:A:r1")["prompt"]
     assert "src/tools/late.py" in call(out, "gate:archive-commit")["prompt"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_gh228_new_path_goes_to_the_group_whose_todo_declares_it(tmp_path: Path, wf: Path) -> None:
+    wv = two_dep_groups()
+    reply = scan_reply(wv, ("src/tools/late.py", "B-1", "modify"))
+    out = run([("^scan:scope:", [reply])], wv=wv, tmp_path=tmp_path, wf=wf)
+    assert "src/tools/late.py" in call(out, "rt:unit:B:r1")["prompt"]
+    assert "src/tools/late.py" not in call(out, "rt:unit:A:r1")["prompt"]
+    assert "src/tools/late.py" in call(out, "gate:archive-commit")["prompt"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("row", [("src/tools/late.py", None, "create"), ("src/tools/late.py", "ZZ-9", "create")])
+def test_gh228_unowned_or_unknown_owner_path_blocks_wave_and_joins_no_group(tmp_path: Path, wf: Path, row: tuple) -> None:
+    reply = scan_reply(wave(), row)
+    out = run([("^scan:scope:", [reply])], tmp_path=tmp_path, wf=wf)
+    assert logged(out, "scope re-scan: path src/tools/late.py has no owning todo \u2014 wave BLOCKED")
+    assert not [l for l in labels(out) if l.startswith("rt:unit:")]
+    assert "src/tools/late.py" not in "".join(c["prompt"] for c in out["calls"] if c["label"].startswith(("impl:", "gate:archive")))
+    assert out["result"]["protocolBlocked"] and "archive" not in labels(out)
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_gh228_flat_and_per_todo_mismatch_is_untrustworthy(tmp_path: Path, wf: Path) -> None:
+    reply = scan_reply(wave())
+    reply["paths"] = reply["paths"] + ["src/tools/ghost.py"]
+    out = run([("^scan:scope:", [reply])], tmp_path=tmp_path, wf=wf)
+    assert not [l for l in labels(out) if l.startswith("rt:unit:")]
+    assert out["result"]["protocolBlocked"] and "archive" not in labels(out)
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_gh228_path_added_after_protocol_audit_reaches_archive_gate(tmp_path: Path, wf: Path) -> None:
+    reply = scan_reply(wave(), ("src/tools/after_codify.py", "A-1", "modify"))
+    out = run([("^scan:scope:final-pre-archive$", [reply])], tmp_path=tmp_path, wf=wf)
+    ls = labels(out)
+    assert ls.index("scan:scope:final-pre-audit") < ls.index("scan:scope:final-pre-archive") < ls.index("gate:archive-commit")
+    assert "src/tools/after_codify.py" in call(out, "gate:archive-commit")["prompt"]
+    assert "src/tools/after_codify.py" not in call(out, "scan:scope:final-pre-audit")["prompt"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("label", ["scan:scope:final-pre-audit", "scan:scope:final-pre-archive"])
+def test_gh228_untrustworthy_final_rescan_blocks_archive(tmp_path: Path, wf: Path, label: str) -> None:
+    out = run([("^" + label + "$", [None])], tmp_path=tmp_path, wf=wf)
+    assert label in labels(out)
+    assert out["result"]["protocolBlocked"] and "archive" not in labels(out)
+    assert logged(out, "final scope re-scan returned no trustworthy result \u2014 archive BLOCKED")
 
 
 @pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)

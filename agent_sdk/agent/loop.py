@@ -1726,6 +1726,7 @@ async def run_loop(
                     tool_name=tc.name,
                     tool_call_id=tc.tool_call_id,
                     emits=entry.decl.emits,
+                    emits_types=entry.decl.emits_types,
                     timeout_seconds=timeout,
                     reuse_kind=deferred_reuse_kind,
                     reuse_label=deferred_reuse_label,
@@ -1833,11 +1834,11 @@ async def run_loop(
                 result = result.value
 
             if ok:
-                emits = entry.decl.emits
-                if emits is not None and isinstance(result, emits):
+                matched = entry.decl.match_emits(result)
+                if matched is not None:
                     artifact_delivered = True
                     yield ArtifactEvent(
-                        data_type=getattr(emits, "data_type", entry.name),
+                        data_type=getattr(matched, "data_type", entry.name),
                         tool_name=tc.name,
                         model=result,
                     )

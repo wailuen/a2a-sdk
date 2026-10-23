@@ -93,11 +93,14 @@ _CUSTOM_EVENT_SCHEMAS = [
 
 def _skill_for(entry: Any) -> AgentSkill:
     emits = entry.decl.emits
+    members = entry.decl.emits_types
     x_sdk: dict[str, Any] = {
         "tier": entry.tier,
         "inputSchema": entry.input_schema(),
     }
-    if emits is not None:
+    if isinstance(emits, tuple):
+        x_sdk["emits"] = [getattr(m, "data_type", m.__name__) for m in members]
+    elif emits is not None:
         x_sdk["emits"] = getattr(emits, "data_type", emits.__name__)
     return AgentSkill.model_validate({
         "id": entry.name,
@@ -150,7 +153,7 @@ def build_agent_card(
     extensions = [
         a2ui_extension(
             allowed_components,
-            [e.decl.emits for e in registry.all() if e.decl.emits is not None],
+            [m for e in registry.all() for m in e.decl.emits_types],
         ),
         AgentExtension(
             uri="https://agent-sdk.dev/extensions/ag-ui-run/v1",

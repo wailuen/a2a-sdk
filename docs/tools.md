@@ -124,6 +124,31 @@ to every protocol from one return value:
 domain card you registered ([content-types.md](content-types.md)). Unknown
 types fail `build_app()`.
 
+### One tool, several card types (tuple `emits`)
+
+A dispatcher tool that returns different content types declares a tuple:
+
+```python
+@tools.tool(tier=1, emits=(KpiCard, TimeSeriesChart))
+async def dispatch(inp: DispatchInput) -> KpiCard | TimeSeriesChart:
+    ...
+```
+
+- The card is sent when the result is an instance of any member, labelled
+  with that member's `data_type`. A result matching no member gets text only.
+- The return annotation must be absent, `Any`, a common superclass of every
+  member, or a `Union`/`|` whose non-`None` arms are exactly the members.
+- No empty tuple, no duplicates, every member a registered content type
+  (inside `a2ui_allowed_components`), and no `MarketBriefing`.
+- MCP `outputSchema` is `{"type": "object", "anyOf": [<member schemas>],
+  "$defs": {<merged>}}`. Members whose `$defs` share a name with different
+  content fail at boot. Raw dict results are coerced into the first member
+  that validates.
+- The agent card lists `x-sdk.emits` as a list of `data_type` strings, and
+  the A2UI extension advertises every member's catalog.
+- A `long_running` tool that declares `emits` and resolves to a value
+  matching no member gets a text-only artifact (no card).
+
 ## Who is calling
 
 `current_identity()` returns the caller's frozen `Identity` inside a tool or a

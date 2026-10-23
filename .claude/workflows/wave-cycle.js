@@ -459,10 +459,12 @@ const SCOPE_SCAN_PY = [
   '    if f.startswith("."): return f in DOT',
   '    if "/" not in t: return "__" not in t and f.endswith(ROOT)',
   '    return f.endswith(EXT)',
-  'out=[]; skip=False',
+  'out=[]; skip=False; cont=False',
   'for l in open(sys.argv[1],encoding="utf-8"):',
-  '    if re.match(r"\\s*(?:[-*]\\s*)?(?:#{1,6}\\s|\\[.\\])",l): skip="[~]" in l',
-  '    if skip or not re.match(r"\\s*(?:[-*+]\\s*)?(?:\\*\\*)?(?:Creates|Modifies)(?:\\*\\*)?:",l,re.I): continue',
+  '    if re.match(r"\\s*(?:[-*]\\s*)?(?:#{1,6}\\s|\\[.\\])",l): skip="[~]" in l; cont=False',
+  '    if skip: continue',
+  '    if re.match(r"\\s*(?:[-*+]\\s*)?(?:\\*\\*)?(?:Creates|Modifies)(?:\\*\\*)?:",l,re.I): cont=True',
+  '    elif not (cont and re.match(r"[ \\t]+\\S",l) and not re.match(r"\\s*(?:[-*+]\\s|#{1,6}\\s|\\[.\\])",l)): cont=False; continue',
   '    for t in re.split(r"[\\s,;()\\[\\]]+",l):',
   '        t=t.lstrip("`*"+chr(34)+chr(39)).rstrip("`*.,:;"+chr(34)+chr(39))',
   '        if ok(t): out.append(t)',
@@ -498,7 +500,51 @@ function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'" }
 
 // Shared path rule for the deliverable gate: the scope scan's own head (EXT/ROOT/DOT lists and
 // ok()), sliced from SCOPE_SCAN_PY so there is exactly one path classifier in this runner.
+if (SCOPE_SCAN_PY.indexOf('\nout=[]; skip=False') < 0) throw new Error('SCOPE_SCAN_PY lost the marker PATH_RULE_PY slices at')
 const PATH_RULE_PY = SCOPE_SCAN_PY.slice(0, SCOPE_SCAN_PY.indexOf('\nout=[]; skip=False'))
+
+// Per-todo scope scan: the flat scan's boundaries, skip rule and continuation rule, but each
+// path comes with its owning todo id (null for wave-level prose, headings' bodies and checkbox
+// lines with no backticked id) and its kind. kind is "modify" for a path after a "modifies"
+// keyword (or on a Modifies: line) and "create" after "adds" (or on a Creates: line), the same
+// rule as harness/wave_scope.py::extract_scope_paths. The union of its paths equals the flat scan.
+const TODO_SCOPE_SCAN_PY = PATH_RULE_PY + '\n' + [
+  'SC=re.compile(r"\\s*(?:[-*+]\\s*)?(?:\\*\\*)?(Creates|Modifies)(?:\\*\\*)?:",re.I)',
+  'KW=re.compile(r"\\b(modifies|adds)\\b",re.I)',
+  'TODO=re.compile(r"^\\s*[-*+]\\s*\\[(.)\\]\\s*"+chr(96)+r"([^"+chr(96)+r"]+)"+chr(96))',
+  'BOUND=r"\\s*(?:[-*]\\s*)?(?:#{1,6}\\s|\\[.\\])"',
+  'HEAD=r"\\s*(?:[-*]\\s*)?#{1,6}\\s"',
+  'rows=[]; skip=False; cur=None; buf=[]',
+  'def flush():',
+  '    if not buf: return',
+  '    owner,first,parts=buf.pop()',
+  '    line=" ".join(parts)',
+  '    default="modify" if first.lower()=="modifies" else "create"',
+  '    kws=[(m.start(),m.group(1).lower()) for m in KW.finditer(line)]',
+  '    for m in re.finditer(r"[^\\s,;()\\[\\]]+",line):',
+  '        t=m.group().lstrip("`*"+chr(34)+chr(39)).rstrip("`*.,:;"+chr(34)+chr(39))',
+  '        if not ok(t): continue',
+  '        k=default',
+  '        for p,w in kws:',
+  '            if p>m.start(): break',
+  '            k="modify" if w=="modifies" else "create"',
+  '        rows.append({"todoId":owner,"path":t,"kind":k})',
+  'for l in open(sys.argv[1],encoding="utf-8"):',
+  '    if re.match(BOUND,l):',
+  '        flush(); skip="[~]" in l; m=TODO.match(l)',
+  '        cur=None if re.match(HEAD,l) or not m else m.group(2).strip()',
+  '        continue',
+  '    f=SC.match(l)',
+  '    if f:',
+  '        flush()',
+  '        if not skip: buf.append((cur,f.group(1),[l.strip()]))',
+  '        continue',
+  '    if buf and re.match(r"[ \\t]+\\S",l) and not re.match(r"\\s*(?:[-*+]\\s|#{1,6}\\s|\\[.\\])",l):',
+  '        buf[0][2].append(l.strip()); continue',
+  '    flush()',
+  'flush()',
+  'print(json.dumps(rows))',
+].join('\n')
 
 // Deliverable gate: one run per Implement tier. A concrete Creates: path must exist; an
 // acceptance record (workspace/acceptance/*.md) must also carry a FIRST verdict of PASS (heading
@@ -567,6 +613,21 @@ const SCOPE_RESCAN_SCHEMA = {
   required: ['paths'],
   additionalProperties: false,
   properties: { paths: { type: 'array', items: { type: 'string' }, description: 'The JSON list printed by the scope scan, unmodified' } },
+}
+SCOPE_RESCAN_SCHEMA.required = ['paths', 'rows']
+SCOPE_RESCAN_SCHEMA.properties.rows = {
+  type: 'array',
+  description: 'The JSON list printed by the per-todo scope scan, unmodified',
+  items: {
+    type: 'object',
+    required: ['todoId', 'path', 'kind'],
+    additionalProperties: false,
+    properties: {
+      todoId: { type: ['string', 'null'] },
+      path: { type: 'string' },
+      kind: { type: 'string', enum: ['create', 'modify'] },
+    },
+  },
 }
 
 // A HUMAN GATE todo holds its group until a release line cites a GitHub issue URL. The hold
@@ -818,6 +879,8 @@ async function parseWave(pf, label) {
     '  parenthetical "(modifies `a`, `b`)" clause and its creates after "adds ...": a path inside a\n' +
     '  "modifies ..." clause goes to allModifies, every other path on a Creates: line to allCreates,\n' +
     '  every path on a Modifies: line to allModifies.\n' +
+    '  Wrapped lines: indented lines directly after a Creates:/Modifies: line (up to a blank line or the next "- " field) belong to that line;\n' +
+    '  a wrapped path inside a "(modifies ..." clause goes to allModifies, any other wrapped path follows its line.\n' +
     '  A path names exactly one file whose final segment has a real extension (.py .js .ts .md .json\n' +
     '  .toml .yaml .yml .lock) or is a known dotfile/lockfile (uv.lock, .env.example, .gitignore, ...).\n' +
     '  Not paths: directories (ending "/"), globs ("*", "?"), slash-commands, identifiers or dotted\n' +
@@ -1182,28 +1245,70 @@ async function checkDeliverables(groups, since, label) {
   return missing
 }
 
-// Re-reads Creates:/Modifies: from the wave file at the top of every redteam round; paths added
-// mid-run join the owning group's scope and wave.allScope (the archive gate's input). A null or
-// malformed scan returns false: the caller treats the round as unknown, never clean.
+// Re-reads Creates:/Modifies: from the wave file at the top of every redteam round (round is
+// null for the two final re-scans, which carry their own label); a path added mid-run joins
+// wave.allScope and the group whose todo now declares it, in the create or modify bucket the
+// per-todo scan reports. The flat scan and the per-todo scan must agree on the path set. A null,
+// malformed, mismatched or unowned result returns false: the caller treats it as unknown, never
+// clean. `group` is unused: the declaring todo, not the calling loop, decides the owner.
 async function rescanScope(base, round, group, phaseName) {
+  const isFinal = round === null || round === undefined
+  const tag = isFinal ? base : base + ' r' + round
   const r = await callAgent(
-    'Run this command at the repo root exactly as written (do not edit it). Set paths to the JSON\n' +
-    'list it prints, unmodified.\n\n' +
-    'python3 - ' + shq(WAVE_FILE) + " <<'SCOPE_SCAN'\n" + SCOPE_SCAN_PY + '\nSCOPE_SCAN',
-    { schema: SCOPE_RESCAN_SCHEMA, label: 'scan:scope:' + base + ':r' + round, phase: phaseName, effort: 'low' }
+    'Run these two commands at the repo root exactly as written (do not edit them). Set paths to the\n' +
+    'JSON list the first prints and rows to the JSON list the second prints, both unmodified.\n\n' +
+    'python3 - ' + shq(WAVE_FILE) + " <<'SCOPE_SCAN'\n" + SCOPE_SCAN_PY + '\nSCOPE_SCAN\n\n' +
+    'python3 - ' + shq(WAVE_FILE) + " <<'TODO_SCOPE_SCAN'\n" + TODO_SCOPE_SCAN_PY + '\nTODO_SCOPE_SCAN',
+    { schema: SCOPE_RESCAN_SCHEMA, label: 'scan:scope:' + base + (isFinal ? '' : ':r' + round), phase: phaseName, effort: 'low' }
   )
   if (!r || !Array.isArray(r.paths) || !r.paths.every(function(p) { return typeof p === 'string' })) return false
-  const added = uniq(r.paths).filter(function(p) { return wave.allScope.indexOf(p) === -1 })
-  added.forEach(function(p) {
-    wave.allScope.push(p)
-    const owners = wave.groups.filter(function(g) {
-      return g.todos.some(function(t) { return String((t && t.body) || '').indexOf(p) !== -1 })
+  if (!Array.isArray(r.rows) || !r.rows.every(function(w) {
+    return w && typeof w.path === 'string' && (w.todoId === null || typeof w.todoId === 'string') &&
+      (w.kind === 'create' || w.kind === 'modify')
+  })) return false
+  const flat = uniq(r.paths)
+  const rowPaths = uniq(r.rows.map(function(w) { return w.path }))
+  if (flat.length !== rowPaths.length || flat.some(function(p) { return rowPaths.indexOf(p) === -1 })) {
+    log('WARNING: scope re-scan (' + tag + ') per-todo rows do not match the flat scan — untrustworthy')
+    return false
+  }
+  const added = flat.filter(function(p) { return wave.allScope.indexOf(p) === -1 })
+  const plan = []
+  for (const p of added) {
+    const owned = r.rows.filter(function(w) { return w.path === p && w.todoId !== null })
+    const targets = owned.map(function(w) {
+      return { g: wave.groups.find(function(g) { return g.todos.some(function(t) { return t && t.id === w.todoId }) }), kind: w.kind, id: w.todoId }
     })
-    const targets = owners.length > 0 ? owners : (group ? [group] : [])
-    targets.forEach(function(g) { if (g.scope.indexOf(p) === -1) g.scope.push(p) })
+    const lost = targets.filter(function(x) { return !x.g })
+    if (owned.length === 0 || lost.length > 0) {
+      log('scope re-scan: path ' + p + ' has no owning todo — wave BLOCKED' +
+          (lost.length > 0 ? ' (todo ' + lost[0].id + ' is not in wave.groups)' : ''))
+      return false
+    }
+    plan.push({ p: p, targets: targets })
+  }
+  plan.forEach(function(x) {
+    wave.allScope.push(x.p)
+    x.targets.forEach(function(t) {
+      const mine = t.kind === 'create' ? t.g.creates : t.g.modifies
+      const all = t.kind === 'create' ? wave.allCreates : wave.allModifies
+      if (mine.indexOf(x.p) === -1) mine.push(x.p)
+      if (all.indexOf(x.p) === -1) all.push(x.p)
+      if (t.g.scope.indexOf(x.p) === -1) t.g.scope.push(x.p)
+    })
   })
-  if (added.length > 0) log('Scope re-scan (' + base + ' r' + round + ') added ' + added.length + ' path(s): ' + added.join(', '))
+  if (added.length > 0) log('Scope re-scan (' + tag + ') added ' + added.length + ' path(s): ' + added.join(', '))
   return true
+}
+
+// The two final re-scans have no round to retry: anything but a trustworthy result blocks the archive.
+async function finalScopeRescan(name, phaseName) {
+  const ok = await rescanScope(name, null, null, phaseName)
+  if (ok !== true) {
+    protocolBlocked = true
+    log('final scope re-scan returned no trustworthy result — archive BLOCKED (scan:scope:' + name + ')')
+  }
+  return ok === true
 }
 
 // Tier-based execution: a tier is every group whose external deps are complete; groups in a
@@ -1893,6 +1998,7 @@ if (wave.groups.length === 1) {
 
 // ─── phase 5: protocol audit ──────────────────────────────────────────────────
 phase('Protocol Audit')
+await finalScopeRescan('final-pre-audit', 'Protocol Audit')
 
 function inSurface(surface) {
   return function(p) { return surface.some(function(pp) { return p.indexOf(pp) !== -1 }) }
@@ -2258,6 +2364,8 @@ if (!preArchiveGate) {
   testsBlockedArchive = true
   log('Suite is RED (' + preArchiveGate.failCount + ' failing) — archive BLOCKED.')
 }
+
+if (!protocolBlocked) await finalScopeRescan('final-pre-archive', 'Archive')
 
 if (!protocolBlocked) {
   const archiveIntent = await callAgent(

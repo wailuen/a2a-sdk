@@ -54,7 +54,7 @@ class DeferredEvent(LoopEvent):
     deferred: DeferredResult
     tool_name: str
     tool_call_id: str
-    emits: type | None  # ToolDecl.emits — used to decide ArtifactEvent wrapping
+    emits: type | tuple[type, ...] | None  # ToolDecl.emits — used to decide ArtifactEvent wrapping
     timeout_seconds: float  # effective timeout for the background await
     # RT-002 (GH-148 cross-surface parity): set when the tool returned
     # ``Reusable(value=DeferredResult(...))`` — loop.py unwraps the Reusable
@@ -65,3 +65,12 @@ class DeferredEvent(LoopEvent):
     # resolved_index to grow.
     reuse_kind: str | None = None
     reuse_label: str | None = None
+    # GH-225: normalized tuple of ``emits`` (ToolDecl.emits_types); derived from
+    # ``emits`` when not passed.
+    emits_types: tuple[type, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.emits_types:
+            from .registry import normalize_emits
+
+            self.emits_types = normalize_emits(self.emits)

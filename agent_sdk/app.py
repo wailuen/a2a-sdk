@@ -15,6 +15,8 @@ import asyncio
 import inspect
 import logging
 import os
+import types as _types
+import typing as _typing
 from asyncio import sleep as _asyncio_sleep
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
@@ -40,7 +42,7 @@ from .config import BaseAgentSettings, parse_idp_issuer
 from .credentials.fields import CredentialField
 from .credentials.store import NS_BEDROCK, NS_MODEL, NS_OAUTH_IDP, CredentialStore, resolver_for_source, validate_namespace
 from .credentials.encrypted_sqlite import EncryptedSqliteStore
-from .models.content_types import ContentModel, content_type_for
+from .models.content_types import ContentModel, MarketBriefing, content_type_for
 from .observability import configure_logging, request_id_middleware
 from .observability.logging import configure_access_log_filter
 from .routes.agent_card import build_agent_card
@@ -62,6 +64,25 @@ _AZURITE_MARKERS = ("UseDevelopmentStorage=true", "devstoreaccount1", "127.0.0.1
 logger = logging.getLogger(__name__)
 
 _MCP_INSTRUCTIONS_MAX_CHARS = 4000
+
+
+def _annotation_covers(ann: Any, members: tuple[type, ...]) -> bool:
+    """GH-225: True when *ann* is a class every emits member subclasses, or a
+    Union/``|`` whose non-None arms exactly cover *members* (or are each such a
+    class)."""
+    origin = _typing.get_origin(ann)
+    if origin is None:
+        if not inspect.isclass(ann):
+            return False
+        return all(issubclass(m, ann) for m in members)
+    if origin is _typing.Union or origin is _types.UnionType:
+        args = [a for a in _typing.get_args(ann) if a is not type(None)]
+        if not args:
+            return False
+        if set(args) == set(members):
+            return True
+        return all(_annotation_covers(a, members) and _typing.get_origin(a) is None for a in args)
+    return False
 
 
 def _is_azurite_emulator_connection_string(value: str) -> bool:
@@ -248,27 +269,37 @@ class Agent:
     ) -> None:
         for entry in registry.all():
             emits = entry.decl.emits
-            if emits is None:
+            members = entry.decl.emits_types
+            if not members:
                 continue
-            if issubclass(emits, ContentModel):
-                if content_type_for(emits.data_type) is not emits:
+            is_tuple = isinstance(emits, tuple)
+            for member in members:
+                if is_tuple and issubclass(member, MarketBriefing):
                     raise ValueError(
-                        f"tool {entry.name!r} emits {emits.__name__}, which is not a "
-                        "registered Profile/domain content type "
-                        "(register_content_type it first)"
+                        f"tool {entry.name!r}: MarketBriefing cannot be a member of "
+                        "an emits tuple (its wire is a bare markdown string)"
                     )
-                # SC-D2: check against allowed_components allowlist when set.
-                if allowed_components is not None and emits.component not in allowed_components:
+                if issubclass(member, ContentModel):
+                    if content_type_for(member.data_type) is not member:
+                        raise ValueError(
+                            f"tool {entry.name!r} emits {member.__name__}, which is not a "
+                            "registered Profile/domain content type "
+                            "(register_content_type it first)"
+                        )
+                    # SC-D2: check against allowed_components allowlist when set.
+                    if allowed_components is not None and member.component not in allowed_components:
+                        raise ValueError(
+                            f"tool {entry.name!r} emits {member.__name__!r} (component "
+                            f"{member.component!r}), which is not in the agent's "
+                            f"a2ui_allowed_components list {allowed_components!r}"
+                        )
+                elif not (isinstance(member, type) and issubclass(member, BaseModel)):
                     raise ValueError(
-                        f"tool {entry.name!r} emits {emits.__name__!r} (component "
-                        f"{emits.component!r}), which is not in the agent's "
-                        f"a2ui_allowed_components list {allowed_components!r}"
+                        f"tool {entry.name!r}: emits must be a ContentModel or pydantic "
+                        "BaseModel subclass"
                     )
-            elif not (isinstance(emits, type) and issubclass(emits, BaseModel)):
-                raise ValueError(
-                    f"tool {entry.name!r}: emits must be a ContentModel or pydantic "
-                    "BaseModel subclass"
-                )
+            if is_tuple:
+                entry.output_schema()  # GH-225: surfaces a $defs collision at boot
             # ── SC-F1: enforce return annotation matches emits ────────────────
             # Resolve string annotations (from __future__ import annotations) using
             # inspect.get_annotations with eval=True so we get real types.
@@ -312,22 +343,17 @@ class Agent:
                         fn.__name__,
                     )
                 continue
-            import typing as _typing
             if ret is _typing.Any:
                 continue  # -> Any — permitted
-            if inspect.isclass(ret) and issubclass(emits, ret):
-                continue  # emits is ret or a subclass of ret — permitted
+            if _annotation_covers(ret, members):
+                continue  # superclass of every member, or Union covering them
             # Guard against generic non-Union origins (e.g. list[T], tuple[T],
-            # set[T]).  typing.get_args(list[KpiCard]) returns (KpiCard,) —
-            # identical to what Optional[KpiCard] produces — so without this
-            # check the Union unwrap path below would silently pass list[T].
-            # Any annotation with a concrete __origin__ that is not Union is
-            # an immediate mismatch (SC-F1 false-positive fix, RT-SC-F1-LIST).
+            # set[T]) — SC-F1 false-positive fix (RT-SC-F1-LIST).
             #
-            # GH-91: Before the generic-origin rejection, handle async-generator
-            # return annotations.  For is_generator tools the honest annotation
-            # is AsyncIterator[T] or AsyncGenerator[T, None]; both have a non-Union
-            # __origin__, so without this branch they fall into the ValueError below.
+            # GH-91: async-generator return annotations: the honest annotation
+            # is AsyncIterator[T] or AsyncGenerator[T, None]; the yield type is
+            # the first argument and follows the same rule as a coroutine's
+            # return annotation.
             import collections.abc as _abc
             _origin = getattr(ret, "__origin__", None)
             if entry.decl.is_generator and _origin in (
@@ -335,35 +361,17 @@ class Agent:
                 _abc.AsyncGenerator,
             ):
                 _gen_args = _typing.get_args(ret)
-                # AsyncIterator[T] → args=(T,); AsyncGenerator[T, None] → args=(T, None).
-                # In both forms the yield type is the first argument.
                 yield_type = _gen_args[0] if _gen_args else None
                 if yield_type is None or yield_type is _typing.Any:
                     continue  # unannotated yield type or Any — permitted
-                # Validate yield_type against emits using the same rule as coroutines:
-                # emits must be yield_type itself or a subclass of it.
-                if inspect.isclass(yield_type) and issubclass(emits, yield_type):
-                    continue  # emits satisfies the yield type — permitted
+                if _annotation_covers(yield_type, members):
+                    continue
                 raise ValueError(
                     f"tool {fn.__name__!r} async-generator return annotation {ret!r} "
                     f"yields {yield_type!r} but emits={emits!r} — "
-                    f"the yield type must be a superclass of (or equal to) emits"
+                    f"the yield type must be a superclass of (or equal to) emits, "
+                    f"or a Union covering every emits member"
                 )
-            if _origin is not None and _origin is not _typing.Union:
-                raise ValueError(
-                    f"tool {fn.__name__!r} return annotation {ret!r} does not match "
-                    f"emits={emits!r}"
-                )
-            # Handle Optional[T] / Union[T, None]: unwrap, filter out NoneType,
-            # and accept if every remaining arg is a class that emits satisfies.
-            _union_args = [
-                a for a in _typing.get_args(ret) if a is not type(None)
-            ]
-            if _union_args and all(
-                inspect.isclass(a) and issubclass(emits, a)
-                for a in _union_args
-            ):
-                continue  # Optional[emits] or Union[emits, ...] — permitted
             raise ValueError(
                 f"tool {fn.__name__!r} return annotation {ret!r} does not match "
                 f"emits={emits!r}"

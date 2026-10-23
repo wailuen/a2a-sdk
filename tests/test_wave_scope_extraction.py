@@ -732,6 +732,10 @@ def test_rt001_parse_prompt_accepts_bare_paths(wf_path: Path) -> None:
     prompt = _parse_prompt(wf_path)
     assert "backticked or bare" in prompt.lower()
     assert "**Creates:**" in prompt
+    low = prompt.lower()
+    assert "indented lines directly after a creates:/modifies: line" in low
+    assert '(up to a blank line or the next "- " field)' in low
+    assert '"(modifies ..." clause goes to allmodifies' in low
 
 
 # ---------------------------------------------------------------------------
@@ -762,3 +766,105 @@ def test_gh208_rescan_script_is_the_scan_script_and_sees_new_paths(wf_path: Path
     wave = tmp_path / "w.md"
     wave.write_text("- Creates: src/a.py\n- Modifies: uv.lock, src/late.py (not `foo()` or src/dir/)\n", encoding="utf-8")
     assert _run_inline_scan(wf_path, wave) == ["src/a.py", "src/late.py", "uv.lock"]
+
+
+# ---------------------------------------------------------------------------
+# GH-228: wrapped Creates:/Modifies: continuation lines, and the per-todo scan that gives
+# rescanScope each new path's owning todo and create/modify bucket.
+# ---------------------------------------------------------------------------
+
+_WRAPPED_WAVE = """# Wave w900
+- [ ] `W-1` wrapped todo
+  - Modifies: `src/w1.py`,
+      `src/wrapped_continuation.py`
+  - Reads: `src/unrelated_read.py`
+
+      `src/after_blank.py`
+"""
+
+
+@pytest.mark.parametrize("wf_path", _SCAN_COPIES, ids=lambda p: str(p.relative_to(_REPO_ROOT)))
+def test_gh228_scan_joins_wrapped_continuation(wf_path: Path, tmp_path: Path) -> None:
+    wave = tmp_path / "w.md"
+    wave.write_text(_WRAPPED_WAVE, encoding="utf-8")
+    assert _run_inline_scan(wf_path, wave) == ["src/w1.py", "src/wrapped_continuation.py"]
+
+
+def test_gh228_reference_and_every_scan_copy_agree_on_wrapped_fixture(tmp_path: Path) -> None:
+    creates, modifies = extract_wave_scope(_WRAPPED_WAVE)
+    assert modifies == ["src/w1.py", "src/wrapped_continuation.py"] and creates == []
+    wave = tmp_path / "w.md"
+    wave.write_text(_WRAPPED_WAVE, encoding="utf-8")
+    for wf_path in _SCAN_COPIES:
+        assert set(_run_inline_scan(wf_path, wave)) == set(creates) | set(modifies), wf_path
+
+
+def test_gh228_reference_wrapped_path_in_modifies_clause_is_a_modify() -> None:
+    creates, modifies = extract_wave_scope(
+        "- Creates: `src/new.py` (modifies `src/old1.py`,\n      `src/old2.py`)\n- Reads: `src/r.py`\n"
+    )
+    assert creates == ["src/new.py"]
+    assert modifies == ["src/old1.py", "src/old2.py"]
+
+
+def _run_todo_scope_scan(wf_path: Path, wave_file: Path) -> list[dict]:
+    import json
+    import subprocess
+    import sys
+
+    js = wf_path.read_text(encoding="utf-8")
+    scan = re.search(r"const SCOPE_SCAN_PY = (\[.*?\n\])\.join\('\\n'\)", js, re.S).group(0)
+    rule = re.search(r"const PATH_RULE_PY = [^\n]*\n", js).group(0)
+    todo = re.search(r"const TODO_SCOPE_SCAN_PY = PATH_RULE_PY .*?\]\.join\('\\n'\)", js, re.S)
+    assert todo, wf_path.name + ": TODO_SCOPE_SCAN_PY not found"
+    script = subprocess.run(
+        ["node", "-e", scan + "\n" + rule + todo.group(0) + "\nprocess.stdout.write(TODO_SCOPE_SCAN_PY)"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    out = subprocess.run([sys.executable, "-", str(wave_file)], input=script, capture_output=True, text=True, check=True).stdout
+    return json.loads(out)
+
+
+_OWNER_WAVE = """# Wave w901
+- Creates: src/prose_level.py
+
+## Todos
+
+- [ ] `A-1` first
+  - Creates: src/a_new.py (modifies src/a_old.py,
+      src/a_wrapped_old.py)
+- [ ] GH-300 unowned checkbox
+  - Modifies: src/gh300.py
+- [~] `S-1` skipped
+  - Creates: src/skipped.py
+- [ ] `B-1` last
+  - Modifies: src/b.py; adds src/b_new.py
+
+## Notes
+  - Creates: src/after_heading.py
+"""
+
+
+@pytest.mark.parametrize("wf_path", _SCAN_COPIES, ids=lambda p: str(p.relative_to(_REPO_ROOT)))
+def test_gh228_per_todo_scan_owners_kinds_and_parity(wf_path: Path, tmp_path: Path) -> None:
+    wave = tmp_path / "w.md"
+    wave.write_text(_OWNER_WAVE, encoding="utf-8")
+    rows = _run_todo_scope_scan(wf_path, wave)
+    by_path = {r["path"]: r for r in rows}
+    assert {r["path"] for r in rows} == set(_run_inline_scan(wf_path, wave))
+    assert "src/skipped.py" not in by_path
+    assert (by_path["src/a_new.py"]["todoId"], by_path["src/a_new.py"]["kind"]) == ("A-1", "create")
+    assert (by_path["src/a_old.py"]["todoId"], by_path["src/a_old.py"]["kind"]) == ("A-1", "modify")
+    assert (by_path["src/a_wrapped_old.py"]["todoId"], by_path["src/a_wrapped_old.py"]["kind"]) == ("A-1", "modify")
+    assert by_path["src/gh300.py"]["todoId"] is None
+    assert by_path["src/gh300.py"]["kind"] == "modify"
+    assert (by_path["src/b.py"]["todoId"], by_path["src/b.py"]["kind"]) == ("B-1", "modify")
+    assert (by_path["src/b_new.py"]["todoId"], by_path["src/b_new.py"]["kind"]) == ("B-1", "create")
+    assert by_path["src/prose_level.py"]["todoId"] is None
+    assert by_path["src/after_heading.py"]["todoId"] is None
+
+
+@pytest.mark.parametrize("wf_path", _GATE_RUNNERS, ids=lambda p: p.name)
+def test_gh228_runner_pins_the_path_rule_slice_marker(wf_path: Path) -> None:
+    js = wf_path.read_text(encoding="utf-8")
+    assert "if (SCOPE_SCAN_PY.indexOf('\\nout=[]; skip=False') < 0) throw" in js
