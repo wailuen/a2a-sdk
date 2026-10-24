@@ -73,7 +73,7 @@ add custom request logic.
   `input-required` state / interrupt outcome, then resume and assert
   completion.
 
-- MCP: `agent_sdk.testing.mcp.McpTestClient` (alias of `McpClient`) takes a
+- MCP: the built-in `load_skill` tool (`mcp_skills="tool"`) is not counted against `--expected-count`. `agent_sdk.testing.mcp.McpTestClient` (alias of `McpClient`) takes a
   base URL, a key file and an ASGI transport. It offers `initialize()`,
   paginated `list_tools()`, `call_tool()`, and for `Agent(mcp_skills="prompts")`
   paginated `list_prompts()` and `get_prompt(name)`. Errors raise `McpError`.
@@ -162,6 +162,12 @@ async def test_full_turn(client):
     text = await driver.agui_resume(
         seen[0]["id"], thread_id, messages, status="approved",
     )
+
+    # History rules: agui_turn appends the user message on any RUN_FINISHED and
+    # the assistant message only when the reply is non-empty; nothing on
+    # RUN_ERROR or a stream with no terminal event. agui_resume appends only a
+    # non-empty assistant reply. Reply text from messages with an explicit
+    # non-assistant role (for example "developer") is left out.
 
     # A2A variant
     task = await driver.a2a_turn("Show me the risk scores.", context_id=None)

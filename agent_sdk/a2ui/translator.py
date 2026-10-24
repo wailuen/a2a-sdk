@@ -23,7 +23,8 @@ holding the three-message open sequence::
 The SDK never emits ``deleteSurface`` for a surface in the artifact or run
 that created it (GH-214 ruling https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762): a spec
 renderer would paint the card and then unmount it. Surface lifetime is managed
-by the client; each turn uses a fresh ``surfaceId``. Delivery callers
+by the client; each artifact uses a fresh ``surfaceId`` (a caller-supplied
+``surface_id`` must be unique per artifact). Delivery callers
 (``agent/runner.py::build_artifact``, ``routes/ag_ui.py``'s ``ArtifactEvent``
 branch) pass the sequence through ``agent/runner.py::validate_a2ui_delivery()``
 and deliver it as ONE message array.
@@ -72,9 +73,16 @@ class A2uiCapabilities:
     # Set only by for_custom_emit(): AG-UI CUSTOM emission skips catalog
     # negotiation (LRN-049).
     any_catalog: bool = False
+    # Set only by from_metadata(keep_declared_catalogs=True) (A2A, GH-240): a
+    # declared catalog list must contain CATALOG_ID for Standard cards.
+    negotiate_standard: bool = False
 
     @classmethod
-    def from_metadata(cls, raw: Any) -> "A2uiCapabilities":
+    def from_metadata(cls, raw: Any, *, keep_declared_catalogs: bool = False) -> "A2uiCapabilities":
+        """*keep_declared_catalogs* is transport-scoped (A2A only, GH-240): a
+        present catalogs list, even an empty one, is kept as sent, so "no key"
+        (resolves to ``[CATALOG_ID]``) differs from "key without the profile
+        URN". Default False keeps the AG-UI behaviour."""
         if not isinstance(raw, dict):
             return cls()
         tier = raw.get("tier") or "core"
@@ -87,13 +95,22 @@ class A2uiCapabilities:
         # GH-213: `catalogs` (SDK profile key) wins; then upstream A2UI v0.9.1
         # client_capabilities.json `{"v0.9": {"supportedCatalogIds": [...]}}`;
         # then the flat `supportedCatalogIds` as a lenient fallback.
-        catalogs = next((c for c in candidates if isinstance(c, list) and c), None)
+        catalogs = next(
+            (c for c in candidates if isinstance(c, list) and (keep_declared_catalogs or c)),
+            None,
+        )
         if catalogs is None:
             catalogs = [CATALOG_ID]
-        return cls(tier=str(tier), catalogs=[str(c) for c in catalogs])
+        return cls(
+            tier=str(tier),
+            catalogs=[str(c) for c in catalogs],
+            negotiate_standard=keep_declared_catalogs,
+        )
 
     @classmethod
-    def gated(cls, opted_in: bool, raw: Any) -> "A2uiCapabilities":
+    def gated(
+        cls, opted_in: bool, raw: Any, *, keep_declared_catalogs: bool = False
+    ) -> "A2uiCapabilities":
         """Fail-closed capability resolution shared across transports (C-006).
 
         *opted_in* is the transport-specific opt-in signal — A2A: the
@@ -105,7 +122,7 @@ class A2uiCapabilities:
         """
         if not opted_in:
             return cls(tier="none", catalogs=[])
-        return cls.from_metadata(raw)
+        return cls.from_metadata(raw, keep_declared_catalogs=keep_declared_catalogs)
 
     @property
     def extended(self) -> bool:
@@ -120,6 +137,8 @@ class A2uiCapabilities:
             # when the client declared its catalog. A2A has no silent-ignore
             # safety net. AG-UI CUSTOM goes through for_custom_emit() instead.
             return self.any_catalog or model_cls.catalog_id in self.catalogs
+        if self.negotiate_standard and not self.any_catalog and CATALOG_ID not in self.catalogs:
+            return False
         if model_cls.extended:
             return self.extended
         return True

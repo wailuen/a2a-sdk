@@ -3,8 +3,8 @@ message array as ``{"messages": [...]}`` (GH-128, agent_sdk/agent/runner.py::
 build_artifact()) to satisfy A2A v0.3.0's DataPart.data object typing — a
 deliberate deviation from A2UI v0.9.1's own A2A binding, which mandates a
 bare array at ``data``. That deviation must be wire-discoverable via a
-non-normative agent-card hint, mirroring the ``deleteSurfaceSemantics``
-precedent (GH-113), so a strictly spec-conformant third-party A2UI Path-A
+non-normative agent-card hint, mirroring the removed ``deleteSurfaceSemantics``
+precedent (GH-113, removed by GH-214), so a strictly spec-conformant third-party A2UI Path-A
 renderer has a documented way to learn the wrapper exists rather than
 silently rendering nothing.
 """

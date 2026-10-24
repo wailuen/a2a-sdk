@@ -33,14 +33,19 @@ SCRIPTS = _scripts()
     "path", SCRIPTS, ids=[str(p.relative_to(REPO_ROOT)) for p in SCRIPTS]
 )
 def test_workflow_script_parses(path: Path, tmp_path: Path) -> None:
-    src = re.sub(r"^\s*export\s+", "", path.read_text(), count=1)
+    src = re.sub(r"^\s*export\s+", "", path.read_text(encoding="utf-8"), count=1, flags=re.M)
     wrapped = tmp_path / "wrapped.js"
-    wrapped.write_text("(async()=>{\n" + src + "\n})")
+    wrapped.write_text("(async()=>{\n" + src + "\n})", encoding="utf-8")
     result = subprocess.run(
         ["node", "--check", str(wrapped)], capture_output=True, text=True, timeout=60
     )
-    assert result.returncode == 0, f"{path.name} has a JS syntax error"
+    rel = path.relative_to(REPO_ROOT)
+    assert result.returncode == 0, f"{rel} has a JS syntax error:\n{result.stderr}"
 
 
 def test_scripts_discovered() -> None:
     assert any(p.parent == REPO_ROOT / "harness" / "workflows" for p in SCRIPTS)
+
+
+def test_sdk_wave_script_exists() -> None:
+    assert (REPO_ROOT / ".claude" / "workflows" / "sdk-wave.js").is_file()

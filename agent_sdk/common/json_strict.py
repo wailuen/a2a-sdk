@@ -23,6 +23,10 @@ way, via ``surrogatepass``), but every SDK writer refuses that character
 state that no later read could serialize, so GET /v1/tasks failed for the
 whole identity. Inbound and outbound now enforce the same rule.
 
+Input nested deeper than 64 levels is refused with the same error, and a
+``RecursionError`` during parsing is mapped to it as a backstop, so no
+route needs its own catch.
+
 All of these surface as ``json.JSONDecodeError`` with a fixed message, so
 every route's existing parse-error branch handles them, and the error text
 never echoes the offending token (SI-2).
@@ -43,6 +47,25 @@ _SURROGATE_RE = re.compile("[\ud800-\udfff]")
 _REPLACEMENT = "\ufffd"
 
 _MESSAGE = "non-finite number not allowed"
+
+# Below pydantic's serialization limit (255) so deep input is refused here,
+# not left to the interpreter's RecursionError, which differs by version.
+_MAX_DEPTH = 64
+
+
+def _check_depth(value: Any) -> None:
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, dict):
+            children: Any = node.values()
+        elif isinstance(node, list):
+            children = node
+        else:
+            continue
+        if depth > _MAX_DEPTH:
+            raise json.JSONDecodeError("nesting too deep", "", 0)
+        stack.extend((c, depth + 1) for c in children if isinstance(c, (dict, list)))
 
 
 def _reject(_token: str = "") -> NoReturn:
@@ -70,19 +93,24 @@ def loads_strict(raw: str | bytes | bytearray) -> Any:
     ``-Infinity``, or an overflowing literal like ``1e999``), to an
     integer past the interpreter's digit limit, or to a string (key or
     value) that is not UTF-8-encodable (a lone surrogate)."""
-    value = json.loads(
-        raw,
-        parse_constant=_reject,
-        parse_float=_parse_float,
-        parse_int=_parse_int,
-    )
-    # Same rule the writers apply: re-encode with the C encoder and refuse
-    # anything dumps_strict would refuse later. Every number is already
-    # finite here, so the only failure left is a non-UTF-8 string.
     try:
-        dumps_strict(value)
-    except ValueError:
-        raise json.JSONDecodeError("string not encodable as UTF-8", "", 0) from None
+        value = json.loads(
+            raw,
+            parse_constant=_reject,
+            parse_float=_parse_float,
+            parse_int=_parse_int,
+        )
+        _check_depth(value)
+        # Same rule the writers apply: re-encode with the C encoder and refuse
+        # anything dumps_strict would refuse later. Every number is already
+        # finite here, so the only failure left is a non-UTF-8 string.
+        try:
+            dumps_strict(value)
+        except ValueError:
+            raise json.JSONDecodeError("string not encodable as UTF-8", "", 0) from None
+    except RecursionError:
+        # fixed text: never str(exc) or any part of the body (SI-2)
+        raise json.JSONDecodeError("nesting too deep", "", 0) from None
     return value
 
 

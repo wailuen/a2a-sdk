@@ -151,7 +151,8 @@ def _field_summary(cls: type[ContentModel]) -> str:
             else:
                 type_str, required = _annotation_str(ann, required)
             suffix = "" if required else "?"
-            parts.append((f"{name}{suffix}: {type_str}", required))
+            wire_name = info.serialization_alias or info.alias or name
+            parts.append((f"{wire_name}{suffix}: {type_str}", required))
 
         # Keep system-prompt tokens manageable: drop whole optional fields from
         # the end first; a required field is never dropped or cut.

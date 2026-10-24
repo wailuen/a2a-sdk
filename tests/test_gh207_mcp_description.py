@@ -78,3 +78,26 @@ def test_bad_mcp_description_rejected_at_boot(bad):
 
 def test_max_length_accepted():
     _toolset(mcp_description="x" * 2048)
+
+
+async def test_model_sees_docstring_not_mcp_description(settings):
+    from agent_sdk.agent.loop import run_loop
+    from agent_sdk.testing import FakeModelClient, reply
+
+    model = FakeModelClient([reply("ok")])
+    app = _app(settings, model, _toolset(mcp_description="MCP-only text"))
+    events = [
+        e
+        async for e in run_loop(
+            model=model,
+            registry=app.state.registry,
+            adapters=app.state.adapters,
+            system="s",
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+        )
+    ]
+    assert events
+    (call,) = model.calls
+    spec = next(t for t in call["tools"] if t["name"] == "gh207_tool_x")
+    assert spec["description"] == "Docstring description."
+    assert "MCP-only text" not in str(call["tools"])

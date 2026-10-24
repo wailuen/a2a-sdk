@@ -233,6 +233,8 @@ const badArgs = []
 if (!Array.isArray(normalizedArgs.scenarios)) badArgs.push('scenarios (must be an array)')
 if (!normalizedArgs.baseUrl) badArgs.push('baseUrl')
 if (!normalizedArgs.keyFile) badArgs.push('keyFile')
+if (normalizedArgs.transports != null && !Array.isArray(normalizedArgs.transports)) badArgs.push('transports (must be an array)')
+if (normalizedArgs.onlyIds != null && !Array.isArray(normalizedArgs.onlyIds)) badArgs.push('onlyIds (must be an array)')
 if (badArgs.length > 0) {
   throw new Error(
     'acceptance-api: missing or invalid arg(s): ' + badArgs.join(', ') +

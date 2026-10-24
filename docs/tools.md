@@ -197,10 +197,11 @@ def _check(cls, v: str) -> str:
     return v
 ```
 
-Only `type(err).message` is shown (control characters collapsed, cut at 256
-characters). Text passed when raising is never shown. Never put input in the
-class text. A subclass with a missing, empty or non-string `message` shows the
-generic phrase. An unknown pydantic error code (for example one built with
+Only `type(err).message` is shown (control characters collapsed, invisible
+format and bidi characters dropped, cut at 256 characters). If nothing is left
+after that, the generic phrase shows. Text passed when raising is never shown.
+Never put input in the class text. A subclass whose class `message` is not a
+non-blank string raises `TypeError` when the class is defined. An unknown pydantic error code (for example one built with
 `PydanticCustomError(f"x_{v}", ...)`) is never echoed; it shows
 "input failed validation".
 

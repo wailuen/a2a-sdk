@@ -131,6 +131,7 @@ async def _a2a_attempt(
 ) -> _Attempt:
     at = _Attempt()
     msg: dict[str, Any] = {
+        "kind": "message",
         "role": "user",
         "messageId": uuid.uuid4().hex,
         "parts": [{"kind": "text", "text": query}],

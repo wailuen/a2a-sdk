@@ -52,6 +52,16 @@ failure — regardless of whether it declares ``emits``, it folds to
 matching agent/loop.py's ``fold_result_content(None)`` fold on the A2A/AG-UI
 surfaces exactly (§5.6 parity rule extends to result verdicts, not just tool
 visibility) (RT-001/RT-002).
+``prompts/list`` and ``prompts/get`` exist only under ``Agent(mcp_skills="prompts")``
+(one user message = the skill body; unknown or excluded name → -32602;
+otherwise -32601). Under ``mcp_skills="tool"`` a read-only ``load_skill`` tool
+is listed (annotations ``readOnlyHint`` true, ``openWorldHint`` false; catalog cut at whole entries
+within 2048 chars, ending ``…and N more``) and served only while the catalog is
+non-empty; bad arguments get the registry's GH-196 argument-error shape.
+``tools/list`` and ``prompts/list`` share one cursor path: an undecodable or
+negative cursor → -32602 ``invalid cursor`` (GH-236). With
+``AGENT_SDK_MCP_SCHEMA_MODE=strict`` ``tools/list`` schemas are flattened
+(``common/schema.py``).
 ``notifications/*`` → 202 empty, never answered. Per spec §10 the client
 MUST send ``MCP-Protocol-Version`` on every non-``initialize`` request, and
 the server MUST 400 a present-but-unrecognized version — both hold on every
@@ -84,8 +94,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import json
 import logging
+import re
 import time
 import uuid
 from collections import OrderedDict
@@ -93,7 +105,7 @@ from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from starlette.background import BackgroundTask
 
 from ..auth.context import bind_identity, unbind_identity
@@ -114,7 +126,7 @@ from ..common.schema import flatten_schema, strip_schema_titles
 from ..common.redact import TITLE_TEXT_MAX_LEN, frame_locations, safe_line_text, sanitize_text
 from ..common.sse import HEARTBEAT, SSE_HEADERS
 from ..agent.loop import LOAD_SKILL_TOOL, ToolInterrupt, resolve_tool_timeout, safe_validation_message
-from ..agent.registry import ToolInputValidationError, match_emits_type
+from ..agent.registry import ToolInputValidationError, _unknown_argument_error, match_emits_type
 from ..credentials import forwarding
 from ..models.content_types import ContentModel, MarketBriefing
 from ..models.errors import AgentError
@@ -464,9 +476,15 @@ async def _dispatch(app: Any, message: dict[str, Any]) -> dict[str, Any] | None:
         if method == "ping":
             return _result(request_id, {})
         if method == "tools/list":
-            return _result(request_id, _handle_tools_list(app, params))
+            listed = _handle_tools_list(app, params)
+            if "__jrpc_error__" in listed:
+                return _error(request_id, _INVALID_PARAMS, listed["__jrpc_error__"])
+            return _result(request_id, listed)
         if method == "prompts/list" and _skills_mode(app) == "prompts":
-            return _result(request_id, _handle_prompts_list(app, params))
+            listed = _handle_prompts_list(app, params)
+            if "__jrpc_error__" in listed:
+                return _error(request_id, _INVALID_PARAMS, listed["__jrpc_error__"])
+            return _result(request_id, listed)
         if method == "prompts/get" and _skills_mode(app) == "prompts":
             got = _handle_prompts_get(app, params)
             if "__jrpc_error__" in got:
@@ -554,15 +572,28 @@ def _handle_initialize(app: Any, params: dict[str, Any]) -> dict[str, Any]:
 _PAGE_SIZE = 64
 
 
+_INVALID_CURSOR = "invalid cursor"
+
+
+class _InvalidCursor(ValueError):
+    """GH-236: a cursor that is not one of ours. Fixed text, never the value (SI-2)."""
+
+
 def _decode_cursor(cursor: Any) -> int:
-    """Decode an opaque base64-encoded cursor to an int offset.
-    Invalid or absent cursor → 0."""
-    if not cursor or not isinstance(cursor, str):
+    """Decode an opaque base64-encoded cursor to a non-negative int offset.
+    Absent or empty cursor → 0; undecodable or negative → ``_InvalidCursor``
+    (a negative offset would otherwise wrap list slicing to the tail)."""
+    if cursor is None or cursor == "":
         return 0
+    if not isinstance(cursor, str):
+        raise _InvalidCursor(_INVALID_CURSOR)
     try:
-        return int(base64.b64decode(cursor.encode()).decode())
+        text = base64.b64decode(cursor.encode("ascii"), validate=True).decode("ascii")
     except Exception:
-        return 0
+        raise _InvalidCursor(_INVALID_CURSOR) from None
+    if not re.fullmatch(r"[0-9]{1,9}", text):
+        raise _InvalidCursor(_INVALID_CURSOR)
+    return int(text)
 
 
 def _encode_cursor(offset: int) -> str:
@@ -578,6 +609,10 @@ _SKILL_NOT_FOUND = "skill not found"
 _MAX_SKILL_CATALOG_LEN = 2048
 
 
+class _LoadSkillArgs(BaseModel):
+    name: str
+
+
 def _skills_mode(app: Any) -> str | None:
     return getattr(app.state, "mcp_skills", None)
 
@@ -590,12 +625,32 @@ def _mcp_skills(app: Any) -> list[Any]:
     return skills.listed(getattr(app.state, "exclude_from_catalog", ()))
 
 
+def _skill_catalog(skills: list[Any]) -> str:
+    """Whole entries within ``_MAX_SKILL_CATALOG_LEN`` chars; ``…and N more``
+    ends the text when entries were left out."""
+    entries = [f"{s.name}: {s.description}" for s in skills]
+    full = "; ".join(entries)
+    if len(full) <= _MAX_SKILL_CATALOG_LEN:
+        return full
+    kept: list[str] = []
+    used = 0
+    for entry in entries:
+        left = len(entries) - len(kept) - 1
+        suffix_len = len(f"; …and {left} more")
+        added = len(entry) + (2 if kept else 0)
+        if used + added + suffix_len > _MAX_SKILL_CATALOG_LEN:
+            break
+        kept.append(entry)
+        used += added
+    more = f"…and {len(entries) - len(kept)} more"
+    return "; ".join([*kept, more])
+
+
 def _load_skill_tool(skills: list[Any]) -> dict[str, Any]:
-    catalog = "; ".join(f"{s.name}: {s.description}" for s in skills)
-    if len(catalog) > _MAX_SKILL_CATALOG_LEN:
-        catalog = catalog[: _MAX_SKILL_CATALOG_LEN - 1] + "…"
+    catalog = _skill_catalog(skills)
     return {
         "name": _LOAD_SKILL,
+        "title": "Load skill",
         "description": f"Load the full instructions of a listed skill by name. Skills: {catalog}",
         "inputSchema": {
             "type": "object",
@@ -605,13 +660,16 @@ def _load_skill_tool(skills: list[Any]) -> dict[str, Any]:
             "required": ["name"],
             "additionalProperties": False,
         },
-        "annotations": {"readOnlyHint": True},
+        "annotations": {"readOnlyHint": True, "openWorldHint": False},
     }
 
 
 def _handle_prompts_list(app: Any, params: dict[str, Any]) -> dict[str, Any]:
     skills = _mcp_skills(app)
-    offset = max(0, _decode_cursor(params.get("cursor")))
+    try:
+        offset = _decode_cursor(params.get("cursor"))
+    except _InvalidCursor:
+        return {"__jrpc_error__": _INVALID_CURSOR}
     page = skills[offset : offset + _PAGE_SIZE]
     result: dict[str, Any] = {
         "prompts": [{"name": s.name, "description": s.description} for s in page]
@@ -640,7 +698,12 @@ def _handle_prompts_get(app: Any, params: dict[str, Any]) -> dict[str, Any]:
 def _handle_tools_list(app: Any, params: dict[str, Any] | None = None) -> dict[str, Any]:
     """Tier 1 only (§5.6). ``outputSchema`` appears ONLY when the tool
     declares ``emits`` — structuredContent is never emitted unclaimed.
-    Supports cursor/nextCursor pagination (PAGE_SIZE=64)."""
+    Supports cursor/nextCursor pagination (PAGE_SIZE=64); a bad cursor returns
+    the ``__jrpc_error__`` sentinel (-32602). Under ``mcp_skills="tool"`` the
+    ``load_skill`` tool is appended when the catalog is non-empty (prompts/list
+    and prompts/get serve ``mcp_skills="prompts"``). In strict schema mode
+    (``AGENT_SDK_MCP_SCHEMA_MODE=strict``) input and output schemas are
+    flattened by ``flatten_schema``."""
     if params is None:
         params = {}
     all_entries: list[Any] = list(app.state.registry.tier1())
@@ -650,9 +713,12 @@ def _handle_tools_list(app: Any, params: dict[str, Any] | None = None) -> dict[s
         if listed:
             skill_tool = _load_skill_tool(listed)
             all_entries.append(skill_tool)
-    # RT-001: clamp to ≥0 — a crafted negative base64 cursor wraps Python list
-    # slicing to the tail of the list, bypassing forward-only pagination.
-    offset = max(0, _decode_cursor(params.get("cursor")))
+    # RT-001/GH-236: a negative base64 cursor would wrap Python list slicing to
+    # the tail of the list, so an undecodable or negative cursor is -32602.
+    try:
+        offset = _decode_cursor(params.get("cursor"))
+    except _InvalidCursor:
+        return {"__jrpc_error__": _INVALID_CURSOR}
     page_entries = all_entries[offset : offset + _PAGE_SIZE]
 
     strict = app.state.settings.mcp_schema_mode == "strict"
@@ -699,26 +765,42 @@ def _tool_text(artifact: Any) -> str:
     return str(artifact)
 
 
+@functools.lru_cache(maxsize=512)
+def _required_keys(cls: type[BaseModel]) -> frozenset[str]:
+    return frozenset(cls.model_json_schema(mode="serialization").get("required", []))
+
+
+def _restore_nested(value: Any, dump: Any) -> None:
+    """Walk *value* and its JSON dump together through any dict, list or
+    tuple, restoring required nulls in every model found."""
+    if isinstance(value, BaseModel):
+        _restore_required_nulls(value, dump)
+    elif isinstance(value, dict) and isinstance(dump, dict):
+        for k, v in value.items():
+            if k in dump:
+                _restore_nested(v, dump[k])
+    elif isinstance(value, (list, tuple)) and isinstance(dump, list) and len(dump) == len(value):
+        for item, item_dump in zip(value, dump):
+            _restore_nested(item, item_dump)
+
+
 def _restore_required_nulls(model: BaseModel, dump: Any) -> Any:
     """Put back the ``None`` keys ``exclude_none`` dropped for fields the
     model's own schema lists as ``required``, so structuredContent conforms to
     the advertised outputSchema (MCP 2025-06-18). Recurses into nested models
-    and lists of models; never overwrites a key a serializer wrote."""
+    held directly or in any dict/list/tuple; never overwrites a key a
+    serializer wrote."""
     if not isinstance(dump, dict):
         return dump
-    required = type(model).model_json_schema(mode="serialization").get("required", [])
+    required = _required_keys(type(model))
     for name, info in type(model).model_fields.items():
         key = info.serialization_alias or info.alias or name
         value = getattr(model, name, None)
         if value is None:
             if key in required and key not in dump:
                 dump[key] = None
-        elif isinstance(value, BaseModel):
-            _restore_required_nulls(value, dump.get(key))
-        elif isinstance(value, (list, tuple)) and isinstance(dump.get(key), list) and len(dump[key]) == len(value):
-            for item, item_dump in zip(value, dump[key]):
-                if isinstance(item, BaseModel):
-                    _restore_required_nulls(item, item_dump)
+        elif key in dump:
+            _restore_nested(value, dump[key])
     return dump
 
 
@@ -739,9 +821,26 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
     if not isinstance(arguments, dict):
         return {"__jrpc_error__": "tools/call 'arguments' must be an object"}
 
-    if name == _LOAD_SKILL and _skills_mode(app) == "tool":
+    skills = _mcp_skills(app) if name == _LOAD_SKILL and _skills_mode(app) == "tool" else []
+    if skills:
         requested = arguments.get("name")
-        for skill in _mcp_skills(app):
+        bad_keys = [str(k) for k in arguments if k != "name"]
+        if bad_keys:
+            # SI-2/GH-196: the registry's argument-error shape; key names only
+            # (C-050 sanitises them), never a value.
+            text = safe_validation_message(
+                _LOAD_SKILL, _unknown_argument_error(bad_keys, tool_name=_LOAD_SKILL).validation_error
+            )
+            return {"content": [{"type": "text", "text": text}], "isError": True}
+        if not isinstance(requested, str):
+            # Missing or non-string name: pydantic's own error, so the text
+            # says "required"/"expected a string", not "unknown argument".
+            try:
+                _LoadSkillArgs.model_validate(arguments)
+            except ValidationError as exc:
+                text = safe_validation_message(_LOAD_SKILL, exc)
+                return {"content": [{"type": "text", "text": text}], "isError": True}
+        for skill in skills:
             if isinstance(requested, str) and skill.name == requested:
                 return {"content": [{"type": "text", "text": skill.body}]}
         # SI-2: fixed text, the requested name is never echoed or logged.

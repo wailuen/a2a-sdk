@@ -666,6 +666,9 @@ class _NullAlias(BaseModel):
     from_: str = Field(alias="from")
     inner: _Inner
     items: list[_Inner] = []
+    byname: dict[str, _Inner] = {}
+    grid: list[list[_Inner]] = []
+    groups: dict[str, list[_Inner]] = {}
 
 
 def _null_alias_toolset() -> ToolSet:
@@ -674,7 +677,10 @@ def _null_alias_toolset() -> ToolSet:
     @ts.tool(tier=1, emits=_NullAlias)
     async def rel020_null_alias():
         """Returns required-null fields and an aliased field."""
-        return _NullAlias(x=None, **{"from": "a"}, inner=_Inner(y=None), items=[_Inner(y=None)])
+        return _NullAlias(
+            x=None, **{"from": "a"}, inner=_Inner(y=None), items=[_Inner(y=None)],
+            byname={"k": _Inner(y=None)}, grid=[[_Inner(y=None)]], groups={"g": [_Inner(y=None)]},
+        )
 
     return ts
 
@@ -696,6 +702,9 @@ async def test_required_null_and_alias_conform_to_output_schema(settings, fake_m
                 sc = res["structuredContent"]
                 assert sc["from"] == "a" and "from_" not in sc
                 jsonschema.validate(sc, tool["outputSchema"])
+                # v0.21.0 release gate: models inside dicts and nested lists too
+                assert sc["byname"]["k"] == {"y": None}
+                assert sc["grid"] == [[{"y": None}]] and sc["groups"] == {"g": [{"y": None}]}
                 assert ("$defs" in tool["outputSchema"]) is (mode == "standard")
                 assert '"from":' in res["content"][0]["text"]
     finally:

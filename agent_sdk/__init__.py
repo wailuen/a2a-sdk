@@ -25,6 +25,7 @@ from .common.redact import (
     safe_cell_text,
     safe_error_text,
     safe_id_text,
+    safe_joined_id_text,
 )
 from .config import BaseAgentSettings
 from .credentials.fields import CredentialField
@@ -50,6 +51,7 @@ __all__ = [
     "safe_block_text",
     "safe_cell_text",
     "safe_id_text",
+    "safe_joined_id_text",
     "safe_error_text",
     "SafeValueError",
     "SourceAdapter",

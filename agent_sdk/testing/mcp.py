@@ -170,8 +170,9 @@ def _has_ref(node: Any) -> list[str]:
 
 def _check_list(tools: list[dict[str, Any]], expected_count: int | None, size_budget: int) -> list[str]:
     out: list[str] = []
-    if expected_count is not None and len(tools) != expected_count:
-        out.append(f"tools/list count {len(tools)} != registered tier-1 tools {expected_count}")
+    counted = sum(1 for t in tools if t.get("name") != "load_skill")
+    if expected_count is not None and counted != expected_count:
+        out.append(f"tools/list count {counted} != registered tier-1 tools {expected_count}")
     for t in tools:
         name = t.get("name", "?")
         props = (t.get("inputSchema") or {}).get("properties") or {}

@@ -80,6 +80,7 @@ Fix 5 protocol conformance bugs surfaced by downstream agents after the 0.4.0 re
 | W61 [x] ✅ 2026-10-23 (GH-225 multi-type emits, GH-228 scope-scan hardening; archived by hand after a release-gate MCP fix for LRN-469) | completed/w061-gh-issues.md | G | 2 | — |
 | W62 [x] ✅ 2026-10-24 (GH-205 mcp_skills, GH-206 strict schema mode, GH-207 mcp_description, GH-212 id-safe text, GH-214 no deleteSurface, GH-229 acceptance args, GH-230 SafeValueError, GH-231 API docs gated; archived by hand after G1 budget stop) | completed/w062-gh-issues.md | G | 8 | — |
 | W63 [x] ✅ 2026-10-24 (GH-233 acceptance-api.js parse fix + workflow parse test, GH-234 AG-UI test client; archived by hand) | completed/w063-gh-issues.md | G | 2 | — |
+| W64 [x] ✅ 2026-10-24 (GH-235 ingress depth cap + AG-UI resume, GH-236 load_skill, GH-237 test clients, GH-238/239 console, GH-240 A2A catalog negotiation, GH-241 safe errors, GH-242 test fixes; archived by hand) | completed/w064-gh-issues.md | G | 8 | — |
 
 ## Dependency graph
 

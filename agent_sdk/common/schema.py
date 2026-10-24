@@ -49,6 +49,20 @@ def _nullable_inner(node: Any) -> dict[str, Any] | None:
     return others[0]
 
 
+def _nullable_members(node: Any) -> list[dict[str, Any]] | None:
+    """GH-236: the non-null members of an ``anyOf`` of 3+ members that holds
+    exactly one ``{"type": "null"}``, else None."""
+    if not isinstance(node, dict):
+        return None
+    options = node.get("anyOf")
+    if not isinstance(options, list) or len(options) < 3:
+        return None
+    others = [o for o in options if o != _NULL]
+    if len(options) - len(others) != 1 or not all(isinstance(o, dict) for o in others):
+        return None
+    return others
+
+
 class _Flattener:
     def __init__(self, defs: dict[str, Any], keep_required: bool) -> None:
         self.defs = defs
@@ -106,7 +120,7 @@ class _Flattener:
                 for pname, pval in value.items():
                     keep = False
                     resolved = self._resolve(pval)
-                    if _nullable_inner(resolved) is not None:
+                    if _nullable_inner(resolved) is not None or _nullable_members(resolved) is not None:
                         # Output: structuredContent is dumped with exclude_none,
                         # which drops a None key, so every nullable field leaves
                         # required. A required field with no default also stays
@@ -130,6 +144,12 @@ class _Flattener:
                 out["required"] = required
             else:
                 del out["required"]
+        if at_property:
+            members = _nullable_members(out)
+            if members is not None:
+                if keep_null:
+                    return out
+                return {**{k: v for k, v in out.items() if k != "anyOf"}, "anyOf": members}
         inner = _nullable_inner(out) if at_property else None
         if inner is not None and keep_null:
             single = inner.get("type")
@@ -145,7 +165,8 @@ class _Flattener:
 
 def flatten_schema(schema: Any, *, keep_required: bool = False) -> Any:
     """GH-206 strict mode: inline local ``#/$defs`` refs, collapse
-    ``anyOf: [X, {"type": "null"}]`` to ``X`` at property positions only
+    ``anyOf: [X, {"type": "null"}]`` to ``X`` (and drop ``null`` from an
+    ``anyOf`` of 3+ members, GH-236) at property positions only
     (list items and dict values can hold ``null`` after ``exclude_none``, so
     they keep it) and drop ``default: null``. Nullable fields leave
     ``required`` (right for outputs, where ``exclude_none`` drops the key)

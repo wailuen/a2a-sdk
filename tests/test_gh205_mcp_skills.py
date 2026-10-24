@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -126,10 +127,13 @@ async def test_default_is_byte_identical(tmp_path):
 
 async def test_default_prompts_method_not_found(tmp_path):
     app = _agent(tmp_path, skills_dir=_skills(tmp_path)).build_app()
-    async with _running(app, tmp_path) as (_, c, _t):
+    async with _running(app, tmp_path) as (_, c, t):
+        _, token = app.state.auth.api_keys.mint("u", admin=True)
         for method in ("prompts/list", "prompts/get"):
             with pytest.raises(McpError):
                 await c._rpc(method, {"name": "skill0"})
+            r = await _raw(t, token, _rpc(method, {"name": "skill0"}))
+            assert r.json()["error"]["code"] == -32601
 
 
 # --- "tool" mode -----------------------------------------------------------
@@ -195,7 +199,7 @@ async def test_prompts_mode(tmp_path):
     app = _agent(
         tmp_path, skills_dir=_skills(tmp_path), mcp_skills="prompts", exclude_from_catalog=["skill1"]
     ).build_app()
-    async with _running(app, tmp_path) as (_, c, _t):
+    async with _running(app, tmp_path) as (_, c, t):
         init = await c.initialize()
         assert init["capabilities"]["prompts"] == {"listChanged": False}
         assert await c.list_tools() == []
@@ -207,6 +211,9 @@ async def test_prompts_mode(tmp_path):
         assert msg["content"] == {"type": "text", "text": "Body of skill 0."}
         with pytest.raises(McpError):
             await c.get_prompt("skill1")
+        _, token = app.state.auth.api_keys.mint("u", admin=True)
+        r = await _raw(t, token, _rpc("prompts/get", {"name": "skill1"}))
+        assert r.json()["error"]["code"] == -32602
 
 
 async def test_prompts_mode_load_skill_not_a_tool(tmp_path):
@@ -280,3 +287,160 @@ async def test_prompts_on_foreign_session_refused_like_tools(tmp_path):
         lst = await _raw(t, b, _rpc("prompts/list"), session=sid)
         get = await _raw(t, b, _rpc("prompts/get", {"name": "skill0"}), session=sid)
         assert tools.status_code == lst.status_code == get.status_code == 404
+
+
+# --- GH-236 ------------------------------------------------------------------
+
+HOSTILE_VALUE = "ZZ-HOSTILE-VALUE-71c2"
+
+
+async def test_load_skill_annotations_and_title(tmp_path):
+    app = _agent(tmp_path, skills_dir=_skills(tmp_path), mcp_skills="tool").build_app()
+    async with _running(app, tmp_path) as (_, c, _t):
+        (tool,) = [t for t in await c.list_tools() if t["name"] == "load_skill"]
+        assert tool["annotations"] == {"readOnlyHint": True, "openWorldHint": False}
+        assert tool["title"] == "Load skill"
+
+
+async def test_load_skill_not_served_when_catalog_empty(tmp_path):
+    app = _agent(
+        tmp_path,
+        skills_dir=_skills(tmp_path),
+        mcp_skills="tool",
+        exclude_from_catalog=["skill0", "skill1"],
+    ).build_app()
+    async with _running(app, tmp_path) as (_, c, t):
+        assert [x["name"] for x in await c.list_tools()] == []
+        _, token = app.state.auth.api_keys.mint("u", admin=True)
+        r = await _raw(
+            t, token, _rpc("tools/call", {"name": "load_skill", "arguments": {"name": "skill0"}})
+        )
+        assert r.json()["error"] == {"code": -32602, "message": "tool not found"}
+
+
+@pytest.mark.parametrize(
+    "arguments, expect",
+    [
+        ({"name": "skill0", "extra": HOSTILE_VALUE}, "extra"),
+        ({"name": "skill0", "bad key <x>": HOSTILE_VALUE}, "<key>"),
+        ({"name": HOSTILE_VALUE, "other": HOSTILE_VALUE}, "other"),
+    ],
+)
+async def test_load_skill_argument_errors_use_registry_shape(tmp_path, arguments, expect):
+    from agent_sdk.agent.loop import safe_validation_message
+    from agent_sdk.agent.registry import _unknown_argument_error
+
+    app = _agent(tmp_path, skills_dir=_skills(tmp_path), mcp_skills="tool").build_app()
+    async with _running(app, tmp_path) as (_, c, _t):
+        res = await c.call_tool("load_skill", arguments)
+    assert res["isError"] is True
+    text = res["content"][0]["text"]
+    assert text.startswith("tool 'load_skill' input invalid: ")
+    assert expect in text
+    assert HOSTILE_VALUE not in text
+    keys = [expect] if expect != "<key>" else ["bad key <x>"]
+    want = safe_validation_message(
+        "load_skill", _unknown_argument_error(keys, tool_name="load_skill").validation_error, None
+    )
+    assert text == want
+
+
+@pytest.mark.parametrize(
+    "arguments, expect",
+    [({}, "name — required field is missing"), ({"name": 5}, "name — expected a string")],
+)
+async def test_load_skill_missing_or_bad_name_says_required(tmp_path, arguments, expect):
+    # A missing or non-string name is not an "unknown argument" (release gate M2).
+    app = _agent(tmp_path, skills_dir=_skills(tmp_path), mcp_skills="tool").build_app()
+    async with _running(app, tmp_path) as (_, c, _t):
+        res = await c.call_tool("load_skill", arguments)
+    assert res["isError"] is True
+    text = res["content"][0]["text"]
+    assert text == f"tool 'load_skill' input invalid: {expect}"
+    assert "unknown argument" not in text
+
+
+async def test_load_skill_catalog_cut_at_whole_entries(tmp_path):
+    d = tmp_path / "skills"
+    d.mkdir()
+    for i in range(40):
+        (d / f"skill{i:02d}.md").write_text(
+            f"---\nname: skill{i:02d}\ndescription: {'d' * 70} number {i:02d}\n---\nBody.\n",
+            encoding="utf-8",
+        )
+    app = _agent(tmp_path, skills_dir=d, mcp_skills="tool").build_app()
+    async with _running(app, tmp_path) as (_, c, _t):
+        (tool,) = [t for t in await c.list_tools() if t["name"] == "load_skill"]
+    prefix = "Load the full instructions of a listed skill by name. Skills: "
+    catalog = tool["description"][len(prefix) :]
+    assert len(catalog) <= 2048
+    body, _, tail = catalog.rpartition("; ")
+    assert re.fullmatch(r"…and \d+ more", tail)
+    left_out = int(re.search(r"\d+", tail).group())
+    entries = body.split("; ")
+    assert len(entries) + left_out == 40
+    assert all(re.fullmatch(r"skill\d\d: d{70} number \d\d", e) for e in entries)
+    assert entries[0].startswith("skill00")
+
+
+async def test_load_skill_small_catalog_has_no_more_suffix(tmp_path):
+    app = _agent(tmp_path, skills_dir=_skills(tmp_path), mcp_skills="tool").build_app()
+    async with _running(app, tmp_path) as (_, c, _t):
+        (tool,) = [t for t in await c.list_tools() if t["name"] == "load_skill"]
+    assert "more" not in tool["description"].split("Skills:")[1]
+
+
+def _bad_cursors():
+    import base64
+
+    return [
+        base64.b64encode(b"-1").decode(),
+        base64.b64encode(b"-9999").decode(),
+        "!!notbase64" + HOSTILE_VALUE,
+        base64.b64encode(HOSTILE_VALUE.encode()).decode(),
+        HOSTILE_VALUE,
+    ]
+
+
+@pytest.mark.parametrize("method, mode", [("tools/list", "tool"), ("prompts/list", "prompts")])
+async def test_bad_cursor_is_invalid_params_without_echo(tmp_path, method, mode):
+    app = _agent(tmp_path, skills_dir=_skills(tmp_path), mcp_skills=mode).build_app()
+    async with _running(app, tmp_path) as (_, c, t):
+        _, token = app.state.auth.api_keys.mint("u", admin=True)
+        for cursor in _bad_cursors():
+            r = await _raw(t, token, _rpc(method, {"cursor": cursor}))
+            err = r.json()["error"]
+            assert err["code"] == -32602
+            assert err["message"] == "invalid cursor"
+            assert HOSTILE_VALUE not in r.text and cursor not in r.text
+        r = await _raw(t, token, _rpc(method, {"cursor": 5}))
+        assert r.json()["error"]["code"] == -32602
+        r = await _raw(t, token, _rpc(method, {"cursor": ""}))
+        assert "result" in r.json()
+
+
+@pytest.mark.parametrize("flag", ["mcp_skills", "reserved"])
+def test_boot_checks_run_before_credential_store(tmp_path, monkeypatch, flag):
+    opened: list[bool] = []
+    original = Agent._build_credential_store
+
+    def spy(self):
+        opened.append(True)
+        return original(self)
+
+    monkeypatch.setattr(Agent, "_build_credential_store", spy)
+    if flag == "mcp_skills":
+        agent = _agent(tmp_path, skills_dir=_skills(tmp_path), mcp_skills="both")
+    else:
+        ts = ToolSet()
+
+        @ts.tool(tier=1)
+        async def load_skill(inp: In) -> str:
+            """clash"""
+            return "x"
+
+        agent = _agent(tmp_path, skills_dir=_skills(tmp_path), toolsets=[ts])
+    with pytest.raises(ValueError) as info:
+        agent.build_app()
+    assert opened == []
+    assert str(tmp_path) not in str(info.value)

@@ -411,7 +411,8 @@ def _capabilities(message: Message, request: Request) -> A2uiCapabilities:
     extensions = request.headers.get("x-a2a-extensions", "")
     opted_in = A2UI_EXTENSION_URI in [u.strip() for u in extensions.split(",")]
     raw = (message.metadata or {}).get("a2uiClientCapabilities")
-    return A2uiCapabilities.gated(opted_in, raw)
+    # GH-240: A2A-only; AG-UI keeps the default.
+    return A2uiCapabilities.gated(opted_in, raw, keep_declared_catalogs=True)
 
 
 def _config_error(params: MessageSendParams) -> JSONResponse | None:

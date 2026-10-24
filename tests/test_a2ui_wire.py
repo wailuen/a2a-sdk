@@ -246,7 +246,7 @@ def test_translate_returns_three_messages():
 
 
 def test_split_a2ui_delivery_is_removed():
-    """GH-214: there is no open/close split any more."""
+    """GH-214 (ruling https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762): there is no open/close split any more."""
     import agent_sdk.a2ui.translator as translator_module
 
     assert not hasattr(translator_module, "split_a2ui_delivery")
@@ -1487,3 +1487,41 @@ def test_system_prompt_allowed_components_still_filters():
     section = get_system_prompt_section(["KpiCard"])
     assert "- KpiCard" in section
     assert "- FundPerformance" not in section
+
+
+async def test_tasks_get_replay_does_not_change_surface_id(client, fake_model):
+    """DESIGN.md §5.4: a replayed createSurface for a held surface is a no-op,
+    so tasks/get returning the same artifact twice is safe."""
+    import uuid
+
+    from agent_sdk.models.content_types import A2UI_EXTENSION_URI
+    from agent_sdk.testing import reply, tool_call
+
+    from .conftest import wait_for_state
+
+    fake_model.script(tool_call("demo_kpis", {"title": "Q2"}), reply("done"))
+    r = await client.post(
+        "/v1/message:send",
+        json={
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": "kpis"}],
+                "messageId": uuid.uuid4().hex,
+            }
+        },
+        headers={"X-A2A-Extensions": A2UI_EXTENSION_URI},
+    )
+    task_id = r.json()["id"]
+    first = await wait_for_state(client, task_id)
+    second = (await client.get(f"/v1/tasks/{task_id}")).json()
+
+    def sids(task):
+        out = []
+        for p in task["artifacts"][0]["parts"]:
+            if p["kind"] == "data":
+                for m in p["data"]["messages"]:
+                    if "createSurface" in m:
+                        out.append(m["createSurface"]["surfaceId"])
+        return out
+
+    assert sids(first) and sids(first) == sids(second)

@@ -22,6 +22,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from typing import (
@@ -1176,14 +1177,20 @@ _BUILTIN_ERROR_CODES: frozenset[str] = frozenset(
 ) | {UNKNOWN_ARGUMENT_ERROR_TYPE}
 
 
+def _drop_format_chars(text: str) -> str:
+    return "".join(c for c in text if unicodedata.category(c) != "Cf")
+
+
 def _validation_phrase(e: Any) -> str:
     err_type = e["type"]
     if err_type == "value_error":
         err = (e.get("ctx") or {}).get("error")
         if isinstance(err, SafeValueError):
             hint = getattr(type(err), "message", None)
-            if isinstance(hint, str) and hint.strip():
-                return safe_line_text(hint)
+            if isinstance(hint, str):
+                text = _drop_format_chars(safe_line_text(hint)).strip()
+                if text:
+                    return text
     phrase = _VALIDATION_TYPE_PHRASES.get(err_type)
     if phrase is not None:
         return phrase

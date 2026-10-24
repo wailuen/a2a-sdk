@@ -29,15 +29,20 @@ class BadTicker(SafeValueError):
 
 
 class NoMessage(SafeValueError):
-    pass
+    message = "placeholder"
 
 
 class EmptyMessage(SafeValueError):
-    message = ""
+    message = "placeholder"
 
 
 class NonStrMessage(SafeValueError):
-    message = 42  # type: ignore[assignment]
+    message = "placeholder"
+
+
+NoMessage.message = ""
+EmptyMessage.message = ""
+NonStrMessage.message = 42  # type: ignore[assignment]
 
 
 class LongHint(SafeValueError):
@@ -188,16 +193,16 @@ def test_builtin_codes_render_code_not_generic() -> None:
 
 
 def test_sdk_unknown_argument_code_keeps_its_phrase() -> None:
-    from agent_sdk.agent.registry import ToolInputValidationError, ToolEntry  # noqa: F401
+    from agent_sdk.agent.registry import _unknown_argument_error
 
     class M(BaseModel):
         model_config = {"extra": "forbid"}
         ticker: str
 
-    from agent_sdk.agent.registry import UNKNOWN_ARGUMENT_ERROR_TYPE
-    from agent_sdk.agent.loop import _VALIDATION_TYPE_PHRASES
-
-    assert UNKNOWN_ARGUMENT_ERROR_TYPE in _VALIDATION_TYPE_PHRASES
+    err = _unknown_argument_error(["bogus"], tool_name="t")
+    text = safe_validation_message("t", err.validation_error, M)
+    assert "unknown argument (not in the tool's input schema)" in text
+    assert "input failed validation" not in text
 
 
 PROBE = "gh230-log-probe"
@@ -299,3 +304,192 @@ async def test_mcp_is_error_text(leaky_client, sdk_caplog) -> None:
             if name == "hint_tool":
                 assert HINT in result["content"][0]["text"]
     _assert_no_leak(records)
+
+
+GENERIC = "value failed a validation rule"
+BIDI = "\u202e\u2066\u2067\u2068\u2069\u202a\u202b\u202c\u202d\u200e\u200f\u061c"
+
+
+def _hint_cls(text: Any) -> type[SafeValueError]:
+    return type("H", (SafeValueError,), {"message": text})
+
+
+def _bad_chars(text: str) -> list[str]:
+    import unicodedata
+
+    return [c for c in text if unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp")]
+
+
+HOSTILE_HINTS = [
+    "\x07 ",
+    "\x07\x1b[31mred\x1b[0m hint",
+    "line1\r\nline2\u2028line3\x85\x9b",
+    BIDI + "Use AAPL" + BIDI,
+    BIDI,
+]
+
+
+@pytest.mark.parametrize("hint", HOSTILE_HINTS)
+def test_hint_sanitised_or_generic(hint: str) -> None:
+    cls = _hint_cls(hint)
+
+    class M(BaseModel):
+        ticker: str
+
+        @field_validator("ticker")
+        @classmethod
+        def _c(cls_, v: str) -> str:
+            raise cls(MARKER)
+
+    text = safe_validation_message("t", _errors(M, "x"), M)
+    phrase = text.split(" — ", 1)[1]
+    assert not _bad_chars(phrase)
+    assert MARKER not in text
+
+
+def test_whitespace_after_sanitising_falls_back_to_generic() -> None:
+    for hint in ("\x07 ", BIDI, "\x07" + BIDI + " "):
+        cls = _hint_cls(hint)
+
+        class M(BaseModel):
+            ticker: str
+
+            @field_validator("ticker")
+            @classmethod
+            def _c(cls_, v: str) -> str:
+                raise cls()
+
+        text = safe_validation_message("t", _errors(M, "x"), M)
+        assert text.endswith("— " + GENERIC), repr(text)
+
+
+@pytest.mark.parametrize("bad", [42, None, "", "   ", b"x", ["a"]])
+def test_init_subclass_rejects_bad_class_message(bad: Any) -> None:
+    with pytest.raises(TypeError):
+        type("Bad", (SafeValueError,), {"message": bad})
+
+
+def test_init_subclass_accepts_inherited_and_good_message() -> None:
+    class Parent(SafeValueError):
+        message = "Use AAPL."
+
+    class Child(Parent):
+        pass
+
+    assert Child.message == "Use AAPL."
+
+
+def _hostile_tools() -> ToolSet:
+    ts = ToolSet()
+    for i, h in enumerate(HOSTILE_HINTS):
+        cls = _hint_cls(h)
+
+        class In(BaseModel):
+            ticker: str
+
+            @field_validator("ticker")
+            @classmethod
+            def _c(cls_, v: str, _cls=cls) -> str:
+                raise _cls(v)
+
+        async def _fn(inp: In) -> dict[str, Any]:
+            return {}
+
+        _fn.__doc__ = f"Hostile hint {i}."
+        _fn.__annotations__["inp"] = In
+        ts.tool(tier=1, name=f"hostile_{i}")(_fn)
+    return ts
+
+
+hostile_tools = _hostile_tools()
+HOSTILE_NAMES = [f"hostile_{i}" for i in range(len(HOSTILE_HINTS))]
+
+
+@pytest.fixture
+async def hostile_client(settings, fake_model):
+    agent = make_agent(settings, model_client=fake_model)
+    agent.toolsets = agent.toolsets + [hostile_tools]
+    app = agent.build_app()
+    async with app.router.lifespan_context(app):
+        _, token = app.state.auth.api_keys.mint("test-admin", admin=True)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as c:
+            yield c, fake_model
+    app.state.credential_store.close()
+    gc.collect()
+
+
+def _assert_clean(payload: str) -> None:
+    assert MARKER not in payload
+    assert not [c for c in _bad_chars(payload) if c not in "\n\r\t"], repr(payload)
+
+
+@pytest.mark.parametrize("name", HOSTILE_NAMES)
+async def test_hostile_hint_mcp(hostile_client, name: str) -> None:
+    client, _ = hostile_client
+    r = await client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {"protocolVersion": "2025-06-18", "capabilities": {}}},
+    )
+    headers = {"MCP-Protocol-Version": "2025-06-18"}
+    if r.headers.get("mcp-session-id"):
+        headers["Mcp-Session-Id"] = r.headers["mcp-session-id"]
+    r = await client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+              "params": {"name": name, "arguments": {"ticker": MARKER}}},
+        headers=headers,
+    )
+    result = r.json()["result"]
+    assert result["isError"] is True
+    _assert_clean(result["content"][0]["text"])
+
+
+@pytest.mark.parametrize("name", HOSTILE_NAMES)
+async def test_hostile_hint_a2a(hostile_client, name: str) -> None:
+    from agent_sdk.testing import reply
+
+    from .conftest import wait_for_state
+
+    client, fake = hostile_client
+    fake.script(tool_call(name, {"ticker": MARKER}), reply("done"))
+    r = await client.post(
+        "/v1/message:send",
+        json={"message": {"messageId": "m1", "role": "user",
+                          "parts": [{"kind": "text", "text": "go"}]}},
+    )
+    task = await wait_for_state(client, r.json()["id"])
+    assert len(fake.calls) == 2
+    _assert_clean(_flatten(fake.calls[1]["messages"][-1]))
+    _assert_clean(_flatten(task))
+
+
+def _flatten(obj: Any) -> str:
+    if isinstance(obj, dict):
+        return " ".join(_flatten(v) for v in obj.values())
+    if isinstance(obj, (list, tuple)):
+        return " ".join(_flatten(v) for v in obj)
+    return obj if isinstance(obj, str) else ""
+
+
+@pytest.mark.parametrize("name", HOSTILE_NAMES)
+async def test_hostile_hint_ag_ui(hostile_client, name: str) -> None:
+    from agent_sdk.testing import reply
+
+    from .conftest import sse_frames
+
+    client, fake = hostile_client
+    fake.script(tool_call(name, {"ticker": MARKER}), reply("done"))
+    body = {"threadId": "t1", "runId": "r1", "messages": [{"id": "m1", "role": "user", "content": "go"}],
+            "state": {}, "tools": [], "context": [], "forwardedProps": {}}
+    r = await client.post("/ag-ui/run", json=body)
+    assert r.status_code == 200
+    frames = sse_frames(r.text)
+    results = [f for f in frames if f["type"] == "TOOL_CALL_RESULT"]
+    assert results
+    _assert_clean(_flatten(results))
+    _assert_clean(_flatten([f for f in frames if f["type"] != "TOOL_CALL_ARGS"]))

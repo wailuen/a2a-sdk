@@ -628,6 +628,15 @@ class Agent:
 
         self._warn_single_replica_required()
         self._validate_idp_settings()
+        # GH-236 (SI-2): fixed-text boot checks run before any credential store opens.
+        if self.mcp_skills not in (None, "tool", "prompts"):
+            raise ValueError("mcp_skills must be None, 'tool' or 'prompts'")
+        if self.mcp_skills is not None and self.skills_dir is None:
+            raise ValueError(f"mcp_skills={self.mcp_skills!r} requires skills_dir")
+        if self.skills_dir is not None and LOAD_SKILL_TOOL in registry.entries:
+            raise ValueError(
+                "'load_skill' is a reserved tool name when skills_dir is set"
+            )
         credential_store = self._build_credential_store()
         self._warn_idp_secret_missing(credential_store)
         api_keys = ApiKeyStore(credential_store)
@@ -658,14 +667,6 @@ class Agent:
             interrupt_ttl=settings.interrupt_ttl_seconds,
             max_interrupted=settings.max_interrupted_tasks,
         )
-        if self.mcp_skills not in (None, "tool", "prompts"):
-            raise ValueError("mcp_skills must be None, 'tool' or 'prompts'")
-        if self.mcp_skills is not None and self.skills_dir is None:
-            raise ValueError(f"mcp_skills={self.mcp_skills!r} requires skills_dir")
-        if self.skills_dir is not None and LOAD_SKILL_TOOL in registry.entries:
-            raise ValueError(
-                "'load_skill' is a reserved tool name when skills_dir is set"
-            )
         skills = SkillsRegistry(self.skills_dir)
         if self.exclude_from_catalog:
             unknown = [n for n in self.exclude_from_catalog if n not in skills.skills]

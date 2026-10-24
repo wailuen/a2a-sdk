@@ -64,70 +64,27 @@ def _neg_cursor(n: int = -1) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_decode_cursor_negative_clamped_by_unit() -> None:
-    """_decode_cursor itself returns a negative int — the clamp lives in
-    _handle_tools_list. Verify the raw decoder handles known negative inputs."""
-    # base64('-1') == 'LTE='
+def test_decode_cursor_negative_rejected_by_unit() -> None:
+    """GH-236: the shared decoder rejects a negative or undecodable cursor."""
+    from agent_sdk.routes.mcp import _InvalidCursor
+
     crafted = base64.b64encode(b"-1").decode()
     assert crafted == "LTE="
-    assert _decode_cursor(crafted) == -1  # raw decoder returns -1 as documented
+    with pytest.raises(_InvalidCursor):
+        _decode_cursor(crafted)
 
 
 async def test_negative_cursor_does_not_wrap_tool_list(client: httpx.AsyncClient) -> None:
-    """A crafted negative-offset cursor must return the same page as cursor=0
-    (i.e. the first page), not the tail of the list."""
+    """A crafted negative-offset cursor is -32602, never the tail of the list."""
     headers = await _mcp_init(client)
-
-    # Fetch the first page with no cursor.
-    r0 = await client.post(
-        "/mcp",
-        json={
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/list",
-            "params": {},
-        },
-        headers=headers,
-    )
-    assert r0.status_code == 200, r0.text
-    first_page_tools = r0.json()["result"]["tools"]
-
-    # Fetch with a crafted negative cursor (base64('-1')).
-    r_neg = await client.post(
-        "/mcp",
-        json={
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/list",
-            "params": {"cursor": _neg_cursor(-1)},
-        },
-        headers=headers,
-    )
-    assert r_neg.status_code == 200, r_neg.text
-    neg_cursor_tools = r_neg.json()["result"]["tools"]
-
-    # The negative-cursor result must be identical to the no-cursor first page.
-    assert neg_cursor_tools == first_page_tools, (
-        "Negative cursor must be clamped to 0; got different tool list: "
-        f"first_page={[t['name'] for t in first_page_tools]!r} "
-        f"neg_cursor={[t['name'] for t in neg_cursor_tools]!r}"
-    )
-
-    # Sanity: a large negative offset also stays on page 0.
-    r_big_neg = await client.post(
-        "/mcp",
-        json={
-            "jsonrpc": "2.0",
-            "id": 4,
-            "method": "tools/list",
-            "params": {"cursor": _neg_cursor(-9999)},
-        },
-        headers=headers,
-    )
-    assert r_big_neg.status_code == 200, r_big_neg.text
-    assert r_big_neg.json()["result"]["tools"] == first_page_tools, (
-        "Large negative cursor must also be clamped to page 0"
-    )
+    for n in (-1, -9999):
+        r = await client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {"cursor": _neg_cursor(n)}},
+            headers=headers,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["error"]["code"] == -32602
 
 
 # ---------------------------------------------------------------------------

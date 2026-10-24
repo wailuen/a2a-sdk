@@ -377,8 +377,8 @@ def validate_a2ui_delivery(
     if not open_messages:
         raise ValueError(
             f"Content type {type(payload).__name__!r} "
-            f"({payload.data_type!r}): translate() output split into "
-            "an empty open sequence (deleteSurface with no "
+            f"({payload.data_type!r}): translate() output has an "
+            "empty open sequence (deleteSurface with no "
             "accompanying create/populate messages); malformed "
             "translate() output"
         )

@@ -24,7 +24,7 @@
 
 import { el } from "./api.js";
 
-/* surfaceId -> {catalogId, components: [], dataModel: {}, node, closed} */
+/* surfaceId -> {catalogId, _componentMap: Map(id -> component), dataModel: {}, node, closed} */
 const surfaces = new Map();
 
 export function resetSurfaces() {
@@ -110,6 +110,10 @@ export function renderA2ui(messages, opts = {}) {
   const touched = new Set();
   const deletions = [];
   const notes = [];
+
+  for (const [surfaceId, entry] of surfaces) {
+    if (entry.node && entry.node.isConnected === false) surfaces.delete(surfaceId);
+  }
 
   // 1) fold the whole array atomically — no painting yet
   list.forEach((msg, index) => {
@@ -476,8 +480,9 @@ function renderGeneric(componentName, data) {
       el(
         "table",
         { class: "tbl tbl-kv" },
-        el("tbody", null, scalarRows.map(([k, v]) => el("tr", null, el("th", null, k), el("td", null, v))))
-      )
+        el("tbody", null, capRows(scalarRows).map(([k, v]) => el("tr", null, el("th", null, k), el("td", null, v))))
+      ),
+      moreNote(scalarRows)
     );
   }
   children.push(...sections);
@@ -684,7 +689,8 @@ function renderComparisonTable(data) {
 }
 
 function renderBarChart(data) {
-  const bars = data.bars || [];
+  const allBars = data.bars || [];
+  const bars = capRows(allBars);
   const W = 560;
   const rowH = 24;
   const PAD = 4;
@@ -702,7 +708,7 @@ function renderBarChart(data) {
     );
     node.appendChild(svgText(labelW + Math.max(w, 1) + 6, y + rowH / 2 + 4, fmtNum(values[i]), "a2ui-svg-label"));
   });
-  return card(data.title || null, null, node);
+  return card(data.title || null, null, node, moreNote(allBars));
 }
 
 function renderEntityList(data) {

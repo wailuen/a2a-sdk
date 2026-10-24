@@ -2,7 +2,7 @@
 run that created it. Ruling: https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762
 
 A spec renderer would paint each card and then unmount it. Surface lifetime is
-client-managed; each turn uses a fresh surfaceId.
+client-managed; each artifact uses a fresh surfaceId.
 """
 
 from __future__ import annotations
@@ -76,12 +76,13 @@ def test_agent_card_param_removed():
 
 
 def test_console_still_renders_surface_without_close():
-    """The console keeps every surface mounted in the transcript: a2ui.js only
-    unmounts on a received deleteSurface, which the SDK no longer sends.
-    It must still accept one from another producer."""
+    """The console keeps every surface mounted: a2ui.js only unmounts on a
+    received deleteSurface, which the SDK no longer sends. It must still
+    accept one from another producer."""
     import pathlib
 
-    js = pathlib.Path("agent_sdk/console/static/a2ui.js").read_text()
+    static = pathlib.Path(__file__).resolve().parent.parent / "agent_sdk" / "console" / "static"
+    js = (static / "a2ui.js").read_text()
     assert "msg.deleteSurface" in js
-    chat = pathlib.Path("agent_sdk/console/static/chat.js").read_text()
+    chat = (static / "chat.js").read_text()
     assert "deleteSurface" not in chat

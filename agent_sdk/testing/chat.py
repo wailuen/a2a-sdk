@@ -159,16 +159,26 @@ class ChatDriver:
     ) -> str:
         """One AG-UI turn over ``POST /ag-ui/run`` (SSE).
 
-        Appends ``{role: user}`` and ``{role: assistant}`` to *messages* in-place
-        for multi-turn continuity.  Returns the assistant reply text only when
-        the run ends with RUN_FINISHED (separate messages joined with "\n");
-        after RUN_ERROR or a stream with no terminal event it returns "" and
-        appends nothing (partial text still reaches the ``text`` emit).
+        The posted body is built from a copy of *messages* plus the user query.
+        After the run, *messages* changes in-place by outcome:
+
+        - RUN_FINISHED with non-empty reply: appends the user message, then the
+          assistant message.
+        - RUN_FINISHED with an empty reply (A2UI-only turn, interrupt outcome,
+          non-assistant text only): appends the user message only.
+        - RUN_ERROR, stream closed with no terminal event, or an exception from
+          the POST/stream: *messages* is unchanged (the exception propagates).
+
+        Returns the assistant reply text (separate messages joined with "\n"),
+        or "" when the run did not end with RUN_FINISHED.  Partial text still
+        reaches the ``text`` emit.
         """
-        messages.append({"role": "user", "content": query})
-        reply = await self._run_agui(self._agui_body(thread_id, messages), emit)
-        if reply:
-            messages.append({"role": "assistant", "content": reply})
+        user = {"role": "user", "content": query}
+        finished, reply = await self._run_agui(self._agui_body(thread_id, [*messages, user]), emit)
+        if finished:
+            messages.append(user)
+            if reply:
+                messages.append({"role": "assistant", "content": reply})
         return reply
 
     async def agui_resume(
@@ -185,10 +195,13 @@ class ChatDriver:
 
         Sends ``resume=[{interruptId, status, payload}]`` and does NOT append a
         user message.  *interrupt_id* is the ``id`` of the interrupt dict the
-        ``interrupt`` emit received from :meth:`agui_turn`.  Appends the
-        assistant reply to *messages* in-place and returns it.  Frames are
-        handled exactly as in :meth:`agui_turn`; an unknown or expired id
-        fires the ``error`` emit.
+        ``interrupt`` emit received from :meth:`agui_turn`.  Returns the
+        assistant reply only when the run ends with RUN_FINISHED, else "".
+        Appends ``{role: assistant}`` to *messages* in-place only on
+        RUN_FINISHED with non-empty text; never appends a user message or an
+        empty assistant entry, and leaves *messages* unchanged on RUN_ERROR, no
+        terminal event, or an exception.  Frames are handled exactly as in
+        :meth:`agui_turn`; an unknown or expired id fires the ``error`` emit.
 
         Provisional API (``agent_sdk.testing``).
         """
@@ -196,8 +209,8 @@ class ChatDriver:
         body["resume"] = [
             {"interruptId": interrupt_id, "status": status, "payload": payload}
         ]
-        reply = await self._run_agui(body, emit)
-        if reply:
+        finished, reply = await self._run_agui(body, emit)
+        if finished and reply:
             messages.append({"role": "assistant", "content": reply})
         return reply
 
@@ -212,9 +225,14 @@ class ChatDriver:
             "state": {},
         }
 
-    async def _run_agui(self, body: dict[str, Any], emit: dict[str, Callable] | None) -> str:
-        """POST *body* to ``/ag-ui/run`` and dispatch SSE frames to *emit*."""
+    async def _run_agui(self, body: dict[str, Any], emit: dict[str, Callable] | None) -> tuple[bool, str]:
+        """POST *body* to ``/ag-ui/run`` and dispatch SSE frames to *emit*.
+
+        Returns ``(finished, reply)``: *finished* is True only when RUN_FINISHED
+        was read; *reply* is the joined assistant text (``""`` when not finished).
+        """
         reply_parts: dict[str, list[str]] = {}
+        roles: dict[str, Any] = {}
         chunk_id: Any = None
         _pending_tool: str | None = None
         finished = False
@@ -273,6 +291,8 @@ class ChatDriver:
                     self._fire(emit, "a2ui", msgs)
                 elif t in ("TEXT_MESSAGE_START", "TEXT_MESSAGE_END"):
                     chunk_id = None
+                    if t == "TEXT_MESSAGE_START" and frame.get("messageId") and "role" in frame:
+                        roles[str(frame["messageId"])] = frame["role"]
                 elif t in ("TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_CHUNK"):
                     delta = frame.get("delta") or ""
                     msg_id = frame.get("messageId")
@@ -282,6 +302,9 @@ class ChatDriver:
                             chunk_id = msg_id
                         else:
                             msg_id = chunk_id
+                        key = str(msg_id or "")
+                        if msg_id and key not in roles and key not in reply_parts and "role" in frame:
+                            roles[key] = frame["role"]
                     reply_parts.setdefault(str(msg_id or ""), []).append(delta)
                     self._fire(emit, "text", delta)
                 elif t == "RUN_ERROR":
@@ -299,8 +322,13 @@ class ChatDriver:
         if not finished and not errored:
             self._fire(emit, "error", "stream closed without a terminal event")
         if not finished:
-            return ""
-        return "\n".join(t for t in ("".join(parts) for parts in reply_parts.values()) if t)
+            return False, ""
+        texts = (
+            "".join(parts)
+            for mid, parts in reply_parts.items()
+            if roles.get(mid, "assistant") == "assistant"
+        )
+        return True, "\n".join(t for t in texts if t)
 
     # ── A2A ───────────────────────────────────────────────────────────────────
 

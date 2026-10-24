@@ -74,6 +74,14 @@ class SafeValueError(ValueError):
 
     message: str = ""
 
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        hint = cls.__dict__.get("message", getattr(cls, "message", None))
+        if not isinstance(hint, str) or not hint.strip():
+            raise TypeError(
+                f"{cls.__name__}.message must be a non-blank str (fixed guidance text)"
+            )
+
 
 class AgentError(Exception):
     """Raised by tools/adapters; translated per surface, never crashes the loop."""

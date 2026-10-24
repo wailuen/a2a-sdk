@@ -489,3 +489,12 @@ Entries ordered by LRN number.
 | LRN-490 | Parallel groups each open their own Unreleased heading | [LRN-490](LRN-490-parallel-groups-duplicate-unreleased.md) |
 | LRN-491 | CHANGELOG Unreleased bullet must name every changed agent_sdk file | [LRN-491](LRN-491-changelog-names-all-changed-files.md) |
 | LRN-492 | Failed-request rollback must restore UI, not just state | [LRN-492](LRN-492-restore-ui-with-state.md) |
+| LRN-493 | Ingress JSON depth cap must be explicit | [LRN-493](LRN-493-explicit-ingress-depth-cap.md) |
+| LRN-494 | Parallel groups add duplicate Unreleased headings | [LRN-494](LRN-494-single-unreleased-heading.md) |
+| LRN-495 | CHANGELOG bullet omits one-line route edits | [LRN-495](LRN-495-changelog-names-all-files.md) |
+| LRN-496 | AC naming real app config tested with a fake | [LRN-496](LRN-496-real-app-not-fake-client.md) |
+| LRN-497 | CHANGELOG bullet lacks changed file list | [LRN-497](LRN-497-changelog-bullet-file-list.md) |
+| LRN-498 | New public field or keyword on exported class not in CHANGELOG | [LRN-498](LRN-498-undocumented-public-field.md) |
+| LRN-499 | CHANGELOG bullet omits touched agent_sdk files | [LRN-499](LRN-499-changelog-names-all-files.md) |
+| LRN-500 | Absence assertion on a char never put in the input | [LRN-500](LRN-500-hostile-input-missing-char.md) |
+| LRN-501 | New rejections not listed under Breaking changes | [LRN-501](LRN-501-breaking-changes-section.md) |

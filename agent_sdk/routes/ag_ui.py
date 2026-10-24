@@ -714,7 +714,7 @@ async def ag_ui_run(
             resume_raw = body.get("resume")
             resume = resume_raw if isinstance(resume_raw, list) else []
             if resume:
-                if not isinstance(resume[0], dict):
+                if len(resume) > 1 or not isinstance(resume[0], dict):
                     yield _emit(mapper.run_error("invalid resume entry", "validation"))
                     return
                 entry = resume[0]

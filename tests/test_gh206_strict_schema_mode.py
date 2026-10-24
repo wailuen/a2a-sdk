@@ -431,3 +431,19 @@ def test_strict_discriminated_union_leaves_no_dangling_defs_ref():
     out = flatten_schema(_U.model_json_schema())
     assert "#/$defs/" not in json.dumps(out)
     assert out["properties"]["u"]["discriminator"] == {"propertyName": "kind"}
+
+
+def test_gh236_top_level_three_member_union_with_null_stays_intact():
+    schema = {"anyOf": [{"type": "integer"}, {"type": "string"}, {"type": "null"}]}
+    assert flatten_schema(schema) == schema
+    assert flatten_schema(schema, keep_required=True) == schema
+
+
+def test_gh236_list_items_keep_null_in_three_member_union():
+    schema = {
+        "type": "object",
+        "properties": {
+            "xs": {"type": "array", "items": {"anyOf": [{"type": "integer"}, {"type": "string"}, {"type": "null"}]}}
+        },
+    }
+    assert flatten_schema(schema) == schema

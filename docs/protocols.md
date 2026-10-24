@@ -50,7 +50,7 @@ activated subset (the A2UI extension URI).
 A2UI surface lifetime is managed by the client. The SDK emits no `deleteSurface`
 for a surface in the artifact or run that created it: each A2A artifact is
 `[TextPart, DataPart(open)]`, and each AG-UI emission is `AGENT_ARTIFACT` then
-one `A2UI_UPDATE`. Each turn uses a fresh `surfaceId`. The agent-card param
+one `A2UI_UPDATE`. Each artifact uses a fresh `surfaceId`; a caller-supplied `surface_id` must be unique per artifact. The agent-card param
 `deleteSurfaceSemantics` was removed (GH-214, ruling
 https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762).
 
@@ -132,7 +132,7 @@ never `RUN_ERROR`.
   metadata. Discovery: both PRM variants + AS metadata, S256 PKCE only.
 - `tools/list` exposes **Tier 1 tools only**; `emits` becomes
   `outputSchema` and results carry `structuredContent`.
-- Setting `AGENT_SDK_MCP_SCHEMA_MODE=strict` flattens `tools/list` schemas (inlined `$defs`, `anyOf` with null collapsed at property positions only, so list items and dict values keep `null`; no `default: null`; a recursive model keeps its `$ref`/`$defs`). It applies to `inputSchema` and `outputSchema`, including the `emits` tuple `anyOf`, and `tools/list` only. Default `standard` is unchanged.
+- Setting `AGENT_SDK_MCP_SCHEMA_MODE=strict` flattens `tools/list` schemas (inlined `$defs`, `anyOf` with null collapsed at property positions only, so list items and dict values keep `null`; no `default: null`; a recursive model keeps its `$ref`/`$defs`; `null` is also dropped from an `anyOf` of three or more members at property positions, with the same required and keep-null rules as the two-member case, while top-level unions stay intact). It applies to `inputSchema` and `outputSchema`, including the `emits` tuple `anyOf`, and `tools/list` only. Default `standard` is unchanged.
 - Skills (opt-in, GH-205): `Agent(mcp_skills="tool")` adds the read-only
   `load_skill` tool to `tools/list` / `tools/call`;
   `Agent(mcp_skills="prompts")` advertises `capabilities.prompts` and serves
@@ -176,4 +176,4 @@ byte-identical alias): `protocolVersion: "0.3.0"`, HTTP+JSON transport,
 `x-sdk` per-skill metadata (tier, schemas, emits), and the `x-agui` block
 (transport, endpoint, customEvents). All URLs derive from `PUBLIC_URL`.
 
-A2A clients must list a domain catalog in `a2uiClientCapabilities.catalogs` to receive its surfaces (GH-180). Upstream A2UI v0.9.1's `{"v0.9": {"supportedCatalogIds": [...]}}` shape (client_capabilities.json) is accepted too when `catalogs` is absent or unusable, then a flat root `supportedCatalogIds` as a lenient fallback; `catalogs` wins when present (GH-213).
+A2A clients must list a domain catalog in `a2uiClientCapabilities.catalogs` to receive its surfaces (GH-180). Upstream A2UI v0.9.1's `{"v0.9": {"supportedCatalogIds": [...]}}` shape (client_capabilities.json) is accepted too when `catalogs` is absent or unusable, then a flat root `supportedCatalogIds` as a lenient fallback; `catalogs` wins when present (GH-213). On A2A a present `catalogs` list, even an empty one, is final: it is not passed over for the upstream keys, and it must include `urn:a2ui-profile:standard:v1` for Standard Profile cards (GH-240). Without it the artifact carries the TextPart plus a plain model-dump DataPart.

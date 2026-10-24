@@ -14,7 +14,7 @@ safe_validation_message (agent_sdk/agent/loop.py) fell back to the bare pydantic
 The fallback assumed every type code is a fixed pydantic identifier. Custom codes are author-chosen strings and can embed input.
 
 ## Check
-Run tests/test_gh230_safe_value_error.py. Also grep agent_sdk/agent/loop.py for `_VALIDATION_TYPE_PHRASES.get(` and confirm the default is a fixed phrase, not the code.
+Run tests/test_gh230_safe_value_error.py. Also read C-050 `_validation_phrase` and `_BUILTIN_ERROR_CODES` in agent_sdk/agent/loop.py and confirm an unknown code falls to `_UNKNOWN_TYPE_PHRASE`, a built-in code renders only if it is in `_BUILTIN_ERROR_CODES`, and the SafeValueError hint passes `safe_line_text` and an empty result falls back to the generic phrase.
 
 ## Prevention
 When planning any text built from a pydantic error, render only allowlisted codes (LRN-044, LRN-216). Give authors a fixed-text channel (SafeValueError class `message`) instead of letting raise-time text through.

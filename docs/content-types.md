@@ -234,9 +234,14 @@ whitespace becomes one space, and control characters and `| < > [ ]` are
 neutralised. Mark a `ComparisonTable` column of ids with
 `ColumnDef(key="id", label="Id", is_id=True)` and its cells render through
 `safe_id_text`; all other cells keep `safe_cell_text`. `is_id` is left off the
-wire when false. Never join an id into a row with other fields: the SDK's two
-joined ids (`EmailList` `(id: ..., conversation: ...)` and `FundPerformance`
-`source <pb_id>`) keep the older look-alike rendering. If you write a custom
+wire when false. Inside an `is_id` cell, `( )` and `=` are not swapped, so an id
+that holds `)` or `=` text can still look like extra structure to a person
+reading the text (it cannot add a line or a column: `|`, `<`, `>`, `[`, `]` and
+control characters are neutralised). Never join an id into a row with other
+fields: the SDK's two joined ids (`EmailList` `(id: ..., conversation: ...)`
+and `FundPerformance` `source <pb_id>`) keep the older look-alike rendering,
+which is `agent_sdk.safe_joined_id_text(value)`; use it for an id you join
+into a row of your own. If you write a custom
 `ContentModel`, include the machine ids a follow-up call needs in your
 `_body_text`: text-only clients (MCP `content[0].text`) see only that text.
 Ruling: https://github.com/wailuen/a2a-sdk/issues/212#issuecomment-6359828392.
