@@ -76,8 +76,8 @@ async def publish_note(inp: PublishInput) -> dict[str, Any]:
         if isinstance(value, dict):
             payload = value.get("payload")
             status = value.get("status")
-            if status is None and isinstance(payload, dict):
-                status = payload.get("status")
+            if status in (None, "resolved") and isinstance(payload, dict):
+                status = payload.get("decision") or payload.get("status")
         else:
             status = value
         if str(status).lower() in ("approved", "yes", "confirm", "true"):

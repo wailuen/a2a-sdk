@@ -116,7 +116,7 @@ def test_non_array_rejected_without_echo(path: Path, field: str, bad: str) -> No
 
 @needs_node
 @pytest.mark.parametrize("path", FILES, ids=IDS)
-def test_only_ids_whole_id_match(path: Path) -> None:
+def test_valid_only_ids_selects_whole_id(path: Path) -> None:
     res = _run_guard(path, _args(onlyIds=["S-1"]))
     assert res["ids"] == ["S-1"]
 
@@ -125,7 +125,9 @@ def test_only_ids_whole_id_match(path: Path) -> None:
 @pytest.mark.parametrize("path", FILES, ids=IDS)
 def test_string_only_ids_does_not_substring_match(path: Path) -> None:
     res = _run_guard(path, _args(onlyIds="S-1"))
-    assert "error" in res
+    assert "onlyIds" in res["error"]
+    assert "/secret/keyfile-path" not in res["error"]
+    assert "ids" not in res
 
 
 @needs_node
@@ -133,3 +135,28 @@ def test_string_only_ids_does_not_substring_match(path: Path) -> None:
 def test_valid_arrays_still_work(path: Path) -> None:
     res = _run_guard(path, _args(transports=["a2a"], onlyIds=[]))
     assert res["transports"] == ["a2a"] and len(res["ids"]) == 3
+
+
+@needs_node
+@pytest.mark.parametrize("path", FILES, ids=IDS)
+@pytest.mark.parametrize("bad", [["A2A"], [5], ["a2a", "x"], ["bogus"]])
+def test_unknown_transport_entries_rejected_without_echo(path: Path, bad: list) -> None:
+    res = _run_guard(path, _args(transports=bad))
+    assert "transports (allowed: a2a, agui)" in res["error"]
+    assert "/secret/keyfile-path" not in res["error"]
+    assert "ids" not in res
+
+
+@needs_node
+@pytest.mark.parametrize("path", FILES, ids=IDS)
+@pytest.mark.parametrize("only", [["s-1"], [1], ["nope", "S-99"]])
+def test_only_ids_matching_nothing_throws(path: Path, only: list) -> None:
+    res = _run_guard(path, _args(onlyIds=only))
+    assert res == {"error": "acceptance-api: onlyIds matched no scenario"}
+
+
+@needs_node
+@pytest.mark.parametrize("path", FILES, ids=IDS)
+def test_known_transports_and_matching_only_ids_pass(path: Path) -> None:
+    res = _run_guard(path, _args(transports=["agui", "a2a"], onlyIds=["S-1"]))
+    assert res["transports"] == ["agui", "a2a"] and res["ids"] == ["S-1"]

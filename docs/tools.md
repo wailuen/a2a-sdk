@@ -219,9 +219,8 @@ raise ToolInterrupt(
 The task parks in `input-required`/`auth-required`; the wall-clock deadline
 suspends while parked. Resume arrives via A2A `message:send` with `taskId`,
 or an AG-UI run with `resume=[{interruptId, status, payload}]` — identity
-bound either way. `status` may be the protocol literal (`"resolved"` /
-`"cancelled"`) with the decision in `payload.decision`, or the SDK shorthand
-(`"approved"` / `"rejected"`) directly in `status` (see protocols.md). Without a `resume_handler`, the raw user response is
+bound either way. `status` must be the protocol literal (`"resolved"` /
+`"cancelled"`), with the decision in `payload.decision` (see protocols.md). Without a `resume_handler`, the raw user response is
 folded back to the model as the tool result.
 
 ## Loop policies

@@ -248,7 +248,10 @@ async def test_sc_a3_extended_card_with_auth_returns_501(client):
 
 
 async def test_sc_a4_cred_fwd_uri_echoed(client, fake_model):
-    """POST /v1/message:send with X-A2A-Extensions: <cred-fwd URI> → header echoed."""
+    """The example agent declares no credential source, so its card has no
+    credential-forwarding extension and the URI is NOT echoed (v0.22.0: never
+    echo an extension the card does not declare). The declared case is
+    tests/test_forwarding_integration.py::test_a2a_echoes_declared_credential_extension."""
     fake_model.script(reply("ok"))
     r = await client.post(
         "/v1/message:send",
@@ -257,11 +260,11 @@ async def test_sc_a4_cred_fwd_uri_echoed(client, fake_model):
     )
     assert r.status_code == 200, r.text
     echoed = r.headers.get("x-a2a-extensions", "")
-    assert CRED_FWD_URI in echoed, f"expected {CRED_FWD_URI!r} in X-A2A-Extensions, got {echoed!r}"
+    assert CRED_FWD_URI not in echoed, echoed
 
 
 async def test_sc_a4_both_uris_echoed(client, fake_model):
-    """Both A2UI URI and cred-fwd URI echoed when both are requested."""
+    """Both requested: only the declared A2UI URI is echoed (no credential source)."""
     from agent_sdk.models.content_types import A2UI_EXTENSION_URI
 
     fake_model.script(reply("ok"))
@@ -273,7 +276,7 @@ async def test_sc_a4_both_uris_echoed(client, fake_model):
     assert r.status_code == 200, r.text
     echoed = r.headers.get("x-a2a-extensions", "")
     assert A2UI_EXTENSION_URI in echoed
-    assert CRED_FWD_URI in echoed
+    assert CRED_FWD_URI not in echoed
 
 
 async def test_sc_a4_unknown_uri_not_echoed(client, fake_model):

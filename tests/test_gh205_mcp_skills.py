@@ -419,7 +419,9 @@ async def test_bad_cursor_is_invalid_params_without_echo(tmp_path, method, mode)
         assert "result" in r.json()
 
 
-@pytest.mark.parametrize("flag", ["mcp_skills", "reserved"])
+@pytest.mark.parametrize(
+    "flag", ["mcp_skills", "reserved", "unknown_exclude", "tool_without_skills_dir"]
+)
 def test_boot_checks_run_before_credential_store(tmp_path, monkeypatch, flag):
     opened: list[bool] = []
     original = Agent._build_credential_store
@@ -431,6 +433,12 @@ def test_boot_checks_run_before_credential_store(tmp_path, monkeypatch, flag):
     monkeypatch.setattr(Agent, "_build_credential_store", spy)
     if flag == "mcp_skills":
         agent = _agent(tmp_path, skills_dir=_skills(tmp_path), mcp_skills="both")
+    elif flag == "unknown_exclude":
+        agent = _agent(
+            tmp_path, skills_dir=_skills(tmp_path), exclude_from_catalog=["no-such-skill"]
+        )
+    elif flag == "tool_without_skills_dir":
+        agent = _agent(tmp_path, mcp_skills="tool", skills_dir=None)
     else:
         ts = ToolSet()
 
@@ -444,3 +452,31 @@ def test_boot_checks_run_before_credential_store(tmp_path, monkeypatch, flag):
         agent.build_app()
     assert opened == []
     assert str(tmp_path) not in str(info.value)
+
+
+async def test_load_skill_catalog_skips_long_entry_and_lists_later_short_ones(tmp_path):
+    d = tmp_path / "skills"
+    d.mkdir()
+    (d / "aaa.md").write_text(
+        f"---\nname: aaa\ndescription: {'L' * 2200}\n---\nBody.\n", encoding="utf-8"
+    )
+    for n in ("bbb", "ccc"):
+        (d / f"{n}.md").write_text(
+            f"---\nname: {n}\ndescription: short {n}\n---\nBody.\n", encoding="utf-8"
+        )
+    app = _agent(tmp_path, skills_dir=d, mcp_skills="tool").build_app()
+    async with _running(app, tmp_path) as (_, c, _t):
+        (tool,) = [t for t in await c.list_tools() if t["name"] == "load_skill"]
+    catalog = tool["description"].split("Skills: ", 1)[1]
+    assert "bbb: short bbb" in catalog
+    assert "ccc: short ccc" in catalog
+    assert "L" * 50 not in catalog
+    assert catalog.endswith("…and 1 more")
+
+
+async def test_load_skill_success_carries_is_error_false(tmp_path):
+    app = _agent(tmp_path, skills_dir=_skills(tmp_path), mcp_skills="tool").build_app()
+    async with _running(app, tmp_path) as (_, c, _t):
+        res = await c.call_tool("load_skill", {"name": "skill0"})
+    assert res["isError"] is False
+    assert res["content"][0]["text"].startswith("Body of skill 0")

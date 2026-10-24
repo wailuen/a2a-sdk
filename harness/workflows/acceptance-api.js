@@ -234,6 +234,7 @@ if (!Array.isArray(normalizedArgs.scenarios)) badArgs.push('scenarios (must be a
 if (!normalizedArgs.baseUrl) badArgs.push('baseUrl')
 if (!normalizedArgs.keyFile) badArgs.push('keyFile')
 if (normalizedArgs.transports != null && !Array.isArray(normalizedArgs.transports)) badArgs.push('transports (must be an array)')
+else if (Array.isArray(normalizedArgs.transports) && normalizedArgs.transports.some(function(t) { return t !== 'a2a' && t !== 'agui' })) badArgs.push('transports (allowed: a2a, agui)')
 if (normalizedArgs.onlyIds != null && !Array.isArray(normalizedArgs.onlyIds)) badArgs.push('onlyIds (must be an array)')
 if (badArgs.length > 0) {
   throw new Error(
@@ -248,6 +249,9 @@ const transports = (normalizedArgs.transports && normalizedArgs.transports.lengt
 const scenarios = (normalizedArgs.onlyIds && normalizedArgs.onlyIds.length > 0)
   ? normalizedArgs.scenarios.filter(function(s) { return normalizedArgs.onlyIds.indexOf(s.id) !== -1 })
   : normalizedArgs.scenarios
+if (normalizedArgs.onlyIds && normalizedArgs.onlyIds.length > 0 && scenarios.length === 0) {
+  throw new Error('acceptance-api: onlyIds matched no scenario')
+}
 
 log('Running ' + scenarios.length + ' scenario(s) in parallel  |  transports: ' + transports.join(' + ') + '  |  ' + BASE_URL)
 

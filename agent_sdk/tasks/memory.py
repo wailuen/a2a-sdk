@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections import OrderedDict
 from typing import Any, Callable, Sequence
@@ -115,6 +116,8 @@ def _turn_boundary_slice(
     )
     return []
 
+
+_TASK_ID_SHAPE = re.compile(r"[0-9a-f]{32}")
 
 class InMemoryTaskStore(TaskStore):
     MAX_REUSABLE_TASKS: int = MAX_REUSABLE_TASKS
@@ -346,6 +349,9 @@ class InMemoryTaskStore(TaskStore):
         return combined
 
     # ── listing ──
+
+    def is_valid_page_token(self, page_token: str) -> bool:
+        return _TASK_ID_SHAPE.fullmatch(page_token) is not None
 
     def list_tasks_for_identity(
         self, identity: Identity, page_size: int = 50, page_token: str | None = None

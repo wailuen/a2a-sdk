@@ -43,7 +43,7 @@ def test_allowlist_applies_after_emits():
     assert supported_catalogs([KpiCard.component], [d, KpiCard]) == [CATALOG_ID]
 
 
-def test_no_emitting_tools_gives_empty_but_extension_present():
+def test_no_emitting_tools_gives_empty_and_extension_absent():
     assert supported_catalogs(None, []) == []
     assert supported_catalogs(None, [None, str]) == []
     ext = a2ui_extension(None, [])
@@ -52,9 +52,7 @@ def test_no_emitting_tools_gives_empty_but_extension_present():
     settings = _settings()
     card = build_agent_card(settings, registry)
     uris = [e["uri"] for e in card["capabilities"]["extensions"]]
-    assert "https://a2ui.org/a2a-extension/a2ui/v0.9.1" in uris
-    a2ui = next(e for e in card["capabilities"]["extensions"] if e["uri"].endswith("a2ui/v0.9.1"))
-    assert a2ui["params"]["supportedCatalogIds"] == []
+    assert "https://a2ui.org/a2a-extension/a2ui/v0.9.1" not in uris  # GH-249
 
 
 def _settings():

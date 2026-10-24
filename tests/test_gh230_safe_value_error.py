@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import unicodedata
 from typing import Any
 
 import httpx
@@ -40,7 +41,7 @@ class NonStrMessage(SafeValueError):
     message = "placeholder"
 
 
-NoMessage.message = ""
+del NoMessage.message
 EmptyMessage.message = ""
 NonStrMessage.message = 42  # type: ignore[assignment]
 
@@ -115,7 +116,7 @@ def test_hint_rendered_not_runtime_arg() -> None:
 
 
 @pytest.mark.parametrize("cls", [NoMessage, EmptyMessage, NonStrMessage])
-def test_bad_message_falls_back(cls: type[SafeValueError]) -> None:
+def test_message_broken_after_definition_falls_back(cls: type[SafeValueError]) -> None:
     class M(BaseModel):
         ticker: str
 
@@ -170,26 +171,24 @@ def test_unknown_type_code_not_echoed() -> None:
 
 
 def test_builtin_codes_render_code_not_generic() -> None:
+    from pydantic import Field
+
     class L(BaseModel):
         xs: list[int] = []
         n: int = 0
 
-    try:
+    with pytest.raises(ValidationError) as info:
         L.model_validate({"xs": "x", "n": 1.5})
-    except ValidationError as exc:
-        text = safe_validation_message("t", exc, L)
+    text = safe_validation_message("t", info.value, L)
     assert "int_from_float" in text
     assert "input failed validation" not in text
-    try:
-        BaseModel.model_validate  # noqa: B018
-        from pydantic import Field
 
-        class C(BaseModel):
-            xs: list[int] = Field(max_length=1)
+    class C(BaseModel):
+        xs: list[int] = Field(max_length=1)
 
+    with pytest.raises(ValidationError) as info:
         C.model_validate({"xs": [1, 2]})
-    except ValidationError as exc:
-        assert "too_long" in safe_validation_message("t", exc, C)
+    assert "too_long" in safe_validation_message("t", info.value, C)
 
 
 def test_sdk_unknown_argument_code_keeps_its_phrase() -> None:
@@ -315,22 +314,21 @@ def _hint_cls(text: Any) -> type[SafeValueError]:
 
 
 def _bad_chars(text: str) -> list[str]:
-    import unicodedata
-
     return [c for c in text if unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp")]
 
 
-HOSTILE_HINTS = [
-    "\x07 ",
-    "\x07\x1b[31mred\x1b[0m hint",
-    "line1\r\nline2\u2028line3\x85\x9b",
-    BIDI + "Use AAPL" + BIDI,
-    BIDI,
+HOSTILE_CASES = [
+    ("\x07\x1b[31mred\x1b[0m hint", "[31mred [0m hint"),
+    ("line1\r\nline2\u2028line3\x85\x9b", "line1  line2 line3"),
+    (BIDI + "Use AAPL" + BIDI, "Use AAPL"),
+    ("Use\u202e AAPL", "Use AAPL"),
 ]
+HOSTILE_HINTS = [hint for hint, _ in HOSTILE_CASES]
+UNRENDERABLE_HINTS = ["\x07 ", BIDI, "\x07" + BIDI + " "]
 
 
-@pytest.mark.parametrize("hint", HOSTILE_HINTS)
-def test_hint_sanitised_or_generic(hint: str) -> None:
+@pytest.mark.parametrize("hint, cleaned", HOSTILE_CASES)
+def test_hint_sanitised(hint: str, cleaned: str) -> None:
     cls = _hint_cls(hint)
 
     class M(BaseModel):
@@ -343,24 +341,15 @@ def test_hint_sanitised_or_generic(hint: str) -> None:
 
     text = safe_validation_message("t", _errors(M, "x"), M)
     phrase = text.split(" — ", 1)[1]
+    assert phrase == cleaned
     assert not _bad_chars(phrase)
     assert MARKER not in text
 
 
-def test_whitespace_after_sanitising_falls_back_to_generic() -> None:
-    for hint in ("\x07 ", BIDI, "\x07" + BIDI + " "):
-        cls = _hint_cls(hint)
-
-        class M(BaseModel):
-            ticker: str
-
-            @field_validator("ticker")
-            @classmethod
-            def _c(cls_, v: str) -> str:
-                raise cls()
-
-        text = safe_validation_message("t", _errors(M, "x"), M)
-        assert text.endswith("— " + GENERIC), repr(text)
+@pytest.mark.parametrize("hint", UNRENDERABLE_HINTS)
+def test_unrenderable_hint_rejected_at_definition(hint: str) -> None:
+    with pytest.raises(TypeError):
+        _hint_cls(hint)
 
 
 @pytest.mark.parametrize("bad", [42, None, "", "   ", b"x", ["a"]])
@@ -403,6 +392,7 @@ def _hostile_tools() -> ToolSet:
 
 hostile_tools = _hostile_tools()
 HOSTILE_NAMES = [f"hostile_{i}" for i in range(len(HOSTILE_HINTS))]
+HOSTILE_CLEANED = dict(zip(HOSTILE_NAMES, (c for _, c in HOSTILE_CASES)))
 
 
 @pytest.fixture
@@ -427,6 +417,11 @@ def _assert_clean(payload: str) -> None:
     assert not [c for c in _bad_chars(payload) if c not in "\n\r\t"], repr(payload)
 
 
+def _assert_hint(error_text: str, cleaned: str) -> None:
+    assert f"— {cleaned}" in error_text, repr(error_text)
+    assert not _bad_chars(error_text), repr(error_text)
+
+
 @pytest.mark.parametrize("name", HOSTILE_NAMES)
 async def test_hostile_hint_mcp(hostile_client, name: str) -> None:
     client, _ = hostile_client
@@ -447,6 +442,7 @@ async def test_hostile_hint_mcp(hostile_client, name: str) -> None:
     result = r.json()["result"]
     assert result["isError"] is True
     _assert_clean(result["content"][0]["text"])
+    _assert_hint(result["content"][0]["text"], HOSTILE_CLEANED[name])
 
 
 @pytest.mark.parametrize("name", HOSTILE_NAMES)
@@ -466,6 +462,7 @@ async def test_hostile_hint_a2a(hostile_client, name: str) -> None:
     assert len(fake.calls) == 2
     _assert_clean(_flatten(fake.calls[1]["messages"][-1]))
     _assert_clean(_flatten(task))
+    _assert_hint(_flatten(fake.calls[1]["messages"][-1]), HOSTILE_CLEANED[name])
 
 
 def _flatten(obj: Any) -> str:
@@ -492,4 +489,5 @@ async def test_hostile_hint_ag_ui(hostile_client, name: str) -> None:
     results = [f for f in frames if f["type"] == "TOOL_CALL_RESULT"]
     assert results
     _assert_clean(_flatten(results))
+    _assert_hint(_flatten(results), HOSTILE_CLEANED[name])
     _assert_clean(_flatten([f for f in frames if f["type"] != "TOOL_CALL_ARGS"]))

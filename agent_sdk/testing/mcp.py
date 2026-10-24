@@ -31,9 +31,12 @@ from typing import Any, Iterable
 
 import httpx
 
-from ..routes.mcp import MCP_INTERRUPT_SUFFIX
+import jsonschema
 
-PROTOCOL_VERSION = "2025-11-25"
+from ..agent.loop import LOAD_SKILL_TOOL
+from ..routes.mcp import MCP_INTERRUPT_SUFFIX, SUPPORTED_PROTOCOL_VERSIONS
+
+PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 DEFAULT_SIZE_BUDGET = 120_000
 _MAX_PAGES = 100
 
@@ -60,6 +63,7 @@ class McpClient:
         )
         self._next_id = 0
         self._session: str | None = None
+        self._version: str | None = None
 
     async def __aenter__(self) -> McpClient:
         return self
@@ -71,6 +75,8 @@ class McpClient:
         headers = {"Accept": "application/json, text/event-stream"}
         if self._session:
             headers["Mcp-Session-Id"] = self._session
+        if self._version:
+            headers["MCP-Protocol-Version"] = self._version
         try:
             resp = await self._http.post("/mcp", json=body, headers=headers)
         except httpx.TransportError:
@@ -109,6 +115,8 @@ class McpClient:
                 "clientInfo": {"name": "agent-sdk-acceptance", "version": "1"},
             },
         )
+        negotiated = result.get("protocolVersion")
+        self._version = negotiated if isinstance(negotiated, str) and negotiated else PROTOCOL_VERSION
         await self._post({"jsonrpc": "2.0", "method": "notifications/initialized"})
         return result
 
@@ -168,9 +176,32 @@ def _has_ref(node: Any) -> list[str]:
     return found
 
 
-def _check_list(tools: list[dict[str, Any]], expected_count: int | None, size_budget: int) -> list[str]:
+def _is_builtin_load_skill(tool: dict[str, Any]) -> bool:
+    schema = tool.get("inputSchema") or {}
+    return (
+        tool.get("name") == LOAD_SKILL_TOOL
+        and tool.get("title") == "Load skill"
+        and tool.get("annotations") == {"readOnlyHint": True, "openWorldHint": False}
+        and schema.get("required") == ["name"]
+        and list(schema.get("properties") or {}) == ["name"]
+    )
+
+
+def _check_list(
+    tools: list[dict[str, Any]],
+    expected_count: int | None,
+    size_budget: int,
+    *,
+    skills_tool: bool | None = None,
+) -> list[str]:
     out: list[str] = []
-    counted = sum(1 for t in tools if t.get("name") != "load_skill")
+
+    def builtin(t: dict[str, Any]) -> bool:
+        if skills_tool is None:
+            return _is_builtin_load_skill(t)
+        return skills_tool and t.get("name") == LOAD_SKILL_TOOL
+
+    counted = sum(1 for t in tools if not builtin(t))
     if expected_count is not None and counted != expected_count:
         out.append(f"tools/list count {counted} != registered tier-1 tools {expected_count}")
     for t in tools:
@@ -185,6 +216,27 @@ def _check_list(tools: list[dict[str, Any]], expected_count: int | None, size_bu
     if size > size_budget:
         out.append(f"tools/list size {size} bytes exceeds budget {size_budget}")
     return out
+
+
+def _check_structured(tool: dict[str, Any], call: dict[str, Any]) -> str:
+    schema = tool.get("outputSchema")
+    if not isinstance(schema, dict):
+        return ""
+    if "structuredContent" not in call:
+        content = call.get("content")
+        texts = [c.get("text") for c in content if isinstance(c, dict)] if isinstance(content, list) else []
+        if call.get("isError") is not True and all(t in ("", None) for t in texts):
+            # A void result (the tool returned nothing): the server sends an
+            # empty text block and no structuredContent (routes/mcp.py, §5.6).
+            return ""
+        return "outputSchema declared but structuredContent is absent"
+    try:
+        jsonschema.validate(call["structuredContent"], schema)
+    except jsonschema.ValidationError:
+        return "structuredContent does not match outputSchema"
+    except jsonschema.SchemaError:
+        return "outputSchema is not a valid JSON Schema"
+    return ""
 
 
 def _is_interrupt(result: dict[str, Any]) -> bool:
@@ -204,11 +256,12 @@ async def run_gate(
     size_budget: int = DEFAULT_SIZE_BUDGET,
     allow_errors: Iterable[str] = (),
     opt_in: Iterable[str] = (),
+    skills_tool: bool | None = None,
 ) -> GateResult:
     allow, opted = set(allow_errors), set(opt_in)
     result = GateResult()
     tools = await client.list_tools()
-    result.failures.extend(_check_list(tools, expected_count, size_budget))
+    result.failures.extend(_check_list(tools, expected_count, size_budget, skills_tool=skills_tool))
     if result.failures:
         return result
     for t in tools:
@@ -224,6 +277,10 @@ async def run_gate(
         call = await client.call_tool(name, args)
         result.called.append(name)
         if call.get("isError") is not True:
+            problem = _check_structured(t, call)
+            if problem:
+                result.failures.append(f"tool {name}: {problem}")
+                return result
             continue
         shown = f"tool {name} args {json.dumps(args, sort_keys=True)}"
         if _is_interrupt(call):
@@ -245,6 +302,7 @@ async def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--size-budget", type=int, default=DEFAULT_SIZE_BUDGET)
     ap.add_argument("--allow-error", action="append", default=[])
     ap.add_argument("--opt-in", action="append", default=[])
+    ap.add_argument("--skills-tool", action="store_true", default=None)
     a = ap.parse_args(argv)
     samples = json.loads(Path(a.samples_file).read_text())
     try:
@@ -257,6 +315,7 @@ async def _main(argv: list[str] | None = None) -> int:
                 size_budget=a.size_budget,
                 allow_errors=a.allow_error,
                 opt_in=a.opt_in,
+                skills_tool=a.skills_tool,
             )
     except McpError as exc:
         print(f"FAIL: {exc}")

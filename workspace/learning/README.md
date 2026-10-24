@@ -118,7 +118,7 @@ Entries ordered by LRN number.
 | LRN-112 | Monotonic clock value fed to datetime.fromtimestamp() as if it were epoch time | [LRN-112](LRN-112-monotonic-clock-epoch-confusion.md) |
 | LRN-113 | New abstractmethod on public ABC breaks external subclasses | [LRN-113](LRN-113-public-abc-new-abstractmethod.md) |
 | LRN-114 | Non-total content extraction crashes AG-UI SSE stream without terminal frame | [LRN-114](LRN-114-non-total-sse-validation-crash.md) |
-| LRN-115 | AG-UI _capabilities() fail-closed tier="none" default is intentional — do not "align" it to spec's tier="core | [LRN-115](LRN-115-agui-capabilities-fail-closed-tier-none-default.md) |
+| LRN-115 | AG-UI _capabilities() fail-closed tier="none" default is intentional — do not "align" it to spec's tier="core" | [LRN-115](LRN-115-agui-capabilities-fail-closed-tier-none-default.md) |
 | LRN-116 | MCP tools/call bypasses generator tool dispatch, breaking long-running Tier-1 tools | [LRN-116](LRN-116-mcp-tools-call-bypasses-generator-dispatch.md) |
 | LRN-117 | Allowlist must cover LLM system-prompt teaching surface | [LRN-117](LRN-117-allowlist-must-cover-llm-teaching-surface.md) |
 | LRN-118 | DESIGN.md MCP version-header rule stale after transport split | [LRN-118](LRN-118-protocol-doc-behavior-drift.md) |
@@ -498,3 +498,23 @@ Entries ordered by LRN number.
 | LRN-499 | CHANGELOG bullet omits touched agent_sdk files | [LRN-499](LRN-499-changelog-names-all-files.md) |
 | LRN-500 | Absence assertion on a char never put in the input | [LRN-500](LRN-500-hostile-input-missing-char.md) |
 | LRN-501 | New rejections not listed under Breaking changes | [LRN-501](LRN-501-breaking-changes-section.md) |
+| LRN-502 | Parallel groups add duplicate [Unreleased] headings to CHANGELOG | [LRN-502](LRN-502-changelog-duplicate-unreleased-heading.md) |
+| LRN-503 | CHANGELOG bullet omits changed file paths and new exports | [LRN-503](LRN-503-changelog-bullet-missing-file-paths.md) |
+| LRN-504 | Shipped agent_sdk module imports a dev-only package | [LRN-504](LRN-504-shipped-module-dev-only-import.md) |
+| LRN-505 | CHANGELOG names classes or nicknames instead of repo paths | [LRN-505](LRN-505-changelog-bullet-nickname-not-path.md) |
+| LRN-506 | New API and breaking behaviour filed only under Fixed | [LRN-506](LRN-506-changelog-wrong-keepachangelog-section.md) |
+| LRN-507 | Provisional testing surface rejections need Breaking heading | [LRN-507](LRN-507-testing-surface-breaking-section.md) |
+| LRN-508 | Breaking bullets need spec clause or ruling URL | [LRN-508](LRN-508-breaking-bullet-needs-ruling.md) |
+| LRN-509 | Testing-client tests must use real build_app over ASGI | [LRN-509](LRN-509-testing-client-real-app.md) |
+| LRN-510 | Provisional-surface break still needs ruling or move | [LRN-510](LRN-510-provisional-breaking-no-ruling.md) |
+| LRN-511 | Ruling URL must cover each Breaking part exactly | [LRN-511](LRN-511-run-gate-break-ruling.md) |
+| LRN-512 | CHANGELOG bullet must not admit a missing ruling | [LRN-512](LRN-512-changelog-admits-missing-ruling.md) |
+| LRN-513 | Pre-lookup resume checks must live in the shared helper | [LRN-513](LRN-513-prelookup-check-in-shared-helper.md) |
+| LRN-514 | dumps_strict swap must keep default=str coercion | [LRN-514](LRN-514-strict-dumps-keep-coercion.md) |
+| LRN-515 | Follow-up issue needs its own GH id in CHANGELOG | [LRN-515](LRN-515-followup-needs-own-gh-id.md) |
+| LRN-516 | Narrowed accepted input leaves stale doc examples | [LRN-516](LRN-516-narrowed-input-stale-docs.md) |
+| LRN-517 | Import-time or helper-output changes need a Breaking changes entry | [LRN-517](LRN-517-import-break-needs-breaking-entry.md) |
+| LRN-518 | Route must not hard-code format of store-minted tokens | [LRN-518](LRN-518-store-owned-token-validation.md) |
+| LRN-519 | Sweep every request.body() when adding a capped-body helper | [LRN-519](LRN-519-uncapped-body-sibling-sweep.md) |
+| LRN-520 | Phase gate must check git diff, not declared files | [LRN-520](LRN-520-undeclared-modified-files.md) |
+| LRN-521 | List absorbed message shapes before removing a catch-all | [LRN-521](LRN-521-catchall-removal-shape-audit.md) |

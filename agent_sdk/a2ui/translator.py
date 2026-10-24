@@ -29,12 +29,16 @@ by the client; each artifact uses a fresh ``surfaceId`` (a caller-supplied
 branch) pass the sequence through ``agent/runner.py::validate_a2ui_delivery()``
 and deliver it as ONE message array.
 
-Gating happens here (capabilities resolved by the route, §5.4): Extended
-profile types need ``tier="core+extended"``; domain cards are emitted freely
-whenever tier is active (consumers silently ignore unknown CUSTOM events per
-AG-UI spec) — only ``tier="none"`` suppresses them (GH-56). Gated off →
-``None``; the caller still ships the TextPart fallback — nothing is silently
-dropped.
+Gating happens here (capabilities resolved by the route, §5.4), in
+``A2uiCapabilities.allows()``: ``tier="none"`` suppresses everything (GH-56).
+A domain card (``catalog_id`` other than the Standard Profile) needs its
+``catalog_id`` in the client's ``catalogs`` unless ``any_catalog`` is set
+(GH-180); AG-UI CUSTOM goes through ``for_custom_emit()``, which sets
+``any_catalog`` and so is gated only by ``tier="none"``. On A2A
+(``negotiate_standard``, GH-240) a Standard card needs ``CATALOG_ID`` in a
+present ``catalogs`` list. An Extended Standard type also needs
+``tier="core+extended"``. Gated off → ``None``; the caller still ships the
+TextPart fallback — nothing is silently dropped.
 """
 
 from __future__ import annotations
@@ -126,8 +130,9 @@ class A2uiCapabilities:
 
     @property
     def extended(self) -> bool:
-        # spec token "core+extended"; substring match kept for back-compat
-        return "extended" in self.tier
+        # The Profile defines only "core" and "core+extended"; any other
+        # tier token behaves as core (GH-249).
+        return self.tier == "core+extended"
 
     def allows(self, model_cls: type[ContentModel]) -> bool:
         if self.tier == "none":
@@ -243,7 +248,9 @@ def translate(
 
 
 class SurfaceRegistry:
-    """Tracks open surfaces for callers that drive streaming A2UI lifecycles.
+    """INTERNAL (GH-249): not part of the public API and not in ``__all__``.
+
+    Tracks open surfaces for callers that drive streaming A2UI lifecycles.
 
     Intended for long-lived sessions that manage surface lifetime themselves
     (e.g. AG-UI CUSTOM event streams).  The stateless ``translate()`` helper
@@ -277,7 +284,10 @@ def apply_data_model_update(
     pointer: str,
     value: Any,
 ) -> None:
-    """Apply a single A2UI v0.9.1 ``updateDataModel`` patch to *model* in-place.
+    """INTERNAL (GH-249): not part of the public API and not in ``__all__``.
+    Dict-only pointers: numeric tokens are dict keys, list paths are not applied.
+
+    Apply a single A2UI v0.9.1 ``updateDataModel`` patch to *model* in-place.
 
     *pointer* — a root-relative JSON Pointer (RFC 6901) starting with ``/``,
     with one spec exception and one security guard:

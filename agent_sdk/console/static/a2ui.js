@@ -138,7 +138,7 @@ export function renderA2ui(messages, opts = {}) {
         notes.push(`createSurface rejected: surface ${surfaceId} is closed`);
         return;
       } else if (existing && !existing.closed) {
-        console.warn("[a2ui] protocol error: duplicate createSurface for open surface", surfaceId);
+        console.warn("[a2ui] duplicate createSurface for open surface ignored (replay); updates still applied", surfaceId);
         return;
       }
       if (!existing) {
@@ -409,6 +409,21 @@ function moreNote(items) {
   return extra > 0 ? el("div", { class: "dim a2ui-more" }, `${extra} more`) : null;
 }
 
+export const MAX_COLUMNS = 10;
+
+function maxOf(values, floor) {
+  return values.reduce((acc, v) => (v > acc ? v : acc), floor);
+}
+
+function minOf(values, ceil) {
+  return values.reduce((acc, v) => (v < acc ? v : acc), ceil);
+}
+
+function moreColumnsNote(columns) {
+  const extra = columns.length - MAX_COLUMNS;
+  return extra > 0 ? el("div", { class: "dim a2ui-more" }, `${extra} more columns`) : null;
+}
+
 /* ── generic data-driven renderer for components with no dedicated one ── */
 
 function titleFromComponent(name) {
@@ -566,8 +581,8 @@ function trendSpan(trend, changePct) {
 function scalePoints(values, width, height, pad) {
   const finite = values.filter((v) => typeof v === "number" && isFinite(v));
   if (!finite.length) return null;
-  let min = Math.min(...finite);
-  let max = Math.max(...finite);
+  let min = minOf(finite, finite[0]);
+  let max = maxOf(finite, finite[0]);
   if (min === max) {
     min -= 1;
     max += 1;
@@ -605,7 +620,8 @@ function renderKpiCard(data) {
 }
 
 function renderTimeSeriesChart(data) {
-  const points = data.data || [];
+  const allPoints = data.data || [];
+  const points = capRows(allPoints);
   const W = 560;
   const H = 180;
   const PAD = 28;
@@ -653,12 +669,19 @@ function renderTimeSeriesChart(data) {
     summaryBits.push(`${s.change_percent > 0 ? "+" : ""}${fmtNum(s.change_percent)}%`);
   }
   if (s.average !== undefined && s.average !== null) summaryBits.push(`avg ${fmtNum(s.average)}`);
-  summaryBits.push(`${data.total_count !== undefined ? data.total_count : points.length} points`);
-  return card(data.title || "Time series", data.subtitle || null, node, el("div", { class: "dim a2ui-chart-foot" }, summaryBits.join(" · ")));
+  summaryBits.push(`${data.total_count !== undefined ? data.total_count : allPoints.length} points`);
+  return card(
+    data.title || "Time series",
+    data.subtitle || null,
+    node,
+    el("div", { class: "dim a2ui-chart-foot" }, summaryBits.join(" · ")),
+    moreNote(allPoints)
+  );
 }
 
 function renderComparisonTable(data) {
-  const columns = data.columns || [];
+  const allColumns = data.columns || [];
+  const columns = allColumns.length > MAX_COLUMNS ? allColumns.slice(0, MAX_COLUMNS) : allColumns;
   const rows = data.rows || [];
   const table = el(
     "table",
@@ -685,7 +708,7 @@ function renderComparisonTable(data) {
       )
     )
   );
-  return card(data.title || null, null, table, moreNote(rows));
+  return card(data.title || null, null, table, moreNote(rows), moreColumnsNote(allColumns));
 }
 
 function renderBarChart(data) {
@@ -697,7 +720,7 @@ function renderBarChart(data) {
   const labelW = 150;
   const H = bars.length * rowH + PAD * 2;
   const values = bars.map((b) => (typeof b.value === "number" ? b.value : 0));
-  const maxAbs = Math.max(...values.map((v) => Math.abs(v)), 1);
+  const maxAbs = maxOf(values.map((v) => Math.abs(v)), 1);
   const node = svg("svg", { viewBox: `0 0 ${W} ${Math.max(H, rowH)}`, class: "a2ui-svg", role: "img" });
   bars.forEach((b, i) => {
     const y = PAD + i * rowH;
@@ -752,7 +775,8 @@ function renderMarketBriefing(value) {
 }
 
 function renderWaterfallChart(data) {
-  const segments = data.segments || [];
+  const allSegments = data.segments || [];
+  const segments = capRows(allSegments);
   const W = 560;
   const H = 200;
   const PAD = 28;
@@ -762,8 +786,8 @@ function renderWaterfallChart(data) {
     bounds.push(typeof s.cumulative === "number" ? s.cumulative : 0);
     bounds.push((typeof s.cumulative === "number" ? s.cumulative : 0) - (typeof s.value === "number" ? s.value : 0));
   });
-  let min = Math.min(...bounds);
-  let max = Math.max(...bounds);
+  let min = minOf(bounds, 0);
+  let max = maxOf(bounds, 0);
   if (min === max) {
     min -= 1;
     max += 1;
@@ -789,17 +813,23 @@ function renderWaterfallChart(data) {
   });
   const subBits = [data.subtitle, data.entity_name, data.currency, data.as_of_date].filter(Boolean);
   if (data.date_range && data.date_range.start) subBits.push(`${data.date_range.start} – ${data.date_range.end}`);
-  return card(data.title || "Waterfall", subBits.join(" · ") || null, node);
+  return card(data.title || "Waterfall", subBits.join(" · ") || null, node, moreNote(allSegments));
 }
 
 function renderMultiCategoryChart(data) {
-  const periods = data.periods || [];
-  const categories = [];
+  const allPeriods = data.periods || [];
+  const periods = capRows(allPeriods);
+  const seen = new Set();
+  const allCategories = [];
   periods.forEach((p) => {
-    Object.keys(p.categories || {}).forEach((k) => {
-      if (!categories.includes(k)) categories.push(k);
+    Object.keys((p && p.categories) || {}).forEach((k) => {
+      if (!seen.has(k)) {
+        seen.add(k);
+        allCategories.push(k);
+      }
     });
   });
+  const categories = capRows(allCategories);
   const W = 560;
   const H = 200;
   const PAD = 28;
@@ -807,7 +837,7 @@ function renderMultiCategoryChart(data) {
   const totals = periods.map((p) =>
     Object.values(p.categories || {}).reduce((acc, c) => acc + (c && typeof c.value === "number" ? c.value : 0), 0)
   );
-  const maxTotal = Math.max(...totals, 1);
+  const maxTotal = maxOf(totals, 1);
   const step = (W - PAD * 2) / Math.max(periods.length, 1);
   const bw = Math.max(8, step * 0.6);
   const node = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "a2ui-svg", role: "img" });
@@ -834,7 +864,7 @@ function renderMultiCategoryChart(data) {
   );
   const range = data.date_range || {};
   const subBits = [data.subtitle, data.unit_label, range.first ? `${range.first} – ${range.last}` : null].filter(Boolean);
-  return card(data.title || "Categories", subBits.join(" · ") || null, node, legend);
+  return card(data.title || "Categories", subBits.join(" · ") || null, node, legend, moreNote(allPeriods), moreNote(allCategories));
 }
 
 /* sole camelCase-wire type */

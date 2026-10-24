@@ -34,6 +34,8 @@ from typing import Any, Sequence
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import PlainTextResponse
 
+from ...common.body import BodyTooLarge, read_capped_body
+from ...common.json_strict import loads_strict
 from .dispatch import WebhookDispatcher
 
 logger = logging.getLogger("agent_sdk.contrib.webhooks")
@@ -86,25 +88,17 @@ def build_graph_webhook_router(
             )
 
         # 2) Notification intake — size-capped read, schedule, always 202.
-        # Content-Length is a fast-path hint only; a chunked or lying header
-        # would bypass it, so the streamed read below is the real cap.
-        declared = request.headers.get("content-length")
-        if declared is not None:
-            try:
-                if int(declared) > body_cap:
-                    logger.warning("webhooks: oversized body rejected (content-length)")
-                    return _accepted()  # drop, but do not invite a Graph retry storm
-            except ValueError:
-                pass
-        raw = bytearray()
-        async for chunk in request.stream():
-            raw.extend(chunk)
-            if len(raw) > body_cap:  # abort as soon as the cap is exceeded
-                logger.warning("webhooks: oversized body dropped")
-                return _accepted()
+        # The shared helper checks Content-Length first, then stops the stream
+        # as soon as the cap is passed (GH-246); over-cap is dropped, not
+        # answered with an error, so Graph does not retry.
         try:
-            payload = json.loads(raw) if raw else None
-        except (ValueError, UnicodeDecodeError):
+            raw = await read_capped_body(request, body_cap)
+        except BodyTooLarge:
+            logger.warning("webhooks: oversized body dropped")
+            return _accepted()
+        try:
+            payload = loads_strict(raw) if raw else None
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
             logger.warning("webhooks: non-JSON body dropped")
             return _accepted()
         if payload is not None:

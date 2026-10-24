@@ -23,13 +23,21 @@ way, via ``surrogatepass``), but every SDK writer refuses that character
 state that no later read could serialize, so GET /v1/tasks failed for the
 whole identity. Inbound and outbound now enforce the same rule.
 
-Input nested deeper than 64 levels is refused with the same error, and a
-``RecursionError`` during parsing is mapped to it as a backstop, so no
-route needs its own catch.
+Input nested deeper than 64 levels (arrays and objects counted together) is
+refused with ``NestingTooDeep``, and a ``RecursionError`` during parsing is
+mapped to it as a backstop, so no route needs its own catch. The cap is 64
+because pydantic's own serialisation limit is 255 and the check must fire
+first on every Python version.
 
 All of these surface as ``json.JSONDecodeError`` with a fixed message, so
 every route's existing parse-error branch handles them, and the error text
-never echoes the offending token (SI-2).
+never echoes the offending token (SI-2). ``NestingTooDeep`` is a
+``JSONDecodeError`` subclass whose message is the fixed ``"nesting too deep"``;
+a route catches it first to tell a client the body was valid JSON but too
+deep. The code stays the parse-error code on every surface: ``-32700`` on MCP
+(``POST /mcp`` and ``POST /mcp/messages``) and A2A (HTTP 400), and the
+existing ``RUN_ERROR`` frame on AG-UI. The JSON-RPC envelope uses 3 of the 64
+levels, so tool ``arguments`` have about 61 levels left on MCP.
 """
 
 from __future__ import annotations
@@ -39,7 +47,13 @@ import math
 import re
 from typing import Any, NoReturn
 
-__all__ = ["dumps_strict", "loads_strict", "scrub_unencodable"]
+__all__ = [
+    "NESTING_TOO_DEEP_MESSAGE",
+    "NestingTooDeep",
+    "dumps_strict",
+    "loads_strict",
+    "scrub_unencodable",
+]
 
 # Every UTF-16 surrogate code point. A Python ``str`` holding one (alone, or
 # as a pair of separate code points) cannot be encoded as UTF-8.
@@ -47,6 +61,15 @@ _SURROGATE_RE = re.compile("[\ud800-\udfff]")
 _REPLACEMENT = "\ufffd"
 
 _MESSAGE = "non-finite number not allowed"
+
+NESTING_TOO_DEEP_MESSAGE = "nesting too deep"
+
+
+class NestingTooDeep(json.JSONDecodeError):
+    """Valid JSON nested past the 64-level cap. Fixed text, no body data."""
+
+    def __init__(self) -> None:
+        super().__init__(NESTING_TOO_DEEP_MESSAGE, "", 0)
 
 # Below pydantic's serialization limit (255) so deep input is refused here,
 # not left to the interpreter's RecursionError, which differs by version.
@@ -64,7 +87,7 @@ def _check_depth(value: Any) -> None:
         else:
             continue
         if depth > _MAX_DEPTH:
-            raise json.JSONDecodeError("nesting too deep", "", 0)
+            raise NestingTooDeep
         stack.extend((c, depth + 1) for c in children if isinstance(c, (dict, list)))
 
 
@@ -92,7 +115,12 @@ def loads_strict(raw: str | bytes | bytearray) -> Any:
     that would decode to a non-finite float (``NaN``, ``Infinity``,
     ``-Infinity``, or an overflowing literal like ``1e999``), to an
     integer past the interpreter's digit limit, or to a string (key or
-    value) that is not UTF-8-encodable (a lone surrogate)."""
+    value) that is not UTF-8-encodable (a lone surrogate).
+
+    Input nested deeper than 64 levels raises the ``NestingTooDeep`` subclass
+    (message ``"nesting too deep"``) so a route can answer it apart from
+    malformed JSON; the JSON-RPC envelope uses 3 levels, leaving about 61 for
+    tool arguments."""
     try:
         value = json.loads(
             raw,
@@ -110,7 +138,7 @@ def loads_strict(raw: str | bytes | bytearray) -> Any:
             raise json.JSONDecodeError("string not encodable as UTF-8", "", 0) from None
     except RecursionError:
         # fixed text: never str(exc) or any part of the body (SI-2)
-        raise json.JSONDecodeError("nesting too deep", "", 0) from None
+        raise NestingTooDeep from None
     return value
 
 

@@ -164,7 +164,7 @@ async def test_ag_ui_resume_is_capped_by_the_shared_per_task_cap(
                     resume=[
                         {
                             "interruptId": "rt001-r6-interrupt",
-                            "status": "accepted",
+                            "status": "resolved",
                             "payload": {},
                         }
                     ]

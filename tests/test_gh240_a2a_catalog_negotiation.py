@@ -9,9 +9,18 @@ from types import SimpleNamespace
 import pytest
 
 from agent_sdk.a2ui.translator import CATALOG_ID, A2uiCapabilities, translate
-from agent_sdk.models.content_types import A2UI_EXTENSION_URI, KpiCard, MetricItem
+from typing import ClassVar
+
+from agent_sdk.models.content_types import (
+    A2UI_EXTENSION_URI,
+    ContentModel,
+    KpiCard,
+    MetricItem,
+    WaterfallChart,
+)
 from agent_sdk.routes.a2a import _capabilities
 from agent_sdk.routes.ag_ui import _RunMapper
+from agent_sdk.routes.ag_ui import _capabilities as ag_ui_capabilities
 from agent_sdk.agent.events import ArtifactEvent
 from agent_sdk.testing import reply, tool_call
 
@@ -76,11 +85,45 @@ def test_transport_scoped_kwarg_keeps_present_list() -> None:
 
 
 def test_ag_ui_custom_unchanged() -> None:
-    caps = A2uiCapabilities.gated(True, {"catalogs": [OTHER]})
+    caps = ag_ui_capabilities(
+        {"forwardedProps": {"a2uiClientCapabilities": {"catalogs": [OTHER]}}}
+    )
     mapper = _RunMapper(thread_id="t", run_id="r", capabilities=caps)
     event = ArtifactEvent(data_type=CARD.data_type, tool_name="t", model=CARD)
     names = [f["name"] for f in mapper.map(event) if f.get("type") == "CUSTOM"]
     assert names == ["AGENT_ARTIFACT", "A2UI_UPDATE"]
+
+
+class _Domain(ContentModel):
+    data_type: ClassVar[str] = "gh249_domain"
+    component: ClassVar[str] = "Gh249Domain"
+    catalog_id: ClassVar[str] = OTHER
+
+    def to_plain_text(self) -> str:
+        return ""
+
+
+def test_mixed_domain_only_list_passes_domain_blocks_standard() -> None:
+    caps = _a2a_caps({"catalogs": [OTHER]})
+    assert caps.allows(_Domain) is True
+    assert caps.allows(KpiCard) is False
+
+
+def test_extended_standard_type_under_negotiation() -> None:
+    extended = _a2a_caps({"catalogs": [CATALOG_ID], "tier": "core+extended"})
+    core = _a2a_caps({"catalogs": [CATALOG_ID], "tier": "core"})
+    other = _a2a_caps({"catalogs": [OTHER], "tier": "core+extended"})
+    assert extended.allows(WaterfallChart) is True
+    assert core.allows(WaterfallChart) is False
+    assert other.allows(WaterfallChart) is False
+
+
+def test_empty_catalogs_wins_over_v09_list() -> None:
+    raw = {"catalogs": [], "v0.9": {"supportedCatalogIds": [CATALOG_ID, OTHER]}}
+    caps = _a2a_caps(raw)
+    assert caps.catalogs == []
+    assert caps.allows(KpiCard) is False
+    assert caps.allows(_Domain) is False
 
 
 def _body() -> dict:

@@ -488,6 +488,12 @@ class TaskStore(abc.ABC):
         task id, plus an opaque ``nextPageToken`` when more remain, and the
         total count of all matching tasks regardless of cursor."""
 
+    def is_valid_page_token(self, page_token: str) -> bool:
+        """Whether ``page_token`` is acceptable to ``list_tasks_for_identity``.
+        The route answers a rejected token with -32602. Default accepts any
+        token; a store whose tokens have a fixed shape may tighten this."""
+        return True
+
     def context_messages(
         self, context_id: str, identity: Identity | None = None
     ) -> Sequence[dict[str, Any]]:

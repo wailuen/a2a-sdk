@@ -230,20 +230,25 @@ name. Values that come from data keep `safe_cell_text`.
 **Machine ids (GH-212, GH-207).** `agent_sdk.safe_id_text(value)` renders an id that
 sits alone on its own `id:` line: `( )`, single spaces and `= + / : , . _ - ! ~ @`
 stay as written (`202601026118 (1688214-U)`, `AAMkAGI2TAAA=`), a run of
-whitespace becomes one space, and control characters and `| < > [ ]` are
+whitespace becomes one space, control characters, Unicode format and bidi
+characters (such as U+202E, GH-250) are dropped, and `| < > [ ]` are
 neutralised. Mark a `ComparisonTable` column of ids with
 `ColumnDef(key="id", label="Id", is_id=True)` and its cells render through
 `safe_id_text`; all other cells keep `safe_cell_text`. `is_id` is left off the
-wire when false. Inside an `is_id` cell, `( )` and `=` are not swapped, so an id
-that holds `)` or `=` text can still look like extra structure to a person
-reading the text (it cannot add a line or a column: `|`, `<`, `>`, `[`, `]` and
-control characters are neutralised). Never join an id into a row with other
-fields: the SDK's two joined ids (`EmailList` `(id: ..., conversation: ...)`
-and `FundPerformance` `source <pb_id>`) keep the older look-alike rendering,
-which is `agent_sdk.safe_joined_id_text(value)`; use it for an id you join
-into a row of your own. If you write a custom
-`ContentModel`, include the machine ids a follow-up call needs in your
-`_body_text`: text-only clients (MCP `content[0].text`) see only that text.
+wire when false.
+
+One rule: put an id in its own `is_id` column or on a standalone `id:` line. If
+you must join an id into a delimited row with other fields, use
+`agent_sdk.safe_joined_id_text(value)` instead; it swaps `( )` and `[ ] < > |`
+for look-alikes and turns whitespace into `_`, so the id cannot forge a second
+`id:` or a fake figure (the SDK's `EmailList` `(id: ..., conversation: ...)` and
+`FundPerformance` `source <pb_id>` use it). Inside an `is_id` cell, `safe_id_text` keeps
+`( ) = : ,` and single spaces as written, so an id that holds such text can
+still look like extra structure to a person reading the text. It cannot add a
+line or a column: `|`, `<`, `>`, `[`, `]` and control characters are neutralised.
+If you write a custom `ContentModel`, include the machine ids a follow-up call
+needs in your `_body_text`: text-only clients (MCP `content[0].text`) see only
+that text.
 Ruling: https://github.com/wailuen/a2a-sdk/issues/212#issuecomment-6359828392.
 
 **Standalone slots (GH-167).** A value that sits alone on its own line, with

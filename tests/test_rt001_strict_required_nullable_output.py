@@ -49,23 +49,6 @@ def test_required_nullable_output_becomes_type_list() -> None:
     jsonschema.validate({"a": None}, out)
 
 
-def test_every_builtin_content_type_sample_wire_validates() -> None:
-    for model in list(_REGISTRY.values()):
-        cls = model if isinstance(model, type) else getattr(model, "model", None)
-        if cls is None or not hasattr(cls, "model_json_schema"):
-            continue
-        try:
-            inst = cls.model_construct()
-            wire = inst.wire()
-        except Exception:
-            continue
-        schema = _strict(cls)
-        validator = jsonschema.Draft202012Validator(schema)
-        for err in validator.iter_errors(wire):
-            if err.validator in ("required", "type") and "null" in str(err.message):
-                raise AssertionError(f"{cls.__name__}: {err.message}")
-
-
 def test_nullable_type_alias_validates_against_strict_schema() -> None:
     from typing import Optional
 
@@ -111,27 +94,28 @@ def test_gh236_three_member_union_drops_null_in_property() -> None:
     assert _validation_errors(out_schema, dumped) == []
 
 
-def _sample(node: dict, defs: dict, depth: int = 0):
+def _sample(node: dict, defs: dict, depth: int = 0, *, fill_optional: bool = False):
     if "$ref" in node:
-        return _sample(defs[node["$ref"].rsplit("/", 1)[1]], defs, depth)
+        return _sample(defs[node["$ref"].rsplit("/", 1)[1]], defs, depth, fill_optional=fill_optional)
     if "const" in node:
         return node["const"]
     if "enum" in node:
         return node["enum"][0]
     if "anyOf" in node or "oneOf" in node:
         options = [o for o in node.get("anyOf", node.get("oneOf")) if o != {"type": "null"}]
-        return _sample(options[0], defs, depth)
+        return _sample(options[0], defs, depth, fill_optional=fill_optional)
     kind = node.get("type")
     if kind == "object" or "properties" in node:
         required = node.get("required", [])
         return {
-            k: _sample(v, defs, depth + 1)
+            k: _sample(v, defs, depth + 1, fill_optional=fill_optional)
             for k, v in node.get("properties", {}).items()
-            if k in required and depth < 6
+            if (fill_optional or k in required) and depth < 6
         }
     if kind == "array":
         count = node.get("minItems", 0)
-        return [_sample(node["items"], defs, depth + 1) for _ in range(count)] if count else []
+        count = count or (1 if fill_optional else 0)
+        return [_sample(node["items"], defs, depth + 1, fill_optional=fill_optional) for _ in range(count)]
     if kind == "integer":
         return 1
     if kind == "number":
@@ -147,6 +131,22 @@ def test_gh236_all_builtin_content_types_have_no_validation_error_and_none_skipp
         raw = cls.model_json_schema()
         try:
             inst = cls.model_validate(_sample(raw, raw.get("$defs", {})))
+            wire = inst.model_dump(mode="json", by_alias=True, exclude_none=True)
+        except Exception:
+            skipped.append(cls.__name__)
+            continue
+        errors = _validation_errors(_strict(cls), wire)
+        assert errors == [], f"{cls.__name__}: {errors}"
+    assert skipped == []
+
+
+def test_all_optional_sample_of_every_builtin_content_type_validates() -> None:
+    """Optional fields, including 3+-member nullable unions, are filled too."""
+    skipped: list[str] = []
+    for cls in list(_REGISTRY.values()):
+        raw = cls.model_json_schema()
+        try:
+            inst = cls.model_validate(_sample(raw, raw.get("$defs", {}), fill_optional=True))
             wire = inst.model_dump(mode="json", by_alias=True, exclude_none=True)
         except Exception:
             skipped.append(cls.__name__)

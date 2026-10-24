@@ -22,6 +22,10 @@ from ..models.content_types import CATALOG_ID as _STANDARD_CATALOG
 from ..validation.validators import safe_id
 
 
+def _is_role(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
 class A2AError(Exception):
     """Raised by ChatDriver when the server returns an A2A error (§11.2 D7.10).
 
@@ -36,7 +40,8 @@ class A2AError(Exception):
     UNSUPPORTED_OP      = -32004
     CONTENT_TYPE_UNSUP  = -32005
     INVALID_AGENT_RESP  = -32006
-    NOT_AUTHENTICATED   = -32007
+    AUTHENTICATED_EXTENDED_CARD_NOT_CONFIGURED = -32007
+    NOT_AUTHENTICATED   = -32007  # deprecated alias; -32007 is not an authentication error
 
     def __init__(self, code: int | None, message: str) -> None:
         super().__init__(message)
@@ -164,8 +169,9 @@ class ChatDriver:
 
         - RUN_FINISHED with non-empty reply: appends the user message, then the
           assistant message.
-        - RUN_FINISHED with an empty reply (A2UI-only turn, interrupt outcome,
-          non-assistant text only): appends the user message only.
+        - RUN_FINISHED with an empty reply (A2UI-only turn, interrupt with no
+          streamed text, non-assistant text only): appends the user message
+          only.  Text streamed before an interrupt RUN_FINISHED is a reply.
         - RUN_ERROR, stream closed with no terminal event, or an exception from
           the POST/stream: *messages* is unchanged (the exception propagates).
 
@@ -173,12 +179,12 @@ class ChatDriver:
         or "" when the run did not end with RUN_FINISHED.  Partial text still
         reaches the ``text`` emit.
         """
-        user = {"role": "user", "content": query}
+        user = {"id": uuid.uuid4().hex, "role": "user", "content": query}
         finished, reply = await self._run_agui(self._agui_body(thread_id, [*messages, user]), emit)
         if finished:
             messages.append(user)
             if reply:
-                messages.append({"role": "assistant", "content": reply})
+                messages.append({"id": uuid.uuid4().hex, "role": "assistant", "content": reply})
         return reply
 
     async def agui_resume(
@@ -211,7 +217,7 @@ class ChatDriver:
         ]
         finished, reply = await self._run_agui(body, emit)
         if finished and reply:
-            messages.append({"role": "assistant", "content": reply})
+            messages.append({"id": uuid.uuid4().hex, "role": "assistant", "content": reply})
         return reply
 
     def _agui_body(self, thread_id: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -291,7 +297,7 @@ class ChatDriver:
                     self._fire(emit, "a2ui", msgs)
                 elif t in ("TEXT_MESSAGE_START", "TEXT_MESSAGE_END"):
                     chunk_id = None
-                    if t == "TEXT_MESSAGE_START" and frame.get("messageId") and "role" in frame:
+                    if t == "TEXT_MESSAGE_START" and frame.get("messageId") and _is_role(frame.get("role")):
                         roles[str(frame["messageId"])] = frame["role"]
                 elif t in ("TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_CHUNK"):
                     delta = frame.get("delta") or ""
@@ -303,7 +309,7 @@ class ChatDriver:
                         else:
                             msg_id = chunk_id
                         key = str(msg_id or "")
-                        if msg_id and key not in roles and key not in reply_parts and "role" in frame:
+                        if msg_id and key not in roles and key not in reply_parts and _is_role(frame.get("role")):
                             roles[key] = frame["role"]
                     reply_parts.setdefault(str(msg_id or ""), []).append(delta)
                     self._fire(emit, "text", delta)
@@ -359,7 +365,7 @@ class ChatDriver:
         # transports for A2A" are out of scope for v1); reject anything else
         # rather than silently guessing at a fallback transport.
         card = await self._discover_card()
-        transport = card.get("preferredTransport", "HTTP+JSON")
+        transport = card.get("preferredTransport", "JSONRPC")
         if transport != "HTTP+JSON":
             raise ValueError(
                 f"unsupported A2A transport: {transport!r} — ChatDriver only "

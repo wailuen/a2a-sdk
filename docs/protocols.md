@@ -13,8 +13,8 @@ identically across protocols.
 | `POST /v1/message:stream` | SSE; first frame is the **full Task**, then status/artifact frames until `final: true` |
 | `GET /v1/tasks/{id}` | Task; `historyLength` truncates (0 → `[]`) |
 | `POST /v1/tasks/{id}:cancel` | 200 + canceled Task; 404/409 per table |
-| `POST /v1/tasks/{id}:subscribe` | re-attach SSE |
-| `GET /v1/tasks` | 200; identity-scoped paginated list — query params `pageSize` (1–100, default 50) and `pageToken`; response `{tasks, totalSize, pageSize, nextPageToken}` |
+| `POST` or `GET /v1/tasks/{id}:subscribe` | re-attach SSE; both verbs share one handler, auth and stream cap |
+| `GET /v1/tasks` | 200; identity-scoped paginated list — query params `pageSize` (1–100, default 50) and `pageToken`; response `{tasks, totalSize, pageSize, nextPageToken}`; a non-empty `pageToken` that is not 32 lowercase hex characters → 400 `-32602` "invalid pageToken" (empty = first page) |
 
 Error table (body `{"error": {code, message}}`): unknown/foreign task →
 404 `-32001`; terminal-task cancel → 409 `-32002`; terminal-task resume
@@ -24,7 +24,17 @@ config → `-32003`: `POST`/`GET /v1/tasks/{id}/pushNotificationConfigs` and
 `-32003` (identity required; same reply for known, foreign and unknown tasks;
 body never read); unacceptable
 `acceptedOutputModes` → `-32005`; missing `messageId` → 400 `-32602`;
-too many concurrent streams → 429 `-32000` + `Retry-After` (see below). Task
+too many concurrent streams → 429 `-32000` + `Retry-After` (see below);
+client `message.role` other than `user` → 400 `-32602`; any unhandled error
+on `/v1/*` → 500 `-32603` "internal error" (fixed text). `acceptedOutputModes`
+matching is case-insensitive, ignores parameters, and accepts `*/*` and `type/*`
+(`text` stays an alias of `text/plain`); `Content-Type` is compared
+case-insensitively; `historyLength` applies to the resume reply and the first
+stream snapshot. `-32004` is 501 when raised by a handler; the 405 a wrong HTTP
+verb gets from the router is transport-level and also carries `-32004`.
+**Bare wire (GH-248):** success bodies and SSE frames are bare `Task | Message`
+or frame objects, not the proto's wrapped `SendMessageResponse` /
+`StreamResponse`; v0.3.0 HTTP+JSON examples and existing clients use the bare form. Task
 access is
 **identity-bound**: someone else's task id returns 404 `-32001` —
 existence is never leaked (admin keys bypass).
@@ -101,16 +111,19 @@ Interrupts end the run with `RUN_FINISHED` carrying
 responseSchema, toolCallId}]}` (camelCase keys on the AG-UI wire). Resume
 with a new run whose body has `resume=[{interruptId, status, payload}]`
 (snake_case `interrupt_id` also accepted) — identity-bound.
+`resume` holds exactly one entry. More than one entry, a `resume` that is
+not a list, or an entry that is not an object ends the run with `RUN_ERROR`
+`invalid resume entry` (code `validation`). A present `status` must be
+`"resolved"` or `"cancelled"`; any other value gets the same `RUN_ERROR`,
+before the interrupt is looked up. A missing or null `status` is delivered
+as `None`. The error carries no entry content.
 
-`status` accepts two conventions, both processed by the action gate:
-- **Canonical AG-UI** — `status="resolved"` (or `"cancelled"`) with the human
-  decision in `payload.decision` (`"approved"`/`"rejected"`).
-- **SDK shorthand** — the domain word directly in `status`
-  (e.g. `status="approved"`/`"rejected"`), `payload` optional.
-
-The two are merged REJECT-WINS (a contradictory pair always denies); an
-unrecognized `status` with no `payload.decision` is UNCLEAR → default-deny,
-without aborting the run.
+On AG-UI the action gate reads the canonical form: `status="resolved"` (or
+`"cancelled"`) with the human decision in `payload.decision`
+(`"approved"`/`"rejected"`). The SDK shorthand (the domain word directly in
+`status`) is accepted on the A2A resume path only. The two are merged
+REJECT-WINS (a contradictory pair always denies); a `resolved` status with no
+`payload.decision` is UNCLEAR, which default-denies without aborting the run.
 
 `RUN_FINISHED` always carries `outcome`: `{type: "success"}` on a normal
 finish, `{type: "interrupt", ...}` when paused. `RUN_ERROR` carries `code` — one
@@ -152,6 +165,8 @@ never `RUN_ERROR`.
 - `tools/call` for an unknown or Tier 2 tool returns JSON-RPC `-32602`
   (invalid params) with the fixed message `tool not found`; the requested
   name is never echoed. An unknown MCP *method* still returns `-32601`.
+- **Body and ids (GH-246).** `POST /mcp` and `POST /mcp/messages` read the body with a size cap (2 MiB): a declared over-cap `Content-Length` is refused before any read, and a streamed body stops being read once it passes the cap; both answer 413. A request (any method not under `notifications/`) whose `id` is missing, null, or not a string or integer gets `-32600` with `id: null` before any handler runs. `/mcp/messages` also checks `Content-Type` (415), acks a JSON-RPC response with 202, and answers a full session queue with a JSON 503. The `Content-Type` compare ignores case. `tools/list` does not change with the negotiated version.
+- **Nesting depth (GH-250).** Every JSON ingress parses with `loads_strict`, which refuses input nested deeper than 64 levels (arrays and objects counted together). The input is valid JSON, but the answer keeps the parse-error code with its own fixed text, `nesting too deep`, apart from the malformed-JSON text: `POST /mcp` and `POST /mcp/messages` answer `-32700` `nesting too deep` (the second one on the session's SSE channel, as for any parse error); `POST /v1/message:send` and `:stream` answer HTTP 400 with `-32700` `nesting too deep`; `POST /ag-ui/run` ends the run with `RUN_ERROR` `nesting too deep` (code `validation`). Malformed JSON keeps `parse error` (MCP), `request body is not valid JSON` (A2A) and `malformed RunAgentInput body` (AG-UI). The text never echoes the body. The JSON-RPC envelope uses about 3 levels, so MCP tool `arguments` have about 61 levels left.
 - A `POST /mcp` body that is a JSON-RPC response (`id` plus `result` or
   `error`, no `method`) returns `202 Accepted` with an empty body, after the
   auth, origin and session checks. Requests still get `application/json`.
@@ -172,7 +187,7 @@ never `RUN_ERROR`.
 
 `/.well-known/agent-card.json` (ETag + 304; `agent.json` is a
 byte-identical alias): `protocolVersion: "0.3.0"`, HTTP+JSON transport,
-`capabilities.extensions` = the A2UI extension with `supportedCatalogIds`,
+`capabilities.extensions` = the A2UI extension with `supportedCatalogIds` (left off the card when no registered tool emits an A2UI type, GH-249),
 `x-sdk` per-skill metadata (tier, schemas, emits), and the `x-agui` block
 (transport, endpoint, customEvents). All URLs derive from `PUBLIC_URL`.
 

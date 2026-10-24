@@ -485,7 +485,8 @@ def test_sc_e5_error_code_constants_no_instance_needed():
     assert A2AError.UNSUPPORTED_OP == -32004
     assert A2AError.CONTENT_TYPE_UNSUP == -32005
     assert A2AError.INVALID_AGENT_RESP == -32006
-    assert A2AError.NOT_AUTHENTICATED == -32007
+    assert A2AError.AUTHENTICATED_EXTENDED_CARD_NOT_CONFIGURED == -32007
+    assert A2AError.NOT_AUTHENTICATED == A2AError.AUTHENTICATED_EXTENDED_CARD_NOT_CONFIGURED
 
 
 def test_sc_e5_error_code_instance_code_matches():

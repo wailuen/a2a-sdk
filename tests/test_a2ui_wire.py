@@ -1525,3 +1525,45 @@ async def test_tasks_get_replay_does_not_change_surface_id(client, fake_model):
         return out
 
     assert sids(first) and sids(first) == sids(second)
+
+
+async def test_tasks_resubscribe_replay_keeps_surface_id(client, fake_model):
+    """GH-244: tasks/resubscribe replays the artifact with the SAME surfaceId."""
+    import re
+    import uuid
+
+    from agent_sdk.models.content_types import A2UI_EXTENSION_URI
+    from agent_sdk.testing import reply, tool_call
+
+    from .conftest import wait_for_state
+
+    fake_model.script(tool_call("demo_kpis", {"title": "Q2"}), reply("done"))
+    r = await client.post(
+        "/v1/message:send",
+        json={
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": "kpis"}],
+                "messageId": uuid.uuid4().hex,
+            }
+        },
+        headers={"X-A2A-Extensions": A2UI_EXTENSION_URI},
+    )
+    task_id = r.json()["id"]
+    done = await wait_for_state(client, task_id)
+    original = [
+        m["createSurface"]["surfaceId"]
+        for p in done["artifacts"][0]["parts"]
+        if p["kind"] == "data"
+        for m in p["data"]["messages"]
+        if "createSurface" in m
+    ]
+    assert original
+
+    resp = await client.post(
+        f"/v1/tasks/{task_id}:subscribe", headers={"X-A2A-Extensions": A2UI_EXTENSION_URI}
+    )
+    assert resp.status_code == 200, resp.text
+    replayed = re.findall(r'"createSurface":\s*\{[^}]*?"surfaceId":\s*"([^"]+)"', resp.text)
+    assert replayed
+    assert set(replayed) == set(original)

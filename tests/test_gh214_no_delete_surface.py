@@ -76,13 +76,57 @@ def test_agent_card_param_removed():
 
 
 def test_console_still_renders_surface_without_close():
-    """The console keeps every surface mounted: a2ui.js only unmounts on a
-    received deleteSurface, which the SDK no longer sends. It must still
-    accept one from another producer."""
-    import pathlib
+    """The console keeps every surface mounted: a2ui.js only closes a surface
+    on a received deleteSurface, which the SDK no longer sends. A deleteSurface
+    from another producer closes the registry entry; the painted node stays
+    attached and a later updateComponents for that surfaceId is dropped."""
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
 
-    static = pathlib.Path(__file__).resolve().parent.parent / "agent_sdk" / "console" / "static"
-    js = (static / "a2ui.js").read_text()
-    assert "msg.deleteSurface" in js
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    from tests.test_gh215_console_generic_renderer import _STUB_API
+
+    static = Path(__file__).resolve().parent.parent / "agent_sdk" / "console" / "static"
+    harness = """
+import { renderA2ui } from "./a2ui.js";
+const v = "v0.9.1";
+const open = [
+  { version: v, createSurface: { surfaceId: "s", catalogId: "c" } },
+  { version: v, updateComponents: { surfaceId: "s", components: [{ id: "root", component: "KpiCard" }] } },
+  { version: v, updateDataModel: { surfaceId: "s", path: "/", value: { metrics: [{ label: "A", value: 1 }] } } },
+];
+const first = renderA2ui(open, { fallbackText: "F" });
+const painted = first.nodes[0];
+const closed = renderA2ui([{ version: v, deleteSurface: { surfaceId: "s" } }], { fallbackText: "F" });
+const later = renderA2ui(
+  [{ version: v, updateComponents: { surfaceId: "s", components: [{ id: "x", component: "KpiCard" }] } }],
+  { fallbackText: "F" }
+);
+process.stdout.write(JSON.stringify({
+  first: first.nodes.length,
+  attached: painted.isConnected !== false,
+  closedNodes: closed.nodes.length,
+  laterNodes: later.nodes.length,
+  laterNotes: later.notes,
+}));
+"""
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "package.json").write_text('{"type": "module"}')
+        (d / "api.js").write_text(_STUB_API)
+        (d / "a2ui.js").write_text((static / "a2ui.js").read_text())
+        (d / "h.js").write_text(harness)
+        proc = subprocess.run([node, "h.js"], cwd=d, capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["first"] == 1
+    assert out["attached"] is True
+    assert out["closedNodes"] == 0
+    assert out["laterNodes"] == 0
+    assert any("unknown/closed surface s" in n for n in out["laterNotes"])
     chat = (static / "chat.js").read_text()
     assert "deleteSurface" not in chat

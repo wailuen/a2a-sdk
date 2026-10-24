@@ -149,6 +149,24 @@ def _init_body() -> dict:
     }
 
 
+async def test_a2a_echoes_declared_credential_extension(probe_app):
+    from agent_sdk.credentials.card import EXTENSION_URI
+
+    app = probe_app
+    app.state._fake.script(reply("done"))
+    async with app.router.lifespan_context(app):
+        _, token = app.state.auth.api_keys.mint("admin", admin=True)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {token}", "X-A2A-Extensions": EXTENSION_URI},
+        ) as c:
+            r = await c.post("/v1/message:send", json=send_body("hi"))
+            assert r.status_code == 200, r.text
+            assert EXTENSION_URI in r.headers.get("x-a2a-extensions", "")
+            await _wait(c, r.json()["id"])
+
+
 async def test_card_advertises_credential_extension(probe_app):
     """The vendor key is a forwarding EXTENSION, never an agent securityScheme
     (a2a-advisor) — field names only, never values."""

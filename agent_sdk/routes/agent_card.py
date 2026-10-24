@@ -13,7 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from ..a2ui.catalog import a2ui_extension
+from ..a2ui.catalog import a2ui_extension, supported_catalogs
 from ..agent.registry import ToolRegistry
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
@@ -147,14 +147,17 @@ def build_agent_card(
 
     ``allowed_components`` (SC-D2): when set, the A2UI extension only
     advertises catalog IDs for the listed component types. Catalog IDs come
-    from the registered tools' ``emits`` types (GH-188).
+    from the registered tools' ``emits`` types (GH-188). With no catalog to
+    advertise the A2UI extension is left off the card (GH-249).
     """
     base_url = settings.resolved_base_url
-    extensions = [
-        a2ui_extension(
-            allowed_components,
-            [m for e in registry.all() for m in e.decl.emits_types],
-        ),
+    emits = [m for e in registry.all() for m in e.decl.emits_types]
+    extensions = []
+    output_modes = ["text/plain", "application/json"]
+    if supported_catalogs(allowed_components, emits):
+        extensions.append(a2ui_extension(allowed_components, emits))
+        output_modes.append("application/a2ui+json")
+    extensions += [
         AgentExtension(
             uri="https://agent-sdk.dev/extensions/ag-ui-run/v1",
             description="AG-UI streaming run endpoint (SSE)",
@@ -187,7 +190,7 @@ def build_agent_card(
             extensions=extensions,
         ),
         "defaultInputModes": ["text/plain"],
-        "defaultOutputModes": ["text/plain", "application/json", "application/a2ui+json"],
+        "defaultOutputModes": output_modes,
         # Tier-2 tools are A2A-only (§5.6); MCP tools/list exposes tier-1 only.
         # The card must not advertise tools MCP consumers cannot call (LRN-094).
         "skills": [_skill_for(e) for e in registry.tier1()],

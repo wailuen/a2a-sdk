@@ -59,6 +59,7 @@ from ..auth.middleware import (
 )
 from ..auth.oauth_tokens import OAuthTokenStore
 from ..auth.oidc import IdpDenied, IdpFlowStore, IdpUnavailable, OidcRelyingParty
+from ..common.body import BodyTooLarge, read_capped_body
 from ..common.etag import etag_for, matches
 from ..common.json_strict import loads_strict
 from ..credentials.store import NS_OAUTH_IDP
@@ -345,8 +346,9 @@ async def oauth_register(request: Request) -> JSONResponse:
             status_code=400, content={"error": code, "error_description": description}
         )
 
-    raw = await request.body()
-    if len(raw) > _MAX_BODY_BYTES:
+    try:
+        raw = await read_capped_body(request, _MAX_BODY_BYTES)
+    except BodyTooLarge:
         return _reg_error("invalid_client_metadata", "request body too large")
     try:
         body = loads_strict(raw.decode("utf-8")) if raw else {}
@@ -898,9 +900,10 @@ async def oauth_idp_consent(request: Request) -> Response:
 async def _parse_form(request: Request) -> dict[str, str]:
     """application/x-www-form-urlencoded body → dict, size-capped. Avoids the
     python-multipart dependency ``request.form()`` would require."""
-    raw = await request.body()
-    if len(raw) > _MAX_BODY_BYTES:
-        raise _too_large()
+    try:
+        raw = await read_capped_body(request, _MAX_BODY_BYTES)
+    except BodyTooLarge:
+        raise _too_large() from None
     try:
         decoded = raw.decode("utf-8")
     except UnicodeDecodeError:

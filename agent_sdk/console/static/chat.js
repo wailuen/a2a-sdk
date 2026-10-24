@@ -231,7 +231,7 @@ export function render(pane, ctx) {
     state.threadId = uuid();
     state.aguiMessages = [];
     pendingInterrupt = null;
-    shownForm = null;
+    removeInterruptForm();
     resetSurfaces();
     input.placeholder = "Message the agent… (Enter to send, Shift+Enter for newline)";
     clear(transcript);
@@ -505,19 +505,38 @@ export function render(pane, ctx) {
       for (const name of fields) values[name] = inputs[name].value;
       const r = buildPayloadFromValues(schema, values);
       if (!r.ok) { err.textContent = r.error; return; }
-      removeInterruptForm();
-      sendAgui("", r.payload);
+      if (pendingInterrupt !== pending) return;
+      runExclusive(async () => {
+        removeInterruptForm();
+        await sendAgui("", r.payload);
+      });
     });
     shownForm = form;
     transcript.appendChild(form);
     transcript.scrollTop = transcript.scrollHeight;
   }
 
+  async function runExclusive(work) {
+    if (state.busy) return;
+    state.busy = true;
+    sendBtn.disabled = true;
+    try {
+      await work();
+    } catch (err) {
+      systemLine(`error: ${err.message || err}`);
+    } finally {
+      state.busy = false;
+      sendBtn.disabled = false;
+      input.focus();
+    }
+  }
+
   async function sendAgui(text, payloadOverride) {
+    const threadAtSend = state.threadId;
     await catalogIdsReady;
     let body;
     let resumed = null;
-    const resumedThread = state.threadId;
+    let userMsg = null;
     if (pendingInterrupt) {
       // resume path: coerce the user's text per the interrupt's responseSchema
       // (GH-216); bad input shows an error and keeps the interrupt pending.
@@ -535,7 +554,7 @@ export function render(pane, ctx) {
       pendingInterrupt = null;
       removeInterruptForm();
       body = {
-        threadId: state.threadId,
+        threadId: threadAtSend,
         runId: uuid(),
         messages: state.aguiMessages.slice(),
         state: {},
@@ -548,11 +567,11 @@ export function render(pane, ctx) {
         resume: [{ interruptId, status: "resolved", payload }],
       };
     } else {
-      state.aguiMessages.push({ id: uuid(), role: "user", content: [{ type: "text", text: text }] });
+      userMsg = Object.freeze({ id: uuid(), role: "user", content: [{ type: "text", text: text }] });
       body = {
-        threadId: state.threadId,
+        threadId: threadAtSend,
         runId: uuid(),
-        messages: state.aguiMessages.slice(),
+        messages: [...state.aguiMessages, userMsg],
         state: {},
         tools: [],
         context: [],
@@ -566,7 +585,7 @@ export function render(pane, ctx) {
       systemLine, traceFrame, label: "run request",
     });
     if (!resp) {
-      if (resumed && state.threadId === resumedThread && pendingInterrupt === null) {
+      if (resumed && state.threadId === threadAtSend && pendingInterrupt === null) {
         pendingInterrupt = resumed;
         if (formFields(resumed.responseSchema)) interruptForm(resumed);
         input.placeholder = `Resume: ${resumed.message || "Agent requires input to continue."}`;
@@ -576,9 +595,11 @@ export function render(pane, ctx) {
 
     const textBuffers = new Map(); // messageId -> streamingBubble
     const order = []; // message ids by first frame; folded into history after RUN_FINISHED
+    const roles = new Map(); // messageId -> explicit string role (C-072); absent = assistant
     const toolArgBuffers = new Map(); // toolCallId -> accumulated JSON fragment string
     let terminal = false;
     let finished = false; // RUN_FINISHED seen: only then do chunk-only messages count as a reply
+    const seenChunkIds = new Set();
     let chunkId; // AG-UI sends messageId on the first chunk only; later chunks inherit it
     const processStream = async () => {
       try {
@@ -593,6 +614,7 @@ export function render(pane, ctx) {
               chunkId = undefined;
               textBuffers.set(json.messageId, streamingBubble());
               if (!order.includes(json.messageId)) order.push(json.messageId);
+              if (json.messageId && typeof json.role === "string" && json.role) roles.set(json.messageId, json.role);
               break;
             case "TEXT_MESSAGE_CONTENT":
             case "TEXT_MESSAGE_CHUNK": {
@@ -605,11 +627,14 @@ export function render(pane, ctx) {
                 }
               }
               let buf = textBuffers.get(id);
-              if (!buf && json.type === "TEXT_MESSAGE_CHUNK") {
+              if (!buf) {
                 buf = streamingBubble();
                 textBuffers.set(id, buf);
                 if (!order.includes(id)) order.push(id);
               }
+              if (json.type === "TEXT_MESSAGE_CHUNK" && id && typeof json.role === "string" && json.role
+                  && !roles.has(id) && !seenChunkIds.has(id)) roles.set(id, json.role);
+              if (json.type === "TEXT_MESSAGE_CHUNK" && id) seenChunkIds.add(id);
               if (buf && json.delta) buf.append(json.delta);
               break;
             }
@@ -655,7 +680,7 @@ export function render(pane, ctx) {
               if (json.outcome && json.outcome.type === "interrupt") {
                 const interrupts = json.outcome.interrupts || [];
                 systemLine(`interrupted: ${fmtJson(interrupts)}`);
-                if (interrupts.length > 0) {
+                if (interrupts.length > 0 && state.threadId === threadAtSend) {
                   // store interrupt so the next send() becomes a resume POST
                   pendingInterrupt = { interruptId: interrupts[0].id, responseSchema: interrupts[0].responseSchema, message: interrupts[0].message };
                   if (formFields(interrupts[0].responseSchema)) interruptForm(pendingInterrupt);
@@ -671,6 +696,7 @@ export function render(pane, ctx) {
             case "RUN_ERROR":
               terminal = true;
               pendingInterrupt = null;
+              removeInterruptForm();
               input.placeholder = "Message the agent… (Enter to send, Shift+Enter for newline)";
               systemLine(`run error: ${json.message || "unknown"}`);
               break;
@@ -738,9 +764,13 @@ export function render(pane, ctx) {
 
     // client owns history: fold assistant messages in arrival order, but only
     // after RUN_FINISHED (a partial reply is not a reply; chat.py agrees)
-    for (const id of finished ? order : []) {
-      const buf = textBuffers.get(id);
-      if (buf) state.aguiMessages.push({ id, role: "assistant", content: buf.text() });
+    if (finished && state.threadId === threadAtSend) {
+      if (userMsg) state.aguiMessages.push(userMsg);
+      for (const id of order) {
+        if (roles.has(id) && roles.get(id) !== "assistant") continue;
+        const buf = textBuffers.get(id);
+        if (buf) state.aguiMessages.push({ id, role: "assistant", content: buf.text() });
+      }
     }
 
     if (!terminal) systemLine("stream closed without RUN_FINISHED/RUN_ERROR");
@@ -802,19 +832,11 @@ export function render(pane, ctx) {
     const text = input.value.trim();
     if (!text || state.busy) return;
     input.value = "";
-    state.busy = true;
-    sendBtn.disabled = true;
-    bubble("user", text);
-    try {
+    await runExclusive(async () => {
+      bubble("user", text);
       if (state.mode === "a2a") await sendA2a(text);
       else await sendAgui(text);
-    } catch (err) {
-      systemLine(`error: ${err.message || err}`);
-    } finally {
-      state.busy = false;
-      sendBtn.disabled = false;
-      input.focus();
-    }
+    });
   }
 
   sendBtn.addEventListener("click", send);

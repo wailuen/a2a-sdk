@@ -30,6 +30,7 @@ from typing import Any, AsyncIterator, Sequence
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
+from pydantic_core import to_jsonable_python
 from starlette.background import BackgroundTask
 
 from ..a2ui.translator import A2uiCapabilities, translate
@@ -40,7 +41,14 @@ from ..auth.middleware import require_identity
 from ..common.iso8601 import iso_utc
 from ..common.origin import guard_origin
 from ..common.redact import frame_locations
-from ..common.json_strict import loads_strict
+from ..common.body import BodyTooLarge, read_capped_body
+from ..common.json_strict import (
+    NESTING_TOO_DEEP_MESSAGE,
+    NestingTooDeep,
+    dumps_strict,
+    loads_strict,
+    scrub_unencodable,
+)
 from ..common import sse as _sse
 from ..common.sse import HEARTBEAT, SSE_HEADERS, sse_data
 from ..credentials import forwarding
@@ -179,6 +187,20 @@ def _user_content_problem(content: Any) -> str | None:
     return None
 
 
+_RESULT_FALLBACK = "tool result not serializable"
+
+
+def _tool_json(value: Any, fallback: str) -> str:
+    try:
+        return dumps_strict(to_jsonable_python(value, fallback=str))
+    except (ValueError, TypeError):
+        return fallback
+
+
+_INVALID_RESUME = "invalid resume entry"
+_RESUME_STATUSES = frozenset({"resolved", "cancelled"})
+
+
 def _is_resume(body: dict[str, Any]) -> bool:
     resume_raw = body.get("resume")
     return isinstance(resume_raw, list) and bool(resume_raw)
@@ -216,6 +238,9 @@ def _validate(body: dict[str, Any]) -> str | None:
     messages = body.get("messages")
     if messages is not None and not isinstance(messages, list):
         return "messages must be a list"
+    resume_raw = body.get("resume")
+    if resume_raw is not None and not isinstance(resume_raw, list):
+        return _INVALID_RESUME
     if _is_resume(body):
         return None
     msgs = messages or []
@@ -325,7 +350,7 @@ class _RunMapper:
                 {
                     "type": "TOOL_CALL_ARGS",
                     "toolCallId": event.tool_call_id,
-                    "delta": json.dumps(event.arguments, default=str),
+                    "delta": _tool_json(event.arguments, "{}"),
                 },
                 {"type": "TOOL_CALL_END", "toolCallId": event.tool_call_id},
             ]
@@ -333,12 +358,19 @@ class _RunMapper:
         if isinstance(event, ToolResultEvent):
             if event.ok:
                 result = event.result
-                content = result if isinstance(result, str) else json.dumps(
-                    result.model_dump(mode="json", by_alias=True, exclude_none=True)
-                    if isinstance(result, BaseModel)
-                    else result,
-                    default=str,
-                )
+                if isinstance(result, str):
+                    # A lone surrogate would make the frame unwritable and end
+                    # the whole run; replace it like any other stored text.
+                    content = scrub_unencodable(result)
+                elif isinstance(result, BaseModel):
+                    try:
+                        dumped = result.model_dump(mode="json", by_alias=True, exclude_none=True)
+                    except Exception:
+                        content = _RESULT_FALLBACK
+                    else:
+                        content = _tool_json(dumped, _RESULT_FALLBACK)
+                else:
+                    content = _tool_json(result, _RESULT_FALLBACK)
             else:
                 content = str(event.error) if event.error is not None else "tool failed"
             # _ensure_step: a resume run delivers this result with no prior
@@ -503,13 +535,20 @@ def _user_timezone(body: dict[str, Any]) -> str | None:
     return forwarded.get("timezone")
 
 
-def _parse_body(raw: bytes) -> dict[str, Any] | None:
-    """The body as an object, or ``None`` when it is not JSON or not an object."""
+_MALFORMED_BODY = "malformed RunAgentInput body"
+
+
+def _parse_body(raw: bytes) -> tuple[dict[str, Any] | None, str]:
+    """The body as an object (or ``None`` when it is not JSON or not an object)
+    and the fixed RUN_ERROR text for that failure (GH-250: too-deep input is
+    told apart from malformed input)."""
     try:
         body = loads_strict(raw)
+    except NestingTooDeep:
+        return None, NESTING_TOO_DEEP_MESSAGE
     except (json.JSONDecodeError, ValueError):
-        return None
-    return body if isinstance(body, dict) else None
+        return None, _MALFORMED_BODY
+    return (body, "") if isinstance(body, dict) else (None, _MALFORMED_BODY)
 
 
 def _resume_interrupt_id(body: dict[str, Any]) -> str:
@@ -517,10 +556,13 @@ def _resume_interrupt_id(body: dict[str, Any]) -> str:
     run. Shared by the pre-admission task-id lookup and ``_run()`` itself so
     the two can never disagree about which entry is being resumed."""
     resume_raw = body.get("resume")
-    if not isinstance(resume_raw, list) or not resume_raw:
+    if not isinstance(resume_raw, list) or len(resume_raw) != 1:
         return ""
     entry = resume_raw[0]
     if not isinstance(entry, dict):
+        return ""
+    status = entry.get("status")
+    if status is not None and (not isinstance(status, str) or status not in _RESUME_STATUSES):
         return ""
     return str(entry.get("interruptId") or entry.get("interrupt_id") or "")
 
@@ -602,14 +644,15 @@ async def ag_ui_run(
     ct = request.headers.get("content-type", "")
     if ct and "application/json" not in ct:
         return Response(status_code=415)
-    raw = await request.body()
-    if len(raw) > _MAX_BODY_BYTES:
+    try:
+        raw = await read_capped_body(request, _MAX_BODY_BYTES)
+    except BodyTooLarge:
         return Response(status_code=413, content=b"request body too large")
 
     # Parsed BEFORE admission (RT-001, round 6) purely so the resume branch's
     # target task id is known to `_admit`. Parsing allocates nothing durable,
     # so this does not move any state mutation ahead of the load-shed check.
-    parsed_body = _parse_body(raw)
+    parsed_body, body_problem = _parse_body(raw)
     body = parsed_body if parsed_body is not None else {}
 
     # RT-002: admit against the shared A2A stream budget BEFORE any durable
@@ -705,7 +748,7 @@ async def ag_ui_run(
         record: TaskRecord | None = None
         try:
             if parsed_body is None:
-                yield _emit(mapper.run_error("malformed RunAgentInput body", "validation"))
+                yield _emit(mapper.run_error(body_problem, "validation"))
                 return
             if (problem := _validate(body)) is not None:
                 yield _emit(mapper.run_error(problem, "validation"))
@@ -715,9 +758,15 @@ async def ag_ui_run(
             resume = resume_raw if isinstance(resume_raw, list) else []
             if resume:
                 if len(resume) > 1 or not isinstance(resume[0], dict):
-                    yield _emit(mapper.run_error("invalid resume entry", "validation"))
+                    yield _emit(mapper.run_error(_INVALID_RESUME, "validation"))
                     return
                 entry = resume[0]
+                status = entry.get("status")
+                if status is not None and (
+                    not isinstance(status, str) or status not in _RESUME_STATUSES
+                ):
+                    yield _emit(mapper.run_error(_INVALID_RESUME, "validation"))
+                    return
                 # accept both casings; emit camelCase (interruptId) ourselves
                 interrupt_id = _resume_interrupt_id(body)
                 record = store.find_interrupt(interrupt_id, identity)

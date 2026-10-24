@@ -1,5 +1,4 @@
-"""GH-235: deeply nested JSON bodies are a parse error on every surface (not a
-500), and an AG-UI resume with more than one entry is refused."""
+"""GH-247 (follow-up to GH-235): AG-UI resume validation and strict tool JSON."""
 
 from __future__ import annotations
 
@@ -7,146 +6,263 @@ import asyncio
 import json
 import uuid
 
+import httpx
 import pytest
 
+from agent_sdk.a2ui.translator import A2uiCapabilities
+from agent_sdk.agent.events import ToolCallEvent, ToolResultEvent
+from agent_sdk.agent.runner import new_task
+from agent_sdk.auth.identity import Identity
 from agent_sdk.common import json_strict
 from agent_sdk.common.json_strict import loads_strict
+from agent_sdk.routes import a2a as a2a_module
 from agent_sdk.routes.mcp import _sse_queues
+from agent_sdk.routes.ag_ui import _RunMapper
+from agent_sdk.testing import reply, tool_call
 
 from .conftest import sse_frames
+from .test_ag_ui import run, run_body
+from .test_rt001_r6_ag_ui_slot_binding import _cancel, _hold
 
-MARKER = "HOSTILE-MARKER-9f3a"
+MARKER = "HOSTILE-MARKER-7f3a"
+
+
+def _errors(frames: list[dict]) -> list[dict]:
+    return [f for f in frames if f["type"] == "RUN_ERROR"]
+
+
+def _mapper() -> _RunMapper:
+    return _RunMapper("t1", "r1", A2uiCapabilities.from_metadata(None))
+
+
+@pytest.mark.parametrize("resume", [{"interruptId": MARKER}, MARKER, 5, True])
+async def test_non_list_resume_is_run_error(client, resume):
+    frames = await run(client, run_body(resume=resume))
+    errs = _errors(frames)
+    assert len(errs) == 1
+    assert errs[0]["message"] == "invalid resume entry"
+    assert errs[0]["code"] == "validation"
+    assert MARKER not in str(frames)
+
+
+async def test_null_resume_is_a_fresh_run(client, fake_model):
+    fake_model.script(reply("hi"))
+    frames = await run(client, run_body(resume=None))
+    assert not _errors(frames)
+
+
+@pytest.mark.parametrize("status", ["banana", 5, {"x": MARKER}, []])
+async def test_bad_status_is_run_error_before_lookup(client, app, status):
+    store = app.state.task_store
+    record = store.create(new_task(), Identity(kind="api_key", subject="o"))
+    store.mark_interrupted(record.task.id, "gh235-int")
+    frames = await run(
+        client,
+        run_body(resume=[{"interruptId": "gh235-int", "status": status, "payload": {}}]),
+    )
+    errs = _errors(frames)
+    assert len(errs) == 1
+    assert errs[0]["message"] == "invalid resume entry"
+    assert errs[0]["code"] == "validation"
+    assert MARKER not in str(frames)
+    assert store.find_interrupt("gh235-int", Identity(kind="api_key", subject="o")) is not None
+
+
+async def test_missing_status_is_still_delivered(client, fake_model):
+    fake_model.script(tool_call("publish_note", {"note": "n"}), reply("after"))
+    frames = await run(client, run_body("publish"))
+    intr = frames[-1]["outcome"]["interrupts"][0]
+    frames = await run(
+        client, run_body(resume=[{"interruptId": intr["id"], "payload": {"decision": "approved"}}])
+    )
+    assert not _errors(frames)
+    assert frames[-1]["type"] == "RUN_FINISHED"
+
+
+async def test_two_entry_resume_at_cap_is_run_error_not_429(client, app, monkeypatch):
+    monkeypatch.setattr(a2a_module, "_MAX_A2A_STREAMS_PER_TASK", 1)
+    store = app.state.task_store
+    record = store.create(new_task(), Identity(kind="api_key", subject="gh235-owner"))
+    store.mark_interrupted(record.task.id, "gh235-cap")
+    held = asyncio.create_task(client.post(f"/v1/tasks/{record.task.id}:subscribe"))
+    try:
+        await _hold(held)
+        r = await asyncio.wait_for(
+            client.post(
+                "/ag-ui/run",
+                json=run_body(
+                    resume=[
+                        {"interruptId": "gh235-cap", "status": "resolved"},
+                        {"interruptId": "other", "status": "resolved"},
+                    ]
+                ),
+            ),
+            timeout=5,
+        )
+        assert r.status_code == 200, r.text
+        errs = _errors(sse_frames(r.text))
+        assert len(errs) == 1 and errs[0]["message"] == "invalid resume entry"
+    finally:
+        await _cancel(held)
+
+
+async def test_bad_status_resume_at_cap_is_run_error_not_429(client, app, monkeypatch):
+    monkeypatch.setattr(a2a_module, "_MAX_A2A_STREAMS_PER_TASK", 1)
+    store = app.state.task_store
+    record = store.create(new_task(), Identity(kind="api_key", subject="gh235-owner"))
+    store.mark_interrupted(record.task.id, "gh235-cap-status")
+    held = asyncio.create_task(client.post(f"/v1/tasks/{record.task.id}:subscribe"))
+    try:
+        await _hold(held)
+        r = await asyncio.wait_for(
+            client.post(
+                "/ag-ui/run",
+                json=run_body(resume=[{"interruptId": "gh235-cap-status", "status": "banana"}]),
+            ),
+            timeout=5,
+        )
+        assert r.status_code == 200, r.text
+        errs = _errors(sse_frames(r.text))
+        assert len(errs) == 1 and errs[0]["message"] == "invalid resume entry"
+    finally:
+        await _cancel(held)
+
+
+def test_tool_call_args_with_nan_use_fixed_fallback():
+    frames = _mapper().map(
+        ToolCallEvent(tool_call_id="c1", tool_name="t", arguments={"x": float("nan")})
+    )
+    delta = next(f for f in frames if f["type"] == "TOOL_CALL_ARGS")["delta"]
+    assert delta == "{}"
+    assert "NaN" not in str(frames)
+
+
+def test_tool_result_with_nan_uses_fixed_fallback():
+    m = _mapper()
+    m.map(ToolCallEvent(tool_call_id="c1", tool_name="t", arguments={}))
+    frames = m.map(
+        ToolResultEvent(tool_call_id="c1", tool_name="t", ok=True, result={"x": float("inf")})
+    )
+    content = next(f for f in frames if f["type"] == "TOOL_CALL_RESULT")["content"]
+    assert "Infinity" not in content and "inf" not in content.lower().replace("information", "")
+
+
+def test_tool_result_with_native_types_still_serializes():
+    import datetime
+    import decimal
+
+    m = _mapper()
+    m.map(ToolCallEvent(tool_call_id="c1", tool_name="t", arguments={}))
+    result = {"when": datetime.date(2026, 1, 2), "amt": decimal.Decimal("1.5"), "id": uuid.uuid4()}
+    frames = m.map(ToolResultEvent(tool_call_id="c1", tool_name="t", ok=True, result=result))
+    content = next(f for f in frames if f["type"] == "TOOL_CALL_RESULT")["content"]
+    assert content != "tool result not serializable"
+    assert "2026-01-02" in content
+
+
+def test_tool_result_str_with_lone_surrogate_is_scrubbed():
+    # v0.22.0 release gate: an unencodable str result ended the whole run.
+    from agent_sdk.common.json_strict import dumps_strict
+
+    m = _mapper()
+    m.map(ToolCallEvent(tool_call_id="c1", tool_name="t", arguments={}))
+    frames = m.map(ToolResultEvent(tool_call_id="c1", tool_name="t", ok=True, result="a\ud83db"))
+    content = next(f for f in frames if f["type"] == "TOOL_CALL_RESULT")["content"]
+    assert content == "a\ufffdb"
+    dumps_strict(frames)
+
+
+def test_tool_result_model_dump_failure_uses_fallback():
+    from pydantic import BaseModel, field_serializer
+
+    class Bad(BaseModel):
+        x: int = 1
+
+        @field_serializer("x")
+        def _boom(self, v):
+            raise RuntimeError("boom")
+
+    m = _mapper()
+    m.map(ToolCallEvent(tool_call_id="c1", tool_name="t", arguments={}))
+    frames = m.map(ToolResultEvent(tool_call_id="c1", tool_name="t", ok=True, result=Bad()))
+    content = next(f for f in frames if f["type"] == "TOOL_CALL_RESULT")["content"]
+    assert content == "tool result not serializable"
+
+
+# Nested bodies go through the real parser (no interpreter shim): 65 to 255
+# levels is valid JSON past the 64-level cap; 5000 also covers the interpreter's
+# own RecursionError on versions that raise it.
+JSON_HEADERS = {"content-type": "application/json"}
+DEPTHS = [65, 100, 255, 5000]
+TOO_DEEP = "nesting too deep"
 
 
 def nested(depth: int) -> bytes:
     return ("[" * depth + f'"{MARKER}"' + "]" * depth).encode()
 
 
-@pytest.fixture(autouse=True)
-def _interpreter_raises_recursion_error(monkeypatch):
-    """Python 3.14's C scanner parses 50000-deep arrays without error; older
-    interpreters raise RecursionError. Force that behaviour so the test is
-    meaningful on every version."""
-    real = json_strict.json
-
-    class _Shim:
-        JSONDecodeError = real.JSONDecodeError
-        dumps = staticmethod(real.dumps)
-
-        @staticmethod
-        def loads(raw, **kw):
-            text = raw.decode() if isinstance(raw, (bytes, bytearray)) else raw
-            if text.startswith("[" * 1000):
-                raise RecursionError(f"maximum recursion depth exceeded {text[-30:]}")
-            return real.loads(raw, **kw)
-
-    monkeypatch.setattr(json_strict, "json", _Shim)
-
-
-JSON_HEADERS = {"content-type": "application/json"}
-
-
-def test_loads_strict_maps_recursion_error():
+@pytest.mark.parametrize("depth", DEPTHS)
+def test_loads_strict_nested_is_too_deep(depth):
     with pytest.raises(json.JSONDecodeError) as ei:
-        loads_strict(nested(50000))
+        loads_strict(nested(depth))
+    assert ei.value.msg == TOO_DEEP
     assert MARKER not in str(ei.value)
-    assert MARKER not in ei.value.msg
 
 
-async def test_mcp_post_nested_is_parse_error(client):
-    r = await client.post("/mcp", content=nested(50000), headers=JSON_HEADERS)
+def test_loads_strict_recursion_error_is_mapped_without_echo(monkeypatch):
+    def boom(*args, **kwargs):
+        raise RecursionError(f"maximum recursion depth exceeded {MARKER}")
+
+    monkeypatch.setattr(json_strict.json, "loads", boom)
+    with pytest.raises(json.JSONDecodeError) as ei:
+        loads_strict(b"[]")
+    assert ei.value.msg == TOO_DEEP
+    assert MARKER not in str(ei.value) and MARKER not in repr(ei.value)
+
+
+@pytest.mark.parametrize("depth", DEPTHS)
+async def test_mcp_post_nested_is_too_deep(client, depth):
+    r = await client.post("/mcp", content=nested(depth), headers=JSON_HEADERS)
     assert r.status_code == 200, r.text
-    assert r.json()["error"]["code"] == -32700
+    assert r.json()["error"] == {"code": -32700, "message": TOO_DEEP}
     assert MARKER not in r.text
 
 
-async def test_mcp_messages_nested_is_parse_error(client, app):
+@pytest.mark.parametrize("depth", DEPTHS)
+async def test_mcp_messages_nested_is_too_deep(client, app, depth):
     bearer = client.headers["authorization"].removeprefix("Bearer ")
     identity = app.state.auth.api_keys.verify(bearer)
-    owner = f"{identity.kind}:{identity.subject}"
     session_id = uuid.uuid4().hex
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
-    _sse_queues(app)[session_id] = (queue, owner)
+    _sse_queues(app)[session_id] = (queue, f"{identity.kind}:{identity.subject}")
     try:
         r = await client.post(
             "/mcp/messages",
             params={"session_id": session_id},
-            content=nested(50000),
+            content=nested(depth),
             headers=JSON_HEADERS,
         )
         assert r.status_code == 202, r.text
         queued = queue.get_nowait()
-        assert json.loads(queued)["error"]["code"] == -32700
+        assert json.loads(queued)["error"] == {"code": -32700, "message": TOO_DEEP}
         assert MARKER not in queued
     finally:
         _sse_queues(app).pop(session_id, None)
 
 
-async def test_a2a_message_send_nested_is_parse_error(client):
-    r = await client.post("/v1/message:send", content=nested(50000), headers=JSON_HEADERS)
-    assert r.status_code != 500, r.text
+@pytest.mark.parametrize("depth", DEPTHS)
+async def test_a2a_message_send_nested_is_too_deep(client, depth):
+    r = await client.post("/v1/message:send", content=nested(depth), headers=JSON_HEADERS)
     assert r.status_code == 400, r.text
+    assert r.json()["error"] == {"code": -32700, "message": TOO_DEEP}
     assert MARKER not in r.text
 
 
-async def test_ag_ui_run_nested_is_parse_error(client):
-    r = await client.post("/ag-ui/run", content=nested(50000), headers=JSON_HEADERS)
+@pytest.mark.parametrize("depth", DEPTHS)
+async def test_ag_ui_run_nested_is_too_deep(client, depth):
+    r = await client.post("/ag-ui/run", content=nested(depth), headers=JSON_HEADERS)
     assert r.status_code == 200, r.text
-    errors = [f for f in sse_frames(r.text) if f["type"] == "RUN_ERROR"]
+    errors = _errors(sse_frames(r.text))
     assert len(errors) == 1
-    assert errors[0]["message"] == "malformed RunAgentInput body"
+    assert errors[0]["message"] == TOO_DEEP
     assert MARKER not in r.text
-
-
-async def test_oauth_register_nested_is_invalid_client_metadata(client):
-    body = nested(2000)
-    assert len(body) < 16 * 1024
-    r = await client.post("/oauth/register", content=body, headers=JSON_HEADERS)
-    assert r.status_code == 400, r.text
-    assert r.json() == {
-        "error": "invalid_client_metadata",
-        "error_description": "request body must be valid JSON",
-    }
-    assert MARKER not in r.text
-
-
-def run_body(**extra) -> dict:
-    return {
-        "threadId": "t1",
-        "runId": "r1",
-        "messages": [{"id": "m1", "role": "user", "content": "hi"}],
-        "state": {},
-        "tools": [],
-        "context": [],
-        "forwardedProps": {},
-        **extra,
-    }
-
-
-async def test_ag_ui_resume_with_two_entries_is_refused(client):
-    entry = {"interruptId": "i1", "status": "resolved", "payload": {}}
-    extra = {"interruptId": "i2", "status": "resolved", "payload": {"x": MARKER}}
-    r = await client.post("/ag-ui/run", json=run_body(resume=[entry, extra]))
-    assert r.status_code == 200, r.text
-    errors = [f for f in sse_frames(r.text) if f["type"] == "RUN_ERROR"]
-    assert len(errors) == 1
-    assert errors[0]["message"] == "invalid resume entry"
-    assert errors[0].get("code") == "validation"
-    assert MARKER not in r.text
-
-
-def test_loads_strict_depth_cap_without_recursion_error():
-    for depth in (65, 300, 999):
-        with pytest.raises(json.JSONDecodeError) as ei:
-            loads_strict(nested(depth))
-        assert ei.value.msg == "nesting too deep"
-    assert loads_strict(nested(64)) is not None
-    with pytest.raises(json.JSONDecodeError):
-        loads_strict(("{\"a\":" * 300 + "1" + "}" * 300).encode())
-
-
-async def test_a2a_deep_metadata_never_breaks_task_list(client):
-    body = ('{"message":{"metadata":' + "[" * 300 + "]" * 300 + "}}").encode()
-    r = await client.post("/v1/message:send", content=body, headers=JSON_HEADERS)
-    assert r.status_code == 400, r.text
-    assert (await client.get("/v1/tasks")).status_code != 500

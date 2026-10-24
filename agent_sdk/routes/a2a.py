@@ -107,8 +107,15 @@ from ..common.admission import (
     resolve_per_identity_limit,
     slot_table,
 )
+from ..common.body import BodyTooLarge, read_capped_body
 from ..common.origin import guard_origin
-from ..common.json_strict import dumps_strict, loads_strict, scrub_unencodable
+from ..common.json_strict import (
+    NESTING_TOO_DEEP_MESSAGE,
+    NestingTooDeep,
+    dumps_strict,
+    loads_strict,
+    scrub_unencodable,
+)
 from ..common import sse as _sse
 from ..common.sse import HEARTBEAT, SSE_HEADERS, sse_data
 from ..common.wire_errors import a2a_error, a2a_invalid_params, a2a_parse_error
@@ -142,6 +149,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _SUPPORTED_MODES = {"text", "text/plain", "application/json", A2UI_MIME_TYPE}
+# GH-248: "text" is the documented legacy alias of text/plain.
+_NORMALIZED_MODES = {"text/plain" if m == "text" else m.lower() for m in _SUPPORTED_MODES}
+
+
+def _mode_accepted(mode: str) -> bool:
+    """GH-248: case-insensitive, parameters ignored, ``*/*`` and ``type/*``
+    wildcards, ``text`` kept as a legacy alias of ``text/plain``."""
+    token = mode.split(";", 1)[0].strip().lower()
+    if token == "text":
+        token = "text/plain"
+    if token == "*/*":
+        return True
+    if token.endswith("/*"):
+        prefix = token[:-1]
+        return any(m.startswith(prefix) for m in _NORMALIZED_MODES)
+    return token in _NORMALIZED_MODES
 _MAX_BODY_BYTES = 1 * 1024 * 1024  # 1 MB — consistent with AG-UI cap
 
 # RT-002 (GH-143 follow-up): message_stream's taskId-resume branch and
@@ -336,10 +359,18 @@ def _echo_extensions(
     returns call neither helper.
     """
     requested = request.headers.get("x-a2a-extensions", "")
+    # Never echo an extension the card does not declare (GH-249: the A2UI
+    # entry is left off when no tool emits A2UI).
+    card = getattr(request.app.state, "agent_card", None) or {}
+    declared = {
+        e.get("uri")
+        for e in (card.get("capabilities") or {}).get("extensions") or []
+        if isinstance(e, dict)
+    }
     activated = [
         uri.strip()
         for uri in requested.split(",")
-        if uri.strip() in activatable
+        if uri.strip() in activatable and uri.strip() in declared
     ]
     if activated:
         response.headers["X-A2A-Extensions"] = ", ".join(activated)
@@ -427,7 +458,7 @@ def _config_error(params: MessageSendParams) -> JSONResponse | None:
             "push notifications are not supported",
         )
     if config.accepted_output_modes is not None and config.accepted_output_modes:
-        if not _SUPPORTED_MODES.intersection(config.accepted_output_modes):
+        if not any(_mode_accepted(m) for m in config.accepted_output_modes):
             return a2a_error(
                 A2A_CONTENT_TYPE_NOT_SUPPORTED,
                 "no acceptable output mode; supported: " + ", ".join(sorted(_SUPPORTED_MODES)),
@@ -439,14 +470,17 @@ async def _parse_send(request: Request) -> MessageSendParams | JSONResponse:
     # RT-005: never takes `headers` — a parse failure means no branch of the
     # route ever ran, so nothing was activated.
     # GH-15: reject non-JSON Content-Type before parsing (A2A §5.1 → -32005/HTTP 415)
-    ct = request.headers.get("content-type", "").split(";")[0].strip()
+    ct = request.headers.get("content-type", "").split(";")[0].strip().lower()
     if ct and ct != "application/json":
         return a2a_error(A2A_CONTENT_TYPE_NOT_SUPPORTED, "Content-Type must be application/json")
-    raw = await request.body()
-    if len(raw) > _MAX_BODY_BYTES:
+    try:
+        raw = await read_capped_body(request, _MAX_BODY_BYTES)
+    except BodyTooLarge:
         return a2a_invalid_params("request body too large")
     try:
         body = loads_strict(raw)
+    except NestingTooDeep:
+        return a2a_parse_error(NESTING_TOO_DEEP_MESSAGE)
     except json.JSONDecodeError:
         return a2a_parse_error("request body is not valid JSON")
     except ValueError:
@@ -461,6 +495,8 @@ async def _parse_send(request: Request) -> MessageSendParams | JSONResponse:
         )
         detail = f"invalid message params (check: {fields})" if fields else "invalid message params"
         return a2a_invalid_params(detail)
+    if params.message.role != "user":
+        return a2a_invalid_params("message.role must be user")
     # GH-193: a resume may carry one DataPart (validated in _resume_or_error,
     # after the task-state checks); everything else keeps the text-only check.
     msg = params.message
@@ -637,6 +673,7 @@ async def message_send(
     if (err := _config_error(params)) is not None:
         return err
     blocking = bool(params.configuration and params.configuration.blocking)
+    history_length = params.configuration.history_length if params.configuration else None
     if params.message.task_id:
         slot: _ClaimedSlot | None = None
         sub: Subscription | None = None
@@ -659,7 +696,7 @@ async def message_send(
         # only A2UI can ever be echoed here, and only when the resumed
         # Task's OWN artifacts genuinely carry an A2UI part.
         _echo_a2ui_if_present([record.task], request, response)
-        return _strict_json_response(_task_wire(record), dict(response.headers))
+        return _strict_json_response(_task_wire(record, history_length), dict(response.headers))
     # SC-A1: bare-Message quick-response path (A2A v0.3.0 §2).
     # Call the optional sync_reply hook BEFORE task creation; if it returns a
     # non-empty string, skip task creation and return a bare Message directly.
@@ -694,9 +731,6 @@ async def message_send(
     finally:
         if slot is not None:
             await slot.release()
-    history_length = (
-        params.configuration.history_length if params.configuration else None
-    )
     return _strict_json_response(_task_wire(record, history_length), dict(response.headers))
 
 
@@ -842,6 +876,7 @@ async def _open_stream(
     record: TaskRecord,
     identity: Identity,
     slot: _ClaimedSlot | None = None,
+    history_length: int | None = None,
 ) -> tuple[AsyncIterator[bytes], Any]:
     """Subscribe + snapshot the full-Task first frame EAGERLY (before the
     worker can mutate the record or publish), then return the SSE generator
@@ -877,7 +912,7 @@ async def _open_stream(
     # it (RT-001, round 6).
     sub = slot.subscribe(record.task.id)
     release = slot.release
-    snapshot = record.task.wire()
+    snapshot = _task_wire(record, history_length)
     terminal = record.task.status.state in TERMINAL_STATES
 
     def _unserializable_tail() -> bytes:
@@ -965,6 +1000,7 @@ async def message_stream(
         return params
     if (err := _config_error(params)) is not None:
         return err
+    history_length = params.configuration.history_length if params.configuration else None
     if params.message.task_id:
         # subscribe BEFORE delivering the resume so no frame is missed
         record = request.app.state.task_store.get(params.message.task_id, identity)
@@ -978,7 +1014,9 @@ async def message_stream(
             return a2a_error(
                 A2A_UNSUPPORTED_OPERATION, "task is in a terminal state and cannot accept new messages"
             )
-        stream, abort = await _open_stream(request, record, identity)
+        stream, abort = await _open_stream(
+            request, record, identity, history_length=history_length
+        )
         resumed = _resume_or_error(request, params, identity)
         if isinstance(resumed, JSONResponse):
             await abort()
@@ -1001,7 +1039,9 @@ async def message_stream(
         # passing it to _open_stream below cannot 429 a second time.
         slot = await _admit(request, identity, None)
         record = _create_task_record(request, params, identity)
-        stream, abort = await _open_stream(request, record, identity, slot=slot)
+        stream, abort = await _open_stream(
+            request, record, identity, slot=slot, history_length=history_length
+        )
         _start_worker(
             request, record, _capabilities(params.message, request), identity,
             (params.message.metadata or {}).get("timezone"),
@@ -1027,6 +1067,8 @@ async def tasks_list(
     identity: Identity = Depends(require_identity),
 ) -> Any:
     guard_origin(request)
+    if pageToken and not request.app.state.task_store.is_valid_page_token(pageToken):
+        return a2a_invalid_params("invalid pageToken")
     size = min(max(pageSize, 1), 100)
     tasks, next_token, total = request.app.state.task_store.list_tasks_for_identity(
         identity, page_size=size, page_token=pageToken
@@ -1073,6 +1115,44 @@ async def push_config_unsupported(
     identity: Identity = Depends(require_identity),
 ) -> Any:
     return _push_config_not_supported(request, response)
+
+
+# Handler name reflects JSON-RPC method tasks/resubscribe; REST path is :subscribe per A2A v0.3.0 §2 binding table (see LRN-099).
+# GH-248 item 8: GET is served by this same handler. It is registered before
+# ``tasks_get`` because that route's ``{task_id}`` would otherwise swallow
+# ``GET /v1/tasks/{id}:subscribe``.
+@router.get("/v1/tasks/{task_id}:subscribe")
+@router.post("/v1/tasks/{task_id}:subscribe")
+async def tasks_resubscribe(
+    task_id: str, request: Request, response: Response, identity: Identity = Depends(require_identity)
+) -> Any:
+    guard_origin(request)
+    # RT-B-005: echo BEFORE the not-found return (was after, so that error
+    # response never carried it — same gap message_send/tasks_get/tasks_cancel
+    # had).
+    # RT-002 (debug round 4): narrowed to A2UI only. A resubscribe replays the
+    # task's own frames, which genuinely can carry A2UI DataParts, so A2UI stays
+    # request-gated here (suppressing it would tell a conformant consumer not to
+    # parse A2UI content this stream does deliver). But this route never calls
+    # forwarding.bind/parse_header — nothing is ever forwarded on a resubscribe
+    # — so echoing the credential-forwarding URI back as "activated" is the same
+    # false-activation signal RT-B-203 removed from tasks/get.
+    _echo_extensions(request, response, activatable=_STREAM_ONLY_EXTENSION_URIS)
+    hdrs = dict(response.headers)
+    record = request.app.state.task_store.get(task_id, identity)
+    if record is None:
+        return a2a_error(A2A_TASK_NOT_FOUND, "task not found", headers=hdrs)
+    identity_token = bind_identity(identity)
+    try:
+        stream, abort = await _open_stream(request, record, identity)
+    finally:
+        unbind_identity(identity_token)
+    return StreamingResponse(
+        stream,
+        media_type="text/event-stream",
+        headers={**SSE_HEADERS, **hdrs},
+        background=BackgroundTask(abort),
+    )
 
 
 @router.get("/v1/tasks/{task_id}")
@@ -1213,37 +1293,3 @@ async def tasks_cancel(
     body = _task_wire(record)
     # spec-required: HTTP 200 with the full canceled Task (§5.1)
     return _strict_json_response(body, hdrs)
-
-
-# Handler name reflects JSON-RPC method tasks/resubscribe; REST path is :subscribe per A2A v0.3.0 §2 binding table (see LRN-099).
-@router.post("/v1/tasks/{task_id}:subscribe")
-async def tasks_resubscribe(
-    task_id: str, request: Request, response: Response, identity: Identity = Depends(require_identity)
-) -> Any:
-    guard_origin(request)
-    # RT-B-005: echo BEFORE the not-found return (was after, so that error
-    # response never carried it — same gap message_send/tasks_get/tasks_cancel
-    # had).
-    # RT-002 (debug round 4): narrowed to A2UI only. A resubscribe replays the
-    # task's own frames, which genuinely can carry A2UI DataParts, so A2UI stays
-    # request-gated here (suppressing it would tell a conformant consumer not to
-    # parse A2UI content this stream does deliver). But this route never calls
-    # forwarding.bind/parse_header — nothing is ever forwarded on a resubscribe
-    # — so echoing the credential-forwarding URI back as "activated" is the same
-    # false-activation signal RT-B-203 removed from tasks/get.
-    _echo_extensions(request, response, activatable=_STREAM_ONLY_EXTENSION_URIS)
-    hdrs = dict(response.headers)
-    record = request.app.state.task_store.get(task_id, identity)
-    if record is None:
-        return a2a_error(A2A_TASK_NOT_FOUND, "task not found", headers=hdrs)
-    identity_token = bind_identity(identity)
-    try:
-        stream, abort = await _open_stream(request, record, identity)
-    finally:
-        unbind_identity(identity_token)
-    return StreamingResponse(
-        stream,
-        media_type="text/event-stream",
-        headers={**SSE_HEADERS, **hdrs},
-        background=BackgroundTask(abort),
-    )

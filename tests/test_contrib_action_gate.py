@@ -298,7 +298,7 @@ async def test_ag_ui_approval_executes(client, fake_model):
 
     r = await client.post(
         "/ag-ui/run",
-        json=_run_body(resume=[{"interrupt_id": intr["id"], "status": "approved", "payload": {}}]),
+        json=_run_body(resume=[{"interrupt_id": intr["id"], "status": "resolved", "payload": {"decision": "approved"}}]),
     )
     types = [f["type"] for f in sse_frames(r.text)]
     assert types[-1] == "RUN_FINISHED"
@@ -313,7 +313,7 @@ async def test_ag_ui_rejection_skips(client, fake_model):
 
     r = await client.post(
         "/ag-ui/run",
-        json=_run_body(resume=[{"interrupt_id": intr["id"], "status": "rejected"}]),
+        json=_run_body(resume=[{"interrupt_id": intr["id"], "status": "resolved", "payload": {"decision": "rejected"}}]),
     )
     assert sse_frames(r.text)[-1]["type"] == "RUN_FINISHED"
     assert _executed == []

@@ -13,6 +13,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel
 
+from ..common.redact import safe_line_text
+
 
 class ErrorCategory(StrEnum):
     AUTH = "auth"
@@ -69,17 +71,21 @@ class SafeValueError(ValueError):
     Subclass it, set the class attribute ``message`` to fixed guidance text and
     raise it with no arguments. Only ``type(err).message`` is ever rendered;
     anything passed at raise time is dropped, so never put input in the class
-    text.
+    text. The hint is cleaned with ``safe_line_text`` before it is shown
+    (control, format and bidi characters dropped, length capped), so defining a
+    subclass whose message is empty after that cleaning raises ``TypeError``
+    (GH-250).
     """
 
     message: str = ""
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
-        hint = cls.__dict__.get("message", getattr(cls, "message", None))
-        if not isinstance(hint, str) or not hint.strip():
+        hint = getattr(cls, "message", None)
+        if not isinstance(hint, str) or not safe_line_text(hint):
             raise TypeError(
-                f"{cls.__name__}.message must be a non-blank str (fixed guidance text)"
+                f"{cls.__name__}.message must render to non-empty text "
+                "(fixed guidance text)"
             )
 
 

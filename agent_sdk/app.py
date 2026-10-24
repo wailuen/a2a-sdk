@@ -63,6 +63,43 @@ _AZURITE_MARKERS = ("UseDevelopmentStorage=true", "devstoreaccount1", "127.0.0.1
 
 logger = logging.getLogger(__name__)
 
+
+class _A2AInternalErrorMiddleware:
+    """Catch unhandled /v1/* exceptions inside ServerErrorMiddleware.
+
+    ServerErrorMiddleware always re-raises after answering, so the server logs
+    the full traceback and str(exc). This catches first, logs the type only
+    (SI-2) and does not re-raise.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http" or not str(scope.get("path", "")).startswith("/v1/"):
+            await self.app(scope, receive, send)
+            return
+        started = False
+
+        async def tracked_send(message: Any) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, receive, tracked_send)
+        except Exception as exc:
+            logger.error("a2a unhandled exception type=%s", type(exc).__name__)
+            if started:
+                return
+            from starlette.responses import JSONResponse as _Json
+
+            await _Json(
+                status_code=500,
+                content={"error": {"code": -32603, "message": "internal error"}},
+            )(scope, receive, send)
+
 _MCP_INSTRUCTIONS_MAX_CHARS = 4000
 
 
@@ -602,6 +639,21 @@ class Agent:
             )
 
     def build_app(self) -> FastAPI:
+        # A boot error after the credential store opens must not leave its
+        # handle open. Close is best-effort and logs nothing about the store
+        # (no path, no key material; SI-2, SI-6).
+        opened: list[CredentialStore] = []
+        try:
+            return self._build_app(opened)
+        except BaseException:
+            for store in opened:
+                try:
+                    store.close()
+                except Exception:
+                    logger.warning("credential_store.close failed during failed boot")
+            raise
+
+    def _build_app(self, opened: list[CredentialStore]) -> FastAPI:
         settings = self.settings
         base_url = settings.resolved_base_url
 
@@ -637,7 +689,16 @@ class Agent:
             raise ValueError(
                 "'load_skill' is a reserved tool name when skills_dir is set"
             )
+        skills = SkillsRegistry(self.skills_dir)
+        if self.exclude_from_catalog:
+            unknown = [n for n in self.exclude_from_catalog if n not in skills.skills]
+            if unknown:
+                raise ValueError(
+                    "exclude_from_catalog references skill(s) not found in "
+                    f"skills_dir: {', '.join(unknown)}"
+                )
         credential_store = self._build_credential_store()
+        opened.append(credential_store)
         self._warn_idp_secret_missing(credential_store)
         api_keys = ApiKeyStore(credential_store)
         bootstrap = BootstrapManager(api_keys)
@@ -667,14 +728,6 @@ class Agent:
             interrupt_ttl=settings.interrupt_ttl_seconds,
             max_interrupted=settings.max_interrupted_tasks,
         )
-        skills = SkillsRegistry(self.skills_dir)
-        if self.exclude_from_catalog:
-            unknown = [n for n in self.exclude_from_catalog if n not in skills.skills]
-            if unknown:
-                raise ValueError(
-                    "exclude_from_catalog references skill(s) not found in "
-                    f"skills_dir: {', '.join(unknown)}"
-                )
         model_client = self._build_model_client(credential_store)
         policies = LoopPolicies(
             max_turns=settings.max_turns,
@@ -821,6 +874,7 @@ class Agent:
         # contribute nothing rather than a garbage origin.
         if _own_url.scheme and _own_url.netloc:
             _cors_origins = _cors_origins | {f"{_own_url.scheme}://{_own_url.netloc}"}
+        app.add_middleware(_A2AInternalErrorMiddleware)
         app.add_middleware(CorsMiddleware, origins=_cors_origins)
         app.state.cors_origins = _cors_origins
 
@@ -872,6 +926,15 @@ class Agent:
                     headers=getattr(exc, "headers", None) or None,
                 )
             return await http_exception_handler(request, exc)
+
+        # GH-248: non-/v1 paths keep Starlette's plain 500. /v1/* is handled by
+        # _A2AInternalErrorMiddleware (no re-raise, so the server never logs the
+        # traceback or str(exc)).
+        @app.exception_handler(Exception)
+        async def _plain_internal_error(request: Any, exc: Exception) -> Any:
+            from starlette.responses import PlainTextResponse as _PlainTextResponse
+
+            return _PlainTextResponse("Internal Server Error", status_code=500)
 
         @app.exception_handler(_RequestValidationError)
         async def _a2a_validation_envelope(request: Any, exc: _RequestValidationError) -> Any:

@@ -6,6 +6,8 @@ import inspect
 import logging
 from collections.abc import Iterable
 
+from pydantic import BaseModel
+
 from ..models.a2a import AgentExtension
 from ..models.content_types import (
     A2UI_EXTENSION_URI,
@@ -61,12 +63,13 @@ def _own_annotation_names(klass: type) -> frozenset[str]:
         return frozenset(vars(klass).get("__annotations__", {}))
 
 
-def _annotation_str(ann: object, required: bool) -> tuple[str, bool]:
+def _annotation_str(ann: object, required: bool, depth: int = 0) -> tuple[str, bool]:
     """Return a (short_type_name, is_required) pair for a Pydantic field annotation.
 
     ``required`` is passed through unchanged: whether a field is required comes
     from ``FieldInfo.is_required()`` only, never from the annotation. A union
-    containing ``None`` makes the type read ``X|null`` instead.
+    containing ``None`` makes the type read ``X|null`` instead. With *depth* > 0
+    a nested model is expanded to its own field list (GH-249).
     """
     import types as _types
     import typing as _typing
@@ -77,7 +80,7 @@ def _annotation_str(ann: object, required: bool) -> tuple[str, bool]:
         non_none = [a for a in args if a is not type(None)]
         if not non_none:
             return "null", required
-        name = "|".join(_annotation_str(a, required)[0] for a in non_none)
+        name = "|".join(_annotation_str(a, required, depth)[0] for a in non_none)
         if len(non_none) < len(args):
             name += "|null"
         return name, required
@@ -85,7 +88,7 @@ def _annotation_str(ann: object, required: bool) -> tuple[str, bool]:
     if origin is list:
         targs = getattr(ann, "__args__", ())
         if targs:
-            return f"[{_annotation_str(targs[0], required)[0]}]", required
+            return f"[{_annotation_str(targs[0], required, depth)[0]}]", required
         return "list", required
 
     if origin is _typing.Literal:
@@ -93,12 +96,35 @@ def _annotation_str(ann: object, required: bool) -> tuple[str, bool]:
 
     cls_name = getattr(ann, "__name__", None)
     if cls_name:
+        if depth > 0 and isinstance(ann, type) and issubclass(ann, BaseModel):
+            return f"{cls_name}{_nested_fields(ann, depth - 1)}", required
         return cls_name, required
 
     raw = str(ann)
     if raw.startswith("Optional[") and raw.endswith("]"):
         return raw[9:-1] + "|null", required
     return raw, required
+
+
+def _serialization_required(model: type[BaseModel]) -> frozenset[str]:
+    try:
+        return frozenset(model.model_json_schema(mode="serialization").get("required", []))
+    except Exception:
+        return frozenset()
+
+
+def _nested_fields(model: type[BaseModel], depth: int) -> str:
+    wire_required = _serialization_required(model)
+    parts: list[str] = []
+    for name, info in model.model_fields.items():
+        if info.exclude:
+            continue
+        wire_name = info.serialization_alias or info.alias or name
+        required = info.is_required() or wire_name in wire_required
+        ann = info.annotation
+        type_str = "any" if ann is None else _annotation_str(ann, required, depth)[0]
+        parts.append(f"{wire_name}{'' if required else '?'}: {type_str}")
+    return "{" + ", ".join(parts) + "}"
 
 
 def _field_summary(cls: type[ContentModel]) -> str:
@@ -111,6 +137,7 @@ def _field_summary(cls: type[ContentModel]) -> str:
     """
     try:
         parts: list[tuple[str, bool]] = []
+        wire_required = _serialization_required(cls)
         for name, info in cls.model_fields.items():
             if name.startswith("_"):
                 continue
@@ -144,14 +171,14 @@ def _field_summary(cls: type[ContentModel]) -> str:
             )
             if not declared_here and name in ContentModel.model_fields:
                 continue
-            required = info.is_required()
+            wire_name = info.serialization_alias or info.alias or name
+            required = info.is_required() or wire_name in wire_required
             ann = info.annotation
             if ann is None:
                 type_str = "any"
             else:
-                type_str, required = _annotation_str(ann, required)
+                type_str, required = _annotation_str(ann, required, 1)
             suffix = "" if required else "?"
-            wire_name = info.serialization_alias or info.alias or name
             parts.append((f"{wire_name}{suffix}: {type_str}", required))
 
         # Keep system-prompt tokens manageable: drop whole optional fields from
@@ -266,7 +293,7 @@ def get_system_prompt_section(allowed_components: list[str] | None = None) -> st
         " the user in the format your instructions ask for, using only values"
         " the tools returned.",
         "",
-        "Components tools can emit (required fields shown, ? = optional,"
+        "Components tools can emit (required fields and common optional fields shown, ? = optional,"
         " |null = the value may be null):",
     ]
     for cls in sorted(types.values(), key=lambda c: c.component):

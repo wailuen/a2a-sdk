@@ -73,10 +73,20 @@ add custom request logic.
   `input-required` state / interrupt outcome, then resume and assert
   completion.
 
-- MCP: the built-in `load_skill` tool (`mcp_skills="tool"`) is not counted against `--expected-count`. `agent_sdk.testing.mcp.McpTestClient` (alias of `McpClient`) takes a
+- MCP: `agent_sdk.testing.mcp.McpTestClient` (alias of `McpClient`) takes a
   base URL, a key file and an ASGI transport. It offers `initialize()`,
   paginated `list_tools()`, `call_tool()`, and for `Agent(mcp_skills="prompts")`
   paginated `list_prompts()` and `get_prompt(name)`. Errors raise `McpError`.
+
+  `McpClient` offers the newest protocol version in `initialize` and sends the
+  negotiated one as `MCP-Protocol-Version` on every later request.
+  `run_gate(client, samples, expected_count=N)` (CLI: `--expected-count N`)
+  checks the `tools/list` count against your tier-1 tool count. The built-in
+  `load_skill` tool (`mcp_skills="tool"`) is not counted. It is matched by its
+  fixed shape, so your own tier-1 tool named `load_skill` is counted. Pass
+  `skills_tool=True` (CLI: `--skills-tool`) to exclude by name instead. For
+  each tool with an `outputSchema`, the gate also checks that the call returns
+  `structuredContent` that matches the schema.
 
 See the SDK's own `tests/` and the template's `tests/` for working
 examples of all three.
@@ -156,11 +166,11 @@ async def test_full_turn(client):
 
     # Resume an AG-UI interrupt (no user message is added). The tool's
     # resume_handler decides what the payload means; the example agent's
-    # publish_note approves when status is "approved".
+    # publish_note approves when payload.decision is "approved".
     seen: list = []
     await driver.agui_turn("Publish it.", thread_id, messages, emit={"interrupt": seen.append})
     text = await driver.agui_resume(
-        seen[0]["id"], thread_id, messages, status="approved",
+        seen[0]["id"], thread_id, messages, payload={"decision": "approved"},
     )
 
     # History rules: agui_turn appends the user message on any RUN_FINISHED and

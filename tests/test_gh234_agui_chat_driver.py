@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -176,6 +178,13 @@ async def test_run_turn_normal_stream_passes(tmp_path):
 
 _NODE = shutil.which("node")
 needs_node = pytest.mark.skipif(_NODE is None, reason="node is not installed")
+_IN_CI = os.environ.get("CI", "").strip().lower() in {"1", "true", "yes"}
+
+
+def test_gh234_node_available_in_ci():
+    if not _IN_CI:
+        pytest.skip("not running in CI; local runs may lack node")
+    assert _NODE is not None, "node is required in CI for the chat.js AG-UI live tests"
 
 
 def _extract(chat_js: str, signature: str) -> str:
@@ -185,7 +194,13 @@ def _extract(chat_js: str, signature: str) -> str:
 
 
 _HARNESS = r"""
-const state = { threadId: "T1", aguiMessages: [], catalogIds: [] };
+const state = { threadId: "T1", aguiMessages: [], catalogIds: [], busy: false, contextId: null };
+const sendBtn = { disabled: false };
+const resetBtn = { addEventListener(t, fn) { resetBtn.fn = fn; } };
+const trace = { id: "trace" };
+const ctx = { toast() {} };
+const resetSurfaces = () => {};
+const clear = (n) => { if (n.children) n.children.length = 0; };
 let n = 0;
 const uuid = () => "uuid-" + (++n);
 const catalogIdsReady = Promise.resolve();
@@ -199,8 +214,11 @@ function mkForm() {
   return f;
 }
 const el = (tag) => (tag === "form" ? mkForm() : { textContent: "", appendChild() {}, addEventListener() {} });
-const transcript = { appendChild(c) { if (c.listeners) formNodes.push(c); }, scrollTop: 0, scrollHeight: 0 };
-const input = { placeholder: "" };
+const transcript = { children: [], appendChild(c) { transcript.children.push(c); if (c.listeners) formNodes.push(c); }, scrollTop: 0, scrollHeight: 0 };
+const input = { placeholder: "", focus() {} };
+let posts = 0;
+let lastBody = null;
+let postThrows = false;
 const systemLine = (m) => log.lines.push(m);
 const traceFrame = () => {};
 const fmtJson = (x) => JSON.stringify(x);
@@ -213,20 +231,33 @@ let pendingInterrupt = null;
 let shownForm = null;
 let postFails = false;
 let onPost = null;
-const postSse = () => ({});
-const postWithRetry = async () => { if (onPost) onPost(); return postFails ? null : {}; };
+const postSse = (url, body) => { lastBody = body; return {}; };
+const postWithRetry = async (fn) => {
+  posts++;
+  if (onPost) onPost();
+  if (postThrows) throw new Error("kaput");
+  const r = fn();
+  return postFails ? null : r;
+};
 const readSse = async (resp, cb) => { for (const f of FRAMES) cb({ json: f, data: "" }); };
 """
+
+
+def _reset_handler(chat_js: str) -> str:
+    m = re.search(r'resetBtn\.addEventListener\("click", \(\) => \{[\s\S]*?\n  \}\);\n', chat_js)
+    assert m, "reset handler not found in chat.js"
+    return m.group(0)
 
 
 def _node_run(frames, scenario: str) -> dict:
     assert _NODE is not None
     chat_js = (STATIC / "chat.js").read_text()
-    fns = "\n".join(
+    fns = _reset_handler(chat_js) + "\n".join(
         _extract(chat_js, sig)
         for sig in (
             "  function removeInterruptForm()",
             "  function interruptForm(",
+            "  async function runExclusive(",
             "  async function sendAgui(",
         )
     )
@@ -234,7 +265,9 @@ def _node_run(frames, scenario: str) -> dict:
         f"const FRAMES = {json.dumps(frames)};\n{_HARNESS}\n{fns}\n"
         f"(async () => {{ {scenario}\n"
         "process.stdout.write(JSON.stringify({ msgs: state.aguiMessages, pending: pendingInterrupt, "
-        "forms: formNodes.map(f => f.removed), placeholder: input.placeholder })); })();\n"
+        "forms: formNodes.map(f => f.removed), placeholder: input.placeholder, posts, lastBody, "
+        "busy: state.busy, lines: log.lines, thread: state.threadId, "
+        "live: transcript.children.filter(c => c.listeners && !c.removed).length })); })();\n"
     )
     out = subprocess.run([_NODE, "-e", script], capture_output=True, text=True, timeout=20, check=True)
     return json.loads(out.stdout)
@@ -364,3 +397,153 @@ async def test_empty_message_adds_no_separator_and_chunk_id_resets():
         FINISHED,
     ))
     assert await d.agui_turn("q", "th", []) == "a\nb\nc"
+
+
+_SUBMIT = "formNodes[formNodes.length - 1].listeners.submit({ preventDefault() {} });"
+_SETTLE = "await new Promise(r => setTimeout(r, 20));"
+_INTERRUPT_FIN = {
+    "type": "RUN_FINISHED",
+    "outcome": {"type": "interrupt", "interrupts": [
+        {"id": "i9", "message": "ok?", "responseSchema": {"fields": ["decision"]}}]},
+}
+
+
+@needs_node
+def test_stale_thread_run_finished_neither_captures_interrupt_nor_folds():
+    frames = [_msg("TEXT_MESSAGE_START", "s1"), _msg("TEXT_MESSAGE_CONTENT", "s1", "x"), _INTERRUPT_FIN]
+    out = _node_run(frames, "onPost = () => { state.threadId = 'T2'; }; await sendAgui('hi');")
+    assert out["msgs"] == []
+    assert out["pending"] is None
+    assert out["live"] == 0 and out["forms"] == []
+
+
+@needs_node
+def test_same_thread_interrupt_still_captured():
+    out = _node_run([_INTERRUPT_FIN], "await sendAgui('hi');")
+    assert out["pending"]["interruptId"] == "i9"
+    assert out["live"] == 1
+    assert [m["role"] for m in out["msgs"]] == ["user"]
+
+
+@needs_node
+def test_run_error_removes_interrupt_form():
+    scenario = _PENDING + ' interruptForm(pendingInterrupt); await sendAgui("yes");'
+    out = _node_run([{"type": "RUN_ERROR", "message": "boom"}], scenario)
+    assert out["pending"] is None
+    assert out["live"] == 0
+
+
+@needs_node
+def test_form_submit_ignored_when_interrupt_no_longer_pending():
+    scenario = (
+        _PENDING + " interruptForm(pendingInterrupt); pendingInterrupt = null;"
+        f" {_SUBMIT} {_SETTLE}"
+    )
+    out = _node_run([_FIN], scenario)
+    assert out["posts"] == 0
+
+
+@needs_node
+def test_form_submit_respects_busy_guard():
+    scenario = (
+        _PENDING + " interruptForm(pendingInterrupt); state.busy = true;"
+        f" {_SUBMIT} {_SETTLE}"
+    )
+    out = _node_run([_FIN], scenario)
+    assert out["posts"] == 0
+    assert out["live"] == 1 and out["busy"] is True
+
+
+@needs_node
+def test_form_submit_sends_resume_and_resets_busy():
+    scenario = _PENDING + f" interruptForm(pendingInterrupt); {_SUBMIT} {_SETTLE}"
+    out = _node_run([_FIN], scenario)
+    assert out["posts"] == 1
+    assert out["lastBody"]["resume"][0]["interruptId"] == "i1"
+    assert out["busy"] is False and out["live"] == 0
+
+
+@needs_node
+def test_form_submit_failure_is_caught_and_busy_released():
+    scenario = (
+        _PENDING + " interruptForm(pendingInterrupt); postThrows = true;"
+        f" {_SUBMIT} {_SETTLE}"
+    )
+    out = _node_run([], scenario)
+    assert out["busy"] is False
+    assert any(line.startswith("error: kaput") for line in out["lines"])
+
+
+@needs_node
+def test_user_role_message_not_folded():
+    frames = [
+        _msg("TEXT_MESSAGE_START", "u1") | {"role": "user"},
+        _msg("TEXT_MESSAGE_CONTENT", "u1", "echo"),
+        _msg("TEXT_MESSAGE_START", "a1") | {"role": "assistant"},
+        _msg("TEXT_MESSAGE_CONTENT", "a1", "real"),
+        _msg("TEXT_MESSAGE_START", "n1") | {"role": 7},
+        _msg("TEXT_MESSAGE_CONTENT", "n1", "nonstring"),
+        _FIN,
+    ]
+    out = _node_run(frames, 'await sendAgui("hi");')
+    assert [(m["id"], m["content"]) for m in out["msgs"] if m["role"] == "assistant"] == [
+        ("a1", "real"), ("n1", "nonstring")]
+
+
+@needs_node
+def test_empty_string_role_is_ignored_like_chat_driver():
+    # v0.22.0 release gate: C-072 records a role only when it is a non-empty string.
+    frames = [
+        _msg("TEXT_MESSAGE_START", "e1") | {"role": ""},
+        _msg("TEXT_MESSAGE_CONTENT", "e1", "kept"),
+        _msg("TEXT_MESSAGE_CHUNK", "e2", "chunk") | {"role": ""},
+        _FIN,
+    ]
+    out = _node_run(frames, 'await sendAgui("hi");')
+    assert [(m["id"], m["content"]) for m in out["msgs"] if m["role"] == "assistant"] == [
+        ("e1", "kept"), ("e2", "chunk")]
+
+
+@needs_node
+def test_chunk_first_role_recorded_and_non_assistant_skipped():
+    frames = [
+        _msg("TEXT_MESSAGE_CHUNK", "c1", "a") | {"role": "tool"},
+        _msg("TEXT_MESSAGE_CHUNK", None, "b"),
+        _FIN,
+    ]
+    out = _node_run(frames, 'await sendAgui("hi");')
+    assert [m for m in out["msgs"] if m["role"] == "assistant"] == []
+
+
+@needs_node
+def test_content_without_start_kept_as_assistant():
+    frames = [_msg("TEXT_MESSAGE_CONTENT", "z1", "no start"), _FIN]
+    out = _node_run(frames, 'await sendAgui("hi");')
+    assert [(m["id"], m["content"]) for m in out["msgs"] if m["role"] == "assistant"] == [("z1", "no start")]
+
+
+@needs_node
+def test_body_includes_user_but_history_appends_only_on_run_finished():
+    frames = [_msg("TEXT_MESSAGE_CONTENT", "z1", "partial")]
+    out = _node_run(frames, 'await sendAgui("hi");')
+    assert [m["role"] for m in out["lastBody"]["messages"]] == ["user"]
+    assert out["msgs"] == []
+    out = _node_run([_msg("TEXT_MESSAGE_CONTENT", "z1", "ok"), _FIN], 'await sendAgui("hi");')
+    assert [m["role"] for m in out["msgs"]] == ["user", "assistant"]
+
+
+@needs_node
+def test_run_error_does_not_append_user_message():
+    out = _node_run([{"type": "RUN_ERROR", "message": "x"}], 'await sendAgui("hi");')
+    assert out["msgs"] == []
+
+
+@needs_node
+def test_reset_handler_clears_pending_interrupt_and_form():
+    scenario = _PENDING + " interruptForm(pendingInterrupt); transcript.children.push({});" + (
+        " resetBtn.fn();"
+    )
+    out = _node_run([], scenario)
+    assert out["pending"] is None
+    assert out["live"] == 0 and out["forms"] == [True]
+    assert out["thread"] != "T1"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import traceback
+import unicodedata
 from typing import Any
 
 _SECRET_KEY = re.compile(
@@ -52,6 +53,21 @@ def safe_error_text(value: str, *, max_len: int | None = 64) -> str:
     of the contract (e.g. table-cell sanitisation)."""
     text = value if max_len is None else value[:max_len]
     return text.translate(_CONTROL_CHARS).strip()
+
+
+def drop_format_chars(value: str) -> str:
+    """Remove every Unicode format character (category Cf) from an untrusted
+    string: the bidi overrides and isolates (U+202A-202E, U+2066-2069), zero-
+    width and joiner characters, the BOM and the soft hyphen (GH-250).
+
+    They are invisible, and the bidi ones reorder how the text displays, so a
+    value that reaches the wire could read differently from what it is
+    ("Trojan Source"). Every wire-bound ``safe_*_text`` helper calls this first,
+    so a separator or id alphabet character is never affected: none of them is
+    in Cf. C-034 sibling."""
+    if value.isascii():
+        return value
+    return "".join(c for c in value if unicodedata.category(c) != "Cf")
 
 
 def redact_value(text: str) -> str:
@@ -173,7 +189,7 @@ def safe_cell_text(value: str) -> str:
     Use :func:`safe_block_text` instead — never this — for a field whose
     declared contract is a MULTI-LINE MARKDOWN DOCUMENT, where a newline is
     the payload's own structure and ``|`` is table syntax."""
-    text = safe_error_text(value, max_len=None).translate(_BARE_SEPARATORS)
+    text = safe_error_text(drop_format_chars(value), max_len=None).translate(_BARE_SEPARATORS)
     text = _SPACED_SEPARATOR_DIGIT_RE.sub(lambda m: _SPACED_SEPARATORS[m.group()], text)
     return _SPACED_SEPARATOR_AT_RE.sub(lambda m: _SPACED_SEPARATORS[m.group()], text)
 
@@ -205,7 +221,7 @@ def safe_line_text(value: str, *, max_len: int | None = LINE_TEXT_MAX_LEN) -> st
     ``max_len`` characters ending in ``…`` (the marker counts within the cap),
     so a cut is always visible (GH-175). Names and other standalone slots use
     ``LINE_TEXT_MAX_LEN`` (256); titles use ``TITLE_TEXT_MAX_LEN`` (1024)."""
-    text = safe_error_text(value, max_len=None)
+    text = safe_error_text(drop_format_chars(value), max_len=None)
     if max_len is None or len(text) <= max_len:
         return text
     if max_len <= 0:
@@ -254,12 +270,13 @@ def safe_id_text(value: str, *, max_len: int | None = 256) -> str:
     ``= + / : , . _ - ! ~ @ ( )`` and single spaces byte-exact (base64
     padding, URNs, ``202601026118 (1688214-U)``); strips control characters,
     caps length, collapses a run of whitespace to one space and neutralises
-    only ``|<>[]``. With the id alone on its line, ``( )`` cannot forge a
+    only ``|<>[]``. Format and bidi characters (category Cf, e.g. U+202E) are
+    dropped first by :func:`drop_format_chars` (GH-250). With the id alone on its line, ``( )`` cannot forge a
     neighbouring ``(id: ...)`` (GH-212 ruling,
     https://github.com/wailuen/a2a-sdk/issues/212#issuecomment-6359828392).
     An id joined into a row with other fields must use
     :func:`safe_joined_id_text` instead."""
-    text = safe_error_text(value, max_len=max_len)
+    text = safe_error_text(drop_format_chars(value), max_len=max_len)
     return " ".join(text.split()).translate(_ID_NEUTRALISE)
 
 
@@ -270,7 +287,7 @@ def safe_joined_id_text(value: str, *, max_len: int | None = 256) -> str:
     neutralised, so the id cannot forge a second ``id:``/``conversation:`` or a
     readable fake figure such as ``(Called down=99.0%)`` (GH-212 HUMAN GATE,
     https://github.com/wailuen/a2a-sdk/issues/212#issuecomment-6366237627)."""
-    text = safe_error_text(value, max_len=max_len)
+    text = safe_error_text(drop_format_chars(value), max_len=max_len)
     return "_".join(text.split()).translate(_JOINED_ID_NEUTRALISE)
 
 

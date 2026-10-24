@@ -22,7 +22,6 @@ import json
 import logging
 import re
 import time
-import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from typing import (
@@ -1177,10 +1176,6 @@ _BUILTIN_ERROR_CODES: frozenset[str] = frozenset(
 ) | {UNKNOWN_ARGUMENT_ERROR_TYPE}
 
 
-def _drop_format_chars(text: str) -> str:
-    return "".join(c for c in text if unicodedata.category(c) != "Cf")
-
-
 def _validation_phrase(e: Any) -> str:
     err_type = e["type"]
     if err_type == "value_error":
@@ -1188,7 +1183,7 @@ def _validation_phrase(e: Any) -> str:
         if isinstance(err, SafeValueError):
             hint = getattr(type(err), "message", None)
             if isinstance(hint, str):
-                text = _drop_format_chars(safe_line_text(hint)).strip()
+                text = safe_line_text(hint)
                 if text:
                     return text
     phrase = _VALIDATION_TYPE_PHRASES.get(err_type)
@@ -1213,7 +1208,10 @@ def safe_validation_message(
     ``_redact_loc``). A type code outside ``_VALIDATION_TYPE_PHRASES`` renders
     a fixed generic phrase; a pydantic built-in code renders the bare code (a
     custom code can be built from input). A ``value_error`` raised as a ``SafeValueError`` renders its
-    class-level ``message`` hint (GH-230).
+    class-level ``message`` hint (GH-230), cleaned by ``safe_line_text`` (control and
+    format/bidi characters dropped, length capped); a hint that cleans to nothing
+    falls back to the generic phrase, and ``SafeValueError`` refuses such a hint
+    at class definition (``TypeError``, GH-250).
     """
     fields = "; ".join(
         f"{_unknown_argument_loc(e['loc']) if e['type'] == UNKNOWN_ARGUMENT_ERROR_TYPE else _redact_loc(tuple(e['loc']), e['type'], input_model)} — "

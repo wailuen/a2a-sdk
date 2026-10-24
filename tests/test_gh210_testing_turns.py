@@ -49,7 +49,12 @@ def _a2a_ok(text="hello"):
 
 
 def _client(handler):
-    return httpx.AsyncClient(base_url="http://t", transport=httpx.MockTransport(handler),
+    def routed(req):
+        if req.method == "GET" and req.url.path.startswith("/.well-known/"):
+            return httpx.Response(200, json={"capabilities": {}})
+        return handler(req)
+
+    return httpx.AsyncClient(base_url="http://t", transport=httpx.MockTransport(routed),
                              headers={"Authorization": f"Bearer {SECRET}"})
 
 
@@ -218,7 +223,10 @@ async def test_agui_message_list_restored_after_failed_attempt(tmp_path, key_fil
             run_key="r2", state_dir=tmp_path / "state", client=c,
         )
     assert out["ok"] and out["reply"] == "agui reply"
-    assert seen[0] == seen[1] == [{"role": "user", "content": QUERY}]
+    def bare(msgs):
+        return [{k: v for k, v in m.items() if k != "id"} for m in msgs]
+
+    assert bare(seen[0]) == bare(seen[1]) == [{"role": "user", "content": QUERY}]
     saved = json.loads((tmp_path / "state" / "acc-r2-agui-msgs.json").read_text())
     assert [m["role"] for m in saved] == ["user", "assistant"]
 

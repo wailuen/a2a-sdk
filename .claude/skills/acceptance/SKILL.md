@@ -207,6 +207,9 @@ It does, in order:
    differs from the registered tier-1 count, an input field has no
    description, an `inputSchema` has `$ref` or `$defs`, or the list is over
    the size budget (default 120000 bytes, `--size-budget`).
+   The built-in `load_skill` tool is not counted (matched by its fixed shape,
+   so a domain tier-1 tool named `load_skill` is counted; `--skills-tool`
+   excludes by name).
 2. One `tools/call` per tool with its `sample=` args, only when the tool is
    read-only (`annotations.readOnlyHint == true`, i.e. `read_only=True`).
    - `sample=None`: skipped with a warning (not a failure).

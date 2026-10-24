@@ -35,6 +35,7 @@ from typing import Any
 
 import httpx
 
+from ..models.content_types import A2UI_EXTENSION_URI
 from .chat import ChatDriver
 
 logger = logging.getLogger("agent_sdk.testing.turns")
@@ -126,23 +127,43 @@ def _safe(run_key: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", run_key)
 
 
+async def _a2ui_advertised(driver: ChatDriver) -> bool:
+    try:
+        card = await driver._discover_card()
+    except (httpx.HTTPError, ValueError):
+        return False
+    exts = (card.get("capabilities") or {}).get("extensions") or []
+    return any(isinstance(e, dict) and e.get("uri") == A2UI_EXTENSION_URI for e in exts)
+
+
 async def _a2a_attempt(
-    client: httpx.AsyncClient, query: str, state: dict[str, str]
+    client: httpx.AsyncClient,
+    query: str,
+    state: dict[str, str],
+    driver: ChatDriver | None = None,
 ) -> _Attempt:
     at = _Attempt()
+    driver = driver or ChatDriver(client)
+    a2ui = await _a2ui_advertised(driver)
     msg: dict[str, Any] = {
         "kind": "message",
         "role": "user",
         "messageId": uuid.uuid4().hex,
         "parts": [{"kind": "text", "text": query}],
     }
+    headers: dict[str, str] = {}
+    if a2ui:
+        headers["X-A2A-Extensions"] = A2UI_EXTENSION_URI
+        msg["metadata"] = {"a2uiClientCapabilities": driver._caps}
     if state.get("task_id") and state.get("state") in ("input-required", "auth-required"):
         msg["taskId"] = state["task_id"]
     elif state.get("context_id"):
         msg["contextId"] = state["context_id"]
     task_id = ctx_id = cur_state = ""
     try:
-        async with client.stream("POST", "/v1/message:stream", json={"message": msg}) as r:
+        async with client.stream(
+            "POST", "/v1/message:stream", json={"message": msg}, headers=headers
+        ) as r:
             r.raise_for_status()
             async for line in r.aiter_lines():
                 if not line.startswith("data:"):
@@ -278,6 +299,7 @@ async def run_turn(
             "context_id": _read(files["ctx"]),
             "state": _read(files["state"]),
         }
+        a2a_driver = ChatDriver(client) if transport == "a2a" else None
         attempts = 0
         any_rate_limited = False
         last: _Attempt | None = None
@@ -294,7 +316,7 @@ async def run_turn(
                 try:
                     if transport == "a2a":
                         last = await asyncio.wait_for(
-                            _a2a_attempt(client, query, a2a_state),
+                            _a2a_attempt(client, query, a2a_state, a2a_driver),
                             timeout=max(0.0, deadline - _now()),
                         )
                         ok = last.classify()

@@ -111,6 +111,7 @@ from starlette.background import BackgroundTask
 from ..auth.context import bind_identity, unbind_identity
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
+from ..common.body import BodyTooLarge, read_capped_body
 from ..common.admission import (
     SlotTable,
     StreamSlot,
@@ -120,7 +121,12 @@ from ..common.admission import (
     resolve_per_identity_limit,
     slot_table,
 )
-from ..common.json_strict import dumps_strict, loads_strict
+from ..common.json_strict import (
+    NESTING_TOO_DEEP_MESSAGE,
+    NestingTooDeep,
+    dumps_strict,
+    loads_strict,
+)
 from ..common.origin import guard_origin
 from ..common.schema import flatten_schema, strip_schema_titles
 from ..common.redact import TITLE_TEXT_MAX_LEN, frame_locations, safe_line_text, sanitize_text
@@ -402,6 +408,12 @@ def _result(request_id: Any, payload: Any) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "result": payload}
 
 
+def _parse_failure_text(exc: Exception) -> str:
+    """Fixed client text for a body ``loads_strict`` refused: valid-but-too-deep
+    JSON is told apart from malformed JSON; the code stays -32700 (GH-250)."""
+    return NESTING_TOO_DEEP_MESSAGE if isinstance(exc, NestingTooDeep) else "parse error"
+
+
 def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
@@ -453,6 +465,29 @@ def _negotiated_version(request: Request) -> "str | object | None":
     return None
 
 
+def _queue_full() -> JSONResponse:
+    return JSONResponse(status_code=503, content={"error": "session queue full"})
+
+
+def _valid_request_id(request_id: Any) -> bool:
+    """A request id is a string or an integer (bool is not one)."""
+    return isinstance(request_id, (str, int)) and not isinstance(request_id, bool)
+
+
+def _is_json_content_type(request: Request) -> bool:
+    ct = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    return not ct or ct == "application/json"
+
+
+def _page(entries: list[Any], cursor: Any) -> tuple[list[Any], str | None]:
+    """One page of ``entries`` plus the next cursor (``None`` on the last page).
+    Raises ``_InvalidCursor`` for a cursor that is not one of ours (GH-236)."""
+    offset = _decode_cursor(cursor)
+    page = entries[offset : offset + _PAGE_SIZE]
+    next_offset = offset + _PAGE_SIZE
+    return page, (_encode_cursor(next_offset) if next_offset < len(entries) else None)
+
+
 async def _dispatch(app: Any, message: dict[str, Any]) -> dict[str, Any] | None:
     """Route one JSON-RPC message. Returns None for notifications (never
     answered — even when the client fabricates an id on one)."""
@@ -463,9 +498,14 @@ async def _dispatch(app: Any, message: dict[str, Any]) -> dict[str, Any] | None:
         params = {}
 
     if not isinstance(method, str) or not method:
-        return _error(request_id, _INVALID_REQUEST, "missing method")
+        # JSON-RPC 2.0 §5: echo the id only when it is a valid one.
+        return _error(
+            request_id if _valid_request_id(request_id) else None, _INVALID_REQUEST, "missing method"
+        )
     if method.startswith("notifications/"):
         return None
+    if not _valid_request_id(request_id):
+        return _error(None, _INVALID_REQUEST, "invalid request id")
     if not isinstance(params, dict):
         # Defensive: reject non-dict params before any handler touches them.
         return _error(request_id, _INVALID_PARAMS, "params must be an object")
@@ -538,9 +578,10 @@ def _handle_initialize(app: Any, params: dict[str, Any]) -> dict[str, Any]:
         "name": display_name,
         "version": settings.agent_version,
     }
-    # title was added in 2025-11-25; only emit it when the negotiated version
-    # is that version or newer.  SUPPORTED_PROTOCOL_VERSIONS is newest-first,
-    # so an index comparison is sufficient.
+    # title is spec-valid at 2025-06-18 but gated here at 2025-11-25 (see the
+    # docstring); this is the only version gate in the MCP layer (tools/list is
+    # version-independent by choice, GH-246).  SUPPORTED_PROTOCOL_VERSIONS is
+    # newest-first, so an index comparison is sufficient.
     if (
         SUPPORTED_PROTOCOL_VERSIONS.index(version)
         <= SUPPORTED_PROTOCOL_VERSIONS.index(_TITLE_MIN_VERSION)
@@ -639,7 +680,7 @@ def _skill_catalog(skills: list[Any]) -> str:
         suffix_len = len(f"; …and {left} more")
         added = len(entry) + (2 if kept else 0)
         if used + added + suffix_len > _MAX_SKILL_CATALOG_LEN:
-            break
+            continue
         kept.append(entry)
         used += added
     more = f"…and {len(entries) - len(kept)} more"
@@ -667,15 +708,14 @@ def _load_skill_tool(skills: list[Any]) -> dict[str, Any]:
 def _handle_prompts_list(app: Any, params: dict[str, Any]) -> dict[str, Any]:
     skills = _mcp_skills(app)
     try:
-        offset = _decode_cursor(params.get("cursor"))
+        page, next_cursor = _page(skills, params.get("cursor"))
     except _InvalidCursor:
         return {"__jrpc_error__": _INVALID_CURSOR}
-    page = skills[offset : offset + _PAGE_SIZE]
     result: dict[str, Any] = {
         "prompts": [{"name": s.name, "description": s.description} for s in page]
     }
-    if offset + _PAGE_SIZE < len(skills):
-        result["nextCursor"] = _encode_cursor(offset + _PAGE_SIZE)
+    if next_cursor is not None:
+        result["nextCursor"] = next_cursor
     return result
 
 
@@ -716,10 +756,9 @@ def _handle_tools_list(app: Any, params: dict[str, Any] | None = None) -> dict[s
     # RT-001/GH-236: a negative base64 cursor would wrap Python list slicing to
     # the tail of the list, so an undecodable or negative cursor is -32602.
     try:
-        offset = _decode_cursor(params.get("cursor"))
+        page_entries, next_cursor = _page(all_entries, params.get("cursor"))
     except _InvalidCursor:
         return {"__jrpc_error__": _INVALID_CURSOR}
-    page_entries = all_entries[offset : offset + _PAGE_SIZE]
 
     strict = app.state.settings.mcp_schema_mode == "strict"
     tools: list[dict[str, Any]] = []
@@ -742,9 +781,8 @@ def _handle_tools_list(app: Any, params: dict[str, Any] | None = None) -> dict[s
         tools.append(tool)
 
     result: dict[str, Any] = {"tools": tools}
-    next_offset = offset + _PAGE_SIZE
-    if next_offset < len(all_entries):
-        result["nextCursor"] = _encode_cursor(next_offset)
+    if next_cursor is not None:
+        result["nextCursor"] = next_cursor
     return result
 
 
@@ -842,7 +880,7 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
                 return {"content": [{"type": "text", "text": text}], "isError": True}
         for skill in skills:
             if isinstance(requested, str) and skill.name == requested:
-                return {"content": [{"type": "text", "text": skill.body}]}
+                return {"content": [{"type": "text", "text": skill.body}], "isError": False}
         # SI-2: fixed text, the requested name is never echoed or logged.
         return {
             "content": [{"type": "text", "text": _SKILL_NOT_FOUND}],
@@ -1061,12 +1099,8 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
 
 
 def _is_jsonrpc_response(message: dict[str, Any]) -> bool:
-    """id + result|error and no method: a client replying to a server request."""
-    return (
-        "method" not in message
-        and message.get("id") is not None
-        and ("result" in message or "error" in message)
-    )
+    """result|error and no method: a client replying to a server request (id may be null)."""
+    return "method" not in message and ("result" in message or "error" in message)
 
 
 @router.post("/", include_in_schema=False)
@@ -1082,28 +1116,28 @@ async def mcp_post(
     # MCP Streamable HTTP 2025-06-18 §3.2.1: clients MUST send
     # Content-Type: application/json.  Reject non-conforming requests with 415;
     # guard with `if ct` to preserve no-header pass-through (dev tools often omit it).
-    ct = request.headers.get("content-type", "").split(";")[0].strip()
-    if ct and ct != "application/json":
+    if not _is_json_content_type(request):
         return JSONResponse(
             status_code=415,
             content={"error": "Content-Type must be application/json"},
             headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
         )
 
-    raw = await request.body()
     # RTGA-006: parse the message FIRST so we can determine is_initialize before
     # validating MCP-Protocol-Version.  initialize must bypass the version-header
     # 400 and proceed to body-level negotiation (DESIGN §5.5).
-    if len(raw) > _MAX_BODY_BYTES:
+    try:
+        raw = await read_capped_body(request, _MAX_BODY_BYTES)
+    except BodyTooLarge:
         return JSONResponse(
             status_code=413, content={"error": "request body too large"},
             headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
         )
     try:
         message = loads_strict(raw.decode("utf-8")) if raw else {}
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         return JSONResponse(
-            content=_error(None, _PARSE_ERROR, "parse error"),
+            content=_error(None, _PARSE_ERROR, _parse_failure_text(exc)),
             headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
         )
     if not isinstance(message, dict):
@@ -1177,8 +1211,8 @@ async def mcp_post(
         unbind_identity(identity_token)
         forwarding.unbind(token)
 
-    # Notifications (and fabricated-id notifications) → 202 Accepted, empty.
-    if response is None or message.get("id") is None:
+    # Notifications → 202 Accepted, empty.
+    if response is None:
         return Response(status_code=202, headers=base_headers)
 
     response = _writable_response(response)
@@ -1487,26 +1521,35 @@ async def mcp_messages(
     # before the MCP-Protocol-Version gate — mirroring mcp_post (lines 451-487).
     # An initialize request on the legacy HTTP+SSE path carries no version header
     # on first contact and must not be rejected with 400 before negotiation.
-    raw = await request.body()
-    if len(raw) > _MAX_BODY_BYTES:
+    if not _is_json_content_type(request):
+        return JSONResponse(
+            status_code=415,
+            content={"error": "Content-Type must be application/json"},
+            headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
+        )
+    try:
+        raw = await read_capped_body(request, _MAX_BODY_BYTES)
+    except BodyTooLarge:
         return JSONResponse(
             status_code=413, content={"error": "request body too large"},
             headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
         )
     try:
         message = loads_strict(raw.decode("utf-8")) if raw else {}
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         # RTGA-003: use put_nowait to avoid blocking indefinitely on a full/dead queue.
         try:
-            queue.put_nowait(json.dumps(_error(None, _PARSE_ERROR, "parse error")))
+            queue.put_nowait(
+                json.dumps(_error(None, _PARSE_ERROR, _parse_failure_text(exc)))
+            )
         except asyncio.QueueFull:
-            return Response(status_code=503, content=b"session queue full")
+            return _queue_full()
         return Response(status_code=202)
     if not isinstance(message, dict):
         try:
             queue.put_nowait(json.dumps(_error(None, _INVALID_REQUEST, "invalid request")))
         except asyncio.QueueFull:
-            return Response(status_code=503, content=b"session queue full")
+            return _queue_full()
         return Response(status_code=202)
 
     is_initialize = message.get("method") == "initialize"
@@ -1524,6 +1567,9 @@ async def mcp_messages(
             headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
         )
 
+    if _is_jsonrpc_response(message):
+        return Response(status_code=202)
+
     token = forwarding.bind(forwarding.parse_header(request.headers.get(forwarding.HEADER_NAME)))
     identity_token = bind_identity(identity)
     try:
@@ -1531,11 +1577,11 @@ async def mcp_messages(
     finally:
         unbind_identity(identity_token)
         forwarding.unbind(token)
-    if response is not None and message.get("id") is not None:
+    if response is not None:
         # RTGA-003: put_nowait matches the SDK pattern in tasks/store.py (lines 44-54);
         # await queue.put() would block indefinitely when the SSE consumer is slow or gone.
         try:
             queue.put_nowait(dumps_strict(_writable_response(response)))
         except asyncio.QueueFull:
-            return Response(status_code=503, content=b"session queue full")
+            return _queue_full()
     return Response(status_code=202)

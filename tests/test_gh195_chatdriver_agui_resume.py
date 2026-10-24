@@ -28,7 +28,7 @@ async def test_agui_resume_completes_interrupted_tool(client, fake_model):
     errors: list[str] = []
     text = await driver.agui_resume(
         interrupt_id, thread_id, messages,
-        status="approved",
+        status="resolved", payload={"decision": "approved"},
         emit={"tool_done": lambda: tool_done.append(1), "error": errors.append},
     )
 
@@ -40,7 +40,8 @@ async def test_agui_resume_completes_interrupted_tool(client, fake_model):
     assert [m for m in messages if m["role"] == "user"] == [
         m for m in before if m["role"] == "user"
     ]
-    assert messages[-1] == {"role": "assistant", "content": "after resume"}
+    assert {k: v for k, v in messages[-1].items() if k != "id"} == {"role": "assistant", "content": "after resume"}
+    assert messages[-1]["id"]
 
 
 async def test_agui_resume_unknown_id_fires_error(client, fake_model):

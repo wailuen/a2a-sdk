@@ -35,7 +35,7 @@ from .test_gh156_mcp_text_ids import _call
 PAREN_ID = "202601026118 (1688214-U)"
 HOSTILE_EMAIL_ID = "a) (id: b, conversation: c"
 HOSTILE_PB = "PB1 (Called down=99.0%)"
-HOSTILE_STANDALONE = "a\r\nb|c<d>e[f]g\x07h\x1bi j\u2028k\x85l\x9bm"
+HOSTILE_STANDALONE = "a\r\nb|c<d>e[f]g\x07h\x1bi\u2028j\u2028k\x85l\x9bm\u202en\u2066o"
 
 tools = ToolSet()
 
@@ -114,6 +114,7 @@ async def _both(client: httpx.AsyncClient, key: str) -> list[str]:
 
 def test_exported() -> None:
     assert agent_sdk.safe_id_text is safe_id_text
+    assert agent_sdk.safe_joined_id_text is safe_joined_id_text
 
 
 def test_safe_id_text_alphabet() -> None:
@@ -155,13 +156,13 @@ async def test_standalone_hostile_cannot_add_line_or_column(gh212_client) -> Non
     for text in await _both(gh212_client, "standalone_hostile"):
         assert len(text.splitlines()) == ent_lines, text
         id_line = next(ln for ln in text.splitlines() if ln.startswith("    id: "))
-        for ch in "|<>[]\x07\x1b \r\u2028\x85\x9b":
+        for ch in "|<>[]\x07\x1b\u2028\r\x85\x9b\u202e\u2066":
             assert ch not in id_line
     for text in await _both(gh212_client, "is_id_hostile"):
         lines = text.splitlines()
         assert len(lines) == 3, text
         assert lines[-1].count(" | ") == 1
-        for ch in "\r\x07\x1b\u2028\x85\x9b":
+        for ch in "\r\x07\x1b\u2028\x85\x9b\u202e\u2066":
             assert ch not in text
 
 
