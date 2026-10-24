@@ -669,7 +669,9 @@ function renderComparisonTable(data) {
           null,
           columns.map((c) => {
             const v = row ? row[c.key] : undefined;
-            return el("td", { class: typeof v === "number" ? "mono" : null }, v === undefined || v === null ? "—" : fmtNum(v));
+            // GH-212: an is_id column is shown byte-exact, never locale-formatted.
+            const text = v === undefined || v === null ? "—" : c.is_id ? String(v) : fmtNum(v);
+            return el("td", { class: typeof v === "number" || c.is_id ? "mono" : null }, text);
           })
         )
       )

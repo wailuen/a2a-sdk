@@ -352,17 +352,18 @@ async def test_strict_tools_list_input_and_output_schemas(tmp_path, fake_model):
 
 
 async def test_strict_required_nullable_output_validates_end_to_end(tmp_path, fake_model):
-    """RT-001: wire() uses exclude_none, so a required-nullable field set to
-    None is absent from structuredContent; the strict outputSchema must not
-    list it in required, and must still accept an explicit null."""
+    """RT-001: the strict outputSchema must not list a required-nullable
+    field in required, and must accept an explicit null. Since v0.20.0 the
+    MCP route sends such a field as null (_restore_required_nulls)."""
     tools, calls = await _list_and_call("strict", tmp_path, fake_model)
     out = tools["gh206_nullable"]["outputSchema"]
     assert not {"x", "c", "leaf"} & set(out.get("required", []))
     assert out["properties"]["x"]["type"] == ["string", "null"]
     empty = calls["gh206_nullable:None"]
     assert empty["isError"] is False
-    assert not {"x", "c", "leaf"} & set(empty["structuredContent"])
+    assert {k: empty["structuredContent"][k] for k in ("x", "c", "leaf")} == {"x": None, "c": None, "leaf": None}
     jsonschema.validate(empty["structuredContent"], out)
+    jsonschema.validate({k: v for k, v in empty["structuredContent"].items() if k not in ("x", "c", "leaf")}, out)
     full = calls["gh206_nullable:set"]
     assert full["isError"] is False
     jsonschema.validate(full["structuredContent"], out)

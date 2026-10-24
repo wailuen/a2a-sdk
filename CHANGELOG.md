@@ -24,6 +24,9 @@ internals, `contrib/`) may change in minors with notice here.
 ### Fixed
 - GH-230 / LRN-470: a pydantic error `type` code outside the known list (for example `PydanticCustomError(f"leak_{x}", ...)`) was echoed into tool error text, so input could leak. It now shows "input failed validation". The SDK's own `unknown_argument` code and every code already in the list are unchanged.
 - GH-229: `acceptance-api.js` (`harness/workflows/` and the template copy) now normalizes `args` like `wave-cycle.js` (GH-131): a JSON-string `args` is parsed, bad JSON gets a named error, and every read goes through `normalizedArgs`. It fails fast when `scenarios` is not an array or `baseUrl`/`keyFile` is missing; errors name only the field and never echo args or values (SI-2). Tests: `tests/test_gh131_acceptance_api_args_normalization.py`.
+- MCP `tools/call` `structuredContent` now conforms to the advertised `outputSchema` in both schema modes: a required field whose value is `None` is sent as `null` instead of being dropped by `exclude_none`, and a plain pydantic `emits` model is dumped `by_alias=True` (the text block too) so aliased keys match the schema (`agent_sdk/routes/mcp.py::_restore_required_nulls`). Tests: `tests/test_gh225_multi_type_emits.py::test_required_null_and_alias_conform_to_output_schema`.
+- Strict schema mode drops a `discriminator.mapping` whose `#/$defs` targets were inlined. The synthetic `load_skill` tool description caps its skill catalog at 2048 characters. `mcp_description` that is not a string fails registration with `ValueError`. `mcp_skills` is typed `Literal["tool", "prompts"] | None`.
+- Console: a `ComparisonTable` `is_id` column renders its value as-is, never locale-formatted (`agent_sdk/console/static/a2ui.js`, GH-212).
 
 ## [0.19.0] — 2026-10-23
 

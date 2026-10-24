@@ -11,7 +11,7 @@ from typing import Any, ClassVar
 import httpx
 import jsonschema
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agent_sdk.a2ui.translator import A2uiCapabilities
 from agent_sdk.agent.deferred import DeferredResult
@@ -652,6 +652,52 @@ async def test_lrn469_undeclared_model_type_is_mcp_tool_error(settings, fake_mod
                     assert "structuredContent" not in res
                     assert res["content"][0]["text"] == "tool output does not match its declared type"
                     assert "_Other" not in res["content"][0]["text"]
+    finally:
+        app.state.credential_store.close()
+        gc.collect()
+
+
+class _Inner(BaseModel):
+    y: int | None
+
+
+class _NullAlias(BaseModel):
+    x: int | None
+    from_: str = Field(alias="from")
+    inner: _Inner
+    items: list[_Inner] = []
+
+
+def _null_alias_toolset() -> ToolSet:
+    ts = ToolSet()
+
+    @ts.tool(tier=1, emits=_NullAlias)
+    async def rel020_null_alias():
+        """Returns required-null fields and an aliased field."""
+        return _NullAlias(x=None, **{"from": "a"}, inner=_Inner(y=None), items=[_Inner(y=None)])
+
+    return ts
+
+
+@pytest.mark.parametrize("mode", ["standard", "strict"])
+async def test_required_null_and_alias_conform_to_output_schema(settings, fake_model, mode):
+    """v0.20.0 release gate: exclude_none dropped required-null keys and the
+    dump ignored aliases, so structuredContent failed its own outputSchema."""
+    settings = settings.model_copy(update={"mcp_schema_mode": mode})
+    app = _app(settings, fake_model, _null_alias_toolset())
+    try:
+        async with app.router.lifespan_context(app):
+            async with await _authed(app) as c:
+                h = await _mcp_init(c)
+                listed = (await c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, headers=h)).json()
+                tool = next(t for t in listed["result"]["tools"] if t["name"] == "rel020_null_alias")
+                res = (await c.post("/mcp", json=_call(2, "rel020_null_alias", {}), headers=h)).json()["result"]
+                assert res.get("isError") is not True
+                sc = res["structuredContent"]
+                assert sc["from"] == "a" and "from_" not in sc
+                jsonschema.validate(sc, tool["outputSchema"])
+                assert ("$defs" in tool["outputSchema"]) is (mode == "standard")
+                assert '"from":' in res["content"][0]["text"]
     finally:
         app.state.credential_store.close()
         gc.collect()

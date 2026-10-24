@@ -695,8 +695,31 @@ def _tool_text(artifact: Any) -> str:
     if isinstance(artifact, ContentModel):
         return artifact.to_plain_text()
     if isinstance(artifact, BaseModel):
-        return artifact.model_dump_json(exclude_none=True)
+        return artifact.model_dump_json(by_alias=True, exclude_none=True)
     return str(artifact)
+
+
+def _restore_required_nulls(model: BaseModel, dump: Any) -> Any:
+    """Put back the ``None`` keys ``exclude_none`` dropped for fields the
+    model's own schema lists as ``required``, so structuredContent conforms to
+    the advertised outputSchema (MCP 2025-06-18). Recurses into nested models
+    and lists of models; never overwrites a key a serializer wrote."""
+    if not isinstance(dump, dict):
+        return dump
+    required = type(model).model_json_schema(mode="serialization").get("required", [])
+    for name, info in type(model).model_fields.items():
+        key = info.serialization_alias or info.alias or name
+        value = getattr(model, name, None)
+        if value is None:
+            if key in required and key not in dump:
+                dump[key] = None
+        elif isinstance(value, BaseModel):
+            _restore_required_nulls(value, dump.get(key))
+        elif isinstance(value, (list, tuple)) and isinstance(dump.get(key), list) and len(dump[key]) == len(value):
+            for item, item_dump in zip(value, dump[key]):
+                if isinstance(item, BaseModel):
+                    _restore_required_nulls(item, item_dump)
+    return dump
 
 
 async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -912,9 +935,12 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
         result["structuredContent"] = (
             {"markdown": artifact.to_markdown()}
             if isinstance(artifact, MarketBriefing)
-            else artifact.wire()
-            if isinstance(artifact, ContentModel)
-            else artifact.model_dump(mode="json", exclude_none=True)
+            else _restore_required_nulls(
+                artifact,
+                artifact.wire()
+                if isinstance(artifact, ContentModel)
+                else artifact.model_dump(mode="json", by_alias=True, exclude_none=True),
+            )
         )
     # GH-173: a value that bypassed validation (model_construct, assignment
     # after construction, a domain list[float]) can still hold nan/inf here.
