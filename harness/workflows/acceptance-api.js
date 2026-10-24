@@ -200,7 +200,7 @@ function buildScenarioPrompt(s, a) {
 
     'RULES:\n' +
     '- A rate-limited turn (helper failureClass "rate-limited") is never scored 1–2; omit it from min scores.\n' +
-    '  If every turn on a transport was rate-limited, set that transport's minScore to 1 (schema minimum, not a score), passed=false and failureClass "rate-limited". Untested turns are "not run", never 10/10.\n' +
+    '  If every turn on a transport was rate-limited, set the minScore of that transport to 1 (schema minimum, not a score), passed=false and failureClass "rate-limited". Untested turns are "not run", never 10/10.\n' +
     '- Never hard-fail on a network timeout — score the turn 1, rationale "timeout".\n' +
     '- If only one transport was run (--transport flag), set the other minScore to 10 and turns to [].\n' +
     '- Return structured output matching the schema exactly.\n'

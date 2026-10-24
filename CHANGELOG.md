@@ -4,6 +4,12 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
+## [Unreleased]
+
+### Fixed
+- GH-233: `acceptance-api.js` (`harness/workflows/` and the template copy) had an apostrophe inside a single-quoted string, so the Workflow runtime could not load it and `/acceptance` stopped before any scenario. The rule text now reads "set the minScore of that transport to 1". Tests: `tests/test_gh233_workflow_scripts_parse.py` (runs `node --check` on every workflow script).
+- GH-234: `ChatDriver` AG-UI driver (`agent_sdk/testing/chat.py`) sends `credentials=` and `Accept: text/event-stream` on `/ag-ui/run`; a stream with no `RUN_FINISHED`/`RUN_ERROR` fires the `error` emit `stream closed without a terminal event` and returns `""` (as does a `RUN_ERROR` stream, so no partial reply reaches `messages`); frames after `RUN_ERROR` are ignored; text from different `messageId`s is joined with `\n` and `TEXT_MESSAGE_CHUNK` is handled. Console (`agent_sdk/console/static/chat.js`, `agent_sdk/console/static/a2ui.js`): "Reset session" in `chat.js` calls the new `a2ui.js` export `resetSurfaces()` to clear painted A2UI surfaces, a surface entry in `a2ui.js` no longer keeps a duplicate component list, a failed resume POST in `chat.js` restores the pending interrupt, and `TEXT_MESSAGE_CHUNK`-only messages are folded into history in `chat.js`. Tests: `tests/test_gh234_agui_chat_driver.py`. A `TEXT_MESSAGE_CHUNK` without `messageId` joins the open chunk message (AG-UI sends the id on the first chunk only), in both `agent_sdk/testing/chat.py` and `agent_sdk/console/static/chat.js`; the console folds chunk-only text into history only after `RUN_FINISHED`.
+
 ## [0.20.0] — 2026-10-24
 
 ### 🔴 Breaking changes

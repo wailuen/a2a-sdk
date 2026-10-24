@@ -487,3 +487,5 @@ Entries ordered by LRN number.
 | LRN-481 | Root caplog misses agent_sdk logger after build_app | [LRN-481](LRN-481-root-caplog-misses-sdk-logger.md) |
 | LRN-482 | Strict schema decides nullability before $ref resolution | [LRN-482](LRN-482-nullability-before-ref-resolution.md) |
 | LRN-490 | Parallel groups each open their own Unreleased heading | [LRN-490](LRN-490-parallel-groups-duplicate-unreleased.md) |
+| LRN-491 | CHANGELOG Unreleased bullet must name every changed agent_sdk file | [LRN-491](LRN-491-changelog-names-all-changed-files.md) |
+| LRN-492 | Failed-request rollback must restore UI, not just state | [LRN-492](LRN-492-restore-ui-with-state.md) |

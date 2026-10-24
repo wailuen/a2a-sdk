@@ -61,6 +61,8 @@
 | C-068 | flatten_schema (strict MCP JSON-schema flattener: inlines local #/$defs refs, keeps $ref/$defs for self-referencing models; collapses anyOf:[X,{type:null}] to X and drops it from required; drops default:null; keeps multi-member anyOf incl. C-066 emits unions; runs before C-060; sibling of C-060/C-066; w062 GH-206) | agent_sdk/common/schema.py | present |
 | C-069 | normalizedArgs (Workflow args JSON-string normalizer: JSON.parse when args is a string, named error on bad JSON without echoing args, fallback args \|\| {}, fail fast on missing required field; GH-131 block, third copy via GH-229; register like C-014/C-037 with cross-runner parity test) | harness/workflows/wave-cycle.js ~22-35 + .claude/workflows/sdk-wave.js ~22-35 + harness/workflows/acceptance-api.js (GH-229) (+ template/.claude/workflows/*.js mirrors) | present |
 | C-070 | mcp_paginate (shared cursor page helper: offset = max(0, _decode_cursor(cursor)) slice + nextCursor; one helper for tools/list and GH-205 prompts/list so the RT-001 negative-offset clamp is not skipped; informational) | agent_sdk/routes/mcp.py (today inline in _handle_tools_list ~593-618 with private _decode_cursor/_encode_cursor ~546-560) | present |
+| C-071 | WORKFLOW_SCRIPT_PARSE_CHECK | tests/test_gh233_workflow_scripts_parse.py | present |
+| C-072 | agui_terminal_stream_reader | agent_sdk/testing/chat.py::ChatDriver._run_agui | present |
 
 ## Descriptions
 

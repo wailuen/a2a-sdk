@@ -14,7 +14,7 @@
  */
 
 import { el, clear, fmtJson, postSse, readSse, uuid } from "./api.js";
-import { renderA2ui } from "./a2ui.js";
+import { renderA2ui, resetSurfaces } from "./a2ui.js";
 import { postWithRetry } from "./retry.js";
 import { buildResumePayload, buildPayloadFromValues, formFields } from "./interrupt.js";
 
@@ -231,6 +231,7 @@ export function render(pane, ctx) {
     state.threadId = uuid();
     state.aguiMessages = [];
     pendingInterrupt = null;
+    resetSurfaces();
     input.placeholder = "Message the agent… (Enter to send, Shift+Enter for newline)";
     clear(transcript);
     clear(trace);
@@ -506,6 +507,7 @@ export function render(pane, ctx) {
   async function sendAgui(text, payloadOverride) {
     await catalogIdsReady;
     let body;
+    let resumed = null;
     if (pendingInterrupt) {
       // resume path: coerce the user's text per the interrupt's responseSchema
       // (GH-216); bad input shows an error and keeps the interrupt pending.
@@ -519,6 +521,7 @@ export function render(pane, ctx) {
         }
         payload = r.payload;
       }
+      resumed = pendingInterrupt;
       pendingInterrupt = null;
       body = {
         threadId: state.threadId,
@@ -551,11 +554,21 @@ export function render(pane, ctx) {
     const resp = await postWithRetry(() => postSse(`${state.base}/ag-ui/run`, body), {
       systemLine, traceFrame, label: "run request",
     });
-    if (!resp) return;
+    if (!resp) {
+      if (resumed) {
+        pendingInterrupt = resumed;
+        if (formFields(resumed.responseSchema)) interruptForm(resumed);
+        input.placeholder = `Resume: ${resumed.message || "Agent requires input to continue."}`;
+      }
+      return;
+    }
 
     const textBuffers = new Map(); // messageId -> streamingBubble
+    const chunkOpen = new Set(); // chunk-only messages not yet folded into history
     const toolArgBuffers = new Map(); // toolCallId -> accumulated JSON fragment string
     let terminal = false;
+    let finished = false; // RUN_FINISHED seen: only then do chunk-only messages count as a reply
+    let chunkId; // AG-UI sends messageId on the first chunk only; later chunks inherit it
     const processStream = async () => {
       try {
         await readSse(resp, ({ json, data }) => {
@@ -566,16 +579,29 @@ export function render(pane, ctx) {
               systemLine(`run ${json.runId || ""} started`);
               break;
             case "TEXT_MESSAGE_START":
+              chunkId = undefined;
               textBuffers.set(json.messageId, streamingBubble());
               break;
             case "TEXT_MESSAGE_CONTENT":
             case "TEXT_MESSAGE_CHUNK": {
-              const buf = textBuffers.get(json.messageId);
+              let id = json.messageId;
+              if (json.type === "TEXT_MESSAGE_CHUNK") {
+                if (id !== undefined && id !== null) chunkId = id;
+                else id = chunkId;
+              }
+              let buf = textBuffers.get(id);
+              if (!buf && json.type === "TEXT_MESSAGE_CHUNK") {
+                buf = streamingBubble();
+                textBuffers.set(id, buf);
+                chunkOpen.add(id);
+              }
               if (buf && json.delta) buf.append(json.delta);
               break;
             }
             case "TEXT_MESSAGE_END": {
+              chunkId = undefined;
               const buf = textBuffers.get(json.messageId);
+              chunkOpen.delete(json.messageId);
               if (buf) {
                 // client owns history: fold the assistant turn back in
                 state.aguiMessages.push({ id: json.messageId, role: "assistant", content: buf.text() });
@@ -616,12 +642,13 @@ export function render(pane, ctx) {
               break;
             case "RUN_FINISHED":
               terminal = true;
+              finished = true;
               if (json.outcome && json.outcome.type === "interrupt") {
                 const interrupts = json.outcome.interrupts || [];
                 systemLine(`interrupted: ${fmtJson(interrupts)}`);
                 if (interrupts.length > 0) {
                   // store interrupt so the next send() becomes a resume POST
-                  pendingInterrupt = { interruptId: interrupts[0].id, responseSchema: interrupts[0].responseSchema };
+                  pendingInterrupt = { interruptId: interrupts[0].id, responseSchema: interrupts[0].responseSchema, message: interrupts[0].message };
                   if (formFields(interrupts[0].responseSchema)) interruptForm(pendingInterrupt);
                   const msg = interrupts[0].message || "Agent requires input to continue.";
                   systemLine(`↩ resume required — type your response and send (${msg})`);
@@ -699,6 +726,13 @@ export function render(pane, ctx) {
     };
 
     await processStream();
+
+    // chunk-only messages have no TEXT_MESSAGE_END: fold them into history,
+    // but only after RUN_FINISHED (a partial reply is not a reply; chat.py agrees)
+    for (const id of finished ? chunkOpen : []) {
+      const buf = textBuffers.get(id);
+      if (buf) state.aguiMessages.push({ id, role: "assistant", content: buf.text() });
+    }
 
     if (!terminal) systemLine("stream closed without RUN_FINISHED/RUN_ERROR");
   }

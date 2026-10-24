@@ -160,7 +160,10 @@ class ChatDriver:
         """One AG-UI turn over ``POST /ag-ui/run`` (SSE).
 
         Appends ``{role: user}`` and ``{role: assistant}`` to *messages* in-place
-        for multi-turn continuity.  Returns the assistant reply text.
+        for multi-turn continuity.  Returns the assistant reply text only when
+        the run ends with RUN_FINISHED (separate messages joined with "\n");
+        after RUN_ERROR or a stream with no terminal event it returns "" and
+        appends nothing (partial text still reaches the ``text`` emit).
         """
         messages.append({"role": "user", "content": query})
         reply = await self._run_agui(self._agui_body(thread_id, messages), emit)
@@ -211,10 +214,18 @@ class ChatDriver:
 
     async def _run_agui(self, body: dict[str, Any], emit: dict[str, Callable] | None) -> str:
         """POST *body* to ``/ag-ui/run`` and dispatch SSE frames to *emit*."""
-        reply_parts: list[str] = []
+        reply_parts: dict[str, list[str]] = {}
+        chunk_id: Any = None
         _pending_tool: str | None = None
+        finished = False
+        errored = False
 
-        async with self._client.stream("POST", "/ag-ui/run", json=body) as resp:
+        async with self._client.stream(
+            "POST",
+            "/ag-ui/run",
+            json=body,
+            headers=self._merged_headers({"Accept": "text/event-stream"}),
+        ) as resp:
             resp.raise_for_status()
             async for raw in resp.aiter_lines():
                 raw = raw.strip()
@@ -260,20 +271,36 @@ class ChatDriver:
                     else:
                         msgs = []
                     self._fire(emit, "a2ui", msgs)
-                elif t == "TEXT_MESSAGE_CONTENT":
+                elif t in ("TEXT_MESSAGE_START", "TEXT_MESSAGE_END"):
+                    chunk_id = None
+                elif t in ("TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_CHUNK"):
                     delta = frame.get("delta") or ""
-                    reply_parts.append(delta)
+                    msg_id = frame.get("messageId")
+                    if t == "TEXT_MESSAGE_CHUNK":
+                        # AG-UI sends messageId on the first chunk only.
+                        if msg_id:
+                            chunk_id = msg_id
+                        else:
+                            msg_id = chunk_id
+                    reply_parts.setdefault(str(msg_id or ""), []).append(delta)
                     self._fire(emit, "text", delta)
                 elif t == "RUN_ERROR":
+                    errored = True
                     self._fire(emit, "error", frame.get("message") or "run failed")
+                    break
                 elif t == "RUN_FINISHED":
+                    finished = True
                     outcome = frame.get("outcome") or {}
                     if outcome.get("type") == "interrupt":
                         interrupts = outcome.get("interrupts") or []
                         self._fire(emit, "interrupt", interrupts[0] if interrupts else outcome)
                     break
 
-        return "".join(reply_parts)
+        if not finished and not errored:
+            self._fire(emit, "error", "stream closed without a terminal event")
+        if not finished:
+            return ""
+        return "\n".join(t for t in ("".join(parts) for parts in reply_parts.values()) if t)
 
     # ── A2A ───────────────────────────────────────────────────────────────────
 

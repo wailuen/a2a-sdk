@@ -27,6 +27,10 @@ import { el } from "./api.js";
 /* surfaceId -> {catalogId, components: [], dataModel: {}, node, closed} */
 const surfaces = new Map();
 
+export function resetSurfaces() {
+  surfaces.clear();
+}
+
 /* ── JSON Pointer (RFC 6901) ── */
 
 function isRelativePointer(pointer) {
@@ -136,7 +140,6 @@ export function renderA2ui(messages, opts = {}) {
       if (!existing) {
         surfaces.set(surfaceId, {
           catalogId: catalogId || "",
-          components: [],
           _componentMap: new Map(),
           dataModel: {},
           node: null,
@@ -157,7 +160,6 @@ export function renderA2ui(messages, opts = {}) {
           if (c && c.id !== undefined) entry._componentMap.set(c.id, c);
         }
       }
-      entry.components = [...entry._componentMap.values()];
       touched.add(surfaceId);
     } else if (msg.updateDataModel) {
       const { surfaceId, path } = msg.updateDataModel;
@@ -213,9 +215,10 @@ export function renderA2ui(messages, opts = {}) {
 }
 
 function paintSurface(entry, fallbackText, notes) {
-  const root = entry.components.find((c) => c && c.id === "root");
+  const components = [...entry._componentMap.values()];
+  const root = components.find((c) => c && c.id === "root");
   if (!root) {
-    return fallbackNode(fallbackText, entry.components.length ? "surface has no root component" : "surface has no components");
+    return fallbackNode(fallbackText, components.length ? "surface has no root component" : "surface has no components");
   }
   const binding = root.data && root.data.path !== undefined ? root.data.path : null;
   if (isRelativePointer(binding)) {
