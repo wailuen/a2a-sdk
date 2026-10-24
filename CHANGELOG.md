@@ -4,7 +4,7 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
-## [Unreleased]
+## [0.20.0] — 2026-10-24
 
 ### 🔴 Breaking changes
 - GH-214: the SDK no longer emits `deleteSurface` for a surface in the artifact or run that created it, and the agent-card A2UI param `deleteSurfaceSemantics` is removed. This is a stable-core wire / Standard Profile change under DESIGN.md §4.0. Ruling: https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762. Emit impact: on A2A each A2UI artifact is `[TextPart, DataPart(open)]` (no close DataPart); on AG-UI each emission is `AGENT_ARTIFACT` then one `A2UI_UPDATE` (no second `A2UI_UPDATE` carrying `deleteSurface`). The open sequence is `createSurface`, `updateComponents`, `updateDataModel`. Parse impact: clients that read `deleteSurfaceSemantics` from the card (`dataEncoding` and the other A2UI params stay), or that waited for a `deleteSurface` message, see neither. Reason: a spec renderer painted each card and then unmounted it. A `translate()` output with no open messages is still rejected. The python helper `split_a2ui_delivery` and `split_a2ui_delivery_validated` are replaced by `validate_a2ui_delivery`. **Migration:** clients manage surface lifetime themselves (keep the card mounted, or unmount it on your own rules); each turn has a fresh `surfaceId`, so cards never collide. The admin console keeps every surface in the transcript. Changed: `agent_sdk/a2ui/translator.py`, `agent_sdk/a2ui/catalog.py`, `agent_sdk/agent/runner.py`, `agent_sdk/routes/ag_ui.py`, DESIGN.md §5.4/§7.1, `docs/protocols.md`. Tests: `tests/test_gh214_no_delete_surface.py`.
