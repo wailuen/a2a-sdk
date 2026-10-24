@@ -4,7 +4,7 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
-## [Unreleased]
+## [0.22.0] — 2026-10-24
 
 ### 🔴 Breaking changes
 - GH-250: (a) a `SafeValueError` subclass whose `message` cleans to empty (only control or Unicode format characters) now raises `TypeError` when its module is imported (`agent_sdk/models/errors.py`). (b) The exported stable-core helpers `safe_line_text`, `safe_cell_text`, `safe_id_text` and `safe_joined_id_text` (`agent_sdk/common/redact.py`) now drop Unicode format characters (Cf), so their output changes for any value that holds them, including ZWJ emoji sequences, Persian ZWNJ, and ids that contain a BOM or ZWSP. Ruling: https://github.com/wailuen/a2a-sdk/issues/250#issuecomment-6381441157. Tests: `tests/test_gh250_core_hardening.py`, `tests/test_gh230_safe_value_error.py`, `tests/test_gh212_id_safe_text.py`. **Migration:** give every `SafeValueError` subclass a `message` with at least one visible character; do not rely on Cf characters surviving these helpers (compare ids before cleaning, not after).
