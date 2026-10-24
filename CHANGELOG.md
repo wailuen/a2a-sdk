@@ -4,7 +4,7 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
-## [Unreleased]
+## [0.20.1] — 2026-10-24
 
 ### Fixed
 - GH-233: `acceptance-api.js` (`harness/workflows/` and the template copy) had an apostrophe inside a single-quoted string, so the Workflow runtime could not load it and `/acceptance` stopped before any scenario. The rule text now reads "set the minScore of that transport to 1". Tests: `tests/test_gh233_workflow_scripts_parse.py` (runs `node --check` on every workflow script).
