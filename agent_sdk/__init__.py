@@ -20,11 +20,16 @@ from .agent.model_client import ModelClient, ModelResponse, ModelToolCall
 from .agent.registry import ToolInputValidationError, ToolSet
 from .agent.reuse import ReuseKind, Reusable
 from .app import Agent
-from .common.redact import safe_block_text, safe_cell_text, safe_error_text
+from .common.redact import (
+    safe_block_text,
+    safe_cell_text,
+    safe_error_text,
+    safe_id_text,
+)
 from .config import BaseAgentSettings
 from .credentials.fields import CredentialField
 from .credentials.store import NS_MODEL
-from .models.errors import AgentError, ErrorCategory
+from .models.errors import AgentError, ErrorCategory, SafeValueError
 from .sources import SourceAdapter
 
 __all__ = [
@@ -44,7 +49,9 @@ __all__ = [
     "ReuseKind",
     "safe_block_text",
     "safe_cell_text",
+    "safe_id_text",
     "safe_error_text",
+    "SafeValueError",
     "SourceAdapter",
     "ToolInputValidationError",
     "ToolInterrupt",

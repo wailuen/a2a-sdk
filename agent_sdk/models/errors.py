@@ -63,6 +63,18 @@ A2A_HTTP_STATUS: dict[int, int] = {
 }
 
 
+class SafeValueError(ValueError):
+    """A validator rejection whose fixed hint may reach the caller (GH-230).
+
+    Subclass it, set the class attribute ``message`` to fixed guidance text and
+    raise it with no arguments. Only ``type(err).message`` is ever rendered;
+    anything passed at raise time is dropped, so never put input in the class
+    text.
+    """
+
+    message: str = ""
+
+
 class AgentError(Exception):
     """Raised by tools/adapters; translated per surface, never crashes the loop."""
 

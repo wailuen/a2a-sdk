@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import uuid
 
 import pytest
@@ -42,28 +44,16 @@ async def test_send_completes_with_artifact(client, fake_model):
     assert done["status"]["state"] == "completed"
     art = done["artifacts"][0]
     kinds = [p["kind"] for p in art["parts"]]
-    # Critical protocol-conformance fix: deleteSurface must never share a
-    # delivered array with its own surface's create/populate messages (a
-    # spec-conformant Path-A renderer folds one array atomically and paints
-    # once after the fold — a bundled deleteSurface would unmount the
-    # surface before it ever painted). The A2UI payload is therefore split
-    # across TWO DataParts: text, data(open), data(close).
-    assert kinds == ["text", "data", "data"]
+    # GH-214 ruling (https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762):
+    # no close DataPart; the artifact is [TextPart, DataPart(open)] and the
+    # client manages surface lifetime.
+    assert kinds == ["text", "data"]
     assert art["metadata"]["data_type"] == "kpi_card"
-    for part in art["parts"][1:]:
-        assert part["metadata"]["mimeType"] == "application/a2ui+json"
-    # A2UI DataPart.data is an object wrapping the message array under
-    # "messages" — matching the AG-UI CUSTOM value convention (GH-128).
+    assert art["parts"][1]["metadata"]["mimeType"] == "application/a2ui+json"
     open_msgs = art["parts"][1]["data"]["messages"]
-    close_msgs = art["parts"][2]["data"]["messages"]
-    verbs = [next(k for k in m if k != "version") for m in open_msgs + close_msgs]
-    assert verbs == ["createSurface", "updateComponents", "updateDataModel", "deleteSurface"]
-    assert all("deleteSurface" not in m for m in open_msgs), (
-        "open DataPart must not contain deleteSurface"
-    )
-    assert len(close_msgs) == 1 and "deleteSurface" in close_msgs[0], (
-        "close DataPart must contain exactly the deleteSurface message"
-    )
+    verbs = [next(k for k in m if k != "version") for m in open_msgs]
+    assert verbs == ["createSurface", "updateComponents", "updateDataModel"]
+    assert "deleteSurface" not in json.dumps(art)
 
 
 async def test_missing_message_id_is_invalid_params(client):

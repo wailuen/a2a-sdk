@@ -103,6 +103,13 @@ reason.
 An explicit `annotations={...}` always overrides the seeded fields,
 field-by-field.
 
+## `mcp_description=` — a different description for MCP
+
+By default a tool's description is its docstring, on every surface. Pass
+`@tools.tool(mcp_description="...")` to give MCP `tools/list` different text.
+The agent loop and the agent card still use the docstring. Empty or
+whitespace-only values, and values over 2048 characters, fail at boot.
+
 ## Tiers
 
 - **Tier 1 (query):** exposed on A2A *and* MCP `tools/list`. 130s timeout.
@@ -168,6 +175,34 @@ Raise `AgentError(category, message, source=...)`. It becomes a tool
 *result* the model can react to — never a crash, never a leaked secret
 (write generic messages; the SDK also redacts known patterns). Any other
 exception is folded to an opaque `"tool '<name>' failed"`.
+
+### Validator hints (`SafeValueError`)
+
+A plain `ValueError` or `AssertionError` raised in a validator reaches the
+caller only as "value failed a validation rule". To give fixed guidance,
+subclass `SafeValueError`, set the class attribute `message`, and raise it
+with no arguments:
+
+```python
+from agent_sdk import SafeValueError
+
+class UseTicker(SafeValueError):
+    message = "Use a ticker such as AAPL, not a company name."
+
+@field_validator("ticker")
+@classmethod
+def _check(cls, v: str) -> str:
+    if " " in v:
+        raise UseTicker()
+    return v
+```
+
+Only `type(err).message` is shown (control characters collapsed, cut at 256
+characters). Text passed when raising is never shown. Never put input in the
+class text. A subclass with a missing, empty or non-string `message` shows the
+generic phrase. An unknown pydantic error code (for example one built with
+`PydanticCustomError(f"x_{v}", ...)`) is never echoed; it shows
+"input failed validation".
 
 ## Interrupts (human-in-the-loop)
 

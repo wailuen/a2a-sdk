@@ -2,8 +2,8 @@
 
 B1: KpiTrend collapses to direction string on the wire (MetricItem.trend).
 B2: TimeSeriesChart emits no top-level `series` and no per-point `series`.
-C1: translate() produces the canonical four-message sequence.
-D1: split_a2ui_delivery() isolates deleteSurface into its own delivered array.
+C1: translate() produces the canonical three-message open sequence.
+D1: no deleteSurface is emitted (GH-214 ruling https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import pytest
 
 from tests._compact_schema import top_level_keys
 
-from agent_sdk.a2ui.translator import A2uiCapabilities, split_a2ui_delivery, translate
+from agent_sdk.a2ui.translator import A2uiCapabilities, translate
 from agent_sdk.models.content_types import (
     ContentModel,
     KpiCard,
@@ -184,7 +184,7 @@ def test_time_series_wire_data_keys_conform_to_profile():
 
 def test_translate_output_structure():
     """translate() must return a list of >= 3 dicts, first element has
-    type 'createSurface' with catalogId, and a 'deleteSurface' message is present."""
+    type 'createSurface' with catalogId, and no 'deleteSurface' message is present (GH-214)."""
     payload = KpiCard(
         title="Test",
         metrics=[MetricItem(label="Revenue", value=1_000_000, unit="USD")],
@@ -204,9 +204,8 @@ def test_translate_output_structure():
     assert "catalogId" in create, f"createSurface must have catalogId; keys: {list(create.keys())}"
     assert "surfaceId" in create, "createSurface must have surfaceId"
 
-    # Must contain a deleteSurface message
-    delete_msgs = [m for m in result if isinstance(m, dict) and "deleteSurface" in m]
-    assert delete_msgs, "result must contain a deleteSurface message"
+    # GH-214: the SDK never closes a surface in the artifact that created it
+    assert not [m for m in result if isinstance(m, dict) and "deleteSurface" in m]
 
     # All messages must have 'version'
     for i, msg in enumerate(result):
@@ -229,57 +228,28 @@ def test_translate_gated_type_returns_none():
     assert result is None, "extended type must be gated off for core-only client"
 
 
-def test_translate_returns_four_messages():
-    """translate() must return exactly 4 messages: createSurface, updateComponents,
-    updateDataModel, deleteSurface — per the translator docstring."""
+def test_translate_returns_three_messages():
+    """translate() must return exactly 3 messages: createSurface, updateComponents,
+    updateDataModel; no deleteSurface (GH-214 ruling
+    https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762)."""
     payload = KpiCard(
         metrics=[MetricItem(label="NAV", value=250_000_000)],
     )
     result = translate(payload)
     assert result is not None
-    assert len(result) == 4, f"expected 4 messages, got {len(result)}"
+    assert len(result) == 3, f"expected 3 messages, got {len(result)}"
 
     assert "createSurface" in result[0]
     assert "updateComponents" in result[1]
     assert "updateDataModel" in result[2]
-    assert "deleteSurface" in result[3]
+    assert not any("deleteSurface" in m for m in result)
 
 
-# ── D1: split_a2ui_delivery() ────────────────────────────────────────────────
+def test_split_a2ui_delivery_is_removed():
+    """GH-214: there is no open/close split any more."""
+    import agent_sdk.a2ui.translator as translator_module
 
-def test_split_a2ui_delivery_isolates_delete_surface():
-    """deleteSurface must never share a delivered array with its own
-    surface's create/populate messages (critical finding: a spec-conformant
-    Path-A renderer folds one array atomically and paints once after the
-    fold, so a bundled deleteSurface unmounts the surface before it ever
-    paints)."""
-    payload = KpiCard(
-        title="Test",
-        metrics=[MetricItem(label="Revenue", value=1_000_000, unit="USD")],
-    )
-    result = translate(payload)
-    assert result is not None
-
-    open_msgs, close_msgs = split_a2ui_delivery(result)
-
-    assert all("deleteSurface" not in m for m in open_msgs), (
-        "open array must not contain deleteSurface"
-    )
-    assert all("deleteSurface" in m for m in close_msgs), (
-        "close array must contain only deleteSurface message(s)"
-    )
-    assert len(close_msgs) == 1
-    assert [next(k for k in m if k != "version") for m in open_msgs] == [
-        "createSurface",
-        "updateComponents",
-        "updateDataModel",
-    ]
-    # every original message is accounted for exactly once, order preserved
-    assert open_msgs + close_msgs == result
-
-
-def test_split_a2ui_delivery_empty_input():
-    assert split_a2ui_delivery([]) == ([], [])
+    assert not hasattr(translator_module, "split_a2ui_delivery")
 
 
 def test_translate_update_data_model_carries_wire_value():
@@ -1184,7 +1154,7 @@ def test_market_briefing_translate_value_is_string_not_dict():
     )
     result = translate(briefing)
     assert result is not None, "translate() must not gate off MarketBriefing (core type)"
-    assert len(result) == 4, f"expected 4 messages, got {len(result)}"
+    assert len(result) == 3, f"expected 3 messages, got {len(result)}"
 
     update = result[2]
     assert "updateDataModel" in update, f"message[2] must be updateDataModel; keys: {list(update.keys())}"

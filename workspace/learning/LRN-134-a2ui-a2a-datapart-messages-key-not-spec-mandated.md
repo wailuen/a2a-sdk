@@ -89,14 +89,14 @@ not a spec-conformant one: **a strictly spec-conformant A2UI v0.9.1 Path-A
 renderer, built from a2ui.org alone with no knowledge of this SDK, will not
 find its message array at `data` and will render nothing for every A2UI
 artifact this SDK emits over A2A** — the same failure class `deleteSurfaceSemantics`
-(GH-113) was invented to make discoverable for the split-delivery shape.
+(GH-113, since removed: superseded by the GH-214 ruling https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762) was invented to make discoverable for the split-delivery shape.
 This SDK's own first-party consumers (`agent_sdk/console/static/chat.js`,
 `agent_sdk/testing/chat.py`) were updated in the same change and unwrap
 `data.messages` correctly; the residual risk is scoped to third-party,
 non-SDK-aware A2UI Path-A clients. RT-001 (v0.5.44, same day): the
 recommended follow-up landed — `agent_sdk/a2ui/catalog.py::a2ui_extension()`
 now advertises a `dataEncoding: "data.messages"` non-normative agent-card
-hint, mirroring `deleteSurfaceSemantics`, so a spec-conformant third-party
+hint, mirroring `deleteSurfaceSemantics` (no longer a live hint: superseded by the GH-214 ruling https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762), so a spec-conformant third-party
 A2UI Path-A renderer has a wire-discoverable way to find the wrapper. The
 wrapper itself remains a deliberate, non-canonical SDK convention on
 neither spec's side — the hint makes the deviation discoverable, it does

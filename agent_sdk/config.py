@@ -264,6 +264,13 @@ class BaseAgentSettings(BaseSettings):
         default=None, ge=1, alias="AGENT_SDK_MAX_MCP_STREAMS_PER_IDENTITY"
     )
 
+    # GH-206: "strict" rewrites MCP tools/list inputSchema/outputSchema for
+    # strict clients (inlined $defs, no anyOf-null, no default null). Any other
+    # value fails at settings construction.
+    mcp_schema_mode: Literal["standard", "strict"] = Field(
+        default="standard", alias="AGENT_SDK_MCP_SCHEMA_MODE"
+    )
+
     # GH-201: per-identity cap on live POST /mcp sessions. Keyed like
     # max_mcp_streams_per_identity above, and for the same reason: org-wide
     # OAuth clients and shared API keys put a whole org on one identity key,

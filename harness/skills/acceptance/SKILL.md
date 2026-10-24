@@ -617,7 +617,7 @@ the DOM, exercise its full intended purpose:
 | `Card` / container types | Sub-components all rendered; no empty slots |
 | `Timeline` | Events ordered; timestamps formatted |
 | `Progress` | Value within 0–100; visual indicator matches value |
-| `deleteSurface` lifecycle | After the 4-message sequence completes, the card DOM element is gone |
+| Surface lifetime | After the 3-message open sequence completes, the card DOM element is still present (the SDK emits no `deleteSurface`; GH-214) |
 | Multi-turn card updates | After turn 2+, `updateComponents` changes are reflected in the DOM |
 
 Check browser console for JS errors: `browser_console_messages`. Any error

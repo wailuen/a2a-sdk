@@ -110,9 +110,10 @@ from ..common.admission import (
 )
 from ..common.json_strict import dumps_strict, loads_strict
 from ..common.origin import guard_origin
+from ..common.schema import flatten_schema, strip_schema_titles
 from ..common.redact import TITLE_TEXT_MAX_LEN, frame_locations, safe_line_text, sanitize_text
 from ..common.sse import HEARTBEAT, SSE_HEADERS
-from ..agent.loop import ToolInterrupt, resolve_tool_timeout, safe_validation_message
+from ..agent.loop import LOAD_SKILL_TOOL, ToolInterrupt, resolve_tool_timeout, safe_validation_message
 from ..agent.registry import ToolInputValidationError, match_emits_type
 from ..credentials import forwarding
 from ..models.content_types import ContentModel, MarketBriefing
@@ -464,6 +465,13 @@ async def _dispatch(app: Any, message: dict[str, Any]) -> dict[str, Any] | None:
             return _result(request_id, {})
         if method == "tools/list":
             return _result(request_id, _handle_tools_list(app, params))
+        if method == "prompts/list" and _skills_mode(app) == "prompts":
+            return _result(request_id, _handle_prompts_list(app, params))
+        if method == "prompts/get" and _skills_mode(app) == "prompts":
+            got = _handle_prompts_get(app, params)
+            if "__jrpc_error__" in got:
+                return _error(request_id, _INVALID_PARAMS, got["__jrpc_error__"])
+            return _result(request_id, got)
         if method == "tools/call":
             result = await _handle_tools_call(app, params)
             if isinstance(result, dict) and "__jrpc_error__" in result:
@@ -520,9 +528,12 @@ def _handle_initialize(app: Any, params: dict[str, Any]) -> dict[str, Any]:
         <= SUPPORTED_PROTOCOL_VERSIONS.index(_TITLE_MIN_VERSION)
     ):
         server_info["title"] = display_name
+    capabilities: dict[str, Any] = {"tools": {"listChanged": False}}
+    if _skills_mode(app) == "prompts":
+        capabilities["prompts"] = {"listChanged": False}
     result: dict[str, Any] = {
         "protocolVersion": version,
-        "capabilities": {"tools": {"listChanged": False}},
+        "capabilities": capabilities,
         "serverInfo": server_info,
     }
     # Surface the per-call credential header to Claude.ai, which injects
@@ -558,30 +569,72 @@ def _encode_cursor(offset: int) -> str:
     return base64.b64encode(str(offset).encode()).decode()
 
 
-_SCHEMA_MAPS = ("properties", "$defs", "definitions", "patternProperties")
-_SCHEMA_NODES = ("items", "additionalProperties", "not", "if", "then", "else", "contains", "propertyNames")
-_SCHEMA_LISTS = ("anyOf", "oneOf", "allOf", "prefixItems")
+def _tool_schema(schema: dict[str, Any], strict: bool, *, is_input: bool = False) -> Any:
+    return strip_schema_titles(flatten_schema(schema, keep_required=is_input) if strict else schema)
 
 
-def _strip_titles(node: Any) -> Any:
-    """GH-221: copy of a JSON Schema without pydantic's auto-generated
-    ``title`` keys. Only schema positions are walked, so a property *named*
-    ``title`` and data keywords (``default``, ``enum``, ``examples``) survive."""
-    if not isinstance(node, dict):
-        return node
-    out: dict[str, Any] = {}
-    for key, value in node.items():
-        if key == "title" and isinstance(value, str):
-            continue
-        if key in _SCHEMA_MAPS and isinstance(value, dict):
-            out[key] = {k: _strip_titles(v) for k, v in value.items()}
-        elif key in _SCHEMA_NODES:
-            out[key] = _strip_titles(value)
-        elif key in _SCHEMA_LISTS and isinstance(value, list):
-            out[key] = [_strip_titles(v) for v in value]
-        else:
-            out[key] = value
-    return out
+_LOAD_SKILL = LOAD_SKILL_TOOL
+_SKILL_NOT_FOUND = "skill not found"
+_MAX_SKILL_CATALOG_LEN = 2048
+
+
+def _skills_mode(app: Any) -> str | None:
+    return getattr(app.state, "mcp_skills", None)
+
+
+def _mcp_skills(app: Any) -> list[Any]:
+    """Catalog skills visible over MCP (GH-205): excluded skills never appear."""
+    skills = getattr(app.state, "skills", None)
+    if skills is None:
+        return []
+    return skills.listed(getattr(app.state, "exclude_from_catalog", ()))
+
+
+def _load_skill_tool(skills: list[Any]) -> dict[str, Any]:
+    catalog = "; ".join(f"{s.name}: {s.description}" for s in skills)
+    if len(catalog) > _MAX_SKILL_CATALOG_LEN:
+        catalog = catalog[: _MAX_SKILL_CATALOG_LEN - 1] + "…"
+    return {
+        "name": _LOAD_SKILL,
+        "description": f"Load the full instructions of a listed skill by name. Skills: {catalog}",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Name of the skill to load."}
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": True},
+    }
+
+
+def _handle_prompts_list(app: Any, params: dict[str, Any]) -> dict[str, Any]:
+    skills = _mcp_skills(app)
+    offset = max(0, _decode_cursor(params.get("cursor")))
+    page = skills[offset : offset + _PAGE_SIZE]
+    result: dict[str, Any] = {
+        "prompts": [{"name": s.name, "description": s.description} for s in page]
+    }
+    if offset + _PAGE_SIZE < len(skills):
+        result["nextCursor"] = _encode_cursor(offset + _PAGE_SIZE)
+    return result
+
+
+def _handle_prompts_get(app: Any, params: dict[str, Any]) -> dict[str, Any]:
+    name = params.get("name")
+    if not isinstance(name, str) or not name:
+        return {"__jrpc_error__": "prompts/get requires a 'name' string"}
+    # SI-2: never reflect the caller-supplied skill name.
+    for skill in _mcp_skills(app):
+        if skill.name == name:
+            return {
+                "description": skill.description,
+                "messages": [
+                    {"role": "user", "content": {"type": "text", "text": skill.body}}
+                ],
+            }
+    return {"__jrpc_error__": _SKILL_NOT_FOUND}
 
 
 def _handle_tools_list(app: Any, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -590,24 +643,34 @@ def _handle_tools_list(app: Any, params: dict[str, Any] | None = None) -> dict[s
     Supports cursor/nextCursor pagination (PAGE_SIZE=64)."""
     if params is None:
         params = {}
-    all_entries = app.state.registry.tier1()
+    all_entries: list[Any] = list(app.state.registry.tier1())
+    skill_tool: dict[str, Any] | None = None
+    if _skills_mode(app) == "tool":
+        listed = _mcp_skills(app)
+        if listed:
+            skill_tool = _load_skill_tool(listed)
+            all_entries.append(skill_tool)
     # RT-001: clamp to ≥0 — a crafted negative base64 cursor wraps Python list
     # slicing to the tail of the list, bypassing forward-only pagination.
     offset = max(0, _decode_cursor(params.get("cursor")))
     page_entries = all_entries[offset : offset + _PAGE_SIZE]
 
+    strict = app.state.settings.mcp_schema_mode == "strict"
     tools: list[dict[str, Any]] = []
     for entry in page_entries:
+        if entry is skill_tool:
+            tools.append(skill_tool)
+            continue
         tool: dict[str, Any] = {
             "name": entry.name,
-            "description": entry.description,
-            "inputSchema": _strip_titles(entry.input_schema()),
+            "description": entry.decl.mcp_description or entry.description,
+            "inputSchema": _tool_schema(entry.input_schema(), strict, is_input=True),
         }
         if entry.title:
             tool["title"] = entry.title
         output_schema = entry.output_schema()
         if output_schema is not None:
-            tool["outputSchema"] = _strip_titles(output_schema)
+            tool["outputSchema"] = _tool_schema(output_schema, strict)
         if entry.annotations:
             tool["annotations"] = entry.annotations
         tools.append(tool)
@@ -652,6 +715,17 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
         arguments = {}
     if not isinstance(arguments, dict):
         return {"__jrpc_error__": "tools/call 'arguments' must be an object"}
+
+    if name == _LOAD_SKILL and _skills_mode(app) == "tool":
+        requested = arguments.get("name")
+        for skill in _mcp_skills(app):
+            if isinstance(requested, str) and skill.name == requested:
+                return {"content": [{"type": "text", "text": skill.body}]}
+        # SI-2: fixed text, the requested name is never echoed or logged.
+        return {
+            "content": [{"type": "text", "text": _SKILL_NOT_FOUND}],
+            "isError": True,
+        }
 
     entry = app.state.registry.get(name)
     # A Tier 2 tool must be indistinguishable from an unknown name on this

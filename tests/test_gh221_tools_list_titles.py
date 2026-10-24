@@ -101,7 +101,7 @@ async def test_refs_unchanged_by_stripping(app, mcp_client) -> None:
 
 
 async def test_title_keys_inside_defs_items_anyof_removed() -> None:
-    from agent_sdk.routes.mcp import _strip_titles
+    from agent_sdk.common.schema import strip_schema_titles
 
     schema = {
         "title": "Root",
@@ -112,7 +112,7 @@ async def test_title_keys_inside_defs_items_anyof_removed() -> None:
         },
         "$defs": {"D": {"title": "D", "properties": {"title": {"title": "T", "type": "string"}}}},
     }
-    out = _strip_titles(schema)
+    out = strip_schema_titles(schema)
     assert _title_keys(out) == []
     assert "title" in out["properties"]
     assert "title" in out["$defs"]["D"]["properties"]

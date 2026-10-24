@@ -4,7 +4,7 @@ identically to the A2A build_artifact() path (SC-D1 parity).
 Mirrors test_rt004_open_delivery_guard.py::test_rt004_all_delete_surface_translate_output_raises.
 Before this fix, ag_ui.py's ArtifactEvent branch called translate() then
 split_a2ui_delivery() directly with no validation, so a translate() output
-that is entirely deleteSurface (empty open sequence) silently produced an
+that is empty after dropping deleteSurface (empty open sequence) silently produced an
 empty A2UI_UPDATE {"messages": []} frame and the run succeeded — while the
 identical output on A2A failed the task deterministically (-32006). Both
 transports must now reject identically.
@@ -41,7 +41,7 @@ def test_rt001_all_delete_surface_translate_output_raises(monkeypatch):
 
 def test_rt001_normal_translate_output_unaffected():
     """Sanity: the SDK's own translate() output still succeeds and yields
-    two A2UI_UPDATE frames (open + close), unaffected by the added guard."""
+    one A2UI_UPDATE frame (open only, GH-214), unaffected by the added guard."""
     payload = KpiCard(metrics=[MetricItem(label="A", value=1)])
     event = ArtifactEvent(data_type=payload.data_type, tool_name="test_tool", model=payload)
     mapper = _RunMapper(
@@ -51,4 +51,4 @@ def test_rt001_normal_translate_output_unaffected():
     )
     frames = mapper.map(event)
     a2ui = [f for f in frames if f.get("type") == "CUSTOM" and f.get("name") == "A2UI_UPDATE"]
-    assert len(a2ui) == 2
+    assert len(a2ui) == 1

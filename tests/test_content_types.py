@@ -1074,7 +1074,8 @@ _NAME_EMAIL = NameEmail(name="N", email="n@x.com")
 def _id_sample_instances() -> dict[str, ContentModel]:
     return {
         "EntityList": EntityList(
-            entity_type="company", items=[EntityItem(id="ent-59199-40", name="Databricks")]
+            entity_type="company",
+            items=[EntityItem(id="202601026118 (1688214-U)", name="Databricks")],
         ),
         "EmailList": EmailList(
             messages=[
@@ -1124,21 +1125,51 @@ def _id_sample_instances() -> dict[str, ContentModel]:
     }
 
 
-def _collect_id_values(obj: Any) -> list[str]:
-    """Walk model fields (LRN-241: derived from the model, not a hand list)
-    and return every non-empty string value of an ``id`` / ``*_id`` field."""
-    found: list[str] = []
+# GH-212: ids joined into one row (not on their own ``id:`` line) keep the
+# old rendering. Keys are (top-level content type, dotted field path); every
+# other id field is standalone.
+_JOINED_ID_SLOTS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("EmailList", "messages.id"),
+        ("EmailList", "messages.conversation_id"),
+        ("FundPerformance", "pb_id"),
+    }
+)
+
+
+def _slot_kind(root: str, path: tuple[str, ...]) -> str:
+    return "joined" if (root, ".".join(path)) in _JOINED_ID_SLOTS else "standalone"
+
+
+def _walk_ids(obj: Any, root: str, path: tuple[str, ...]) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
     if isinstance(obj, BaseModel):
         for name in type(obj).model_fields:
             value = getattr(obj, name)
             if (name == "id" or name.endswith("_id")) and isinstance(value, str) and value:
-                found.append(value)
+                found.append((value, _slot_kind(root, (*path, name))))
             else:
-                found.extend(_collect_id_values(value))
+                found.extend(_walk_ids(value, root, (*path, name)))
     elif isinstance(obj, (list, tuple)):
         for v in obj:
-            found.extend(_collect_id_values(v))
+            found.extend(_walk_ids(v, root, path))
     return found
+
+
+def _collect_id_values(obj: Any, *, with_kind: bool = False) -> Any:
+    """Walk model fields (LRN-241: derived from the model, not a hand list)
+    and return every non-empty string value of an ``id`` / ``*_id`` field; with
+    ``with_kind=True`` return ``(value, "standalone" | "joined")`` pairs."""
+    pairs = _walk_ids(obj, type(obj).__name__, ())
+    return pairs if with_kind else [v for v, _ in pairs]
+
+
+def _expected_id_text(value: str, kind: str) -> str:
+    """What the text must carry for an id: standalone ids byte-exact (GH-212
+    ruling), joined-slot ids in the joined-variant rendering."""
+    if kind == "joined":
+        return _joined_id_for_test(value)
+    return value
 
 
 # Documented exemptions: "Type" (whole type) or "Type.field.path" (one id
@@ -1147,7 +1178,8 @@ _ID_TEXT_EXEMPT: dict[str, str] = {}
 
 
 def _is_id_field(name: str) -> bool:
-    return name == "id" or name.endswith("_id")
+    # ``ColumnDef.is_id`` (GH-212) is a boolean flag, not an identifier.
+    return name == "id" or (name.endswith("_id") and name != "is_id")
 
 
 def _model_types(annotation: Any) -> list[type[BaseModel]]:
@@ -1224,11 +1256,13 @@ def test_entity_list_text_carries_id_in_documented_shape():
 @pytest.mark.parametrize("name", sorted(_id_sample_instances()))
 def test_plain_text_carries_every_id_field(name):
     card = _id_sample_instances()[name]
-    ids = _collect_id_values(card)
+    ids = _collect_id_values(card, with_kind=True)
     assert ids
     text = card.to_plain_text()
-    for value in ids:
-        assert value in text, f"{name}: id {value!r} missing from text fallback"
+    for value, kind in ids:
+        assert _expected_id_text(value, kind) in text, (
+            f"{name}: {kind} id {value!r} missing from text fallback"
+        )
 
 
 def test_email_list_text_omits_conversation_id_when_absent():
@@ -1269,7 +1303,10 @@ def test_registry_wide_every_id_field_reaches_text():
                     f"{key}.{dotted}: sample leaves this id field unset; set it in "
                     "_id_sample_instances() or add an _ID_TEXT_EXEMPT entry"
                 )
-                assert value in text, f"{key}.{dotted}: id {value!r} missing from text"
+                kind = _slot_kind(key, path)
+                assert _expected_id_text(value, kind) in text, (
+                    f"{key}.{dotted}: {kind} id {value!r} missing from text"
+                )
 
 
 def test_fund_performance_pb_id_already_in_text():
@@ -1306,18 +1343,46 @@ def _with_hostile_ids(obj: Any) -> Any:
 
 @pytest.mark.parametrize("name", sorted(_id_sample_instances()))
 def test_every_id_site_is_sanitized_and_capped(name):
+    """GH-212 ruling (https://github.com/wailuen/a2a-sdk/issues/212#issuecomment-6359828392,
+    joined slots per #issuecomment-6366237627): standalone ids may carry
+    ``(b) c``; joined-slot ids keep the old rendering with no raw ``(b) c``."""
     card = _with_hostile_ids(_id_sample_instances()[name])
-    assert _collect_id_values(card), f"{name}: no id fields were made hostile"
+    pairs = _collect_id_values(card, with_kind=True)
+    assert pairs, f"{name}: no id fields were made hostile"
     text = card.to_plain_text()
     assert "\x1b" not in text
     assert "x" * 300 not in text
-    for raw in ("|(b)", "(b) c", "c\n"):
-        assert raw not in text, f"{name}: raw id fragment {raw!r} leaked into text"
-    assert _safe_id_for_test(_HOSTILE_ID) in text
+    assert "|(b)" not in text and "c\n" not in text
+    kinds = {kind for _, kind in pairs}
+    if "standalone" in kinds:
+        assert _safe_standalone_id_for_test(_HOSTILE_ID) in text
+    if "joined" in kinds:
+        assert "(b) c" not in text, f"{name}: raw id fragment leaked into joined slot"
+        assert _joined_id_for_test(_HOSTILE_ID) in text
 
 
-def _safe_id_for_test(value: str) -> str:
+def _safe_standalone_id_for_test(value: str) -> str:
     return content_types_module._safe_id(value)
+
+
+def _joined_id_for_test(value: str) -> str:
+    return content_types_module._safe_joined_id(value)
+
+
+def test_joined_id_slots_match_joined_call_sites():
+    import inspect
+
+    for cls in (EmailList, FundPerformance):
+        src = inspect.getsource(cls._body_text)
+        assert "_safe_id(" not in src, f"{cls.__name__} joined slot uses the relaxed alphabet"
+    assert inspect.getsource(EmailList._body_text).count("_safe_joined_id(") == 2
+    assert inspect.getsource(FundPerformance._body_text).count("_safe_joined_id(") == 1
+    assert {k for k, _ in _JOINED_ID_SLOTS} == {"EmailList", "FundPerformance"}
+    assert len(_JOINED_ID_SLOTS) == 3
+    for key, dotted in _JOINED_ID_SLOTS:
+        cls = content_types_module.registered_content_types()
+        owner = next(c for c in cls.values() if c.__name__ == key)
+        assert tuple(dotted.split(".")) in _id_field_paths(owner)
 
 
 # ── GH-167: standalone slots keep ASCII; joined slots stay neutralised ──────

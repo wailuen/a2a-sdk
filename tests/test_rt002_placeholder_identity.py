@@ -240,27 +240,17 @@ async def test_agent_card_name_not_placeholder(
 
 
 # ---------------------------------------------------------------------------
-# AC-6: GET /openapi.json 'info.title' must not expose the raw placeholder
+# AC-6: OpenAPI schema 'info.title' must not expose the raw placeholder
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_openapi_title_not_placeholder(
-    placeholder_app,
-) -> None:
-    """GET /openapi.json info.title must not be the raw placeholder string.
+def test_openapi_title_not_placeholder(placeholder_app) -> None:
+    """The OpenAPI info.title must not be the raw placeholder string.
 
-    /openapi.json is served unauthenticated by FastAPI's default; the app title
-    must be normalized via settings.display_name, not the raw agent_name.
+    Checked via app.openapi() directly: /openapi.json is only served in DEV_MODE
+    (GH-231), but the schema must still carry the normalized display_name.
     """
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=placeholder_app),
-        base_url="http://test",
-    ) as c:
-        r = await c.get("/openapi.json")
-    assert r.status_code == 200, r.text
-    schema = r.json()
-    title = schema["info"]["title"]
+    title = placeholder_app.openapi()["info"]["title"]
     assert title != PLACEHOLDER_AGENT_NAME, (
         f"openapi info.title must not expose the raw placeholder; got {title!r}"
     )

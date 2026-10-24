@@ -211,13 +211,43 @@ function buildScenarioPrompt(s, a) {
 
 phase('Run')
 
-const transports = (args.transports && args.transports.length > 0) ? args.transports : ['a2a', 'agui']
+// args may arrive JSON-encoded as a string (GH-131 / GH-229); errors name fields only,
+// never echo the raw args or any value (keyFile is the admin key path).
+let normalizedArgs
+if (typeof args === 'string') {
+  try {
+    normalizedArgs = JSON.parse(args)
+  } catch (e) {
+    throw new Error(
+      'acceptance-api: args arrived as a string but is not valid JSON — pass { scenarios, baseUrl, keyFile } ' +
+      '(or a JSON-encoded string of the same shape).'
+    )
+  }
+} else {
+  normalizedArgs = args || {}
+}
+if (normalizedArgs === null || typeof normalizedArgs !== 'object' || Array.isArray(normalizedArgs)) {
+  throw new Error('acceptance-api: args is not valid JSON object — pass { scenarios, baseUrl, keyFile }.')
+}
+const badArgs = []
+if (!Array.isArray(normalizedArgs.scenarios)) badArgs.push('scenarios (must be an array)')
+if (!normalizedArgs.baseUrl) badArgs.push('baseUrl')
+if (!normalizedArgs.keyFile) badArgs.push('keyFile')
+if (badArgs.length > 0) {
+  throw new Error(
+    'acceptance-api: missing or invalid arg(s): ' + badArgs.join(', ') +
+    ' — pass { scenarios, baseUrl, keyFile } (or a JSON-encoded string of the same shape).'
+  )
+}
+const BASE_URL = normalizedArgs.baseUrl
 
-const scenarios = (args.onlyIds && args.onlyIds.length > 0)
-  ? args.scenarios.filter(function(s) { return args.onlyIds.indexOf(s.id) !== -1 })
-  : args.scenarios
+const transports = (normalizedArgs.transports && normalizedArgs.transports.length > 0) ? normalizedArgs.transports : ['a2a', 'agui']
 
-log('Running ' + scenarios.length + ' scenario(s) in parallel  |  transports: ' + transports.join(' + ') + '  |  ' + args.baseUrl)
+const scenarios = (normalizedArgs.onlyIds && normalizedArgs.onlyIds.length > 0)
+  ? normalizedArgs.scenarios.filter(function(s) { return normalizedArgs.onlyIds.indexOf(s.id) !== -1 })
+  : normalizedArgs.scenarios
+
+log('Running ' + scenarios.length + ' scenario(s) in parallel  |  transports: ' + transports.join(' + ') + '  |  ' + BASE_URL)
 
 // ── Secret externalisation ────────────────────────────────────────────────────
 // The service key is NOT passed as args.adminKey.  Instead the skill caller (which
@@ -232,9 +262,9 @@ log('Running ' + scenarios.length + ' scenario(s) in parallel  |  transports: ' 
 //
 // Cleanup: the caller must NOT unlink args.keyFile after Workflow() returns; it is
 // reused by later re-runs and removed at the skill's 'Service key teardown'.
-const _keyFile = args.keyFile
+const _keyFile = normalizedArgs.keyFile
 
-const enrichedArgs = Object.assign({}, args, { transports: transports, _keyFile: _keyFile })
+const enrichedArgs = Object.assign({}, normalizedArgs, { transports: transports, _keyFile: _keyFile })
 
 const rawResults = await pipeline(
   scenarios,

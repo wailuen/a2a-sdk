@@ -74,23 +74,13 @@ async def test_tool_and_custom_events(client, fake_model):
     assert agent_artifact["dataType"] == "kpi_card"
     assert agent_artifact["toolName"] == "demo_kpis"
 
-    # Critical protocol-conformance fix: deleteSurface must never share a
-    # delivered array with its own surface's create/populate messages (a
-    # spec-conformant Path-A renderer folds one array atomically and paints
-    # once after the fold — a bundled deleteSurface would unmount the
-    # surface before it ever painted). The A2UI payload is therefore split
-    # across TWO A2UI_UPDATE CUSTOM events, open before close.
+    # GH-214 ruling (https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762):
+    # exactly one A2UI_UPDATE per emission, no deleteSurface.
     a2ui_updates = [f["value"]["messages"] for f in custom_frames if f["name"] == "A2UI_UPDATE"]
-    assert len(a2ui_updates) == 2, "deleteSurface must be its own A2UI_UPDATE event"
-    open_msgs, close_msgs = a2ui_updates
-    verbs = [next(k for k in m if k != "version") for m in open_msgs + close_msgs]
-    assert verbs == ["createSurface", "updateComponents", "updateDataModel", "deleteSurface"]
-    assert all("deleteSurface" not in m for m in open_msgs), (
-        "first A2UI_UPDATE event must not contain deleteSurface"
-    )
-    assert len(close_msgs) == 1 and "deleteSurface" in close_msgs[0], (
-        "second A2UI_UPDATE event must contain exactly the deleteSurface message"
-    )
+    assert len(a2ui_updates) == 1, "no second A2UI_UPDATE close event (GH-214)"
+    verbs = [next(k for k in m if k != "version") for m in a2ui_updates[0]]
+    assert verbs == ["createSurface", "updateComponents", "updateDataModel"]
+    assert names.index("AGENT_ARTIFACT") < names.index("A2UI_UPDATE")
 
 
 async def test_interrupt_outcome_and_resume(client, fake_model):

@@ -39,12 +39,13 @@ from typing import (
 logger = logging.getLogger(__name__)
 
 from pydantic import BaseModel, ValidationError
-from pydantic_core import to_jsonable_python
+from pydantic_core import core_schema, to_jsonable_python
 
 from ..common.redact import frame_locations
+from ..common.redact import safe_line_text
 from ..common.redact import sanitize_text
 from ..models.content_types import TRANSCRIPT_DUMP_CONTEXT
-from ..models.errors import AgentError
+from ..models.errors import AgentError, SafeValueError
 from .deferred import DeferredEvent, DeferredResult
 from .events import (
     ArtifactEvent,
@@ -60,7 +61,13 @@ from .events import (
     UsageEvent,
 )
 from .model_client import ModelClient
-from .registry import ToolEntry, ToolInputValidationError, ToolRegistry, ToolTerminalResult
+from .registry import (
+    UNKNOWN_ARGUMENT_ERROR_TYPE,
+    ToolEntry,
+    ToolInputValidationError,
+    ToolRegistry,
+    ToolTerminalResult,
+)
 from .reuse import (
     RESOLVED_MARKER_KEY,
     Reusable,
@@ -1162,6 +1169,29 @@ def _unknown_argument_loc(loc: tuple[Any, ...]) -> str:
     return "<key>"
 
 
+_UNKNOWN_TYPE_PHRASE = "input failed validation"
+
+_BUILTIN_ERROR_CODES: frozenset[str] = frozenset(
+    get_args(core_schema.ErrorType)
+) | {UNKNOWN_ARGUMENT_ERROR_TYPE}
+
+
+def _validation_phrase(e: Any) -> str:
+    err_type = e["type"]
+    if err_type == "value_error":
+        err = (e.get("ctx") or {}).get("error")
+        if isinstance(err, SafeValueError):
+            hint = getattr(type(err), "message", None)
+            if isinstance(hint, str) and hint.strip():
+                return safe_line_text(hint)
+    phrase = _VALIDATION_TYPE_PHRASES.get(err_type)
+    if phrase is not None:
+        return phrase
+    if err_type in _BUILTIN_ERROR_CODES:
+        return err_type
+    return _UNKNOWN_TYPE_PHRASE
+
+
 def safe_validation_message(
     tool_name: str,
     exc: ValidationError,
@@ -1173,12 +1203,14 @@ def safe_validation_message(
     rejected value. ``loc`` is walked against ``input_model`` so that only
     schema-declared field names (and list indices) are echoed; user-supplied
     dict keys and ``extra_forbidden`` field names are redacted (see
-    ``_redact_loc``). Unknown type codes fall back to the bare code, which is
-    safe-by-construction (a fixed Pydantic identifier, never user input).
+    ``_redact_loc``). A type code outside ``_VALIDATION_TYPE_PHRASES`` renders
+    a fixed generic phrase; a pydantic built-in code renders the bare code (a
+    custom code can be built from input). A ``value_error`` raised as a ``SafeValueError`` renders its
+    class-level ``message`` hint (GH-230).
     """
     fields = "; ".join(
-        f"{_unknown_argument_loc(e['loc']) if e['type'] == 'unknown_argument' else _redact_loc(tuple(e['loc']), e['type'], input_model)} — "
-        f"{_VALIDATION_TYPE_PHRASES.get(e['type'], e['type'])}"
+        f"{_unknown_argument_loc(e['loc']) if e['type'] == UNKNOWN_ARGUMENT_ERROR_TYPE else _redact_loc(tuple(e['loc']), e['type'], input_model)} — "
+        f"{_validation_phrase(e)}"
         for e in exc.errors()
     )
     return f"tool '{tool_name}' input invalid: {fields}"

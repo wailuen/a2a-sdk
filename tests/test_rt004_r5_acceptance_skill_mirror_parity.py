@@ -91,9 +91,13 @@ def test_the_referenced_workflow_takes_keyfile_not_adminkey():
     code = [
         ln for ln in script.splitlines() if not ln.lstrip().startswith("//")
     ]
-    assert any("args.keyFile" in ln for ln in code), (
+    # GH-131/GH-229: the script reads keys off ``normalizedArgs`` (args after
+    # JSON-string normalization), so accept either spelling of the args object.
+    reads = re.compile(r"\b(?:args|normalizedArgs)\.keyFile\b")
+    raw = re.compile(r"\b(?:args|normalizedArgs)\.adminKey\b")
+    assert any(reads.search(ln) for ln in code), (
         "the workflow never reads args.keyFile"
     )
-    assert not any("args.adminKey" in ln for ln in code), (
+    assert not any(raw.search(ln) for ln in code), (
         "the workflow still reads args.adminKey (the raw-key contract)"
     )

@@ -17,7 +17,11 @@ from agent_sdk.models.content_types import (
     EntityList,
 )
 
-from .test_content_types import _collect_id_values, _id_sample_instances
+from .test_content_types import (
+    _collect_id_values,
+    _expected_id_text,
+    _id_sample_instances,
+)
 
 tools = ToolSet()
 
@@ -150,19 +154,30 @@ def test_email_list_plain_text_preserves_graph_id() -> None:
 
 
 def test_safe_id_text_blocks_forgery_keeps_alphabet() -> None:
-    from agent_sdk.common.redact import safe_id_text
+    """GH-212 ruling https://github.com/wailuen/a2a-sdk/issues/212#issuecomment-6359828392:
+    ``( )`` and single spaces stay verbatim in standalone ids; ``=`` stays
+    byte-exact (HUMAN GATE .../issues/212#issuecomment-6366237627). The joined
+    variant keeps the GH-156 defence."""
+    from agent_sdk.common.redact import safe_id_text, safe_joined_id_text
 
     assert safe_id_text("a,b=c:d+e/f.g_h-i!j~k@l") == "a,b=c:d+e/f.g_h-i!j~k@l"
-    out = safe_id_text("x), conversation: (id: y\n[z]|")
-    assert "\n" not in out and " " not in out
-    assert "(" not in out and ")" not in out and "|" not in out
-
+    assert safe_id_text("202601026118 (1688214-U)") == "202601026118 (1688214-U)"
+    assert safe_id_text("a \t\n  b") == "a b"
+    out = safe_id_text("x), conversation: (id: y\n[z]|<>")
+    assert "\n" not in out and "|" not in out
+    assert "[" not in out and "]" not in out and "<" not in out and ">" not in out
+    assert out.startswith("x), conversation: (id: y ")
+    joined = safe_joined_id_text("x), conversation: (id: y\n[z]|")
+    assert "\n" not in joined and " " not in joined
+    assert "(" not in joined and ")" not in joined and "|" not in joined
 
 
 @pytest.mark.parametrize("key", sorted(_id_sample_instances()))
 async def test_mcp_text_carries_every_id_field(gh156_client, key) -> None:
-    ids = _collect_id_values(_id_sample_instances()[key])
+    ids = _collect_id_values(_id_sample_instances()[key], with_kind=True)
     assert ids, f"{key}: sample populates no id fields"
     text = await _call(gh156_client, _sample_tool_name(key))
-    for value in ids:
-        assert value in text, f"{key}: id {value!r} missing from MCP content[0].text"
+    for value, kind in ids:
+        assert _expected_id_text(value, kind) in text, (
+            f"{key}: {kind} id {value!r} missing from MCP content[0].text"
+        )

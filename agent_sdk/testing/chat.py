@@ -61,7 +61,7 @@ class ChatDriver:
         ``tool_args(args: dict)``     — parsed tool arguments
         ``tool_done()``               — tool call ends (result received)
         ``artifact(data_type, tool)`` — artifact emitted before result
-        ``a2ui(messages: list)``      — A2UI 4-message lifecycle sequence
+        ``a2ui(messages: list)``      — A2UI open sequence (createSurface, updateComponents, updateDataModel)
         ``text(delta: str)``          — streaming text delta (AG-UI only)
         ``error(message: str)``       — run or request error
         ``interrupt(obj: dict)``      — run paused for input.  On AG-UI: the AG-UI

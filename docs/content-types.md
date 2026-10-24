@@ -43,8 +43,8 @@ capability.
 ## What `emits=` produces
 
 When a tool returns its `emits` instance, the SDK translates it into the
-4-message self-cleaning A2UI sequence (`createSurface`,
-`updateComponents`, `updateDataModel`, `deleteSurface`), capability-gated
+3-message A2UI open sequence (`createSurface`,
+`updateComponents`, `updateDataModel`), capability-gated
 per client (`a2uiClientCapabilities` in A2A message metadata / AG-UI
 `forwardedProps`). Clients without the capability get the plain-text
 fallback — nothing is silently dropped.
@@ -125,7 +125,7 @@ Profile strictly can ignore them.
 |---|---|
 | `EntityList` | `title`, `showing` |
 | `CalendarEvent` | event-level `is_online` (the Profile has it on `location`) |
-| `ColumnDef` (in `ComparisonTable`) | `unit`, `highlight` |
+| `ColumnDef` (in `ComparisonTable`) | `unit`, `highlight`, `is_id` (only on the wire when `true`) |
 | `ComparisonTable` | `sort_by`, `sort_order` |
 
 `MarketBriefing.wire()` returns the `to_markdown()` string, the same value the
@@ -226,6 +226,20 @@ you wrote (not data) keeps `( ) ,` as written. Use
 cell or `neutralise=":"` for the name in a `label: value` row. It always
 collapses line breaks and control characters, and swaps only the characters you
 name. Values that come from data keep `safe_cell_text`.
+
+**Machine ids (GH-212, GH-207).** `agent_sdk.safe_id_text(value)` renders an id that
+sits alone on its own `id:` line: `( )`, single spaces and `= + / : , . _ - ! ~ @`
+stay as written (`202601026118 (1688214-U)`, `AAMkAGI2TAAA=`), a run of
+whitespace becomes one space, and control characters and `| < > [ ]` are
+neutralised. Mark a `ComparisonTable` column of ids with
+`ColumnDef(key="id", label="Id", is_id=True)` and its cells render through
+`safe_id_text`; all other cells keep `safe_cell_text`. `is_id` is left off the
+wire when false. Never join an id into a row with other fields: the SDK's two
+joined ids (`EmailList` `(id: ..., conversation: ...)` and `FundPerformance`
+`source <pb_id>`) keep the older look-alike rendering. If you write a custom
+`ContentModel`, include the machine ids a follow-up call needs in your
+`_body_text`: text-only clients (MCP `content[0].text`) see only that text.
+Ruling: https://github.com/wailuen/a2a-sdk/issues/212#issuecomment-6359828392.
 
 **Standalone slots (GH-167).** A value that sits alone on its own line, with
 nothing joined after it (a title, a name, a summary), does not need the

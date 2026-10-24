@@ -473,3 +473,17 @@ Entries ordered by LRN number.
 | LRN-467 | CHANGELOG alias mention trips ratchet test unplanned | [LRN-467](LRN-467-changelog-alias-ratchet-test.md) |
 | LRN-468 | Loop event not reshaped with the A2A artifact frame | [LRN-468](LRN-468-loop-event-diverges-from-frame.md) |
 | LRN-469 | MCP tools/call ignores advertised outputSchema on type mismatch | [LRN-469](LRN-469-mcp-output-schema-unenforced.md) |
+| LRN-470 | Unknown pydantic error type code echoed into tool error text | [LRN-470](LRN-470-pydantic-type-code-echo.md) |
+| LRN-471 | New public API filed under Changed; files not named | [LRN-471](LRN-471-changelog-added-vs-changed.md) |
+| LRN-472 | New boot-time rejection shipped without Breaking entry | [LRN-472](LRN-472-boot-rejection-is-breaking.md) |
+| LRN-473 | Unreleased work added to tagged release section | [LRN-473](LRN-473-tagged-changelog-section-edit.md) |
+| LRN-474 | Strict schema drops required but validator still demands it | [LRN-474](LRN-474-schema-loosening-vs-validator.md) |
+| LRN-475 | Null collapse must apply only at property positions | [LRN-475](LRN-475-nullable-collapse-nested-positions.md) |
+| LRN-476 | Null collapse breaks types whose serializer re-inserts null | [LRN-476](LRN-476-nullable-collapse-serializer-reinsert.md) |
+| LRN-477 | Strict outputSchema must match exclude_none serialization | [LRN-477](LRN-477-outputschema-exclude-none-mismatch.md) |
+| LRN-478 | caplog no-leak asserts empty after first build_app | [LRN-478](LRN-478-caplog-propagation-first-build.md) |
+| LRN-479 | Unfixed caplog empty-capture in GH-205 skill leak tests | [LRN-479](LRN-479-caplog-empty-capture-unfixed.md) |
+| LRN-480 | Allowlist narrower than the ruling that created it | [LRN-480](LRN-480-allowlist-narrower-than-ruling.md) |
+| LRN-481 | Root caplog misses agent_sdk logger after build_app | [LRN-481](LRN-481-root-caplog-misses-sdk-logger.md) |
+| LRN-482 | Strict schema decides nullability before $ref resolution | [LRN-482](LRN-482-nullability-before-ref-resolution.md) |
+| LRN-490 | Parallel groups each open their own Unreleased heading | [LRN-490](LRN-490-parallel-groups-duplicate-unreleased.md) |

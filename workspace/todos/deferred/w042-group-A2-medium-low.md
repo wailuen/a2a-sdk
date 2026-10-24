@@ -83,6 +83,7 @@ Findings were accumulated across every unit redteam round for group A2 and dedup
 - sdkCandidate: true
 
 ### R1 RT-009
+- status: openapi.json part CLOSED by GH-231 (docs routes are dev-only); 405 and rate-limit parts remain
 - severity: low
 - file: agent_sdk/routes/oauth.py
 - description: [SDK] With AGENT_SDK_OAUTH_IDP=none, /oauth/idp/callback and /oauth/idp/consent are still registered on the router (lines 746, 778). So they show up in the default /openapi.json, wrong-method requests return 405 with an Allow header instead of 404, and each probe uses up the per-IP unauth limiter before the 404. 'Off = byte-identical' holds only for the endpoints the test pins.

@@ -21,7 +21,7 @@ from asyncio import sleep as _asyncio_sleep
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI
@@ -29,7 +29,7 @@ from pydantic import BaseModel, SecretStr
 
 from .a2ui.translator import A2uiCapabilities
 from .agent.bedrock import BedrockModelClient, require_bearer_auth_botocore
-from .agent.loop import LoopPolicies
+from .agent.loop import LOAD_SKILL_TOOL, LoopPolicies
 from .agent.model_client import ModelClient
 from .agent.registry import ToolRegistry, ToolSet
 from .agent.skills import SkillsRegistry
@@ -114,6 +114,7 @@ class Agent:
         task_store: TaskStore | None = None,
         console_static_dir: Path | None = None,
         lifespan_extras: list[Callable[[FastAPI], Any]] | None = None,
+        mcp_skills: Literal["tool", "prompts"] | None = None,
     ) -> None:
         """Assemble an agent from its parts.
 
@@ -150,6 +151,17 @@ class Agent:
                 skill's name here so its now-redundant catalog entry is
                 suppressed rather than duplicating instructions the model
                 already always sees.
+            mcp_skills: Expose the ``skills_dir`` catalog to MCP clients
+                (GH-205). ``None`` (default) leaves ``initialize`` and
+                ``tools/list`` unchanged. ``"tool"`` lists the built-in
+                ``load_skill`` tool on ``tools/list`` and serves it on
+                ``tools/call``. ``"prompts"`` advertises
+                ``capabilities.prompts`` and serves ``prompts/list`` and
+                ``prompts/get`` (one user message holding the skill body).
+                Both need ``skills_dir``. Skills in ``exclude_from_catalog``
+                are never listed or fetchable over MCP. Anything else raises
+                ``ValueError`` at build. When ``skills_dir`` is set,
+                ``load_skill`` is a reserved tool name.
             toolsets: ``ToolSet`` instances whose tools are registered.
             model_client: Override the auto-configured ``ModelClient``
                 (useful in tests and for non-Bedrock backends).
@@ -215,6 +227,7 @@ class Agent:
         self.artifact_vars = artifact_vars or {}
         self.mcp_instructions = mcp_instructions
         self.skills_dir = skills_dir
+        self.mcp_skills = mcp_skills
         self.exclude_from_catalog = list(exclude_from_catalog or [])
         self.toolsets = list(toolsets or [])
         self._model_client = model_client
@@ -645,6 +658,14 @@ class Agent:
             interrupt_ttl=settings.interrupt_ttl_seconds,
             max_interrupted=settings.max_interrupted_tasks,
         )
+        if self.mcp_skills not in (None, "tool", "prompts"):
+            raise ValueError("mcp_skills must be None, 'tool' or 'prompts'")
+        if self.mcp_skills is not None and self.skills_dir is None:
+            raise ValueError(f"mcp_skills={self.mcp_skills!r} requires skills_dir")
+        if self.skills_dir is not None and LOAD_SKILL_TOOL in registry.entries:
+            raise ValueError(
+                "'load_skill' is a reserved tool name when skills_dir is set"
+            )
         skills = SkillsRegistry(self.skills_dir)
         if self.exclude_from_catalog:
             unknown = [n for n in self.exclude_from_catalog if n not in skills.skills]
@@ -772,6 +793,9 @@ class Agent:
             title=app_title,
             version=settings.agent_version,
             lifespan=lifespan,
+            docs_url="/docs" if settings.dev_mode else None,
+            redoc_url="/redoc" if settings.dev_mode else None,
+            openapi_url="/openapi.json" if settings.dev_mode else None,
         )
         app.middleware("http")(request_id_middleware)
         # RTGA-007: strip trailing slashes so the defense-in-depth origin guards
@@ -874,6 +898,8 @@ class Agent:
         }
         app.state.task_store = task_store
         app.state.skills = skills
+        app.state.mcp_skills = self.mcp_skills
+        app.state.exclude_from_catalog = frozenset(self.exclude_from_catalog)
         app.state.mcp_instructions = mcp_instructions
         app.state.model_client = model_client
         app.state.oauth = oauth_store

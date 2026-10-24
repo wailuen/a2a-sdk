@@ -35,10 +35,10 @@ async def test_card_shape(client):
     params = a2ui_ext["params"]
     assert "urn:a2ui-profile:standard:v1" in params["supportedCatalogIds"]
     assert params["acceptsInlineCatalogs"] is False
-    # GH-113 (superseded by the critical split-delivery fix, DESIGN.md
-    # §5.4/§7.1): deleteSurface is always delivered as its own,
-    # independently-folded message array — wire-discoverable via this hint.
-    assert params["deleteSurfaceSemantics"] == "split-delivery"
+    # GH-214 ruling (https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762):
+    # deleteSurfaceSemantics is removed; dataEncoding stays.
+    assert "deleteSurfaceSemantics" not in params
+    assert params["dataEncoding"] == "data.messages"
     # skills carry only spec fields + x-sdk
     for skill in card["skills"]:
         bare = set(skill) - {

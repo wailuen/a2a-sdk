@@ -33,7 +33,7 @@ from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
 from ..a2ui.translator import A2uiCapabilities, translate
-from ..agent.runner import new_task, run_task_worker, split_a2ui_delivery_validated
+from ..agent.runner import new_task, run_task_worker, validate_a2ui_delivery
 from ..auth.context import ResumeEnvelope, bind_identity, unbind_identity
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
@@ -411,35 +411,19 @@ class _RunMapper:
                 if a2ui_messages is not None:
                     # RT-001: SC-D1 + RT-004 validation, mirroring
                     # runner.py::build_artifact's A2A path exactly via the
-                    # shared split_a2ui_delivery_validated() boundary, so a
-                    # malformed translate() output (e.g. a custom domain-card
-                    # translate() that is entirely deleteSurface) fails this
-                    # transport too instead of silently emitting an empty
-                    # A2UI_UPDATE {"messages": []} and letting the run
-                    # succeed. Raises ValueError, caught by the enclosing
-                    # stream() try/except and reported as RUN_ERROR (§5.3) —
-                    # the same "every failure after RUN_STARTED becomes a
-                    # RUN_ERROR frame" contract every other exception here
-                    # already follows.
+                    # shared validate_a2ui_delivery() boundary, so a
+                    # malformed translate() output fails this transport too
+                    # instead of silently emitting an empty A2UI_UPDATE.
+                    # Raises ValueError, caught by the enclosing stream()
+                    # try/except and reported as RUN_ERROR (§5.3).
                     #
-                    # Critical protocol-conformance fix: deleteSurface must
-                    # never share a delivered array with its own surface's
-                    # create/populate messages — a spec-conformant Path-A
-                    # renderer folds one delivered array atomically and
-                    # paints once after the fold, so a bundled deleteSurface
-                    # would unmount the surface before it ever painted (see
-                    # split_a2ui_delivery() docstring). Deliver the open and
-                    # close arrays as two separate A2UI_UPDATE CUSTOM events,
-                    # open first — each event a self-contained fold+paint
-                    # unit. Named envelope so consumers can key on
-                    # value.messages (spec: CUSTOM.value carries the A2UI
-                    # message array).
-                    open_messages, close_messages = split_a2ui_delivery_validated(
-                        payload, a2ui_messages
-                    )
+                    # One A2UI_UPDATE per emission and no deleteSurface
+                    # (GH-214 ruling
+                    # https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762):
+                    # surface lifetime is client-managed. Named envelope so
+                    # consumers can key on value.messages.
+                    open_messages = validate_a2ui_delivery(payload, a2ui_messages)
                     frames.append(self._custom("A2UI_UPDATE", {"messages": open_messages}))
-                    if close_messages:
-                        frames.append(self._custom("A2UI_UPDATE", {"messages": close_messages}))
             return frames
 
         if isinstance(event, InterruptEvent):

@@ -4,9 +4,10 @@
  * - Surface registry keyed by surfaceId; createSurface / updateComponents /
  *   updateDataModel are folded ATOMICALLY per message array and each touched
  *   surface is painted ONCE per array — never repainted mid-array.
- * - deleteSurface applies POST-paint: the registry entry closes (further
- *   updates for that surfaceId are rejected) while the painted DOM persists
- *   as a transcript snapshot (show-then-close, the SDK-wide rule).
+ * - The SDK never emits deleteSurface (GH-214); a deleteSurface received from
+ *   another producer is still accepted and applies POST-paint: the registry
+ *   entry closes (further updates for that surfaceId are rejected) while the
+ *   painted DOM persists as a transcript snapshot.
  * - Data bindings are JSON Pointer (RFC 6901) {"path": ...} references into
  *   the surface data model. RT-002: per spec, an omitted path AND the
  *   literal path "/" both mean "the whole data model" — "/" is NOT the

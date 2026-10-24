@@ -2,7 +2,8 @@
 
 PROVISIONAL (``agent_sdk.testing``).  ``McpClient`` speaks the MCP
 Streamable HTTP JSON-RPC subset the gate needs: ``initialize``, paginated
-``tools/list`` and ``tools/call``.  ``run_gate`` checks the tool list, then
+``tools/list``, ``tools/call``, and (GH-205) paginated ``prompts/list`` and
+``prompts/get``.  ``McpTestClient`` is an alias of ``McpClient``.  ``run_gate`` checks the tool list, then
 calls each read-only tier-1 tool once with its ``sample=`` arguments.
 
 Security: the bearer is read from ``key_file`` only (there is no key argument,
@@ -124,6 +125,23 @@ class McpClient:
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return await self._rpc("tools/call", {"name": name, "arguments": arguments})
+
+    async def list_prompts(self) -> list[dict[str, Any]]:
+        prompts: list[dict[str, Any]] = []
+        cursor: str | None = None
+        for _ in range(_MAX_PAGES):
+            result = await self._rpc("prompts/list", {"cursor": cursor} if cursor else {})
+            prompts.extend(result.get("prompts") or [])
+            cursor = result.get("nextCursor")
+            if not cursor:
+                return prompts
+        raise McpError("mcp prompts/list pagination did not end")
+
+    async def get_prompt(self, name: str) -> dict[str, Any]:
+        return await self._rpc("prompts/get", {"name": name})
+
+
+McpTestClient = McpClient
 
 
 @dataclass

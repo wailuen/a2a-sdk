@@ -2,9 +2,9 @@
 A2A DataPart artifacts and AG-UI A2UI_UPDATE CUSTOM events.
 
 Per artifact ``translate()`` computes ONE ``list[dict]`` (never a bare dict)
-holding the full self-cleaning sequence::
+holding the three-message open sequence::
 
-    createSurface → updateComponents → updateDataModel → deleteSurface
+    createSurface → updateComponents → updateDataModel
 
 - every message carries ``version: "v0.9.1"``
 - the first updateComponents establishes exactly one component, id "root"
@@ -20,18 +20,13 @@ holding the full self-cleaning sequence::
   the pin. Every other content type's ``metadata`` reaches A2UI via ``wire()``
   below unchanged.
 
-``translate()``'s return value is a computed sequence, not a wire delivery
-unit. Delivery callers (``agent/runner.py::build_artifact``,
-``routes/ag_ui.py``'s ``ArtifactEvent`` branch) MUST pass it through
-``agent/runner.py::split_a2ui_delivery_validated()`` — never call this
-module's own ``split_a2ui_delivery()`` directly from a delivery caller
-(RT-001: a transport that split without validating first shipped malformed
-A2UI silently instead of failing the run) — and deliver the two returned
-halves as two independently folded arrays. See ``split_a2ui_delivery()``'s
-own docstring for why the split exists at all: a spec-conformant A2UI
-v0.9.1 Path-A renderer folds one delivered message array atomically and
-paints once after the fold, so ``deleteSurface`` can never share a delivered
-array with its own surface's create/populate messages.
+The SDK never emits ``deleteSurface`` for a surface in the artifact or run
+that created it (GH-214 ruling https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762): a spec
+renderer would paint the card and then unmount it. Surface lifetime is managed
+by the client; each turn uses a fresh ``surfaceId``. Delivery callers
+(``agent/runner.py::build_artifact``, ``routes/ag_ui.py``'s ``ArtifactEvent``
+branch) pass the sequence through ``agent/runner.py::validate_a2ui_delivery()``
+and deliver it as ONE message array.
 
 Gating happens here (capabilities resolved by the route, §5.4): Extended
 profile types need ``tier="core+extended"``; domain cards are emitted freely
@@ -166,7 +161,7 @@ def translate(
     send_data_model: bool = False,
     theme: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]] | None:
-    """Full four-message sequence for one artifact, or None when the type
+    """Three-message open sequence for one artifact, or None when the type
     is gated off for this client."""
     caps = capabilities or A2uiCapabilities()
     cls = type(payload)
@@ -187,7 +182,7 @@ def translate(
     except Exception as exc:
         # SI-2 (RT-004): this is the actual reachable call site for a
         # domain card's wire()/to_markdown() exception — it runs BEFORE
-        # runner.py's split_a2ui_delivery_validated ever gets a chance to
+        # runner.py's validate_a2ui_delivery ever gets a chance to
         # re-check wire(), so an unguarded raise here previously escaped
         # both transports unwrapped, with str(exc) intact. Report only the
         # exception's type, never str(exc), and suppress chaining
@@ -225,55 +220,15 @@ def translate(
             "version": A2UI_VERSION,
             "updateDataModel": {"surfaceId": sid, "path": "/root", "value": value},
         },
-        {
-            "version": A2UI_VERSION,
-            "deleteSurface": {"surfaceId": sid},
-        },
     ]
-
-
-def split_a2ui_delivery(
-    messages: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Partition a ``translate()`` sequence into (open, close) for two
-    independently-folded wire deliveries.
-
-    Critical protocol-conformance fix: the A2UI v0.9.1 client contract folds
-    ONE delivered message array atomically and paints once after the fold;
-    ``deleteSurface``'s unmount+unsubscribe happens DURING that fold, before
-    the paint. ``translate()`` computes ``createSurface``/``updateComponents``/
-    ``updateDataModel``/``deleteSurface`` as one logical sequence, but if that
-    whole sequence were handed to a strictly spec-conformant Path-A renderer
-    as a single delivered array, the renderer would unmount the surface
-    before ever painting it — nothing would render, for every artifact, on
-    any consumer that has no private knowledge of this SDK's renderer
-    internals.
-
-    The fix is at the delivery boundary, not inside ``translate()``: split
-    the sequence into an *open* array (``createSurface``, ``updateComponents``,
-    ``updateDataModel``) and a *close* array (``deleteSurface``), and deliver
-    them as two separate wire units — two DataParts on one A2A artifact, or
-    two AG-UI ``A2UI_UPDATE`` CUSTOM events, always open before close. Each
-    array then gets its own ordinary atomic fold-and-paint pass: the open
-    array's pass paints the surface; the close array's pass touches no
-    surface (nothing to (re)paint) and closes the registry entry only once
-    already-painted DOM. No renderer needs private knowledge of a
-    "post-paint" convention — this is ordinary sequential per-array
-    processing, exactly what the spec's fold-once-per-array contract already
-    guarantees.
-    """
-    close = [m for m in messages if "deleteSurface" in m]
-    open_ = [m for m in messages if "deleteSurface" not in m]
-    return open_, close
 
 
 class SurfaceRegistry:
     """Tracks open surfaces for callers that drive streaming A2UI lifecycles.
 
-    Intended for long-lived sessions that emit createSurface/deleteSurface
-    messages incrementally (e.g. AG-UI CUSTOM event streams).  The stateless
-    ``translate()`` helper above does not use this — it emits its own
-    self-contained four-message sequence.
+    Intended for long-lived sessions that manage surface lifetime themselves
+    (e.g. AG-UI CUSTOM event streams).  The stateless ``translate()`` helper
+    above does not use this — it emits its own three-message open sequence.
     """
 
     def __init__(self) -> None:

@@ -58,6 +58,7 @@ _SENTINEL = object()
 # resolving to a THIRD DeferredResult raises rather than looping forever /
 # leaking the object.
 _MAX_DEFERRED_RESOLUTIONS = 2
+_MAX_DESCRIPTION_LEN = 2048
 
 
 # ── GH-148 / RT-B-004: reuse-token schema widening ──
@@ -447,6 +448,9 @@ class ToolDecl:
     # none, (X,) for ``emits=X``, (A, B, ...) for a tuple. Derived from
     # ``emits`` when not passed.
     emits_types: tuple[type, ...] = ()
+    # GH-207: when set, MCP tools/list uses this as the description; the
+    # agent loop and the agent card keep ``description``.
+    mcp_description: str | None = None
 
     def __post_init__(self) -> None:
         if not self.emits_types:
@@ -505,7 +509,17 @@ class ToolSet:
         long_running: bool = False,
         tool_timeout_override: float | None = None,
         allow_extra_args: bool = False,
+        mcp_description: str | None = None,
     ) -> Callable:
+        if mcp_description is not None:
+            if not isinstance(mcp_description, str):
+                raise ValueError("mcp_description must be a string")
+            if not mcp_description.strip():
+                raise ValueError("mcp_description must not be empty or whitespace")
+            if len(mcp_description) > _MAX_DESCRIPTION_LEN:
+                raise ValueError(
+                    f"mcp_description exceeds {_MAX_DESCRIPTION_LEN} characters"
+                )
         if tier not in (1, 2):
             raise ValueError("tier must be 1 (query: A2A+MCP) or 2 (composite: A2A only)")
         emits_types = normalize_emits(emits)
@@ -687,6 +701,7 @@ class ToolSet:
                     reuse_raw_override=reuse_raw_override_for_model(input_model),
                     reuse_field_types=reuse_field_types_for_model(input_model),
                     allow_extra_args=allow_extra_args,
+                    mcp_description=mcp_description,
                 )
             )
             return fn

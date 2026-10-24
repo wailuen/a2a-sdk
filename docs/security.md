@@ -9,6 +9,7 @@ Every resolved identity is **kind-tagged**: `api_key` or `oauth`.
 | A2A, AG-UI | API key or OAuth token |
 | `/mcp` | API key or OAuth token |
 | `/admin/*`, key management | API key (admin) — `oauth` kind rejected |
+| `/openapi.json`, `/docs`, `/redoc`, `/docs/oauth2-redirect` | dev-only: not mounted (404) unless `DEV_MODE=true`, which is refused for a non-local `PUBLIC_URL`. They list every route, so production never serves them |
 | `/oauth/token` | unauthenticated by design (PKCE; clients registered as confidential must also present their `client_secret` via their registered method) |
 | `/oauth/idp/callback`, `/oauth/idp/consent` | unauthenticated by design (single-use state, browser cookie, consent ticket; per-IP rate limited). Only active with `AGENT_SDK_OAUTH_IDP=oidc`. A documented SI-5 exception |
 | `/oauth/revoke` | oauth callers for their **own** tokens only; without a Bearer, a public client by `client_id`, a confidential client with its secret |

@@ -73,6 +73,11 @@ add custom request logic.
   `input-required` state / interrupt outcome, then resume and assert
   completion.
 
+- MCP: `agent_sdk.testing.mcp.McpTestClient` (alias of `McpClient`) takes a
+  base URL, a key file and an ASGI transport. It offers `initialize()`,
+  paginated `list_tools()`, `call_tool()`, and for `Agent(mcp_skills="prompts")`
+  paginated `list_prompts()` and `get_prompt(name)`. Errors raise `McpError`.
+
 See the SDK's own `tests/` and the template's `tests/` for working
 examples of all three.
 
@@ -165,5 +170,5 @@ async def test_full_turn(client):
     a2ui_seqs = ChatDriver.extract_a2ui(task)
     assert len(a2ui_seqs) >= 1
     verbs = [next(k for k in m if k != "version") for m in a2ui_seqs[0]]
-    assert verbs == ["createSurface", "updateComponents", "updateDataModel", "deleteSurface"]
+    assert verbs == ["createSurface", "updateComponents", "updateDataModel"]
 ```

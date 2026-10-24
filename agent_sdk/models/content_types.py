@@ -106,6 +106,7 @@ from ..common.redact import (
     safe_block_text,
     safe_cell_text,
     safe_id_text,
+    safe_joined_id_text,
     safe_label_text,
     safe_line_text,
     sanitize_text,
@@ -141,10 +142,17 @@ def _sanitize_line(value: str, *, max_len: int | None = LINE_TEXT_MAX_LEN) -> st
 
 
 def _safe_id(value: str) -> str:
-    """Identifier for the text fallback (GH-156, SI-2): byte-exact for real id
-    alphabets (``=``, ``:``), but unable to forge a separator or flood the
-    text block (``safe_id_text``)."""
+    """Identifier alone on its ``id:`` line (GH-156, GH-212, SI-2): byte-exact
+    for real id alphabets (``=``, ``:``, ``( )``), but unable to add a line,
+    a column or flood the text block (``safe_id_text``)."""
     return safe_id_text(value, max_len=_METADATA_SUFFIX_FIELD_MAX_LEN)
+
+
+def _safe_joined_id(value: str) -> str:
+    """Identifier JOINED into a row with other fields (EmailList
+    ``(id: ..., conversation: ...)``, FundPerformance ``source <pb_id>``):
+    keeps the GH-156 rendering so it cannot forge a sibling field (GH-212)."""
+    return safe_joined_id_text(value, max_len=_METADATA_SUFFIX_FIELD_MAX_LEN)
 
 
 def _sanitize_block(value: str) -> str:
@@ -806,12 +814,23 @@ class ColumnDef(_Wire):
     type: str | None = None
     unit: str | None = None
     highlight: str | None = None
+    is_id: bool = False
+
+    @model_serializer(mode="wrap")
+    def _omit_is_id_when_false(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = handler(self)
+        if not self.is_id:
+            data.pop("is_id", None)
+        return data
 
 
 class ComparisonTable(ContentModel):
     """``sort_by`` and ``sort_order`` are SDK extensions: not in the Standard
     Profile v1 contract, kept on the wire (GH-179). ``ColumnDef.unit`` and
-    ``ColumnDef.highlight`` are SDK extensions too.
+    ``ColumnDef.highlight`` are SDK extensions too. ``ColumnDef.is_id=True``
+    marks a column of machine ids: its cells render through ``safe_id_text``
+    (``( )`` and spaces byte-exact, GH-212) instead of ``safe_cell_text``; it is
+    omitted from the wire when false.
 
     ``rows`` values must be finite: a ``nan``/``inf`` cell is rejected at
     construction (GH-173 rule) so ``wire()`` and ``to_plain_text()`` agree."""
@@ -840,9 +859,13 @@ class ComparisonTable(ContentModel):
         lines = [_sanitize_line(self.title, max_len=TITLE_TEXT_MAX_LEN)] if self.title else []
         lines += [f"  {header}", "  " + "-" * len(header)]
         for row in self.rows:
-            lines.append(
-                "  " + " | ".join(_sanitize_cell(str(row.get(c.key, ""))) for c in self.columns)
-            )
+            cells = [
+                _safe_id(str(row.get(c.key, "")))
+                if c.is_id
+                else _sanitize_cell(str(row.get(c.key, "")))
+                for c in self.columns
+            ]
+            lines.append("  " + " | ".join(cells))
         return "\n".join(lines)
 
 
@@ -1211,7 +1234,7 @@ class FundPerformance(ContentModel):
         # separators (_sanitize_cell) — reversing the order would let a
         # fullwidth substitution's byte growth outrun the cap.
         if self.pb_id:
-            safe_pb_id = _safe_id(self.pb_id)
+            safe_pb_id = _safe_joined_id(self.pb_id)
             bits.append(f"source {safe_pb_id}")
         return (" | ".join(bits) or "fund performance (no data)")
 
@@ -1249,9 +1272,9 @@ class EmailList(ContentModel):
             received_at = _sanitize_cell(m.received_at)
             from_email = _sanitize_cell(m.from_.email)
             subject = _sanitize_cell(m.subject)
-            ids = f"id: {_safe_id(m.id)}"
+            ids = f"id: {_safe_joined_id(m.id)}"
             if m.conversation_id:
-                ids += f", conversation: {_safe_id(m.conversation_id)}"
+                ids += f", conversation: {_safe_joined_id(m.conversation_id)}"
             lines.append(f"  {unread}{received_at} | {from_email} | {subject} ({ids})")
             if m.preview:
                 lines.append(f"    {_sanitize_cell(m.preview)}")

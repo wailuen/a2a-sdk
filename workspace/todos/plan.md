@@ -78,6 +78,7 @@ Fix 5 protocol conformance bugs surfaced by downstream agents after the 0.4.0 re
 | W59 [x] ✅ 2026-10-23 (GH-204B, GH-208–GH-211, GH-213, GH-215–GH-221 partial/whole; archived by hand — wave gate blocked only on template PR #2 merge, which pairs with the 0.18.0 release) | completed/w059-gh-issues.md | G | 13 | — |
 | W60 [x] ✅ 2026-10-23 (GH-218 docs, GH-219 parts 1/2/4, GH-221 parts 4–6, GH-222, GH-223; archived by hand — wave gate blocked only on template PR #2 merge, which pairs with the 0.18.0 release) | completed/w060-gh-issues.md | G | 5 | — |
 | W61 [x] ✅ 2026-10-23 (GH-225 multi-type emits, GH-228 scope-scan hardening; archived by hand after a release-gate MCP fix for LRN-469) | completed/w061-gh-issues.md | G | 2 | — |
+| W62 [x] ✅ 2026-10-24 (GH-205 mcp_skills, GH-206 strict schema mode, GH-207 mcp_description, GH-212 id-safe text, GH-214 no deleteSurface, GH-229 acceptance args, GH-230 SafeValueError, GH-231 API docs gated; archived by hand after G1 budget stop) | completed/w062-gh-issues.md | G | 8 | — |
 
 ## Dependency graph
 

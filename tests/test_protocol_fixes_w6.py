@@ -177,38 +177,26 @@ def test_build_artifact_content_model_no_a2ui_emits_two_parts():
 
 
 def test_build_artifact_content_model_with_a2ui_emits_a2ui_data_part():
-    """When A2UI is active, build_artifact emits TextPart + two A2UI DataParts
-    (open + close — deleteSurface is delivered as its own array, never
-    bundled with create/populate; see split_a2ui_delivery())."""
+    """When A2UI is active, build_artifact emits TextPart + one A2UI DataPart
+    (open only; no close DataPart, GH-214 ruling
+    https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762)."""
     card = _SimpleCard(value="world")
     assert _CAPS_A2UI_ON.allows(_SimpleCard), "precondition: A2UI must be active"
 
     artifact = build_artifact(_make_event(card), _CAPS_A2UI_ON)
     parts = artifact.parts
-    assert len(parts) == 3, f"expected 3 parts, got {len(parts)}: {parts}"
+    assert len(parts) == 2, f"expected 2 parts, got {len(parts)}: {parts}"
 
-    text_part, open_part, close_part = parts
+    text_part, open_part = parts
     assert isinstance(text_part, TextPart)
     assert isinstance(open_part, DataPart)
-    assert isinstance(close_part, DataPart)
 
-    # A2UI DataParts carry the message array wrapped in an object under
+    # A2UI DataPart carries the message array wrapped in an object under
     # "messages" — matching the AG-UI CUSTOM value convention (GH-128).
-    for data_part in (open_part, close_part):
-        assert isinstance(data_part.data, dict), (
-            f"A2UI DataPart.data must be a dict, got {type(data_part.data)}"
-        )
-        assert isinstance(data_part.data["messages"], list), (
-            f"A2UI DataPart.data['messages'] must be a list, "
-            f"got {type(data_part.data['messages'])}"
-        )
-        meta = data_part.metadata or {}
-        assert meta.get("mimeType") == "application/a2ui+json"
-
-    open_msgs = open_part.data["messages"]
-    close_msgs = close_part.data["messages"]
-    assert all("deleteSurface" not in m for m in open_msgs)
-    assert len(close_msgs) == 1 and "deleteSurface" in close_msgs[0]
+    assert isinstance(open_part.data, dict)
+    assert isinstance(open_part.data["messages"], list)
+    assert (open_part.metadata or {}).get("mimeType") == "application/a2ui+json"
+    assert all("deleteSurface" not in m for m in open_part.data["messages"])
 
 
 # ---------------------------------------------------------------------------

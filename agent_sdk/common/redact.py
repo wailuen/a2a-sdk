@@ -240,22 +240,38 @@ _ID_NEUTRALISE = str.maketrans({
     "｜": "/",
     "<": "＜",
     ">": "＞",
-    "(": "（",
-    ")": "）",
     "[": "［",
     "]": "］",
 })
 
+_JOINED_ID_NEUTRALISE = str.maketrans({"(": "（", ")": "）"}) | _ID_NEUTRALISE
+
 
 def safe_id_text(value: str, *, max_len: int | None = 256) -> str:
-    """Render an upstream identifier for a text fallback a model may copy back
-    into a tool call (GH-156). Unlike :func:`safe_cell_text`, keeps
-    ``= + / : , . _ - ! ~ @`` byte-exact (base64 padding, URNs); strips control
-    characters, caps length, turns whitespace into ``_`` and neutralises only
-    ``()[]<>|`` so an id cannot forge ``(id: ...)`` or ``, conversation: ...``."""
+    """Render an upstream identifier that sits ALONE on its own ``id:`` line
+    (or in an ``is_id`` table column) for a text fallback a model may copy
+    back into a tool call (GH-156, GH-212). Keeps
+    ``= + / : , . _ - ! ~ @ ( )`` and single spaces byte-exact (base64
+    padding, URNs, ``202601026118 (1688214-U)``); strips control characters,
+    caps length, collapses a run of whitespace to one space and neutralises
+    only ``|<>[]``. With the id alone on its line, ``( )`` cannot forge a
+    neighbouring ``(id: ...)`` (GH-212 ruling,
+    https://github.com/wailuen/a2a-sdk/issues/212#issuecomment-6359828392).
+    An id joined into a row with other fields must use
+    :func:`safe_joined_id_text` instead."""
     text = safe_error_text(value, max_len=max_len)
-    text = "_".join(text.split())
-    return text.translate(_ID_NEUTRALISE)
+    return " ".join(text.split()).translate(_ID_NEUTRALISE)
+
+
+def safe_joined_id_text(value: str, *, max_len: int | None = 256) -> str:
+    """Identifier rendering for an id JOINED into a row beside other fields
+    (``EmailList`` ``(id: ..., conversation: ...)``, ``FundPerformance``
+    ``source <pb_id>``): whitespace becomes ``_`` and ``()[]<>|`` are
+    neutralised, so the id cannot forge a second ``id:``/``conversation:`` or a
+    readable fake figure such as ``(Called down=99.0%)`` (GH-212 HUMAN GATE,
+    https://github.com/wailuen/a2a-sdk/issues/212#issuecomment-6366237627)."""
+    text = safe_error_text(value, max_len=max_len)
+    return "_".join(text.split()).translate(_JOINED_ID_NEUTRALISE)
 
 
 def safe_block_text(value: str) -> str:

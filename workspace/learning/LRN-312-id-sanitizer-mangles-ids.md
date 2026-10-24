@@ -14,7 +14,7 @@ GH-156 `_safe_id` ran ids through `_sanitize_cell` (C-007), which rewrites `=`, 
 A delimiter-neutralising cell sanitizer was reused for identifiers that must round-trip byte-exact.
 
 ## Check
-Verify `safe_id_text` exists in `agent_sdk/common/redact.py` and `_safe_id` uses it. Run a test asserting `AAMkAGI2TAAA=` and `urn:li:organization:1` appear verbatim in `to_plain_text()` and MCP `content[0].text`.
+Verify `safe_id_text` (new alphabet, GH-212) exists in `agent_sdk/common/redact.py` and `_safe_id` uses it. Run a test asserting `AAMkAGI2TAAA=` and `urn:li:organization:1` appear verbatim in `to_plain_text()` and MCP `content[0].text`.
 
 ## Prevention
-When planning text rendering of ids a model will copy back, require an id-preserving sanitizer (strip controls, whitespace, `()[]<>|` only; keep `= + / : , . _ - ! ~ @`). Require tests with real upstream id alphabets (base64 padding, URN colons).
+When planning text rendering of ids a model will copy back, require an id-preserving sanitizer (strip controls, collapse whitespace to one space, neutralise `|<>[]` only; keep `( )`, single spaces and `= + / : , . _ - ! ~ @`; GH-212 ruling https://github.com/wailuen/a2a-sdk/issues/212#issuecomment-6359828392 updated this alphabet, `=` stays byte-exact; ids joined into a row (EmailList, FundPerformance `pb_id`) keep the old `safe_joined_id_text` rendering per https://github.com/wailuen/a2a-sdk/issues/212#issuecomment-6366237627). Require tests with real upstream id alphabets (base64 padding, URN colons).

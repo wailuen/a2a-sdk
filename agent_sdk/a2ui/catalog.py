@@ -367,25 +367,12 @@ def a2ui_extension(
     When *allowed_components* is set (SC-D2) only the matching catalog IDs
     are advertised in ``supportedCatalogIds``.
 
-    ``deleteSurfaceSemantics`` is a NON-NORMATIVE, SDK-specific hint (NOT a
-    field defined by A2UI v0.9.1 / Standard Profile v1). It carries the
-    show-then-close convention (DESIGN.md §5.4/§7.1) on the card:
-    ``deleteSurface`` for a surface is always delivered as its own,
-    independently-folded message array — a separate A2A DataPart (or a
-    separate AG-UI ``A2UI_UPDATE`` CUSTOM event) from that surface's
-    create/populate messages, never bundled into the same array (critical
-    fix: a strictly spec-conformant Path-A renderer folds ONE delivered
-    array atomically and paints once after the fold, so a bundled
-    ``deleteSurface`` would unmount the surface before it ever painted). This
-    means NO special-casing is required to render this SDK's A2UI output
-    correctly — ordinary per-array fold-then-paint handling, exactly what
-    A2UI v0.9.1 already specifies, is sufficient. The hint value
-    ``"split-delivery"`` documents this on the card as a courtesy so a
-    consumer need not reverse-engineer the delivery shape, but it is not a
-    spec-defined discovery mechanism and correct rendering never depends on
-    reading it.
+    The SDK emits no ``deleteSurface`` for the surface it creates, so the
+    former ``deleteSurfaceSemantics`` param is removed (GH-214 ruling
+    https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762):
+    clients manage surface lifetime themselves.
 
-    ``dataEncoding`` is also a NON-NORMATIVE, SDK-specific hint (LRN-134
+    ``dataEncoding`` is a NON-NORMATIVE, SDK-specific hint (LRN-134
     follow-up to GH-128/GH-113). A2UI v0.9.1's own A2A binding mandates a
     bare array at the DataPart's ``data`` field; this SDK instead wraps the
     array as ``{"messages": [...]}`` (``agent_sdk/agent/runner.py::
@@ -406,7 +393,6 @@ def a2ui_extension(
         params={
             "supportedCatalogIds": supported_catalogs(allowed_components, emits),
             "acceptsInlineCatalogs": False,
-            "deleteSurfaceSemantics": "split-delivery",
             "dataEncoding": "data.messages",
         },
     )

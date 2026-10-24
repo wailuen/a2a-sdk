@@ -142,10 +142,9 @@ def test_d1_good_domain_card_wire_nonempty_does_not_raise(_register_d1_cards):
     # Should succeed without raising
     artifact = build_artifact(event, _CAPS_DOMAIN_ON)
     assert artifact is not None
-    # TextPart + A2UI DataPart(open) + A2UI DataPart(close) — deleteSurface is
-    # delivered as its own array, never bundled with create/populate (critical
-    # protocol-conformance fix; see split_a2ui_delivery()).
-    assert len(artifact.parts) == 3
+    # TextPart + A2UI DataPart(open); no close DataPart (GH-214 ruling
+    # https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762).
+    assert len(artifact.parts) == 2
 
 
 def test_d1_bad_domain_card_gated_off_does_not_raise(_register_d1_cards):
@@ -185,8 +184,8 @@ def test_d1_standard_profile_type_wire_not_double_validated():
     caps = A2uiCapabilities(tier="core", catalogs=["urn:a2ui-profile:standard:v1"])
     artifact = build_artifact(event, caps)
     assert artifact is not None
-    # TextPart + A2UI DataPart(open) + A2UI DataPart(close)
-    assert len(artifact.parts) == 3
+    # TextPart + A2UI DataPart(open) (GH-214: no close DataPart)
+    assert len(artifact.parts) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +198,7 @@ def test_d1_standard_profile_type_wire_not_double_validated():
 # The actual reachable call site for a wire()-raises domain card is
 # translator.py::translate()'s own (previously unguarded) payload.wire()
 # call, not _validate_a2ui_wire's redundant re-check: build_artifact() and
-# ag_ui.py's map() both call translate() BEFORE split_a2ui_delivery_validated
+# ag_ui.py's map() both call translate() BEFORE validate_a2ui_delivery
 # (which is what invokes _validate_a2ui_wire), so a raise from wire() was
 # already propagating — as the raw, unwrapped exception, str(exc) intact —
 # out of translate() before _validate_a2ui_wire's own try/except ever ran.
@@ -574,7 +573,7 @@ def test_gh56_ac1_domain_type_allowed_when_tier_core_catalog_standard(_register_
     result = translate(payload, capabilities=caps.for_custom_emit())
     assert result is not None
     assert isinstance(result, list)
-    assert len(result) == 4
+    assert len(result) == 3
 
 
 def test_gh56_ac2_domain_type_suppressed_when_tier_none(_register_gh56_card):

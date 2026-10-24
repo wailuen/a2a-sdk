@@ -77,3 +77,8 @@ class SkillsRegistry:
     def load(self, name: str) -> str | None:
         skill = self.skills.get(name)
         return skill.body if skill else None
+
+    def listed(self, exclude: Iterable[str] | None = None) -> list[Skill]:
+        """Catalog skills (those not in ``exclude``), in discovery order."""
+        excluded = set(exclude) if exclude else set()
+        return [s for s in self.skills.values() if s.name not in excluded]

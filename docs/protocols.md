@@ -47,6 +47,13 @@ Supported output modes: `text`, `text/plain`, `application/json`,
 `application/a2ui+json`. `X-A2A-Extensions` is echoed with only the
 activated subset (the A2UI extension URI).
 
+A2UI surface lifetime is managed by the client. The SDK emits no `deleteSurface`
+for a surface in the artifact or run that created it: each A2A artifact is
+`[TextPart, DataPart(open)]`, and each AG-UI emission is `AGENT_ARTIFACT` then
+one `A2UI_UPDATE`. Each turn uses a fresh `surfaceId`. The agent-card param
+`deleteSurfaceSemantics` was removed (GH-214, ruling
+https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762).
+
 **Concurrent-stream cap.** `POST /v1/message:stream`,
 `POST /v1/tasks/{id}:subscribe` and AG-UI's `POST /ag-ui/run` each hold an
 indefinite `text/event-stream` on a single-process server, so they share one
@@ -125,6 +132,14 @@ never `RUN_ERROR`.
   metadata. Discovery: both PRM variants + AS metadata, S256 PKCE only.
 - `tools/list` exposes **Tier 1 tools only**; `emits` becomes
   `outputSchema` and results carry `structuredContent`.
+- Setting `AGENT_SDK_MCP_SCHEMA_MODE=strict` flattens `tools/list` schemas (inlined `$defs`, `anyOf` with null collapsed at property positions only, so list items and dict values keep `null`; no `default: null`; a recursive model keeps its `$ref`/`$defs`). It applies to `inputSchema` and `outputSchema`, including the `emits` tuple `anyOf`, and `tools/list` only. Default `standard` is unchanged.
+- Skills (opt-in, GH-205): `Agent(mcp_skills="tool")` adds the read-only
+  `load_skill` tool to `tools/list` / `tools/call`;
+  `Agent(mcp_skills="prompts")` advertises `capabilities.prompts` and serves
+  paginated `prompts/list` plus `prompts/get` (one user message holding the
+  skill body). Both need `skills_dir`; `exclude_from_catalog` skills are
+  hidden; `load_skill` is a reserved tool name. Default `None` changes
+  nothing.
 - `initialize.instructions` carries the credential note, then your own text
   from `Agent(mcp_instructions=...)` (persona agents) or
   `artifacts/mcp_instructions.md` (artifact agents; same variables as

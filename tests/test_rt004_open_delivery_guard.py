@@ -1,11 +1,10 @@
 """RT-004: build_artifact() must not emit an empty open A2UI DataPart.
 
-split_a2ui_delivery() partitions translate() output into (open, close)
-arrays. The close DataPart is only appended when close_messages is
-non-empty (runner.py); the open DataPart was appended unconditionally,
-so a translate() output that is entirely deleteSurface (open_messages
-== []) produced a {"messages": []} DataPart instead of failing
-deterministically. The SDK's own translate() always emits createSurface
+validate_a2ui_delivery() rejects a translate() output with no open
+messages (GH-214: deleteSurface is never delivered). The open DataPart was
+once appended unconditionally, so a translate() output that is entirely
+deleteSurface (open_messages == []) produced a {"messages": []} DataPart
+instead of failing deterministically. The SDK's own translate() always emits createSurface
 first, so this is latent for Standard Profile / registered domain types
 today — it guards against a future custom translate() output.
 """
@@ -36,7 +35,7 @@ def test_rt004_all_delete_surface_translate_output_raises(monkeypatch):
 
 
 def test_rt004_normal_translate_output_unaffected():
-    """Sanity: the SDK's own translate() (create/update/update/delete) still
+    """Sanity: the SDK's own translate() (create/update/update) still
     produces a non-empty open sequence and build_artifact() succeeds."""
     payload = KpiCard(metrics=[MetricItem(label="A", value=1)])
     event = ArtifactEvent(data_type=payload.data_type, tool_name="test_tool", model=payload)
@@ -45,4 +44,4 @@ def test_rt004_normal_translate_output_unaffected():
     artifact = build_artifact(event, caps)
 
     assert artifact is not None
-    assert len(artifact.parts) == 3
+    assert len(artifact.parts) == 2  # TextPart + open DataPart (GH-214)
