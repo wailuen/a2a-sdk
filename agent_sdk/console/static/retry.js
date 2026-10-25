@@ -31,13 +31,32 @@ export function decideRetry(status, retryAfter, attempt) {
   return { retry: true, delayMs: fromHeader === null ? backoff : fromHeader };
 }
 
+/** Sleep that rejects with an AbortError as soon as the signal aborts (and clears its timer). */
+export function abortableSleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) {
+      reject(new DOMException("aborted", "AbortError"));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("aborted", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      if (signal) signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 /**
  * POST until a response that is OK, or a failure that must not be retried.
  * Only called before any SSE frame has been read, so a network failure is safe
  * to retry. Returns the OK response, or null after reporting the failure.
  */
-export async function postWithRetry(doPost, { systemLine, traceFrame, label, sleep }) {
-  const wait = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+export async function postWithRetry(doPost, { systemLine, traceFrame, label, sleep, signal }) {
+  const wait = sleep || ((ms) => abortableSleep(ms, signal));
   for (let attempt = 0; ; attempt++) {
     let resp;
     try {
@@ -49,7 +68,7 @@ export async function postWithRetry(doPost, { systemLine, traceFrame, label, sle
       }
       const delayMs = Math.min(BASE_DELAY_MS * 2 ** attempt, MAX_DELAY_MS);
       systemLine(`${label} failed (network error), retrying in ${delayMs / 1000}s…`);
-      await wait(delayMs);
+      if (!(await waited(wait, delayMs))) return null;
       continue;
     }
     if (resp.ok) return resp;
@@ -60,6 +79,16 @@ export async function postWithRetry(doPost, { systemLine, traceFrame, label, sle
       return null;
     }
     systemLine(`${label} failed (HTTP ${resp.status}), retrying in ${delayMs / 1000}s…`);
+    if (!(await waited(wait, delayMs))) return null;
+  }
+}
+
+/** true once the back-off wait finished; false if it was aborted (Reset). */
+async function waited(wait, delayMs) {
+  try {
     await wait(delayMs);
+    return true;
+  } catch (_e) {
+    return false;
   }
 }

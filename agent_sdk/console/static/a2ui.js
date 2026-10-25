@@ -31,6 +31,16 @@ export function resetSurfaces() {
   surfaces.clear();
 }
 
+/* Closed-surface tombstones are kept so a replayed createSurface is rejected,
+ * but only the newest MAX_TOMBSTONES of them: the oldest are forgotten. */
+export const MAX_TOMBSTONES = 200;
+
+function pruneTombstones() {
+  const closed = [];
+  for (const [surfaceId, entry] of surfaces) if (entry.closed) closed.push(surfaceId);
+  for (const surfaceId of closed.slice(0, Math.max(0, closed.length - MAX_TOMBSTONES))) surfaces.delete(surfaceId);
+}
+
 /* ── JSON Pointer (RFC 6901) ── */
 
 function isRelativePointer(pointer) {
@@ -120,7 +130,7 @@ export function renderA2ui(messages, opts = {}) {
     try {
       foldMessage(msg);
     } catch (err) {
-      notes.push(`message ${index} skipped: ${(err && err.message) || err}`);
+      notes.push(`message ${index} skipped: ${clip((err && err.message) || err)}`);
     }
   });
 
@@ -135,7 +145,7 @@ export function renderA2ui(messages, opts = {}) {
       if (!surfaceId) return;
       const existing = surfaces.get(surfaceId);
       if (existing && existing.closed) {
-        notes.push(`createSurface rejected: surface ${surfaceId} is closed`);
+        notes.push(`createSurface rejected: surface ${clip(surfaceId)} is closed`);
         return;
       } else if (existing) {
         console.warn("[a2ui] duplicate createSurface for open surface ignored (replay); updates still applied", surfaceId);
@@ -153,7 +163,7 @@ export function renderA2ui(messages, opts = {}) {
       const { surfaceId, components } = msg.updateComponents;
       const entry = surfaces.get(surfaceId);
       if (!entry || entry.closed) {
-        notes.push(`updateComponents dropped: unknown/closed surface ${surfaceId}`);
+        notes.push(`updateComponents dropped: unknown/closed surface ${clip(surfaceId)}`);
         return;
       }
       if (!entry._componentMap) entry._componentMap = new Map();
@@ -167,12 +177,12 @@ export function renderA2ui(messages, opts = {}) {
       const { surfaceId, path } = msg.updateDataModel;
       const entry = surfaces.get(surfaceId);
       if (!entry || entry.closed) {
-        notes.push(`updateDataModel dropped: unknown/closed surface ${surfaceId}`);
+        notes.push(`updateDataModel dropped: unknown/closed surface ${clip(surfaceId)}`);
         return;
       }
       // Absent "value" key means delete; explicit null means set to null.
       if (isRelativePointer(path)) {
-        notes.push(`updateDataModel rejected: relative path ${JSON.stringify(path)} has no scope`);
+        notes.push(`updateDataModel rejected: relative path ${clip(JSON.stringify(path))} has no scope`);
         return;
       }
       const value = "value" in msg.updateDataModel ? msg.updateDataModel.value : undefined;
@@ -193,8 +203,8 @@ export function renderA2ui(messages, opts = {}) {
     try {
       painted = paintSurface(entry, fallbackText, notes);
     } catch (err) {
-      notes.push(`surface ${surfaceId} paint failed: ${(err && err.message) || err}`);
-      painted = fallbackNode(fallbackText, `render error for surface ${surfaceId}`);
+      notes.push(`surface ${clip(surfaceId)} paint failed: ${clip((err && err.message) || err)}`);
+      painted = fallbackNode(fallbackText, `render error for surface ${clip(surfaceId)}`);
     }
     if (entry.node && entry.node.parentNode) {
       entry.node.replaceWith(painted); // repaint in place (same transcript slot)
@@ -214,6 +224,7 @@ export function renderA2ui(messages, opts = {}) {
       entry.dataModel = {};
     }
   }
+  pruneTombstones();
 
   return { nodes, notes };
 }
@@ -226,7 +237,7 @@ function paintSurface(entry, fallbackText, notes) {
   }
   const binding = root.data && root.data.path !== undefined ? root.data.path : null;
   if (isRelativePointer(binding)) {
-    notes.push(`root binding rejected: relative path ${JSON.stringify(binding)} has no scope`);
+    notes.push(`root binding rejected: relative path ${clip(JSON.stringify(binding))} has no scope`);
     return fallbackNode(fallbackText, "relative data path rejected");
   }
   const value = binding !== null ? pointerGet(entry.dataModel, binding) : entry.dataModel;
@@ -234,10 +245,10 @@ function paintSurface(entry, fallbackText, notes) {
   if (!renderer) {
     const resolvedValue = value === undefined ? null : value;
     if (resolvedValue === null || typeof resolvedValue !== "object" || Array.isArray(resolvedValue)) {
-      notes.push(`unknown component ${String(root.component)} — text fallback rendered`);
-      return fallbackNode(fallbackText, `unknown component: ${String(root.component)}`);
+      notes.push(`unknown component ${clip(root.component)} — text fallback rendered`);
+      return fallbackNode(fallbackText, `unknown component: ${clip(root.component)}`);
     }
-    notes.push(`unknown component ${String(root.component)} — generic renderer used`);
+    notes.push(`unknown component ${clip(root.component)} — generic renderer used`);
     const name = root.component;
     renderer = (data) => renderGeneric(name, data);
   }
@@ -248,8 +259,8 @@ function paintSurface(entry, fallbackText, notes) {
     appendMetadataFootnote(node, resolved);
     return node;
   } catch (err) {
-    notes.push(`renderer ${root.component} failed: ${err.message || err}`);
-    return fallbackNode(fallbackText, `renderer error for ${String(root.component)}`);
+    notes.push(`renderer ${clip(root.component)} failed: ${clip(err.message || err)}`);
+    return fallbackNode(fallbackText, `renderer error for ${clip(root.component)}`);
   }
 }
 
@@ -388,10 +399,10 @@ function fallbackNode(fallbackText, reason) {
   const node = el("div", { class: "a2ui-surface a2ui-fallback" });
   if (fallbackText) {
     for (const para of String(fallbackText).split(/\n/)) {
-      node.appendChild(el("div", { class: "a2ui-fallback-line" }, para));
+      node.appendChild(el("div", { class: "a2ui-fallback-line" }, clip(para, MAX_PROSE)));
     }
   } else {
-    node.appendChild(el("div", { class: "dim" }, reason));
+    node.appendChild(el("div", { class: "dim" }, clip(reason)));
   }
   return node;
 }
@@ -465,7 +476,7 @@ function compactText(v) {
   } catch (_e) {
     text = "(unserializable)";
   }
-  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+  return clip(text, 200);
 }
 
 function genericTable(rows) {
@@ -592,7 +603,7 @@ function trendSpan(trend, changePct) {
   }
   if (!dir && !detail) return null;
   const cls = dir === "up" ? "a2ui-trend up" : dir === "down" ? "a2ui-trend down" : "a2ui-trend";
-  return el("span", { class: cls }, `${ARROWS[dir] || ""}${detail}`);
+  return el("span", { class: cls }, `${Object.hasOwn(ARROWS, dir) ? ARROWS[dir] : ""}${detail}`);
 }
 
 /* simple numeric series → SVG path points */
@@ -639,7 +650,7 @@ function renderKpiCard(data) {
 
 function renderTimeSeriesChart(data) {
   const allPoints = data.data || [];
-  const points = allPoints.length > MAX_ROWS ? allPoints.slice(-MAX_ROWS) : allPoints;
+  const points = capRows([...allPoints].reverse()).reverse(); // newest MAX_ROWS, oldest first
   const W = 560;
   const H = 180;
   const PAD = 28;
@@ -827,7 +838,7 @@ function renderWaterfallChart(data) {
     const cls = isTotal ? "a2ui-svg-bar total" : val >= 0 ? "a2ui-svg-bar" : "a2ui-svg-bar neg";
     node.appendChild(svg("rect", { x, y: y1, width: bw, height: Math.max(y2 - y1, 1.5), class: cls }));
     const label = clip(s.label, 64);
-    node.appendChild(svgText(x + bw / 2, H - 6, label.length > 12 ? `${label.slice(0, 11)}…` : label, "a2ui-svg-label", "middle"));
+    node.appendChild(svgText(x + bw / 2, H - 6, clip(label, 12), "a2ui-svg-label", "middle"));
   });
   const subBits = [data.subtitle, data.entity_name, data.currency, data.as_of_date].filter(Boolean).map((b) => clip(b, 64));
   if (data.date_range && data.date_range.start) subBits.push(`${clip(data.date_range.start, 32)} – ${clip(data.date_range.end, 32)}`);
@@ -874,7 +885,7 @@ function renderMultiCategoryChart(data) {
       node.appendChild(svg("rect", { x, y: yCursor, width: bw, height: Math.max(h, 0.5), class: `a2ui-svg-bar cat-${ci % 6}` }));
     });
     const label = clip(p && p.period, 64);
-    node.appendChild(svgText(x + bw / 2, H - 6, label.length > 10 ? `${label.slice(0, 9)}…` : label, "a2ui-svg-label", "middle"));
+    node.appendChild(svgText(x + bw / 2, H - 6, clip(label, 10), "a2ui-svg-label", "middle"));
   });
   const legend = el(
     "div",

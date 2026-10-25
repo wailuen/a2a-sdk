@@ -52,7 +52,7 @@ for (const s of steps) {
     for (const c of transcript.children) c.parentNode = null;
     transcript.children = [];
   }
-  const r = renderA2ui(s.messages || [], { fallbackText: "FALLBACK" });
+  const r = renderA2ui(s.messages || [], { fallbackText: s.fallback === undefined ? "FALLBACK" : s.fallback });
   r.nodes.forEach((n) => transcript.appendChild(n));
   out.push({
     nodes: r.nodes.map(dump),
@@ -374,8 +374,8 @@ def test_generic_sections_capped(tmp_path):
     [r] = _run(tmp_path, [{"messages": _surface("gs", "Whatever", data)}])
     node = r["nodes"][0]
     tables = [x for x in _walk(node) if x.get("tag") == "table" and "a2ui-table" in x["cls"]]
-    assert 0 < len(tables) < 40
-    assert "more sections" in _text(node)
+    assert len(tables) == 10
+    assert "30 more sections" in _text(node)
 
 
 @needs_node
@@ -392,3 +392,88 @@ def test_create_after_delete_is_ignored(tmp_path):
     assert res[0]["nodes"]
     assert res[2]["nodes"] == []
     assert any("createSurface rejected" in n for n in res[2]["notes"])
+
+
+# GH-263 items 2 and 5: every wire value goes through clip(); inline slices, tombstones, ARROWS.
+_HUGE = "Z" * 5000
+
+
+def _lone_surrogates(text: str) -> bool:
+    return re.search("[\ud800-\udfff]", text) is not None
+
+
+@needs_node
+def test_notes_clip_wire_surface_ids_and_component_names(tmp_path):
+    huge_msg = lambda m: [{"version": "v0.9.1", **m}]  # noqa: E731
+    steps = [
+        {"messages": huge_msg({"updateComponents": {"surfaceId": _HUGE, "components": []}})},
+        {"messages": huge_msg({"updateDataModel": {"surfaceId": _HUGE, "path": "/", "value": {}}})},
+        {"messages": _surface("U", _HUGE, 5), "fallback": ""},
+        {"messages": _surface("G", _HUGE, {"a": 1})},
+    ]
+    res = _run(tmp_path, steps)
+    for r in res:
+        assert r["notes"], r
+        assert all(len(n) < 400 for n in r["notes"]), r["notes"]
+    fallback = res[2]["nodes"][0]
+    assert max(len(t) for t in _texts(fallback)) <= 256
+
+
+@needs_node
+def test_fallback_text_lines_are_clipped(tmp_path):
+    steps = [{"messages": _surface("F", "Thing", 5), "fallback": "x" * 30000 + "\nshort"}]
+    [r] = _run(tmp_path, steps)
+    lens = [len(t) for t in _texts(r["nodes"][0])]
+    assert max(lens) <= 20000 and "short" in _texts(r["nodes"][0])
+
+
+@needs_node
+def test_inline_label_truncation_goes_through_clip_without_lone_surrogates(tmp_path):
+    label = "A" * 10 + "\U0001F600\U0001F600"
+    seg = [{"label": label, "value": 5, "cumulative": 5, "type": "delta"}]
+    [r] = _run(tmp_path, [{"messages": _surface("W", "WaterfallChart", {"segments": seg})}])
+    texts = _texts(r["nodes"][0])
+    assert "A" * 10 + "\u2026" in texts
+    assert not any(_lone_surrogates(t) for t in texts)
+    periods = [{"period": label, "categories": {"a": {"value": 1}}}]
+    [r] = _run(tmp_path, [{"messages": _surface("M", "MultiCategoryChart", {"periods": periods})}])
+    texts = _texts(r["nodes"][0])
+    assert "A" * 9 + "\u2026" in texts
+    assert not any(_lone_surrogates(t) for t in texts)
+
+
+@needs_node
+def test_compact_text_cap_is_200_characters_including_the_ellipsis(tmp_path):
+    [r] = _run(tmp_path, [{"messages": _surface("C", "Whatever", {"blob": {"k": "v" * 500}})}])
+    cells = [t for t in _texts(r["nodes"][0]) if t.startswith('{"k"') and t.endswith("\u2026")]
+    assert len(cells) == 1 and len(cells[0]) == 200 and cells[0].endswith("\u2026")
+
+
+@needs_node
+def test_time_series_still_keeps_newest_points_and_notes_older_ones(tmp_path):
+    pts = [{"date": f"d{i}", "value": i} for i in range(105)]
+    [r] = _run(tmp_path, [{"messages": _surface("ts2", "TimeSeriesChart", {"data": pts, "chart_type": "line"})}])
+    texts = _texts(r["nodes"][0])
+    assert "5 more older points" in texts
+    assert texts.index("d5") < texts.index("d104")
+    assert "d4" not in texts
+
+
+@needs_node
+def test_trend_direction_is_not_looked_up_on_the_prototype(tmp_path):
+    metrics = [{"label": "L", "value": 1, "trend": name} for name in ("constructor", "toString", "__proto__", "up")]
+    [r] = _run(tmp_path, [{"messages": _surface("K", "KpiCard", {"metrics": metrics})}])
+    text = _text(r["nodes"][0])
+    assert "function" not in text and "native code" not in text
+    assert "\u25b2" in text
+
+
+@needs_node
+def test_closed_surface_tombstones_are_bounded(tmp_path):
+    close = lambda sid: [{"version": "v0.9.1", "deleteSurface": {"surfaceId": sid}}]  # noqa: E731
+    steps = [{"messages": _surface(f"s{i}", "Thing", {"a": i}) + close(f"s{i}")} for i in range(250)]
+    steps.append({"messages": _surface("s249", "Thing", {"a": 1})})
+    steps.append({"messages": _surface("s0", "Thing", {"a": 1})})
+    res = _run(tmp_path, steps)
+    assert res[250]["nodes"] == [] and any("createSurface rejected" in n for n in res[250]["notes"])
+    assert res[251]["nodes"] and not any("rejected" in n for n in res[251]["notes"])

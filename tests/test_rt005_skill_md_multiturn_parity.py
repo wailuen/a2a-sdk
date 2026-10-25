@@ -7,7 +7,7 @@ LRN-071/LRN-085).
 
 LRN-103 fixed the harness copy to split turns 2-N on the prior task's state
 (interrupted -> send `taskId`; terminal -> send `contextId` with no
-`taskId`, else the server 501s with -32004 per GH-144). Editing only the
+`taskId`, else the server 400s with -32004 per GH-144). Editing only the
 authoring source left the two copies this repo and downstream agents
 actually EXECUTE still teaching the pre-fix, single-branch instruction
 ("always send taskId") — which fails on turn 2+ of every multi-turn run
@@ -61,7 +61,7 @@ def test_harness_copy_states_the_completed_vs_interrupted_split() -> None:
         "the terminal branch must explicitly send contextId with NO taskId"
     )
     assert "-32004" in section, (
-        "must explain why: re-addressing a terminal task via taskId returns 501/-32004"
+        "must explain why: re-addressing a terminal task via taskId returns 400/-32004"
     )
 
 

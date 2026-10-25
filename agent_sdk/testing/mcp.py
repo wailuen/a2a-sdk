@@ -33,6 +33,7 @@ from typing import Any, Iterable
 import httpx
 
 import jsonschema
+from referencing.exceptions import Unresolvable
 
 from ..agent.loop import LOAD_SKILL_TOOL
 from ..routes.mcp import MCP_INTERRUPT_SUFFIX, SUPPORTED_PROTOCOL_VERSIONS
@@ -118,7 +119,7 @@ class McpClient:
         )
         negotiated = result.get("protocolVersion")
         if negotiated is None:
-            negotiated = PROTOCOL_VERSION
+            raise McpError("mcp initialize result has no protocolVersion")
         if negotiated not in SUPPORTED_PROTOCOL_VERSIONS:
             raise McpError("mcp negotiated protocol version is not supported")
         self._version = negotiated
@@ -241,9 +242,10 @@ def _check_structured(tool: dict[str, Any], call: dict[str, Any]) -> str:
         return "structuredContent does not match outputSchema"
     except jsonschema.SchemaError:
         return "outputSchema is not a valid JSON Schema"
-    except Exception:
-        # An unresolvable $ref surfaces as a library-specific error; it is a gate failure.
+    except Unresolvable:
         return "outputSchema has an unresolvable $ref"
+    except Exception:
+        return "outputSchema could not be validated"
     return ""
 
 

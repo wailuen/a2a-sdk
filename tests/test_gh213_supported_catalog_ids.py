@@ -57,7 +57,7 @@ def test_gated_without_opt_in_stays_none() -> None:
 def test_a2a_route_resolves_supported_catalog_ids() -> None:
     message = SimpleNamespace(metadata={"a2uiClientCapabilities": {"supportedCatalogIds": [DOMAIN]}})
     request = SimpleNamespace(headers={"x-a2a-extensions": A2UI_EXTENSION_URI})
-    caps = _capabilities(message, request)  # type: ignore[arg-type]
+    caps = _capabilities(message, request, a2ui_enabled=True)  # type: ignore[arg-type]
     assert caps.allows(_Domain) is True
 
 
@@ -90,5 +90,5 @@ def test_a2a_route_resolves_v09_nested_supported_catalog_ids() -> None:
         metadata={"a2uiClientCapabilities": {"v0.9": {"supportedCatalogIds": [DOMAIN]}}}
     )
     request = SimpleNamespace(headers={"x-a2a-extensions": A2UI_EXTENSION_URI})
-    caps = _capabilities(message, request)  # type: ignore[arg-type]
+    caps = _capabilities(message, request, a2ui_enabled=True)  # type: ignore[arg-type]
     assert caps.allows(_Domain) is True

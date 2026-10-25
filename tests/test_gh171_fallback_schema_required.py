@@ -48,12 +48,13 @@ class _Gh171Many(ContentModel):
         return "x"
 
 
-def test_required_nullable_has_no_question_mark():
+def test_nullable_without_keep_null_renders_optional():
+    # GH-262 supersedes GH-171: wire() drops a None value, so ``a`` is optional.
     f = _fields(_field_summary(_Gh171Card))
-    assert f["a"] == "str|null"
+    assert f["a?"] == "str|null"
     assert "b?" in f
     assert f["c"] == "int"
-    assert required_paths(parse_schema(_field_summary(_Gh171Card))) == {"a", "c"}
+    assert required_paths(parse_schema(_field_summary(_Gh171Card))) == {"c"}
 
 
 def test_many_fields_keep_every_required_field_and_mark_drop():

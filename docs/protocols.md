@@ -18,7 +18,7 @@ identically across protocols.
 
 Error table (body `{"error": {code, message}}`): unknown/foreign task →
 404 `-32001`; terminal-task cancel → 409 `-32002`; terminal-task resume
-(`message:send` or `message:stream` with `taskId`) → 501 `-32004`; push
+(`message:send` or `message:stream` with `taskId`) → 400 `-32004`; push
 config → `-32003`: `POST`/`GET /v1/tasks/{id}/pushNotificationConfigs` and
 `GET`/`DELETE /v1/tasks/{id}/pushNotificationConfigs/{configId}` all return 501
 `-32003` (identity required; same reply for known, foreign and unknown tasks;
@@ -30,14 +30,23 @@ on `/v1/*` → 500 `-32603` "internal error" (fixed text). `acceptedOutputModes`
 matching is case-insensitive, ignores parameters, and accepts `*/*` and `type/*`
 (`text` stays an alias of `text/plain`); `Content-Type` is compared
 case-insensitively; `historyLength` applies to the resume reply and the first
-stream snapshot. `-32004` is 501 when raised by a handler; the 405 a wrong HTTP
-verb gets from the router is transport-level and also carries `-32004`.
+stream snapshot. `-32004` takes its HTTP status per call site (GH-266): a wrong-state message
+(terminal-task resume on `message:send` or `message:stream`, and `message:send`
+to a task that is not awaiting input) → 400; an unsupported operation and the
+colon-id wrong-verb guard (`GET /v1/tasks/{id}:cancel`) → 501; the 405 a wrong
+HTTP verb gets from the router is transport-level and also carries `-32004`.
+JSON-RPC client codes map `-32600` → 400 and `-32601` → 404 (with `-32700` and
+`-32602` → 400).
 A request body over 1 MiB gets 400 `-32602` "request body too large". A failed task
 always carries `status.message` (role `agent`, one TextPart) with the same safe text
 as `status.error.message`; `status.error` is an SDK extension that spec-compliant
 clients can ignore. When a client sends `acceptedOutputModes`, artifact parts are
 filtered to the accepted types; if none remain and `text/plain` is accepted, one
-TextPart fallback is kept, otherwise the task fails with `-32005`.
+TextPart fallback is kept, otherwise the task fails with `-32005`. GH-261: A2UI
+is used for an artifact only when the app gate, the `X-A2A-Extensions` opt-in and
+the modes all agree (modes absent, or accepting `application/a2ui+json` directly or
+by wildcard); otherwise the JSON DataPart / TextPart fallback is built and then
+filtered, so `["application/json"]` with the header gets a JSON DataPart.
 **Bare wire (GH-248):** success bodies and SSE frames are bare `Task | Message`
 or frame objects, not the proto's wrapped `SendMessageResponse` /
 `StreamResponse`; v0.3.0 HTTP+JSON examples and existing clients use the bare form. Task
@@ -59,8 +68,13 @@ into model input. New input is never silently dropped. Earlier history is not re
 message the client keeps in its history does not lock the thread, and its non-text
 parts are left out of the model input.
 
-Supported output modes: `text`, `text/plain`, `application/json`,
-`application/a2ui+json`. `X-A2A-Extensions` is echoed with only the
+Supported output modes: `text`, `text/plain`, `application/json`, and
+`application/a2ui+json` only for a request that opts in (app gate and header);
+without the header, asking for only `application/a2ui+json` gets 415 / `-32005` and
+the error's "supported:" list leaves it out. A resume checks its modes against the
+opt-in captured when the task started: its own header is never read and it cannot
+newly opt in to A2UI. A resume that sends `acceptedOutputModes` replaces the stored
+modes; one without them keeps the stored value. `X-A2A-Extensions` is echoed with only the
 activated subset (the A2UI extension URI).
 
 A2UI surface lifetime is managed by the client. The SDK emits no `deleteSurface`
@@ -146,16 +160,30 @@ Inbound history is processed, not rejected: >50 messages or messages over
 same-role messages merge. Control characters are stripped, not rejected —
 never `RUN_ERROR`.
 
-## MCP (2025-06-18, Streamable HTTP at `/mcp`)
+## MCP (2025-11-25, 2025-06-18, 2025-03-26; Streamable HTTP at `/mcp`)
 
 - Auth: OAuth 2.1 (Claude.ai connector flow) or API key; unauthenticated →
   401 with a `WWW-Authenticate` pointer to the protected-resource
   metadata. Discovery: both PRM variants + AS metadata, S256 PKCE only.
-  A request with no bearer always gets that 401 (never 429); an invalid
-  bearer and the `/oauth/*` endpoints share the per-IP
-  `AGENT_SDK_UNAUTH_RATE_LIMIT` window. An `/oauth/*` 429 body is
+  A request with no bearer always gets that 401 (never 429) with the bare
+  challenge `Bearer resource_metadata="..."`; an invalid, expired or refused
+  bearer gets `Bearer error="invalid_token", resource_metadata="..."`. Failed
+  bearers count in their own per-IP window and the `/oauth/*` endpoints in
+  another; both are sized by `AGENT_SDK_UNAUTH_RATE_LIMIT`, so one cannot drain
+  the other. An API `/oauth/*` 429 (`register`, `token`, `revoke`) is
   `{"error":"temporarily_unavailable","error_description":"rate limit exceeded"}`
-  with `Retry-After`.
+  with `Retry-After` and `Cache-Control: no-store`; the four browser routes
+  (`GET`/`POST /oauth/authorize`, `GET /oauth/idp/callback`,
+  `POST /oauth/idp/consent`) answer 429 with the branded HTML error page.
+  Token responses also carry `Pragma: no-cache`.
+- Versions: `initialize` echoes the client's `protocolVersion` when it is
+  2025-11-25, 2025-06-18 or 2025-03-26; any other value gets the newest
+  (2025-11-25). `serverInfo.title` is sent only at 2025-11-25 (the title gate).
+  Deviation (GH-266): a tool that declares `emits` (so it advertises
+  `outputSchema`) but returns no value (None) answers `isError: false` with an
+  empty text block and no `structuredContent`, although MCP 2025-06-18 says a
+  tool with an `outputSchema` MUST return conforming `structuredContent`. This
+  keeps parity with the A2A/AG-UI fold of a void result.
 - `tools/list` exposes **Tier 1 tools only**; `emits` becomes
   `outputSchema` and results carry `structuredContent`.
 - Setting `AGENT_SDK_MCP_SCHEMA_MODE=strict` flattens `tools/list` schemas (inlined `$defs`, `anyOf` with null collapsed at property positions only, so list items and dict values keep `null`; no `default: null`; a recursive model keeps its `$ref`/`$defs`; `null` is also dropped from an `anyOf` of three or more members at property positions, with the same required and keep-null rules as the two-member case, while top-level unions stay intact). It applies to `inputSchema` and `outputSchema`, including the `emits` tuple `anyOf`, and `tools/list` only. Default `standard` is unchanged.

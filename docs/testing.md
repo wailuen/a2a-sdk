@@ -88,11 +88,11 @@ add custom request logic.
   each tool with an `outputSchema`, the gate also checks that the call returns
   `structuredContent` that matches the schema; an `outputSchema` with an
   unresolvable `$ref` is a gate failure. `initialize` raises `McpError` when the
-  server negotiates a version the SDK does not support.
+  server negotiates a version the SDK does not support, or returns none.
 
 `ChatDriver` and `agent_sdk.testing.turns` send the A2UI extension header and
 capabilities only when the agent card advertises the A2UI extension, and
-`turns` adds the card's `supportedCatalogIds` to the declared catalogs. A
+`turns` fetches the card once, inside the same slot wait and time budget as the turn, and passes its `supportedCatalogIds` to `ChatDriver(extra_catalogs=..., card=...)` for both the A2A and AG-UI paths; the list is merged with the standard catalog and de-duplicated. A message-kind reply clears the stored task and state. A
 resume sends both `taskId` and `contextId`. Non-goal: A2A `additionalInterfaces`
 and the card `url` are not followed; these clients drive the SDK's own app on
 the client you give them.

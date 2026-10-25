@@ -167,6 +167,8 @@ function renderMd(markdown) {
   return frag;
 }
 
+const BUSY_NOTE = "busy: wait for the current run to finish";
+
 /* session state survives tab switches */
 const state = {
   mode: "a2a",
@@ -392,9 +394,9 @@ export function render(pane, ctx) {
   }
 
   async function sendA2a(text) {
-    await catalogIdsReady;
     const threadAtSend = state.threadId;
     const signal = state.abort ? state.abort.signal : undefined;
+    await catalogIdsReady;
     const message = {
       kind: "message",
       role: "user",
@@ -409,7 +411,7 @@ export function render(pane, ctx) {
     const resp = await postWithRetry(
       () => postAbortable(signal, () => postSse(`${state.base}/v1/message:stream`, { message },
         state.a2uiAdvertised ? { "X-A2A-Extensions": "https://a2ui.org/a2a-extension/a2ui/v0.9.1" } : {}, signal)),
-      { systemLine: staleGuard(systemLine, threadAtSend), traceFrame: staleGuard(traceFrame, threadAtSend), label: "stream request" }
+      { systemLine: staleGuard(systemLine, threadAtSend), traceFrame: staleGuard(traceFrame, threadAtSend), label: "stream request", signal }
     );
     if (!resp) return;
     const setContextId = (id) => {
@@ -420,6 +422,7 @@ export function render(pane, ctx) {
     let agentStream = null; // streaming bubble for A2A status-update text parts
 
     await readSse(resp, ({ event, json, data }) => {
+      if (state.threadId !== threadAtSend) return;
       traceFrame(event || "data", json !== null ? json : data);
       if (!json) return;
       const kind = json.kind;
@@ -454,7 +457,7 @@ export function render(pane, ctx) {
       }
     });
 
-    if (!sawFinal) systemLine("stream closed without final:true (re-subscribe per §5.2)");
+    if (!sawFinal && state.threadId === threadAtSend) systemLine("stream closed without final:true (re-subscribe per §5.2)");
   }
 
   function handleA2aArtifact(artifact) {
@@ -546,7 +549,7 @@ export function render(pane, ctx) {
 
   async function runExclusive(work) {
     if (state.busy) {
-      systemLine("busy: wait for the current run to finish");
+      systemLine(BUSY_NOTE);
       return;
     }
     state.busy = true;
@@ -617,7 +620,7 @@ export function render(pane, ctx) {
     // Retry only 429/503 (honouring Retry-After) and network failures, and only
     // here, before any SSE frame has been read.
     const resp = await postWithRetry(() => postAbortable(signal, () => postSse(`${state.base}/ag-ui/run`, body, undefined, signal)), {
-      systemLine: staleGuard(systemLine, threadAtSend), traceFrame: staleGuard(traceFrame, threadAtSend), label: "run request",
+      systemLine: staleGuard(systemLine, threadAtSend), traceFrame: staleGuard(traceFrame, threadAtSend), label: "run request", signal,
     });
     if (!resp) {
       if (resumed && state.threadId === threadAtSend && pendingInterrupt === null) {
@@ -668,7 +671,7 @@ export function render(pane, ctx) {
                 textBuffers.set(id, buf);
                 if (!order.includes(id)) order.push(id);
               }
-              if (json.type === "TEXT_MESSAGE_CHUNK" && id && typeof json.role === "string" && json.role
+              if (json.type === "TEXT_MESSAGE_CHUNK" && json.messageId && typeof json.role === "string" && json.role
                   && !roles.has(id) && !textSeen.has(id)) roles.set(id, json.role);
               textSeen.add(id);
               if (buf && json.delta) buf.append(json.delta);
@@ -866,7 +869,11 @@ export function render(pane, ctx) {
 
   async function send() {
     const text = input.value.trim();
-    if (!text || state.busy) return;
+    if (!text) return;
+    if (state.busy) {
+      systemLine(BUSY_NOTE);
+      return;
+    }
     input.value = "";
     await runExclusive(async () => {
       bubble("user", text);

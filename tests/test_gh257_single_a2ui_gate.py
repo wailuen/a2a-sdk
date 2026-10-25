@@ -17,7 +17,7 @@ from agent_sdk.app import Agent
 from agent_sdk.example.agent import make_agent
 from agent_sdk.models.content_types import A2UI_EXTENSION_URI, A2UI_MIME_TYPE
 from agent_sdk.routes.a2a import _capabilities as a2a_capabilities
-from agent_sdk.routes.agent_card import a2ui_enabled
+from agent_sdk.routes.agent_card import compute_a2ui_enabled
 from agent_sdk.routes.ag_ui import _capabilities as ag_ui_capabilities
 from agent_sdk.testing import FakeModelClient, reply, tool_call
 
@@ -76,10 +76,10 @@ def _has_a2ui(task: dict) -> bool:
 
 
 def test_helper_true_only_with_catalogs() -> None:
-    assert a2ui_enabled(None, []) is False
+    assert compute_a2ui_enabled(None, []) is False
     from agent_sdk.models.content_types import KpiCard
 
-    assert a2ui_enabled(None, [KpiCard]) is True
+    assert compute_a2ui_enabled(None, [KpiCard]) is True
 
 
 def test_capabilities_helpers_gate_on_flag() -> None:
@@ -105,15 +105,16 @@ async def test_card_state_and_runtime_agree(settings, emitting) -> None:
             assert (A2UI_EXTENSION_URI in uris) is enabled
             assert ("application/a2ui+json" in card["defaultOutputModes"]) is enabled
             async with await _client(app) as c:
-                tool, args = ("demo_kpis", {"title": "k"}) if emitting else ("plain", {})
-                model.script(tool_call(tool, args), reply("done"))
+                if not emitting:
+                    return
+                model.script(tool_call("demo_kpis", {"title": "k"}), reply("done"))
                 r = await c.post(
                     "/v1/message:send",
                     json=_msg(configuration={"blocking": True}),
                     headers={"X-A2A-Extensions": A2UI_EXTENSION_URI},
                 )
                 assert r.status_code == 200, r.text
-                assert _has_a2ui(r.json()["result"] if "result" in r.json() else r.json()) is enabled
+                assert _has_a2ui(r.json()["result"] if "result" in r.json() else r.json())
     finally:
         app.state.credential_store.close()
         gc.collect()
@@ -147,9 +148,14 @@ async def test_modes_with_a2ui_on_accept_a2ui_mime(settings) -> None:
     try:
         async with app.router.lifespan_context(app):
             async with await _client(app) as c:
+                cfg = {"acceptedOutputModes": ["application/a2ui+json"], "blocking": True}
+                r = await c.post("/v1/message:send", json=_msg(configuration=cfg))
+                assert r.status_code == 415
+                assert r.json()["error"]["code"] == -32005
                 r = await c.post(
                     "/v1/message:send",
-                    json=_msg(configuration={"acceptedOutputModes": ["application/a2ui+json"], "blocking": True}),
+                    json=_msg(configuration=cfg),
+                    headers={"X-A2A-Extensions": A2UI_EXTENSION_URI},
                 )
                 assert "error" not in r.json(), r.text
     finally:
@@ -157,19 +163,48 @@ async def test_modes_with_a2ui_on_accept_a2ui_mime(settings) -> None:
         gc.collect()
 
 
-async def test_ag_ui_off_drops_forwarded_caps(settings) -> None:
-    model = FakeModelClient()
-    app = _build(settings, model, False)
+def test_capabilities_helpers_fail_closed_without_argument() -> None:
+    msg = SimpleNamespace(metadata={"a2uiClientCapabilities": {"tier": "core"}})
+    req = SimpleNamespace(headers={"x-a2a-extensions": A2UI_EXTENSION_URI})
+    assert a2a_capabilities(msg, req).tier == "none"  # type: ignore[arg-type]
+    body = {"forwardedProps": {"a2uiClientCapabilities": {"tier": "core"}}}
+    assert ag_ui_capabilities(body).tier == "none"
+
+
+async def test_a2ui_off_content_model_tool_gets_no_a2ui_part(settings) -> None:
+    model = FakeModelClient().script(tool_call("demo_kpis", {"title": "k"}), reply("done"))
+    app = _build(settings, model, True)
+    app.state.a2ui_enabled = False  # gate off while the tool still returns a ContentModel
     try:
         async with app.router.lifespan_context(app):
             async with await _client(app) as c:
-                model.script(tool_call("plain", {}), reply("done"))
+                r = await c.post(
+                    "/v1/message:send",
+                    json=_msg(configuration={"blocking": True}),
+                    headers={"X-A2A-Extensions": A2UI_EXTENSION_URI},
+                )
+                task = r.json()
+                assert task["artifacts"], r.text
+                assert not _has_a2ui(task)
+    finally:
+        app.state.credential_store.close()
+        gc.collect()
+
+
+async def test_ag_ui_off_drops_forwarded_caps(settings) -> None:
+    model = FakeModelClient().script(tool_call("demo_kpis", {"title": "k"}), reply("done"))
+    app = _build(settings, model, True)
+    app.state.a2ui_enabled = False  # gate off while the tool still returns a ContentModel
+    try:
+        async with app.router.lifespan_context(app):
+            async with await _client(app) as c:
                 body = run_body(
                     "go",
                     forwardedProps={"a2uiClientCapabilities": {"version": "v0.9.1", "tier": "core+extended"}},
                 )
                 r = await c.post("/ag-ui/run", json=body)
                 frames = sse_frames(r.text)
+                assert any(f["type"] == "TOOL_CALL_RESULT" for f in frames), r.text
                 assert not [f for f in frames if f["type"] == "CUSTOM" and f["name"] == "A2UI_UPDATE"]
     finally:
         app.state.credential_store.close()

@@ -308,7 +308,7 @@ include depends on the state of the prior task:
 - Otherwise (prior task ended `completed`, `failed`, or any other terminal state),
   send `contextId` (captured from the turn-1 SSE stream) with **no `taskId`**,
   so the server creates a new task within the same conversation context instead of
-  re-addressing a terminal task (which would return 501 / -32004):
+  re-addressing a terminal task (which would return 400 / -32004):
   ```json
   { "message": { "role": "user", "messageId": "<new-uuid4-hex>", "contextId": "<context-id>", "parts": [ ... ] } }
   ```

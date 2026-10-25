@@ -110,7 +110,14 @@ def _parse_int(token: str) -> int:
         raise json.JSONDecodeError("number too large", "", 0) from None
 
 
-def loads_strict(raw: str | bytes | bytearray) -> Any:
+def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [k for k, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise json.JSONDecodeError("duplicate key", "", 0)
+    return dict(pairs)
+
+
+def loads_strict(raw: str | bytes | bytearray, *, reject_duplicate_keys: bool = False) -> Any:
     """``json.loads`` that raises ``json.JSONDecodeError`` for any input
     that would decode to a non-finite float (``NaN``, ``Infinity``,
     ``-Infinity``, or an overflowing literal like ``1e999``), to an
@@ -120,10 +127,16 @@ def loads_strict(raw: str | bytes | bytearray) -> Any:
     Input nested deeper than 64 levels raises the ``NestingTooDeep`` subclass
     (message ``"nesting too deep"``) so a route can answer it apart from
     malformed JSON; the JSON-RPC envelope uses 3 levels, leaving about 61 for
-    tool arguments."""
+    tool arguments.
+
+    With ``reject_duplicate_keys=True`` an object that repeats a key at any
+    depth raises ``json.JSONDecodeError`` with the fixed text
+    ``"duplicate key"`` (never the key or a value, SI-2). Off by default:
+    plain JSON parsers keep the last value."""
     try:
         value = json.loads(
             raw,
+            object_pairs_hook=_no_duplicate_keys if reject_duplicate_keys else None,
             parse_constant=_reject,
             parse_float=_parse_float,
             parse_int=_parse_int,

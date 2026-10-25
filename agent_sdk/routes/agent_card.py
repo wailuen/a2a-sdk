@@ -128,7 +128,7 @@ def task_error_extension() -> AgentExtension:
     )
 
 
-def a2ui_enabled(allowed_components: list[str] | None, emits: list[type]) -> bool:
+def compute_a2ui_enabled(allowed_components: list[str] | None, emits: list[type]) -> bool:
     """The single A2UI on/off gate (GH-257); computed once in ``build_app()``."""
     return bool(supported_catalogs(allowed_components, emits))
 

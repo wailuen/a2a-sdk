@@ -1,5 +1,5 @@
 """RT-002: docs/protocols.md and DESIGN.md must document terminal-task
-RESUME (message/send, message/stream with taskId) as 501 -32004
+RESUME (message/send, message/stream with taskId) as 400 -32004
 (UnsupportedOperation) — never -32002 (TaskNotCancelable), which A2A v0.3.0
 reserves exclusively for tasks/cancel (harness/reference/a2a-protocol-0_3_0.md
 "-32002 on tasks/cancel").
@@ -71,10 +71,10 @@ def test_protocols_md_scopes_32002_to_cancel_only() -> None:
 def test_protocols_md_documents_terminal_resume_as_32004() -> None:
     text = _normalize_ws(_protocols_md_text())
     assert re.search(
-        r"terminal-task resume.*?message:(send|stream).*?501.*?-32004", text
+        r"terminal-task resume.*?message:(send|stream).*?400.*?-32004", text
     ), (
         "docs/protocols.md must document terminal-task resume "
-        "(message:send / message:stream with taskId) as 501 -32004"
+        "(message:send / message:stream with taskId) as 400 -32004"
     )
 
 
@@ -90,7 +90,7 @@ def test_design_md_32004_row_covers_terminal_resume() -> None:
 
 
 # ===========================================================================
-# Live — both surfaces the doc now describes actually emit 501 -32004
+# Live — both surfaces the doc now describes actually emit 400 -32004
 # ===========================================================================
 
 
@@ -103,7 +103,7 @@ async def test_terminal_task_resume_via_message_send_is_32004(client, fake_model
     await wait_for_state(client, task_id, {"completed", "failed", "canceled"})
 
     r2 = await client.post("/v1/message:send", json=_send_body("resume attempt", task_id))
-    assert r2.status_code == 501, r2.text
+    assert r2.status_code == 400, r2.text
     assert r2.json()["error"]["code"] == -32004
 
 
@@ -116,5 +116,5 @@ async def test_terminal_task_resume_via_message_stream_is_32004(client, fake_mod
     await wait_for_state(client, task_id, {"completed", "failed", "canceled"})
 
     r2 = await client.post("/v1/message:stream", json=_send_body("resume attempt", task_id))
-    assert r2.status_code == 501, r2.text
+    assert r2.status_code == 400, r2.text
     assert r2.json()["error"]["code"] == -32004

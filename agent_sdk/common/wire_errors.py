@@ -26,7 +26,16 @@ _CATEGORY_HTTP = {
 
 _PARSE_ERROR = -32700
 _INVALID_PARAMS = -32602
+_INVALID_REQUEST = -32600
+_METHOD_NOT_FOUND = -32601
 _INTERNAL_ERROR = -32603
+
+_CLIENT_CODE_HTTP = {
+    _PARSE_ERROR: 400,
+    _INVALID_PARAMS: 400,
+    _INVALID_REQUEST: 400,
+    _METHOD_NOT_FOUND: 404,
+}
 
 
 def a2a_error(
@@ -35,6 +44,7 @@ def a2a_error(
     data: Any = None,
     *,
     headers: dict[str, str] | None = None,
+    status: int | None = None,
 ) -> JSONResponse:
     """A2A spec error (the seven -3200x codes or JSON-RPC standard codes).
 
@@ -46,11 +56,13 @@ def a2a_error(
     genuinely activated — never a header pre-computed before the request's
     own branch (parse/config failure vs. a resolved success path) was known;
     routes/a2a.py's module docstring and ``_echo_extensions`` document why.
+    ``status`` overrides the per-code HTTP status for one call site (GH-266:
+    a wrong-state message answers -32004 with 400, not the 501 default).
     Most error paths (a parse failure, an unresolvable resume, ...) activated
     nothing and correctly pass no headers at all.
     """
-    _client_error_codes = (_PARSE_ERROR, _INVALID_PARAMS)
-    status = A2A_HTTP_STATUS.get(code, 400 if code in _client_error_codes else 500)
+    if status is None:
+        status = A2A_HTTP_STATUS.get(code, _CLIENT_CODE_HTTP.get(code, 500))
     body: dict[str, Any] = {"code": code, "message": message}
     if data is not None:
         body["data"] = data

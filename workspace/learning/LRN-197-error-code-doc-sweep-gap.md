@@ -14,7 +14,7 @@ GH-144 changed terminal-task resume (message/send, message/stream) to 501/-32004
 The fix updated route handlers (a2a.py) but no step required docs pinning that error code to change in the same commit.
 
 ## Check
-`grep -n "terminal-task" docs/protocols.md` — resume must say 501/-32004, cancel 409/-32002. `grep -n "32004" DESIGN.md` — row must list terminal-task re-message.
+`grep -n "terminal-task" docs/protocols.md` — resume must say 400/-32004 (GH-266 ruling https://github.com/wailuen/a2a-sdk/issues/266#issuecomment-6395232882), the colon-id guard 501/-32004, cancel 409/-32002. `grep -n "32004" DESIGN.md` — row must list terminal-task re-message.
 
 ## Prevention
 A wave changing which error code a route emits must add docs/protocols.md and DESIGN.md's error-table row to that unit's Modifies: list, not a later pass.

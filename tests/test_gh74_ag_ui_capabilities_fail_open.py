@@ -19,28 +19,28 @@ from .conftest import sse_frames
 def test_capabilities_absent_key_returns_none_tier():
     """No a2uiClientCapabilities key → tier='none' (fail-closed)."""
     body = {"forwardedProps": {}}
-    caps = _capabilities(body)
+    caps = _capabilities(body, a2ui_enabled=True)
     assert caps.tier == "none"
 
 
 def test_capabilities_absent_forwardedProps_returns_none_tier():
     """No forwardedProps at all → tier='none'."""
     body = {}
-    caps = _capabilities(body)
+    caps = _capabilities(body, a2ui_enabled=True)
     assert caps.tier == "none"
 
 
 def test_capabilities_explicit_core_tier():
     """Explicit tier='core' is preserved."""
     body = {"forwardedProps": {"a2uiClientCapabilities": {"tier": "core"}}}
-    caps = _capabilities(body)
+    caps = _capabilities(body, a2ui_enabled=True)
     assert caps.tier == "core"
 
 
 def test_capabilities_explicit_extended_tier():
     """Explicit tier='core+extended' is preserved."""
     body = {"forwardedProps": {"a2uiClientCapabilities": {"tier": "core+extended"}}}
-    caps = _capabilities(body)
+    caps = _capabilities(body, a2ui_enabled=True)
     assert caps.tier == "core+extended"
 
 

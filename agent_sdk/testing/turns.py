@@ -38,7 +38,7 @@ from typing import Any
 
 import httpx
 
-from .chat import ChatDriver, card_catalog_ids
+from .chat import ChatDriver, card_catalog_ids, fetch_agent_card
 
 logger = logging.getLogger("agent_sdk.testing.turns")
 
@@ -112,7 +112,7 @@ class _Attempt:
             self.rate_limited, self.reason = True, "http-429"
         elif self.status is not None:
             self.reason = "http-error"
-        elif self.reason == "transport-error":
+        elif self.reason in ("transport-error", "malformed-stream"):
             pass
         elif any(t in self.error_text.lower() for t in _RATE_TEXT):
             self.rate_limited, self.reason = True, "too-many-requests"
@@ -129,18 +129,20 @@ def _safe(run_key: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", run_key)
 
 
-async def _a2ui_advertised(driver: ChatDriver) -> bool:
-    return await driver._a2ui_advertised()
-
-
 async def _card_driver(client: httpx.AsyncClient) -> ChatDriver:
-    """A ChatDriver whose catalogs include the card's ``supportedCatalogIds``."""
-    probe = ChatDriver(client)
-    if not await probe._a2ui_advertised():
-        return probe
-    driver = ChatDriver(client, extra_catalogs=card_catalog_ids(probe._card))
-    driver._card = probe._card
-    return driver
+    """A ChatDriver whose catalogs include the card's ``supportedCatalogIds``.
+
+    The card is fetched once here; a failed or non-object card counts as an
+    agent that does not advertise A2UI.
+    """
+    card: Any = {}
+    try:
+        card = await fetch_agent_card(client)
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("agent card fetch failed: %s", type(exc).__name__)
+    if not isinstance(card, dict):
+        card = {}
+    return ChatDriver(client, extra_catalogs=card_catalog_ids(card), card=card)
 
 
 def _text_of(parts: Any) -> str:
@@ -169,6 +171,7 @@ async def _a2a_attempt(
     if state.get("context_id"):
         msg["contextId"] = state["context_id"]
     task_id = ctx_id = cur_state = ""
+    message_seen = False
     try:
         async with client.stream(
             "POST", "/v1/message:stream", json={"message": msg}, headers=headers
@@ -177,7 +180,14 @@ async def _a2a_attempt(
             async for line in r.aiter_lines():
                 if not line.startswith("data:"):
                     continue
-                ev = json.loads(line[5:].strip())
+                try:
+                    ev = json.loads(line[5:].strip())
+                except ValueError:
+                    at.reason = "malformed-stream"
+                    break
+                if not isinstance(ev, dict):
+                    at.reason = "malformed-stream"
+                    break
                 kind = ev.get("kind")
                 if kind == "task":
                     task_id = task_id or ev.get("id", "")
@@ -196,6 +206,7 @@ async def _a2a_attempt(
                     task_id = task_id or ev.get("taskId", "")
                     ctx_id = ctx_id or ev.get("contextId", "")
                     at.reply = _text_of(ev.get("parts"))
+                    message_seen = True
                     break
                 elif kind == "artifact-update":
                     art = ev.get("artifact") or {}
@@ -210,6 +221,8 @@ async def _a2a_attempt(
         at.status = exc.response.status_code
     except httpx.TransportError:
         at.reason = "transport-error"
+    if message_seen:
+        task_id = cur_state = ""
     at.failed = cur_state in ("failed", "rejected", "canceled")
     if cur_state in ("failed", "rejected"):
         at.error_text = at.reply
@@ -218,13 +231,18 @@ async def _a2a_attempt(
 
 
 async def _agui_attempt(
-    client: httpx.AsyncClient, query: str, thread_id: str, messages: list[dict[str, Any]]
+    client: httpx.AsyncClient,
+    query: str,
+    thread_id: str,
+    messages: list[dict[str, Any]],
+    driver: ChatDriver | None = None,
 ) -> _Attempt:
     at = _Attempt()
+    driver = driver or await _card_driver(client)
     errors: list[str] = []
     snapshot = list(messages)
     try:
-        at.reply = await ChatDriver(client).agui_turn(
+        at.reply = await driver.agui_turn(
             query,
             thread_id,
             messages,
@@ -314,7 +332,19 @@ async def run_turn(
             "context_id": _read(files["ctx"]),
             "state": _read(files["state"]),
         }
-        a2a_driver = await _card_driver(client) if transport == "a2a" else None
+        card_driver: dict[str, ChatDriver] = {}
+
+        async def _driver() -> ChatDriver:
+            if "d" not in card_driver:
+                card_driver["d"] = await _card_driver(client)
+            return card_driver["d"]
+
+        async def _run_attempt() -> _Attempt:
+            drv = await _driver()
+            if transport == "a2a":
+                return await _a2a_attempt(client, query, a2a_state, drv)
+            return await _agui_attempt(client, query, f"{key}-agui", messages, drv)
+
         attempts = 0
         any_rate_limited = False
         last: _Attempt | None = None
@@ -329,18 +359,8 @@ async def run_turn(
             try:
                 attempts += 1
                 try:
-                    if transport == "a2a":
-                        last = await asyncio.wait_for(
-                            _a2a_attempt(client, query, a2a_state, a2a_driver),
-                            timeout=max(0.0, deadline - _now()),
-                        )
-                        ok = last.classify()
-                    else:
-                        last = await asyncio.wait_for(
-                            _agui_attempt(client, query, f"{key}-agui", messages),
-                            timeout=max(0.0, deadline - _now()),
-                        )
-                        ok = not last.reason
+                    last = await asyncio.wait_for(_run_attempt(), timeout=max(0.0, deadline - _now()))
+                    ok = last.classify() if transport == "a2a" else not last.reason
                 except asyncio.TimeoutError:
                     messages[:] = snapshot
                     last = _Attempt()
@@ -363,8 +383,9 @@ async def run_turn(
             sdir.mkdir(parents=True, exist_ok=True)
             if transport == "a2a":
                 for name, k in (("task", "task_id"), ("ctx", "context_id"), ("state", "state")):
-                    if last.ids.get(k):
-                        files[name].write_text(last.ids[k])
+                    value = last.ids.get(k, "")
+                    if value or name != "ctx":
+                        files[name].write_text(value)
             else:
                 files["msgs"].write_text(json.dumps(messages))
             return {

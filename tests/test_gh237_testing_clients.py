@@ -740,19 +740,15 @@ async def test_context_only_when_not_interrupted(tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("card", [[], "x", None, {"capabilities": []}, {"capabilities": {"extensions": "x"}}])
 async def test_non_object_card_is_not_advertised(card):
-    from agent_sdk.testing.turns import _a2ui_advertised
-
     client = _card_client(card, [])
-    assert await _a2ui_advertised(ChatDriver(client)) is False
+    assert await ChatDriver(client).a2ui_client_activation() == ({}, {})
 
 
 @pytest.mark.asyncio
 async def test_card_fetch_failure_logged_by_type_only(caplog):
-    from agent_sdk.testing.turns import _a2ui_advertised
-
     client = _card_client(httpx.ConnectError("secret-host-detail"), [])
     with caplog.at_level("WARNING"):
-        assert await _a2ui_advertised(ChatDriver(client)) is False
+        assert await ChatDriver(client).a2ui_client_activation() == ({}, {})
     assert "ConnectError" in caplog.text
     assert "secret-host-detail" not in caplog.text
 
@@ -786,10 +782,10 @@ async def test_chat_driver_sends_a2ui_header_only_when_advertised(tmp_path, adve
         async with await _asgi_client(app, rec) as client:
             d = ChatDriver(client)
             await d.a2a_turn("q")
-            try:
+            from agent_sdk.testing.chat import A2AError
+
+            with pytest.raises(A2AError):  # unknown task: the server refuses, the request still went out
                 await d.resume("no-task", "no-ctx", "r")
-            except Exception:  # unknown task: the server refuses, the request still went out
-                pass
     app.state.credential_store.close()
     assert len(rec.posts) == 2
     for req in rec.posts:
@@ -840,3 +836,232 @@ def test_check_structured_unresolvable_ref_is_failure():
     tool = {"outputSchema": {"type": "object", "properties": {"a": {"$ref": "#/$defs/missing"}}}}
     out = _check_structured(tool, {"structuredContent": {"a": 1}})
     assert "$ref" in out
+
+
+# ── GH-264 ────────────────────────────────────────────────────────────────────
+
+from agent_sdk.testing.chat import _STANDARD_CATALOG as _STD  # noqa: E402
+
+
+def _counting_client(card, stream_body, gets, posts, *, card_delay=0.0, post_statuses=None):
+    import asyncio
+
+    statuses = list(post_statuses or [])
+
+    async def handler(req):
+        if req.method == "GET":
+            gets.append(req)
+            if card_delay:
+                await asyncio.sleep(card_delay)
+            return httpx.Response(200, json=card)
+        posts.append(req)
+        if statuses:
+            return httpx.Response(statuses.pop(0), content=b"")
+        return httpx.Response(200, content=stream_body)
+
+    return httpx.AsyncClient(base_url="http://t", transport=httpx.MockTransport(handler))
+
+
+async def _no_sleep(_s):
+    return None
+
+
+@pytest.mark.asyncio
+async def test_message_kind_stream_clears_stored_task_and_state(tmp_path):
+    from agent_sdk.testing.turns import run_turn
+
+    (tmp_path / "acc-k-a2a-task.txt").write_text("old-task")
+    (tmp_path / "acc-k-a2a-state.txt").write_text("input-required")
+    body = _sse({"kind": "message", "role": "agent", "contextId": "c1", "parts": [{"kind": "text", "text": "hi"}]})
+    client = _counting_client({"capabilities": {}}, body, [], [])
+    out = await run_turn(
+        transport="a2a", base_url="http://t", key_file="unused", query="q", run_key="k",
+        state_dir=tmp_path, lock_dir=tmp_path / "locks", client=client,
+    )
+    assert out["ok"] is True
+    assert (tmp_path / "acc-k-a2a-task.txt").read_text() == ""
+    assert (tmp_path / "acc-k-a2a-state.txt").read_text() == ""
+    assert (tmp_path / "acc-k-a2a-ctx.txt").read_text() == "c1"
+
+
+def test_chat_driver_merges_and_dedupes_catalogs():
+    d = ChatDriver(None, extra_catalogs=["urn:a", _STD, "urn:a", "urn:b"])
+    assert d._caps["catalogs"] == [_STD, "urn:a", "urn:b"]
+
+
+@pytest.mark.asyncio
+async def test_chat_driver_card_parameter_skips_fetch():
+    gets: list = []
+    client = _counting_client({}, b"", gets, [])
+    d = ChatDriver(client, card=_a2ui_card(["urn:z"]))
+    headers, meta = await d.a2ui_client_activation()
+    assert headers and meta["a2uiClientCapabilities"]["catalogs"] == [_STD]
+    assert gets == []
+
+
+@pytest.mark.asyncio
+async def test_card_fetched_once_across_retries_and_catalogs_deduped(tmp_path, monkeypatch):
+    from agent_sdk.testing import turns
+
+    monkeypatch.setattr(turns, "_sleep", _no_sleep)
+    gets: list = []
+    posts: list = []
+    body = _sse({"kind": "message", "role": "agent", "parts": [{"kind": "text", "text": "ok"}]})
+    card = _a2ui_card(["urn:x", _STD, "urn:x"])
+    client = _counting_client(card, body, gets, posts, post_statuses=[429])
+    out = await turns.run_turn(
+        transport="a2a", base_url="http://t", key_file="unused", query="q", run_key="k2",
+        state_dir=tmp_path, lock_dir=tmp_path / "locks", client=client,
+    )
+    assert out["ok"] is True and out["attempts"] == 2
+    assert len(gets) == 1
+    caps = json.loads(posts[-1].content)["message"]["metadata"]["a2uiClientCapabilities"]
+    assert caps["catalogs"] == [_STD, "urn:x"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["a2a", "agui"])
+async def test_card_fetch_is_inside_time_budget(tmp_path, transport):
+    from agent_sdk.testing.turns import run_turn
+
+    client = _counting_client({"capabilities": {}}, b"", [], [], card_delay=30.0)
+    out = await run_turn(
+        transport=transport, base_url="http://t", key_file="unused", query="q", run_key="k3",
+        state_dir=tmp_path, lock_dir=tmp_path / "locks", budget_s=0.3, client=client,
+    )
+    assert out["ok"] is False and out["reason"] == "budget-exceeded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["a2a", "agui"])
+async def test_card_fetch_waits_for_slot(tmp_path, transport):
+    from agent_sdk.testing.turns import SlotLimiter, run_turn
+
+    held = SlotLimiter(tmp_path / "locks", 1).try_acquire()
+    assert held is not None
+    gets: list = []
+    client = _counting_client({"capabilities": {}}, b"", gets, [])
+    try:
+        out = await run_turn(
+            transport=transport, base_url="http://t", key_file="unused", query="q", run_key="k4",
+            state_dir=tmp_path, lock_dir=tmp_path / "locks", max_slots=1, budget_s=0.3, client=client,
+        )
+    finally:
+        held.release()
+    assert out["ok"] is False and out["reason"] == "slot-wait-exceeded"
+    assert gets == []
+
+
+@pytest.mark.asyncio
+async def test_agui_turn_declares_card_catalogs(tmp_path):
+    from agent_sdk.testing.turns import run_turn
+
+    posts: list = []
+    # An empty reply is a failed attempt and is retried, so the stream carries text.
+    body = _sse(_start("m1"), _content("hi"), FINISHED)
+    client = _counting_client(_a2ui_card(["urn:x", "urn:x"]), body, [], posts)
+    out = await run_turn(
+        transport="agui", base_url="http://t", key_file="unused", query="q", run_key="k5",
+        state_dir=tmp_path, lock_dir=tmp_path / "locks", budget_s=10.0, client=client,
+    )
+    assert out["ok"] is True
+    caps = json.loads(posts[0].content)["forwardedProps"]["a2uiClientCapabilities"]
+    assert caps["catalogs"] == [_STD, "urn:x"]
+
+
+@pytest.mark.asyncio
+async def test_agui_run_turn_over_build_app_declares_domain_catalog(tmp_path):
+    from agent_sdk.testing import reply
+    from agent_sdk.testing.turns import run_turn
+
+    register_content_type(_DomCatalog)
+    try:
+        # An unscripted model errors every run, so script one text reply.
+        app = _a2ui_app(tmp_path, FakeModelClient([reply("done")]), domain=True)
+        rec = _Recorder(httpx.ASGITransport(app=app))
+        async with app.router.lifespan_context(app):
+            async with await _asgi_client(app, rec) as client:
+                out = await run_turn(
+                    transport="agui", base_url="http://test", key_file="unused", query="q",
+                    run_key="k6", state_dir=tmp_path, lock_dir=tmp_path / "locks", budget_s=10.0,
+                    client=client,
+                )
+        app.state.credential_store.close()
+    finally:
+        _REGISTRY.pop("gh256_dom", None)
+    assert out["ok"] is True
+    caps = json.loads(rec.posts[0].content)["forwardedProps"]["a2uiClientCapabilities"]
+    assert "urn:test-gh256-domain:v1" in caps["catalogs"]
+
+
+@pytest.mark.asyncio
+async def test_card_fetch_builds_no_new_client(tmp_path, monkeypatch):
+    from agent_sdk.testing.turns import run_turn
+
+    # Each stream carries a text reply: an empty reply is retried until the budget ends.
+    bodies = {
+        "a2a": _sse({"kind": "message", "role": "agent", "parts": [{"kind": "text", "text": "ok"}]}),
+        "agui": _sse(_start("m1"), _content("hi"), FINISHED),
+    }
+    clients = {t: _counting_client(_a2ui_card(["urn:x"]), b, [], []) for t, b in bodies.items()}
+    built: list = []
+    real_init = httpx.AsyncClient.__init__
+
+    def spy(self, *a, **kw):
+        built.append(1)
+        real_init(self, *a, **kw)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", spy)
+    for transport in ("a2a", "agui"):
+        out = await run_turn(
+            transport=transport, base_url="http://t", key_file="unused", query="q", run_key="k7",
+            state_dir=tmp_path, lock_dir=tmp_path / "locks", budget_s=10.0, client=clients[transport],
+        )
+        assert out["ok"] is True
+    assert built == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_missing_protocol_version_is_error_without_echo(tmp_path):
+    from agent_sdk.testing.mcp import McpError
+
+    def handler(req):
+        body = json.loads(req.content)
+        if body.get("method") == "initialize":
+            return httpx.Response(
+                200, json={"jsonrpc": "2.0", "id": body["id"], "result": {"serverInfo": {"name": "BODY-MARKER-9"}}}
+            )
+        return httpx.Response(202)
+
+    kf = tmp_path / "key"
+    kf.write_text("tok")
+    async with McpClient("http://t", key_file=kf, transport=httpx.MockTransport(handler)) as c:
+        with pytest.raises(McpError) as ei:
+            await c.initialize()
+    assert "BODY-MARKER-9" not in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_malformed_sse_frame_is_a_failed_attempt_not_a_traceback():
+    client = _card_client({"capabilities": {}}, [], b"data: {not json\n\n")
+    at = await _a2a_attempt(client, "q", {})
+    assert at.reason == "malformed-stream" and at.classify() is False
+
+
+@pytest.mark.asyncio
+async def test_a2a_turn_rejects_non_object_card():
+    client = _card_client(["not", "an", "object"], [])
+    with pytest.raises(ValueError, match="not a JSON object"):
+        await ChatDriver(client).a2a_turn("q")
+
+
+def test_check_structured_other_validator_error_is_not_reported_as_ref(monkeypatch):
+    from agent_sdk.testing import mcp as mcp_mod
+
+    def boom(*_a, **_k):
+        raise RuntimeError("secret detail")
+
+    monkeypatch.setattr(mcp_mod.jsonschema, "validate", boom)
+    tool = {"outputSchema": {"type": "object"}}
+    out = mcp_mod._check_structured(tool, {"structuredContent": {}})
+    assert "$ref" not in out and "secret detail" not in out and out

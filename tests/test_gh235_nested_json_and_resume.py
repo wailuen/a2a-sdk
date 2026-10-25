@@ -51,7 +51,7 @@ async def test_null_resume_is_a_fresh_run(client, fake_model):
     assert not _errors(frames)
 
 
-@pytest.mark.parametrize("status", ["banana", 5, {"x": MARKER}, []])
+@pytest.mark.parametrize("status", ["banana", "approved", "rejected", 5, {"x": MARKER}, []])
 async def test_bad_status_is_run_error_before_lookup(client, app, status):
     store = app.state.task_store
     record = store.create(new_task(), Identity(kind="api_key", subject="o"))
@@ -335,7 +335,13 @@ async def test_oauth_register_nested_is_invalid_client_metadata(client, objects)
 @pytest.mark.parametrize("objects", [False, True])
 async def test_a2a_deep_metadata_never_breaks_task_list(client, objects):
     open_, close = ('{"a":', "}") if objects else ("[", "]")
-    body = ('{"message":{"metadata":' + open_ * 300 + "1" * objects + close * 300 + "}}").encode()
+    deep = open_ * 300 + "1" * objects + close * 300
+    body = (
+        '{"message":{"role":"user","messageId":"m1","parts":[{"text":"hi"}],"metadata":'
+        + deep
+        + "}}"
+    ).encode()
     r = await client.post("/v1/message:send", content=body, headers=JSON_HEADERS)
     assert r.status_code == 400, r.text
+    assert r.json()["error"] == {"code": -32700, "message": TOO_DEEP}
     assert (await client.get("/v1/tasks")).status_code != 500

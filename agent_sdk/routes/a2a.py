@@ -145,6 +145,8 @@ from ..models.errors import (
 )
 from ..tasks.store import StreamTerminated, Subscription, TaskRecord
 
+_INVALID_RESPONSE_TEXT = "invalid agent response"
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -152,7 +154,7 @@ router = APIRouter()
 _BASE_MODES = {"text", "text/plain", "application/json"}
 
 
-def _supported_modes(a2ui_enabled: bool) -> set[str]:
+def _supported_modes(*, a2ui_enabled: bool = False) -> set[str]:
     """Per-app supported output modes; the A2UI MIME only when A2UI is on (GH-257)."""
     return _BASE_MODES | {A2UI_MIME_TYPE} if a2ui_enabled else set(_BASE_MODES)
 
@@ -426,21 +428,43 @@ def _resume_value(message: Message) -> Any | JSONResponse:
     return {"status": None, "payload": data_parts[0].data}
 
 
+def _a2ui_header(request: Request) -> bool:
+    extensions = request.headers.get("x-a2a-extensions", "")
+    return A2UI_EXTENSION_URI in [u.strip() for u in extensions.split(",")]
+
+
+def _a2ui_opt_in(request: Request) -> bool:
+    """GH-261: this request's A2UI opt-in (app gate AND the header); read for
+    the decision only, never echoed or activated."""
+    return bool(request.app.state.a2ui_enabled) and _a2ui_header(request)
+
+
 def _capabilities(
-    message: Message, request: Request, *, a2ui_enabled: bool = True
+    message: Message, request: Request, *, a2ui_enabled: bool = False
 ) -> A2uiCapabilities:
     # Gate A2UI on the opt-in header — clients that never sent X-A2A-Extensions
     # containing A2UI_EXTENSION_URI must not receive A2UI DataParts. The
     # fail-closed default itself lives in A2uiCapabilities.gated (C-006) so
     # this transport cannot drift from ag_ui.py's independently.
-    extensions = request.headers.get("x-a2a-extensions", "")
-    opted_in = A2UI_EXTENSION_URI in [u.strip() for u in extensions.split(",")] and a2ui_enabled
+    opted_in = _a2ui_header(request) and a2ui_enabled
     raw = (message.metadata or {}).get("a2uiClientCapabilities")
     # GH-240: A2A-only; AG-UI keeps the default.
     return A2uiCapabilities.gated(opted_in, raw, keep_declared_catalogs=True)
 
 
-def _config_error(params: MessageSendParams, a2ui_enabled: bool = True) -> JSONResponse | None:
+def _modes_error(modes: list[str] | None, *, a2ui_enabled: bool) -> JSONResponse | None:
+    if not modes:
+        return None
+    supported = _supported_modes(a2ui_enabled=a2ui_enabled)
+    if not any(media_type_match(m, supported) for m in modes):
+        return a2a_error(
+            A2A_CONTENT_TYPE_NOT_SUPPORTED,
+            "no acceptable output mode; supported: " + ", ".join(sorted(supported)),
+        )
+    return None
+
+
+def _config_error(params: MessageSendParams, *, a2ui_enabled: bool = False) -> JSONResponse | None:
     # RT-005: never takes `headers` — a config error means _capabilities()/
     # _start_worker never ran, so nothing on this request was ever activated.
     config = params.configuration
@@ -451,14 +475,11 @@ def _config_error(params: MessageSendParams, a2ui_enabled: bool = True) -> JSONR
             A2A_PUSH_NOTIFICATION_NOT_SUPPORTED,
             "push notifications are not supported",
         )
-    if config.accepted_output_modes is not None and config.accepted_output_modes:
-        supported = _supported_modes(a2ui_enabled)
-        if not any(media_type_match(m, supported) for m in config.accepted_output_modes):
-            return a2a_error(
-                A2A_CONTENT_TYPE_NOT_SUPPORTED,
-                "no acceptable output mode; supported: " + ", ".join(sorted(supported)),
-            )
-    return None
+    if params.message.task_id:
+        # GH-261: a resume's modes are checked in _resume_or_error against the
+        # opt-in captured at task start.
+        return None
+    return _modes_error(config.accepted_output_modes, a2ui_enabled=a2ui_enabled)
 
 
 async def _parse_send(request: Request) -> MessageSendParams | JSONResponse:
@@ -537,7 +558,9 @@ def _start_worker(
         unbind_identity(identity_token)
 
 
-def _create_task_record(request: Request, params: MessageSendParams, identity: Identity) -> TaskRecord:
+def _create_task_record(
+    request: Request, params: MessageSendParams, identity: Identity, *, a2ui_opted_in: bool = False
+) -> TaskRecord:
     msg = params.message
     task = new_task(msg.context_id)
     # LRN-048: never mutate the inbound Message; archive a copy with server-assigned
@@ -548,6 +571,7 @@ def _create_task_record(request: Request, params: MessageSendParams, identity: I
     config = params.configuration
     if config is not None and config.accepted_output_modes:
         record.accepted_output_modes = list(config.accepted_output_modes)
+    record.a2ui_opted_in = a2ui_opted_in
     # A2A §3 contextId continuation: carry prior conversation history into the
     # new task so the model can reference entities from earlier turns.
     # RT-002/RT-B-202: bridge_context_messages (agent/loop.py) re-asserts the
@@ -581,18 +605,26 @@ def _resume_or_error(
         return a2a_error(
             A2A_UNSUPPORTED_OPERATION,
             "task is in a terminal state and cannot accept new messages",
+            status=400,
         )
     if state not in INTERRUPT_STATES:
         # working task not awaiting input: continuing it is not a supported op
-        return a2a_error(A2A_UNSUPPORTED_OPERATION, "task is not awaiting input")
+        return a2a_error(A2A_UNSUPPORTED_OPERATION, "task is not awaiting input", status=400)
     if msg.context_id and msg.context_id != record.task.context_id:
         return a2a_invalid_params("contextId does not match the task")
     value = _resume_value(msg)
     if isinstance(value, JSONResponse):
         return value
+    config = params.configuration
+    resume_modes = config.accepted_output_modes if config is not None else None
+    if (err := _modes_error(resume_modes, a2ui_enabled=record.a2ui_opted_in)) is not None:
+        return err
     # GH-185: the already-running worker picks this up after its resume wait,
     # so post-resume tools see the resuming caller (not the original submitter).
-    delivered = store.deliver_resume(record.task.id, ResumeEnvelope(value, identity))
+    delivered = store.deliver_resume(
+        record.task.id,
+        ResumeEnvelope(value, identity, list(resume_modes) if resume_modes else None),
+    )
     if not delivered:
         # lost the race: interrupt was consumed/expired between check and deliver
         return a2a_error(A2A_TASK_NOT_FOUND, "task not found")
@@ -669,7 +701,7 @@ async def message_send(
     params = await _parse_send(request)
     if isinstance(params, JSONResponse):
         return params
-    if (err := _config_error(params, request.app.state.a2ui_enabled)) is not None:
+    if (err := _config_error(params, a2ui_enabled=_a2ui_opt_in(request))) is not None:
         return err
     blocking = bool(params.configuration and params.configuration.blocking)
     history_length = params.configuration.history_length if params.configuration else None
@@ -715,10 +747,10 @@ async def message_send(
             return _strict_json_response(bare_msg.wire())
     slot = await _admit(request, identity, None) if blocking else None
     try:
-        record = _create_task_record(request, params, identity)
+        record = _create_task_record(request, params, identity, a2ui_opted_in=_a2ui_opt_in(request))
         sub = slot.subscribe(record.task.id) if slot is not None else None
         _start_worker(
-            request, record, _capabilities(params.message, request, a2ui_enabled=request.app.state.a2ui_enabled), identity,
+            request, record, _capabilities(params.message, request, a2ui_enabled=record.a2ui_opted_in), identity,
             (params.message.metadata or {}).get("timezone"),
         )
         # RT-005: the sole path on this route that can activate either
@@ -931,12 +963,12 @@ async def _open_stream(
                     state=TaskState.FAILED,
                     message=Message(
                         role="agent",
-                        parts=[TextPart(text="invalid agent response")],
+                        parts=[TextPart(text=_INVALID_RESPONSE_TEXT)],
                         messageId=uuid.uuid4().hex,
                     ),
                     error=WireError(
                         code=A2A_INVALID_AGENT_RESPONSE,
-                        message="invalid agent response",
+                        message=_INVALID_RESPONSE_TEXT,
                     ),
                 ),
                 final=True,
@@ -1002,7 +1034,7 @@ async def message_stream(
     params = await _parse_send(request)
     if isinstance(params, JSONResponse):
         return params
-    if (err := _config_error(params, request.app.state.a2ui_enabled)) is not None:
+    if (err := _config_error(params, a2ui_enabled=_a2ui_opt_in(request))) is not None:
         return err
     history_length = params.configuration.history_length if params.configuration else None
     if params.message.task_id:
@@ -1016,7 +1048,9 @@ async def message_stream(
             # the failure. Return -32004 directly, never opening a stream
             # subscription for a task that cannot be resumed.
             return a2a_error(
-                A2A_UNSUPPORTED_OPERATION, "task is in a terminal state and cannot accept new messages"
+                A2A_UNSUPPORTED_OPERATION,
+                "task is in a terminal state and cannot accept new messages",
+                status=400,
             )
         stream, abort = await _open_stream(
             request, record, identity, history_length=history_length
@@ -1042,12 +1076,12 @@ async def message_stream(
         # fully enforced here. The slot is claimed, not merely checked, so
         # passing it to _open_stream below cannot 429 a second time.
         slot = await _admit(request, identity, None)
-        record = _create_task_record(request, params, identity)
+        record = _create_task_record(request, params, identity, a2ui_opted_in=_a2ui_opt_in(request))
         stream, abort = await _open_stream(
             request, record, identity, slot=slot, history_length=history_length
         )
         _start_worker(
-            request, record, _capabilities(params.message, request, a2ui_enabled=request.app.state.a2ui_enabled), identity,
+            request, record, _capabilities(params.message, request, a2ui_enabled=record.a2ui_opted_in), identity,
             (params.message.metadata or {}).get("timezone"),
         )
         # RT-005: the sole path on this route that can activate either

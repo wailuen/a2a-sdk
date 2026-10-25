@@ -195,6 +195,7 @@ def _extract(chat_js: str, signature: str) -> str:
 
 _HARNESS = r"""
 const state = { threadId: "T1", aguiMessages: [], catalogIds: [], busy: false, contextId: null, abort: null };
+const BUSY_NOTE = "busy: wait for the current run to finish";
 const sendBtn = { disabled: false };
 const resetBtn = { addEventListener(t, fn) { resetBtn.fn = fn; } };
 const trace = { id: "trace" };
@@ -231,13 +232,15 @@ const bubble = () => {};
 const handleA2aArtifact = () => {};
 const auditLine = () => {};
 let lastSignal = null;
+let lastRetrySignal = null;
 let onFrame = null;
 let pendingInterrupt = null;
 let shownForm = null;
 let postFails = false;
 let onPost = null;
 const postSse = (url, body, headers, signal) => { lastBody = body; lastSignal = signal; return {}; };
-const postWithRetry = async (fn) => {
+const postWithRetry = async (fn, opts) => {
+  lastRetrySignal = opts ? opts.signal : null;
   posts++;
   if (onPost) onPost();
   if (postThrows) throw new Error("kaput");
@@ -267,6 +270,7 @@ def _node_run(frames, scenario: str) -> dict:
             "  async function runExclusive(",
             "  async function sendA2a(",
             "  async function sendAgui(",
+            "  async function send()",
         )
     )
     script = (
@@ -276,6 +280,7 @@ def _node_run(frames, scenario: str) -> dict:
         "forms: formNodes.map(f => f.removed), placeholder: input.placeholder, posts, lastBody, "
         "busy: state.busy, lines: log.lines, thread: state.threadId, "
         "ctx: state.contextId, custom: log.custom, signalMatches: lastSignal ? lastSignal === (state.abort && state.abort.signal) : null, aborted: state.abort ? state.abort.signal.aborted : null, "
+        "inputValue: input.value, retrySignalMatches: lastRetrySignal ? lastRetrySignal === (state.abort && state.abort.signal) : null, "
         "live: transcript.children.filter(c => c.listeners && !c.removed).length })); })();\n"
     )
     out = subprocess.run([_NODE, "-e", script], capture_output=True, text=True, timeout=20, check=True)
@@ -674,3 +679,65 @@ def test_post_sse_passes_signal_and_keeps_auth_header(tmp_path):
     f.write_text(script)
     out = subprocess.run([_NODE, str(f)], capture_output=True, text=True, timeout=20, check=True)
     assert json.loads(out.stdout) == {"a": True, "none": True}
+
+
+# GH-263 item 1: the CHUNK role check keys on the frame's own messageId.
+@needs_node
+def test_idless_chunk_role_is_not_recorded_on_the_minted_id():
+    frames = [_msg("TEXT_MESSAGE_CHUNK", None, "a") | {"role": "user"}, _FIN]
+    out = _node_run(frames, 'await sendAgui("hi");')
+    assistant = _ACTIVE_ASSISTANT(out)
+    assert [c for _, c in assistant] == ["a"]
+    assert assistant[0][0].startswith("uuid-")
+
+
+@needs_node
+def test_chunk_with_own_id_still_records_role_once():
+    frames = [_msg("TEXT_MESSAGE_CHUNK", "k1", "a") | {"role": "user"}, _FIN]
+    assert _ACTIVE_ASSISTANT(_node_run(frames, 'await sendAgui("hi");')) == []
+
+
+# GH-263 item 4: a real mid-stream flip, counted by frames, not tied to the first frame or onPost.
+_FLIP_AFTER_SECOND = "let k = 0; onFrame = () => { if (++k === 3) state.threadId = 'T2'; };"
+
+
+@needs_node
+def test_agui_thread_flip_after_second_frame_drops_the_rest():
+    note = {"type": "CUSTOM", "name": "AGENT_NOTE", "value": {"note": "x"}}
+    frames = [{"type": "RUN_STARTED", "runId": "r1"}, note, note, note, _FIN]
+    out = _node_run(frames, _FLIP_AFTER_SECOND + " await sendAgui('hi');")
+    assert out["custom"] == 1
+    assert out["msgs"] == []
+    assert "run finished" not in out["lines"]
+    assert not any("stream closed" in ln for ln in out["lines"])
+
+
+@needs_node
+def test_a2a_thread_flip_after_second_frame_drops_the_rest():
+    frames = [{"kind": "task", "id": f"t{i}", "contextId": f"c{i}", "status": {"state": "working"}} for i in (1, 2, 3)]
+    out = _node_run(frames, _FLIP_AFTER_SECOND + " await sendA2a('hi');")
+    assert out["lines"] == ["task t1 \u00b7 working", "task t2 \u00b7 working"]
+    assert out["ctx"] == "c2"
+
+
+# GH-263 item 5.
+@needs_node
+def test_a2a_thread_is_captured_before_the_catalog_await():
+    out = _node_run([_A2A_TASK], "const p = sendA2a('hi'); state.threadId = 'T2'; await p;")
+    assert out["ctx"] is None
+    assert out["lines"] == []
+
+
+@needs_node
+def test_send_while_busy_shows_the_fixed_note_and_keeps_the_text():
+    out = _node_run([], "state.busy = true; input.value = 'hi'; await send();")
+    assert out["lines"] == ["busy: wait for the current run to finish"]
+    assert out["inputValue"] == "hi"
+    assert out["posts"] == 0
+
+
+@needs_node
+@pytest.mark.parametrize("call", ['sendAgui("hi")', 'sendA2a("hi")'])
+def test_run_paths_pass_the_same_signal_to_the_retry_wait(call):
+    out = _node_run([], f"state.abort = new AbortController(); await {call};")
+    assert out["retrySignalMatches"] is True

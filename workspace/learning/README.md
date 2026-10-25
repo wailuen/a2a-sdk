@@ -77,7 +77,7 @@ Entries ordered by LRN number.
 | LRN-071 | template/ is a peer repo — wave todos must commit+push to wailuen/a2a-agent-template, not to a2a-sdk | [LRN-071](LRN-071-template-is-peer-repo-not-submodule.md) |
 | LRN-072 | git add on a directory containing .git creates a gitlink (mode 160000), not file tracking | [LRN-072](LRN-072-git-add-nested-repo-creates-gitlink-not-files.md) |
 | LRN-073 | Scenario runner filter(Boolean) turns crashed agents into silent pass-rate inflation | [LRN-073](LRN-073-acceptance-filter-boolean-nan-denominator.md) |
-| LRN-074 | inspect.get_annotations collapses explicit `-> None` and missing annotation to the same value | [LRN-074](LRN-074-inspect-get-annotations-none-ambiguity.md) |
+| LRN-074 | inspect.get_annotations collapses explicit -> None and missing annotation to the same value | [LRN-074](LRN-074-inspect-get-annotations-none-ambiguity.md) |
 | LRN-075 | Harness workflow fixes don't propagate to template peer repo | [LRN-075](LRN-075-harness-workflow-template-sync-gap.md) |
 | LRN-076 | Wave redteam fix loop must invoke debug agent unconditionally at round 4+ — not only on stall | [LRN-076](LRN-076-redteam-loop-must-call-debug-at-round-4.md) |
 | LRN-077 | Wire-up fixes in build_app() need their own integration test at the app.state seam | [LRN-077](LRN-077-build-app-wire-up-needs-integration-test.md) |
@@ -105,10 +105,10 @@ Entries ordered by LRN number.
 | LRN-099 | A2A REST action suffix can differ from the JSON-RPC method name | [LRN-099](LRN-099-a2a-rest-suffix-differs-from-method-name.md) |
 | LRN-100 | Budget-exhausted deferred marker must be relocated once findings are resolved | [LRN-100](LRN-100-budget-exhausted-deferred-must-be-relocated.md) |
 | LRN-101 | Agent card description must never fall back to empty string | [LRN-101](LRN-101-agent-card-description-empty-string-fallback.md) |
-| LRN-102 | TOOL_PROGRESS CUSTOM event emitted in ag_ui.py but absent from CUSTOM_EVENTS tuple, card schema,... | [LRN-102](LRN-102-tool-progress-custom-event-parity-gap.md) |
+| LRN-102 | TOOL_PROGRESS CUSTOM event emitted in ag_ui.py but absent from CUSTOM_EVENTS tuple, card schema, DESIGN.md contract table, and console router — parity guard silent because both sides missing | [LRN-102](LRN-102-tool-progress-custom-event-parity-gap.md) |
 | LRN-103 | A2A multi-turn continuation must use contextId, not taskId, for completed tasks | [LRN-103](LRN-103-a2a-multiturn-contextid-continuation.md) |
 | LRN-104 | deferred imports in model clients must not be silently caught by bare except Exception | [LRN-104](LRN-104-deferred-import-silent-wrap.md) |
-| LRN-105 | bare "except Exception" in model client invoke paths swallows distinct error categories (e.g. Rat... | [LRN-105](LRN-105-broad-except-swallows-error-category.md) |
+| LRN-105 | bare "except Exception" in model client invoke paths swallows distinct error categories (e.g. RateLimitError) as generic UPSTREAM | [LRN-105](LRN-105-broad-except-swallows-error-category.md) |
 | LRN-106 | caplog assertions on agent_sdk.* loggers false-green outside full-suite order | [LRN-106](LRN-106-caplog-propagate-false-order-dependent.md) |
 | LRN-107 | Fixed broken test idiom recurs uncaught in a sibling test | [LRN-107](LRN-107-duplicated-broken-test-idiom.md) |
 | LRN-108 | Unautomated documentation anchors drift silently | [LRN-108](LRN-108-unautomated-doc-anchor-drift.md) |
@@ -118,7 +118,7 @@ Entries ordered by LRN number.
 | LRN-112 | Monotonic clock value fed to datetime.fromtimestamp() as if it were epoch time | [LRN-112](LRN-112-monotonic-clock-epoch-confusion.md) |
 | LRN-113 | New abstractmethod on public ABC breaks external subclasses | [LRN-113](LRN-113-public-abc-new-abstractmethod.md) |
 | LRN-114 | Non-total content extraction crashes AG-UI SSE stream without terminal frame | [LRN-114](LRN-114-non-total-sse-validation-crash.md) |
-| LRN-115 | AG-UI _capabilities() fail-closed tier="none" default is intentional — do not "align" it to spec's tier="core" | [LRN-115](LRN-115-agui-capabilities-fail-closed-tier-none-default.md) |
+| LRN-115 | AG-UI _capabilities() fail-closed tier="none" default is intentional — do not "align" it to spec's tier="core | [LRN-115](LRN-115-agui-capabilities-fail-closed-tier-none-default.md) |
 | LRN-116 | MCP tools/call bypasses generator tool dispatch, breaking long-running Tier-1 tools | [LRN-116](LRN-116-mcp-tools-call-bypasses-generator-dispatch.md) |
 | LRN-117 | Allowlist must cover LLM system-prompt teaching surface | [LRN-117](LRN-117-allowlist-must-cover-llm-teaching-surface.md) |
 | LRN-118 | DESIGN.md MCP version-header rule stale after transport split | [LRN-118](LRN-118-protocol-doc-behavior-drift.md) |
@@ -537,3 +537,23 @@ Entries ordered by LRN number.
 | LRN-538 | Changelog must name every changed file by full path | [LRN-538](LRN-538-changelog-full-path-coverage.md) |
 | LRN-539 | Field added to a Reads-only file escapes scope gates | [LRN-539](LRN-539-reads-only-file-modified.md) |
 | LRN-540 | MockTransport exceptions must be named in the check | [LRN-540](LRN-540-mocktransport-exceptions-unnamed.md) |
+| LRN-541 | Changelog names console static files by basename | [LRN-541](LRN-541-changelog-console-basename-refs.md) |
+| LRN-542 | Parallel waves leave duplicate Unreleased headings | [LRN-542](LRN-542-duplicate-unreleased-heading.md) |
+| LRN-543 | Resume state must travel in the envelope | [LRN-543](LRN-543-resume-state-via-envelope.md) |
+| LRN-544 | Off-gate tests must use an emitting tool | [LRN-544](LRN-544-off-gate-test-needs-emitter.md) |
+| LRN-545 | GH changelog bullets omit touched files | [LRN-545](LRN-545-changelog-gh-bullet-file-list.md) |
+| LRN-546 | Harness and template skill edits missing from Unreleased bullet | [LRN-546](LRN-546-changelog-harness-template-paths.md) |
+| LRN-547 | Wire-status ruling leaves old status pinned in LRN Checks | [LRN-547](LRN-547-ruling-reversal-stale-checks.md) |
+| LRN-548 | New 4xx rejection filed under Fixed without Migration | [LRN-548](LRN-548-new-rejection-not-breaking.md) |
+| LRN-549 | Listed low items skipped when ruling says fix as listed | [LRN-549](LRN-549-low-items-not-individually-done.md) |
+| LRN-550 | Named untested path closed by a nearby success test | [LRN-550](LRN-550-untested-branch-needs-direct-test.md) |
+| LRN-551 | Failed-status text hand-built outside the shared builder | [LRN-551](LRN-551-duplicated-failed-status-text.md) |
+| LRN-552 | CHANGELOG correction asked by a ruling not applied | [LRN-552](LRN-552-changelog-ruling-not-applied.md) |
+| LRN-553 | Documented spec deviation names the wrong condition | [LRN-553](LRN-553-spec-deviation-wrong-condition.md) |
+| LRN-554 | Diff touches files not declared in todo scope | [LRN-554](LRN-554-undeclared-file-scope-diff.md) |
+| LRN-555 | Wire omission rule duplicated outside its ClassVar | [LRN-555](LRN-555-omission-rule-second-copy.md) |
+| LRN-556 | Breaking CHANGELOG entry omits effect on downstream subclasses | [LRN-556](LRN-556-changelog-subclass-effect-omitted.md) |
+| LRN-557 | Breaking CHANGELOG bullet lacks its own ruling URL | [LRN-557](LRN-557-breaking-bullet-missing-ruling-url.md) |
+| LRN-558 | New rejection filed under Changed instead of Breaking | [LRN-558](LRN-558-new-rejection-filed-under-changed.md) |
+| LRN-559 | New exported testing API lacks Added bullet and file paths | [LRN-559](LRN-559-public-testing-api-no-added-bullet.md) |
+| LRN-560 | Challenge-site test passes without reaching the branch | [LRN-560](LRN-560-vacuous-challenge-site-test.md) |

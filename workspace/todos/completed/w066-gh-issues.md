@@ -53,7 +53,7 @@ Each issue body lists file:line and the fix for every numbered item. Implement e
 ## G2 — A2A / AG-UI / MCP routes and runner
 
 - [x] `GH-257` runtime still enables A2UI when the card does not advertise it ‖ group:G2
-  - Creates: (modifies `agent_sdk/app.py` (compute `app.state.a2ui_enabled` once, next to `build_agent_card`, only), `agent_sdk/routes/agent_card.py` (A2UI extension/output-mode gate, the new `a2ui_enabled` helper, and the new keyword-only `a2ui_enabled` and `emits` arguments on `build_agent_card` (agent_card.py:131-137) only; app.py imports the helper from there), `agent_sdk/routes/a2a.py`, `agent_sdk/agent/runner.py`, `agent_sdk/routes/ag_ui.py` (`_capabilities` (ag_ui.py:522) and its call site at ag_ui.py:683 (`_RunMapper(thread_id, run_id, _capabilities(body))` in `ag_ui_run`, changed to pass `request.app.state.a2ui_enabled`) only), `agent_sdk/console/static/chat.js` (`loadCatalogIds` (chat.js:353-370: record whether the fetched card declares the A2UI extension) and the sendA2a opt-in (chat.js:372-388) only; the AG-UI `forwardedProps.a2uiClientCapabilities` sites at chat.js:563/:578 are not edited), `tests/test_gh249_a2ui_gating.py`, `tests/test_gh225_multi_type_emits.py` (the :604 `build_agent_card` call only: pass `a2ui_enabled=True`), `docs/protocols.md` (A2UI section only), `workspace/components/README.md` (C-006 row only), `CHANGELOG.md`)
+  - Creates: (modifies `agent_sdk/app.py` (compute `app.state.a2ui_enabled` once, next to `build_agent_card`, only), `agent_sdk/routes/agent_card.py` (A2UI extension/output-mode gate, the new `a2ui_enabled` helper, and the new keyword-only `a2ui_enabled` and `emits` arguments on `build_agent_card` (agent_card.py:131-137) only; app.py imports the helper from there), `agent_sdk/routes/a2a.py`, `agent_sdk/agent/runner.py`, `agent_sdk/routes/ag_ui.py` (`_capabilities` (ag_ui.py:522) and its call site at ag_ui.py:683 (`_RunMapper(thread_id, run_id, _capabilities(body))` in `ag_ui_run`, changed to pass `request.app.state.a2ui_enabled`) only), `agent_sdk/console/static/chat.js` (`loadCatalogIds` (chat.js:353-370: record whether the fetched card declares the A2UI extension) and the sendA2a opt-in (chat.js:372-388) only; the AG-UI `forwardedProps.a2uiClientCapabilities` sites at chat.js:563/:578 are not edited), `tests/test_gh225_multi_type_emits.py` (the :604 `build_agent_card` call only: pass `a2ui_enabled=True`), `docs/protocols.md` (A2UI section only), `workspace/components/README.md` (C-006 row only), `CHANGELOG.md`)
   - Reads: `agent_sdk/a2ui/catalog.py`
   - Severity: medium
   - Depends: GH-254
@@ -154,7 +154,7 @@ Each issue body lists file:line and the fix for every numbered item. Implement e
 ## G6 — auth rate limiting
 
 - [x] `GH-260` shared per-IP limiter can 429 the 401 challenge and the OAuth chain ‖ group:G6
-  - Creates: (modifies `agent_sdk/auth/middleware.py`, `agent_sdk/routes/oauth.py`, `agent_sdk/app.py` (`_a2a_auth_envelope` HTTPException handler only: add the `/oauth/` 429 branch), `docs/protocols.md` (auth section only), new `tests/test_gh260_rate_limit.py`, `CHANGELOG.md`)
+  - Creates: (modifies `agent_sdk/auth/middleware.py`, `agent_sdk/app.py` (`_a2a_auth_envelope` HTTPException handler only: add the `/oauth/` 429 branch), `docs/protocols.md` (auth section only), new `tests/test_gh260_rate_limit.py`, `CHANGELOG.md`)
   - Reads: `agent_sdk/config.py`, `agent_sdk/common/limits.py`
   - Severity: medium
   - Root cause: the bearer-less 401 path shares the unauth bucket with the OAuth endpoints, and OAuth 429s use FastAPI's `{detail}`.

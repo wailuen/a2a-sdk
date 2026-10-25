@@ -474,11 +474,6 @@ def _valid_request_id(request_id: Any) -> bool:
     return isinstance(request_id, (str, int)) and not isinstance(request_id, bool)
 
 
-def _is_json_content_type(request: Request) -> bool:
-    ct = request.headers.get("content-type", "")
-    return not ct or is_json_content_type(ct)
-
-
 def _page(entries: list[Any], cursor: Any) -> tuple[list[Any], str | None]:
     """One page of ``entries`` plus the next cursor (``None`` on the last page).
     Raises ``_InvalidCursor`` for a cursor that is not one of ours (GH-236)."""
@@ -1117,7 +1112,8 @@ async def mcp_post(
     # Content-Type: application/json.  Reject non-conforming requests with 415;
     # a missing header passes through (dev tools often omit it), and the compare
     # is case-insensitive and also takes a +json type (is_json_content_type).
-    if not _is_json_content_type(request):
+    ct = request.headers.get("content-type", "")
+    if ct and not is_json_content_type(ct):
         return JSONResponse(
             status_code=415,
             content={"error": "Content-Type must be application/json"},
@@ -1522,7 +1518,8 @@ async def mcp_messages(
     # before the MCP-Protocol-Version gate — mirroring mcp_post.
     # An initialize request on the legacy HTTP+SSE path carries no version header
     # on first contact and must not be rejected with 400 before negotiation.
-    if not _is_json_content_type(request):
+    ct = request.headers.get("content-type", "")
+    if ct and not is_json_content_type(ct):
         return JSONResponse(
             status_code=415,
             content={"error": "Content-Type must be application/json"},

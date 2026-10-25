@@ -47,6 +47,8 @@ class AuthRuntime:
     idp_disable_api_keys: bool = False
     identity_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(100))
     unauth_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(30))
+    # GH-260: failed-bearer 401s count here, never in the OAuth-endpoint bucket.
+    bearer_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(30))
 
 
 def _runtime(request: Request) -> AuthRuntime:
@@ -75,17 +77,23 @@ def _bearer(request: Request) -> str | None:
     return None
 
 
-def _prm_challenge(prm_url: str) -> str:
-    """RFC 6750 §3-compliant Bearer challenge pointing at the PRM URL."""
+def _prm_challenge(prm_url: str, *, invalid_token: bool = False) -> str:
+    """RFC 6750 §3-compliant Bearer challenge pointing at the PRM URL.
+
+    ``invalid_token`` adds the §3.1 error code for a presented-but-bad bearer."""
+    if invalid_token:
+        return f'Bearer error="invalid_token", resource_metadata="{prm_url}"'
     return f'Bearer resource_metadata="{prm_url}"'
 
 
-def _unauthorized(request: Request, runtime: AuthRuntime, detail: str) -> HTTPException:
+def _unauthorized(
+    request: Request, runtime: AuthRuntime, detail: str, *, invalid_token: bool = False
+) -> HTTPException:
     # P6-03 + GH-33: MCP routes use the path-suffixed PRM; all other protected
     # routes (A2A /v1/*, AG-UI /ag-ui/*) use the bare PRM. Both point to valid
     # RFC 9728 endpoints; the resource value in each matches the accessed surface.
     prm = runtime.prm_url if request.url.path.startswith("/mcp") else runtime.bare_prm_url
-    challenge = _prm_challenge(prm)
+    challenge = _prm_challenge(prm, invalid_token=invalid_token)
     return HTTPException(
         status_code=401, detail=detail, headers={"WWW-Authenticate": challenge}
     )
@@ -123,9 +131,9 @@ async def _resolve_identity(request: Request) -> Identity:
     if identity is None and runtime.oauth is not None:
         identity = runtime.oauth.verify(token)
     if identity is None:
-        if not runtime.unauth_limiter.allow(ip_key):
+        if not runtime.bearer_limiter.allow(ip_key):
             raise _rate_limited()
-        raise _unauthorized(request, runtime, "invalid credentials")
+        raise _unauthorized(request, runtime, "invalid credentials", invalid_token=True)
 
     if not runtime.identity_limiter.allow(identity.principal_key):
         raise _rate_limited()
@@ -145,9 +153,10 @@ async def require_identity(request: Request) -> Identity:
         and not identity.admin
         and not identity.service
     ):
-        if not runtime.unauth_limiter.allow(_client_key(request, runtime)):
+        # Counts in the failed-bearer bucket, same as an invalid bearer.
+        if not runtime.bearer_limiter.allow(_client_key(request, runtime)):
             raise _rate_limited()
-        raise _unauthorized(request, runtime, "invalid credentials")
+        raise _unauthorized(request, runtime, "invalid credentials", invalid_token=True)
     return identity
 
 

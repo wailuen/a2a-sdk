@@ -89,8 +89,8 @@ async def publish_note(inp: PublishInput) -> dict[str, Any]:
         message=f"Publish this note? {inp.note!r}",
         response_schema={
             "type": "object",
-            "properties": {"status": {"enum": ["approved", "denied"]}},
-            "required": ["status"],
+            "properties": {"decision": {"enum": ["approved", "denied"]}},
+            "required": ["decision"],
         },
         resume_handler=confirmed,
     )

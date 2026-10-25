@@ -183,3 +183,40 @@ def test_header_nan_or_duplicate_key_fails_closed(raw: bytes, caplog) -> None:
     with caplog.at_level(logging.DEBUG):
         assert forwarding.parse_header(_header(raw)) == {}
     assert "api_key" not in caplog.text
+
+
+def test_loads_strict_duplicate_keys_option(caplog) -> None:
+    from agent_sdk.common.json_strict import loads_strict
+
+    assert loads_strict(b'{"a": 1, "a": 2}') == {"a": 2}
+    for raw in (b'{"secret-k": 1, "secret-k": 2}', b'{"x": {"secret-k": "v-val", "secret-k": "w"}}'):
+        with pytest.raises(json.JSONDecodeError) as ei:
+            loads_strict(raw, reject_duplicate_keys=True)
+        assert "secret-k" not in str(ei.value)
+        assert "v-val" not in str(ei.value)
+
+
+def test_header_parsed_once(monkeypatch) -> None:
+    calls: list[Any] = []
+    real = forwarding.loads_strict
+
+    def spy(raw, **kw):
+        calls.append(kw)
+        return real(raw, **kw)
+
+    monkeypatch.setattr(forwarding, "loads_strict", spy)
+    loads_calls: list[int] = []
+    real_loads = json.loads
+    monkeypatch.setattr(
+        json, "loads", lambda *a, **k: (loads_calls.append(1), real_loads(*a, **k))[1]
+    )
+    assert forwarding.parse_header(_header(b'{"src": {"api_key": "v"}}')) == {"src": {"api_key": "v"}}
+    assert calls == [{"reject_duplicate_keys": True}]
+    assert len(loads_calls) == 1
+
+
+def test_header_too_deep_fails_closed(caplog) -> None:
+    raw = b'{"src":' + b"[" * 100 + b"1" + b"]" * 100 + b"}"
+    with caplog.at_level(logging.DEBUG):
+        assert forwarding.parse_header(_header(raw)) == {}
+    assert "src" not in caplog.text

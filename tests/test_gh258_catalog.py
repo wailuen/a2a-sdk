@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import enum
 import inspect
+import re
 from pathlib import Path
 from typing import ClassVar, Literal
 
@@ -194,3 +195,163 @@ def test_design_records_entity_list_extensions() -> None:
         "EntityList" in ln and "title" in ln and "showing" in ln and "SDK extension" in ln and "ignore" in ln
         for ln in text.splitlines()
     )
+
+
+# ── GH-262: one shared omission rule ──
+
+from agent_sdk.models.content_types import (  # noqa: E402
+    ColumnDef,
+    DocumentItem,
+    DocumentList,
+    TimeSeriesDataPoint,
+)
+from tests.test_gh170_profile_required_keys import _minimal_instances  # noqa: E402
+
+
+class _Nullable(ContentModel):
+    data_type: ClassVar[str] = "gh262_nullable"
+    component: ClassVar[str] = "Gh262Nullable"
+    wire_keeps_null: ClassVar[frozenset[str]] = frozenset({"kept"})
+
+    kept: float | None
+    dropped: float | None
+    plain: str
+
+    def _body_text(self) -> str:
+        return ""
+
+
+def test_nullable_optional_unless_wire_keeps_null() -> None:
+    required = required_paths(parse_schema(_field_summary(_Nullable)))
+    assert required == {"kept", "plain"}
+
+
+def test_wire_omitted_field_renders_optional() -> None:
+    class _Omits(ContentModel):
+        data_type: ClassVar[str] = "gh262_omits"
+        component: ClassVar[str] = "Gh262Omits"
+        wire_omitted: ClassVar[frozenset[str]] = frozenset({"hidden"})
+
+        hidden: str = "x"
+        shown: str = "y"
+
+        def _body_text(self) -> str:
+            return ""
+
+    assert required_paths(parse_schema(_field_summary(_Omits))) == {"shown"}
+
+
+def test_declared_omissions_and_keeps() -> None:
+    assert ColumnDef.wire_omitted == frozenset({"is_id"})
+    assert DocumentItem.wire_omitted == frozenset({"web_url", "last_modified"})
+    assert TimeSeriesDataPoint.wire_keeps_null == frozenset({"value"})
+
+
+def test_time_series_value_none_still_written() -> None:
+    assert TimeSeriesDataPoint(date="d", value=None).wire() == {"date": "d", "value": None}
+
+
+def _parse(summary: str):  # type: ignore[no-untyped-def]
+    # ``dict[K, V]`` renders as ``{key: V}``: ``key`` is a placeholder, not a field.
+    summary = re.sub(r"\{key: \w+\}", "{}", summary)
+    flat = re.sub(r'(?<=")\|[\w|]+', "", summary)
+    return parse_schema(re.sub(r"\b[A-Z]\w*(?=\{)", "", flat))
+
+
+def test_timeseries_point_summary_keeps_value_required() -> None:
+    required = required_paths(_parse(catalog._nested_fields(TimeSeriesDataPoint, 0)))
+    assert required == {"date", "value"}
+
+
+_INSTANCES = _minimal_instances()
+_INSTANCES["TimeSeriesChart"] = TimeSeriesChart(
+    chart_type="line", title="t", data=[TimeSeriesDataPoint(date="d", value=None)]
+)
+_INSTANCES["DocumentList"] = DocumentList(
+    documents=[DocumentItem(id="1", name="n", web_url="u", last_modified="m")]
+)
+
+
+@pytest.mark.parametrize("component", sorted(_INSTANCES))
+def test_summary_required_is_subset_of_wire_round_trip(component: str) -> None:
+    inst = _INSTANCES[component]
+    required = required_paths(_parse(_field_summary(type(inst))))
+    missing = required - emitted_paths(inst.wire())
+    assert not missing, f"{component}: summary requires keys wire() omitted: {sorted(missing)}"
+
+
+def test_every_registered_standard_type_has_an_instance() -> None:
+    from agent_sdk.models.content_types import PROFILE_TYPES
+
+    names = {c.component for c in PROFILE_TYPES} - {"MarketBriefing"}
+    assert names <= set(_INSTANCES)
+
+
+def test_timeseries_keys_are_literals() -> None:
+    assert TimeSeriesChart.model_fields["x_key"].annotation == Literal["date"]
+    assert TimeSeriesChart.model_fields["y_key"].annotation == Literal["value"]
+    with pytest.raises(ValidationError) as exc:
+        _chart(y_key="other")
+    assert "date" not in str(exc.value) or "value" in str(exc.value)
+    assert "'value'" in str(exc.value)
+
+
+def test_int_enum_and_literal_values_unquoted_numbers() -> None:
+    class _N(ContentModel):
+        data_type: ClassVar[str] = "gh262_n"
+        component: ClassVar[str] = "Gh262N"
+
+        level: Literal[1, 2]
+
+        def _body_text(self) -> str:
+            return ""
+
+    assert "1|2" in _field_summary(_N)
+    assert '"1|2"' not in _field_summary(_N)
+
+
+def test_budget_counts_braces_and_ellipsis() -> None:
+    class _Long(ContentModel):
+        data_type: ClassVar[str] = "gh262_long"
+        component: ClassVar[str] = "Gh262Long"
+
+        req: str
+        o1: str | None = None
+        o2: str | None = None
+        o3: str | None = None
+        o4: str | None = None
+        o5: str | None = None
+        o6: str | None = None
+        o7: str | None = None
+        o8: str | None = None
+        o9: str | None = None
+        o10: str | None = None
+        o11: str | None = None
+        o12: str | None = None
+        o13: str | None = None
+        o14: str | None = None
+        o15: str | None = None
+        o16: str | None = None
+
+        def _body_text(self) -> str:
+            return ""
+
+    assert len(_field_summary(_Long)) <= 250
+
+
+def test_gh262_wire_omitted_drives_serializers_and_catalog():
+    from typing import ClassVar
+
+    from agent_sdk.models.content_types import ColumnDef, DocumentItem
+
+    class Col(ColumnDef):
+        wire_omitted: ClassVar[frozenset[str]] = frozenset({"is_id", "unit"})
+
+    assert "unit" not in Col(key="k", label="K").model_dump()
+    assert "unit" in ColumnDef(key="k", label="K", unit="u").model_dump()
+
+    class Doc(DocumentItem):
+        wire_omitted: ClassVar[frozenset[str]] = frozenset({"web_url", "last_modified", "size"})
+
+    assert "size" not in Doc(id="1", name="n", size=3.0).model_dump()
+    assert "size" in DocumentItem(id="1", name="n", size=3.0).model_dump()

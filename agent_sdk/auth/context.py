@@ -43,3 +43,4 @@ class ResumeEnvelope:
 
     value: Any
     identity: Identity
+    accepted_output_modes: list[str] | None = None

@@ -35,7 +35,7 @@ is non-negotiable; implementation convenience cannot override it.
 ## Check
 
 Verify that sending `message/send` or `message/stream` with a `taskId` whose task is in
-`TERMINAL_STATES` returns JSON-RPC error `-32004` (HTTP 501) and does NOT create a new task:
+`TERMINAL_STATES` returns JSON-RPC error `-32004` (HTTP 400, GH-266 ruling https://github.com/wailuen/a2a-sdk/issues/266#issuecomment-6395232882) and does NOT create a new task:
 
 ```
 grep -n "_continue_from_terminal" agent_sdk/routes/a2a.py

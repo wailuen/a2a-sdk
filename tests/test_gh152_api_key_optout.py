@@ -111,6 +111,14 @@ async def test_switch_rejections_count_against_unauth_limiter(keys):
 
     app, user_key, _ = keys
     app.state.auth.idp_disable_api_keys = True
-    app.state.auth.unauth_limiter = RateLimiter(1)
+    app.state.auth.bearer_limiter = RateLimiter(1)
     assert (await _call(app, "GET", "/v1/tasks", user_key)).status_code == 401
     assert (await _call(app, "GET", "/v1/tasks", user_key)).status_code == 429
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as c:
+        r = await c.post(
+            "/oauth/register",
+            json={"redirect_uris": ["https://c.example.com/cb"], "client_name": "x"},
+        )
+    assert r.status_code == 201

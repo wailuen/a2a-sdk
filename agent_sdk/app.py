@@ -45,7 +45,7 @@ from .credentials.encrypted_sqlite import EncryptedSqliteStore
 from .models.content_types import ContentModel, MarketBriefing, content_type_for
 from .observability import configure_logging, request_id_middleware
 from .observability.logging import configure_access_log_filter
-from .routes.agent_card import a2ui_enabled, build_agent_card
+from .routes.agent_card import build_agent_card, compute_a2ui_enabled
 from .sources import SourceAdapter
 from .tasks.memory import InMemoryTaskStore
 from .tasks.store import TaskStore
@@ -721,6 +721,7 @@ class Agent:
             idp_disable_api_keys=settings.oauth_idp_disable_api_keys,
             identity_limiter=RateLimiter(settings.rate_limit_per_minute),
             unauth_limiter=RateLimiter(settings.unauth_rate_limit_per_minute),
+            bearer_limiter=RateLimiter(settings.unauth_rate_limit_per_minute),
         )
 
         task_store = self._task_store or InMemoryTaskStore(
@@ -926,13 +927,24 @@ class Agent:
                     headers=getattr(exc, "headers", None) or None,
                 )
             if exc.status_code == 429 and request.url.path.startswith("/oauth/"):
+                from .routes.oauth import (
+                    BROWSER_OAUTH_ROUTES,
+                    RATE_LIMITED_PAGE_TEXT,
+                    _error_page,
+                )
+
+                retry = getattr(exc, "headers", None) or {}
+                if (request.method, request.url.path) in BROWSER_OAUTH_ROUTES:
+                    page = _error_page(RATE_LIMITED_PAGE_TEXT, status=429)
+                    page.headers.update(retry)
+                    return page
                 return _JSONResponse(
                     status_code=429,
                     content={
                         "error": "temporarily_unavailable",
                         "error_description": "rate limit exceeded",
                     },
-                    headers=getattr(exc, "headers", None) or None,
+                    headers={**retry, "Cache-Control": "no-store"},
                 )
             return await http_exception_handler(request, exc)
 
@@ -1000,7 +1012,7 @@ class Agent:
         app.state.inject_current_date = settings.inject_current_date
         app.state.timezone = settings.timezone
         emits = [m for e in registry.all() for m in e.decl.emits_types]
-        app.state.a2ui_enabled = a2ui_enabled(allowed_components, emits)
+        app.state.a2ui_enabled = compute_a2ui_enabled(allowed_components, emits)
         app.state.agent_card = build_agent_card(
             settings, registry, app.state.credential_fields,
             allowed_components=allowed_components,

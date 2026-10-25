@@ -35,7 +35,6 @@ from __future__ import annotations
 import base64
 import binascii
 import contextvars
-import json
 import re
 from typing import Mapping
 
@@ -59,13 +58,6 @@ _forwarded: contextvars.ContextVar[dict[str, dict[str, str]]] = contextvars.Cont
 )
 
 
-def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    keys = [k for k, _ in pairs]
-    if len(set(keys)) != len(keys):
-        raise ValueError("duplicate key")
-    return dict(pairs)
-
-
 def parse_header(raw: str | None) -> dict[str, dict[str, str]]:
     """Decode + strictly validate the ``X-Agent-Credentials`` envelope.
 
@@ -81,8 +73,7 @@ def parse_header(raw: str | None) -> dict[str, dict[str, str]]:
     if len(decoded) > _MAX_DECODED_BYTES:
         return {}
     try:
-        obj = loads_strict(decoded)
-        json.loads(decoded, object_pairs_hook=_no_duplicate_keys)
+        obj = loads_strict(decoded, reject_duplicate_keys=True)
     except (ValueError, UnicodeDecodeError):
         return {}
     if not isinstance(obj, dict) or len(obj) > _MAX_SOURCES:

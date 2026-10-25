@@ -55,6 +55,15 @@ def card_catalog_ids(card: Any) -> list[str]:
     return [i for i in ids if isinstance(i, str)] if isinstance(ids, list) else []
 
 
+async def fetch_agent_card(client: Any) -> Any:
+    """GET the agent card on *client*, with the legacy ``agent.json`` fallback (SC-E2)."""
+    r = await client.get("/.well-known/agent-card.json")
+    if r.status_code == 404:
+        r = await client.get("/.well-known/agent.json")
+    r.raise_for_status()
+    return r.json()
+
+
 def _is_role(value: Any) -> bool:
     return isinstance(value, str) and bool(value)
 
@@ -125,6 +134,7 @@ class ChatDriver:
         client: Any,  # httpx.AsyncClient
         *,
         extra_catalogs: list[str] | None = None,
+        card: dict[str, Any] | None = None,
         poll_interval: float = 0.5,
         timeout: float = 180.0,
         credentials: dict[str, str] | None = None,
@@ -133,11 +143,11 @@ class ChatDriver:
         self._caps: dict[str, Any] = {
             "version": _A2UI_VERSION,
             "tier": "core+extended",
-            "catalogs": [_STANDARD_CATALOG] + list(extra_catalogs or []),
+            "catalogs": list(dict.fromkeys([_STANDARD_CATALOG, *(extra_catalogs or [])])),
         }
         self._poll_interval = poll_interval
         self._timeout = timeout
-        self._card: dict[str, Any] | None = None
+        self._card: dict[str, Any] | None = card
         self._a2ui_active: bool = False
         # SC-E1: optional credential headers injected into every outbound request
         self._credentials: dict[str, str] | None = credentials
@@ -171,12 +181,7 @@ class ChatDriver:
         /.well-known/agent.json path before raising.
         """
         if self._card is None:
-            r = await self._client.get("/.well-known/agent-card.json")
-            if r.status_code == 404:
-                # SC-E2: legacy fallback for A2A v0.2.x agents
-                r = await self._client.get("/.well-known/agent.json")
-            r.raise_for_status()
-            self._card = r.json()
+            self._card = await fetch_agent_card(self._client)
         return self._card
 
     async def _a2ui_advertised(self) -> bool:
@@ -423,6 +428,8 @@ class ChatDriver:
         # transports for A2A" are out of scope for v1); reject anything else
         # rather than silently guessing at a fallback transport.
         card = await self._discover_card()
+        if not isinstance(card, dict):
+            raise ValueError("agent card is not a JSON object")
         transport = card.get("preferredTransport", "JSONRPC")
         if transport != "HTTP+JSON":
             raise ValueError(

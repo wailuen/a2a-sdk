@@ -147,7 +147,7 @@ async def test_stream_terminal_taskid_returns_unsupported(client, fake_model):
     r = await client.post(
         "/v1/message:stream", json=send_body("turn 2", task_id=task_id)
     )
-    assert r.status_code == 501, r.text
+    assert r.status_code == 400, r.text
     assert not r.headers["content-type"].startswith("text/event-stream")
     assert r.json()["error"]["code"] == -32004
 

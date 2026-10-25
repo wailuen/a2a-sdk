@@ -54,6 +54,9 @@ A2A_ERROR_NAMES: dict[int, str] = {
 # WireError.from_a2a_code(-32000 | -32601, ...).http_status() intentionally
 # falls back to the 500 default; do not add entries for them without also
 # reconciling the app.py dispatch-level status codes (401/403 and 404).
+# GH-266: this table is the per-code default. A call site may override it
+# (a2a_error(..., status=400) for a wrong-state message), and wire_errors maps
+# the JSON-RPC client codes -32700/-32602/-32600 to 400 and -32601 to 404.
 A2A_HTTP_STATUS: dict[int, int] = {
     A2A_TASK_NOT_FOUND: 404,
     A2A_TASK_NOT_CANCELABLE: 409,

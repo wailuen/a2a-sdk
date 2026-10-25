@@ -90,6 +90,15 @@ _CONSENT_SECURITY_HEADERS = {
 }
 
 
+BROWSER_OAUTH_ROUTES: frozenset[tuple[str, str]] = frozenset({
+    ("GET", "/oauth/authorize"),
+    ("GET", "/oauth/idp/callback"),
+    ("POST", "/oauth/idp/consent"),
+    ("POST", "/oauth/authorize"),
+})
+RATE_LIMITED_PAGE_TEXT = "Too many attempts. Wait a minute, then start again from the app."
+
+
 def _agent_name(request: Request) -> str:
     """The agent's public name for the consent pages (settings.display_name
     normalizes a blank/placeholder AGENT_NAME)."""
@@ -982,11 +991,16 @@ async def oauth_authorize_approve(request: Request) -> Response:
 # ---------------------------------------------------------------------------
 
 
+_TOKEN_NO_CACHE = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+
+
 def _token_error(error: str, description: str) -> JSONResponse:
     """RFC 6749 §5.2 shape. Descriptions are generic constants — a failed
     exchange never learns WHY (unknown vs expired vs replayed vs PKCE)."""
     return JSONResponse(
-        status_code=400, content={"error": error, "error_description": description}
+        status_code=400,
+        content={"error": error, "error_description": description},
+        headers=_TOKEN_NO_CACHE,
     )
 
 
@@ -1001,11 +1015,11 @@ def _token_success(pair: dict[str, Any]) -> JSONResponse:
     # Claude.ai chokes on the empty-string form).
     if pair.get("scope"):
         body["scope"] = pair["scope"]
-    return JSONResponse(content=body, headers={"Cache-Control": "no-store"})
+    return JSONResponse(content=body, headers=_TOKEN_NO_CACHE)
 
 
 def _invalid_client(basic: bool) -> JSONResponse:
-    headers = {"Cache-Control": "no-store"}
+    headers = dict(_TOKEN_NO_CACHE)
     if basic:
         headers["WWW-Authenticate"] = 'Basic realm="oauth"'
     return JSONResponse(
@@ -1185,7 +1199,9 @@ async def oauth_revoke(request: Request) -> JSONResponse:
             raise HTTPException(
                 status_code=401,
                 detail="invalid credentials",
-                headers={"WWW-Authenticate": _prm_challenge(runtime.prm_url)},
+                headers={
+                    "WWW-Authenticate": _prm_challenge(runtime.prm_url, invalid_token=True)
+                },
             )
         store.revoke_by_value(token, caller=identity)
         return JSONResponse(content={})

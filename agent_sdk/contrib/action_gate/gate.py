@@ -124,8 +124,10 @@ def parse_decision(resume_value: Any) -> Decision:
     """Normalize a transport-specific resume value into a :class:`Decision`.
 
     - **A2A** → the resume value is a plain string (the user's message text;
-      the route extracts ``TextPart`` text only, so a resume carrying only a
-      ``DataPart``/``FilePart`` arrives as ``""`` → UNCLEAR). Classify exact-
+      a text resume stays a string; a resume of exactly one ``DataPart``
+      arrives as the dict ``{"status": None, "payload": data}``, classified
+      as in the AG-UI bullet below; other part kinds are refused by the
+      route). Classify the string exact-
       match: a reply that merely *contains* "yes" ⇒ UNCLEAR, never approved.
     - **AG-UI** → a dict ``{"status": ..., "payload": ...}``. The decision is
       canonical: ``status`` is the protocol literal ``resolved``/``cancelled``

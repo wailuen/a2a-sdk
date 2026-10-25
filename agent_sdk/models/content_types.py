@@ -361,6 +361,14 @@ class _Wire(BaseModel):
     # back in the error text (GH-173).
     model_config = ConfigDict(populate_by_name=True, hide_input_in_errors=True)
 
+    # GH-262: the one omission rule. ``wire_omitted`` lists field names a
+    # serializer may pop; ``wire_keeps_null`` lists nullable fields whose
+    # serializer always writes the key (``null`` when unset). The A2UI catalog
+    # reads both to decide required-ness; a nullable field is otherwise dropped
+    # by ``wire()``'s ``exclude_none``.
+    wire_omitted: ClassVar[frozenset[str]] = frozenset()
+    wire_keeps_null: ClassVar[frozenset[str]] = frozenset()
+
     @model_validator(mode="before")
     @classmethod
     def _nullable_non_finite_to_none(cls, data: Any) -> Any:
@@ -729,6 +737,8 @@ class KpiCard(ContentModel):
 
 
 class TimeSeriesDataPoint(_Wire):
+    wire_keeps_null: ClassVar[frozenset[str]] = frozenset({"value"})
+
     date: str
     value: float | None
     label: str | None = None
@@ -744,8 +754,9 @@ class TimeSeriesDataPoint(_Wire):
         can't distinguish the two, so re-insert ``value: null`` here when the
         field was actually ``None`` (LRN-110)."""
         data = handler(self)
-        if self.value is None:
-            data["value"] = None
+        for name in self.wire_keeps_null:
+            if getattr(self, name) is None:
+                data[name] = None
         return data
 
 
@@ -770,8 +781,8 @@ class TimeSeriesChart(ContentModel):
     chart_type: Literal["line", "area", "bar"]
     title: str
     subtitle: str | None = None
-    x_key: str = "date"
-    y_key: str = "value"
+    x_key: Literal["date"] = "date"
+    y_key: Literal["value"] = "value"
     x_label: str | None = None
     y_label: str | None = None
     data: list[TimeSeriesDataPoint]
@@ -781,12 +792,12 @@ class TimeSeriesChart(ContentModel):
     # field. Store it for Python-side multi-series grouping only.
     series: list[SeriesMeta] | None = Field(default=None, exclude=True)
 
-    @field_validator("x_key", "y_key")
+    @field_validator("x_key", "y_key", mode="before")
     @classmethod
-    def _fixed_keys(cls, v: str, info: ValidationInfo) -> str:
+    def _fixed_keys(cls, v: Any, info: ValidationInfo) -> str:
         expected = "date" if info.field_name == "x_key" else "value"
         if v != expected:
-            raise ValueError(f"TimeSeriesChart {info.field_name} must be fixed")
+            raise ValueError(f"TimeSeriesChart {info.field_name} must be fixed to {expected!r}")
         return v
 
     @model_validator(mode="before")
@@ -825,11 +836,14 @@ class ColumnDef(_Wire):
     highlight: str | None = None
     is_id: bool = False
 
+    wire_omitted: ClassVar[frozenset[str]] = frozenset({"is_id"})
+
     @model_serializer(mode="wrap")
     def _omit_is_id_when_false(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         data = handler(self)
-        if not self.is_id:
-            data.pop("is_id", None)
+        for name in self.wire_omitted:
+            if not getattr(self, name):
+                data.pop(name, None)
         return data
 
 
@@ -1458,6 +1472,8 @@ TRANSCRIPT_DUMP_CONTEXT = "agent_sdk.transcript"
 
 
 class DocumentItem(_Wire):
+    wire_omitted: ClassVar[frozenset[str]] = frozenset({"web_url", "last_modified"})
+
     id: str
     name: str
     type: str | None = None
@@ -1487,8 +1503,8 @@ class DocumentItem(_Wire):
             data["link"] = self.web_url
         if self.last_modified and not data.get("modified"):
             data["modified"] = self.last_modified
-        data.pop("web_url", None)
-        data.pop("last_modified", None)
+        for name in self.wire_omitted:
+            data.pop(name, None)
         return data
 
 

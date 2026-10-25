@@ -118,6 +118,9 @@ class TaskRecord:
     # GH-259: the client's ``configuration.acceptedOutputModes`` from the
     # submitting request; runtime-only, applied to artifact parts.
     accepted_output_modes: list[str] | None = None
+    # GH-261: the A2UI opt-in (app gate AND header) captured at task start;
+    # runtime-only. A resume checks its modes against this, never its header.
+    a2ui_opted_in: bool = False
 
 
 class TaskStore(abc.ABC):
@@ -275,7 +278,11 @@ class TaskStore(abc.ABC):
     @abc.abstractmethod
     def deliver_resume(self, task_id: str, value: Any) -> bool:
         """Hand a resume value to the paused worker. False if the task is
-        not interrupted (caller maps to the spec error)."""
+        not interrupted (caller maps to the spec error).
+
+        ``TaskRecord.accepted_output_modes`` and ``a2ui_opted_in`` are
+        runtime-only; a resume's new modes ride in ``ResumeEnvelope``, never
+        as a change to the record ``get()`` returned."""
 
     def persist_messages(self, record: TaskRecord) -> None:
         """Flush ``record.messages`` after an out-of-loop caller has

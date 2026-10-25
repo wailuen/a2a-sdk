@@ -84,7 +84,7 @@ router = APIRouter()
 
 MAX_HISTORY_MESSAGES = 50
 MAX_MESSAGE_CHARS = 32000
-_MAX_BODY_BYTES = 1 * 1024 * 1024  # 1 MB — mirrors MCP/OAuth caps
+_MAX_BODY_BYTES = 1 * 1024 * 1024  # 1 MB, same as the A2A route (MCP allows 2 MB, OAuth 16 KB)
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
@@ -535,7 +535,7 @@ class _RunMapper:
 # ── route ──
 
 
-def _capabilities(body: dict[str, Any], *, a2ui_enabled: bool = True) -> A2uiCapabilities:
+def _capabilities(body: dict[str, Any], *, a2ui_enabled: bool = False) -> A2uiCapabilities:
     # The fail-closed default itself lives in A2uiCapabilities.gated (C-006)
     # so this transport cannot drift from a2a.py's independently.
     forwarded = body.get("forwardedProps")

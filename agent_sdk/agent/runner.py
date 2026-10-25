@@ -416,6 +416,17 @@ def _part_media_type(part: Any) -> str:
     return str(getattr(part.file, "mime_type", None) or "application/octet-stream")
 
 
+def _build_capabilities(
+    capabilities: A2uiCapabilities, accepted_modes: Sequence[str] | None
+) -> A2uiCapabilities:
+    """GH-261: the per-build A2UI decision. A client whose ``acceptedOutputModes``
+    does not accept A2UI (directly or by wildcard) gets the non-A2UI build, so
+    the JSON/Text fallback exists before ``apply_output_modes`` filters."""
+    if accepted_modes and not any(media_type_match(m, {A2UI_MIME_TYPE}) for m in accepted_modes):
+        return A2uiCapabilities.gated(False, None)
+    return capabilities
+
+
 def apply_output_modes(artifact: Artifact, modes: Sequence[str] | None) -> Artifact:
     """GH-259: keep only the parts whose media type the client accepts. When
     none remain, keep one TextPart fallback if ``text/plain`` is accepted;
@@ -433,14 +444,22 @@ def apply_output_modes(artifact: Artifact, modes: Sequence[str] | None) -> Artif
                 "no acceptable output mode",
                 a2a_code=-32005,
             )
-        texts = [p.text for p in artifact.parts if isinstance(p, TextPart)]
-        if not texts:
-            texts = [
-                dumps_strict(p.data) if isinstance(p, DataPart) else ""
-                for p in artifact.parts
-            ]
-        kept = [TextPart(text="\n".join(t for t in texts if t))]
-    return artifact.model_copy(update={"parts": kept})
+        texts = [p.data and dumps_strict(p.data) for p in artifact.parts if isinstance(p, DataPart)]
+        text = "\n".join(t for t in texts if t)
+        if not text:
+            raise AgentError(
+                ErrorCategory.VALIDATION,
+                "no acceptable output mode",
+                a2a_code=-32005,
+            )
+        kept = [TextPart(text=text)]
+    update: dict[str, Any] = {"parts": kept}
+    meta = artifact.metadata
+    if meta and meta.get("mimeType") and not any(
+        (getattr(p, "metadata", None) or {}).get("mimeType") == meta["mimeType"] for p in kept
+    ):
+        update["metadata"] = {k: v for k, v in meta.items() if k != "mimeType"}
+    return artifact.model_copy(update=update)
 
 
 def build_text_only_artifact(event: ArtifactEvent) -> Artifact:
@@ -1163,7 +1182,9 @@ async def _run_deferred_background(
         if event.emits_types and matched is None:
             artifact = build_text_only_artifact(artifact_ev)
         else:
-            artifact = build_artifact(artifact_ev, capabilities)
+            artifact = build_artifact(
+                artifact_ev, _build_capabilities(capabilities, record.accepted_output_modes)
+            )
         artifact = apply_output_modes(artifact, record.accepted_output_modes)
         # RT-002: serialize the wire frame HERE (inside the guarded block) but
         # do NOT mutate task.artifacts yet — the append is deferred to AFTER
@@ -1325,6 +1346,8 @@ async def run_task_worker(
         value = await future
         if isinstance(value, ResumeEnvelope):
             bind_identity(value.identity)
+            if value.accepted_output_modes:
+                record.accepted_output_modes = list(value.accepted_output_modes)
             return value.value
         return value
 
@@ -1455,7 +1478,10 @@ async def run_task_worker(
                 break
             elif isinstance(event, ArtifactEvent):
                 artifact = apply_output_modes(
-                    build_artifact(event, capabilities), record.accepted_output_modes
+                    build_artifact(
+                        event, _build_capabilities(capabilities, record.accepted_output_modes)
+                    ),
+                    record.accepted_output_modes,
                 )
                 # RT-002: serialize the wire frame BEFORE mutating
                 # task.artifacts, AND append only AFTER publish() has actually

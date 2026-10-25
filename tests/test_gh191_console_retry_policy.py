@@ -100,3 +100,91 @@ def test_all_console_js_files_parse(tmp_path: Path) -> None:
         copy.write_text(f.read_text())
         proc = subprocess.run([node, "--check", str(copy)], capture_output=True, text=True)
         assert proc.returncode == 0, f"{f.name}: {proc.stderr[:300]}"
+
+
+# GH-263 item 5: Reset aborts the back-off sleep, and abort -> 499 -> no retry.
+_ABORT_DRIVER = r"""
+import { postWithRetry, abortableSleep } from "%(retry)s";
+%(post_abortable)s
+const out = {};
+const rejects = async (p) => { try { await p; return false; } catch (e) { return e.name; } };
+const mk = (status) => ({ ok: status < 300, status, headers: { get: () => null }, text: async () => "body" });
+
+// 1. the real sleep rejects as soon as the signal aborts, long before the timer
+let ac = new AbortController();
+let t0 = Date.now();
+let sleeping = rejects(abortableSleep(20000, ac.signal));
+ac.abort();
+out.sleepRejects = await sleeping;
+out.sleepFast = Date.now() - t0 < 1000;
+ac = new AbortController(); ac.abort();
+out.preAborted = await rejects(abortableSleep(20000, ac.signal));
+
+// 2. Reset during the back-off wait: postWithRetry stops, no second POST, no timer left open
+ac = new AbortController();
+let calls = 0; const lines = [];
+t0 = Date.now();
+const pending = postWithRetry(async () => { calls++; return mk(503); },
+  { systemLine: (t) => lines.push(t), traceFrame() {}, label: "run request", signal: ac.signal });
+setTimeout(() => ac.abort(), 20);
+const resp = await pending;
+out.sleepAbort = { resp, calls, fast: Date.now() - t0 < 1000, lines };
+
+// 3. abort -> 499 -> no retry: the doPost fails because the signal is aborted
+ac = new AbortController(); ac.abort();
+calls = 0; const waits = []; const lines3 = []; const traces = [];
+const resp3 = await postWithRetry(
+  () => { calls++; return postAbortable(ac.signal, async () => { throw new Error("The operation was aborted"); }); },
+  { systemLine: (t) => lines3.push(t), traceFrame: (a, b) => traces.push([a, b]), label: "run request",
+    sleep: async (ms) => waits.push(ms), signal: ac.signal });
+out.chain = { resp: resp3, calls, waits, lines: lines3, traces };
+
+// 4. a failure with a live signal is still a network failure and is retried
+ac = new AbortController();
+calls = 0; const waits4 = [];
+const resp4 = await postWithRetry(
+  () => { calls++; return postAbortable(ac.signal, async () => { if (calls < 2) throw new Error("x"); return mk(200); }); },
+  { systemLine() {}, traceFrame() {}, label: "run request", sleep: async (ms) => waits4.push(ms), signal: ac.signal });
+out.live = { ok: resp4 !== null, calls, waits: waits4 };
+console.log(JSON.stringify(out));
+"""
+
+
+def _post_abortable_source() -> str:
+    start = CHAT_JS.index("  async function postAbortable(")
+    return CHAT_JS[start : CHAT_JS.index("\n  }\n", start) + len("\n  }\n")]
+
+
+@pytest.fixture(scope="module")
+def abort_result(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available")
+    d = tmp_path_factory.mktemp("abortjs")
+    f = d / "driver.mjs"
+    f.write_text(_ABORT_DRIVER % {"retry": (STATIC / "retry.js").as_posix(), "post_abortable": _post_abortable_source()})
+    p = subprocess.run([node, str(f)], capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    return json.loads(p.stdout)
+
+
+def test_abortable_sleep_rejects_on_abort(abort_result: dict) -> None:
+    assert abort_result["sleepRejects"] == "AbortError" and abort_result["sleepFast"]
+    assert abort_result["preAborted"] == "AbortError"
+
+
+def test_reset_during_backoff_wakes_the_wait_and_stops(abort_result: dict) -> None:
+    r = abort_result["sleepAbort"]
+    assert r["resp"] is None and r["calls"] == 1 and r["fast"]
+    assert len(r["lines"]) == 1 and "retrying in 1s" in r["lines"][0]
+
+
+def test_abort_becomes_499_and_is_not_retried(abort_result: dict) -> None:
+    r = abort_result["chain"]
+    assert r["resp"] is None and r["calls"] == 1 and r["waits"] == []
+    assert r["lines"] == ["run request failed: HTTP 499"]
+    assert not any("network error" in ln for ln in r["lines"])
+
+
+def test_failure_with_live_signal_is_still_retried(abort_result: dict) -> None:
+    assert abort_result["live"] == {"ok": True, "calls": 2, "waits": [1000]}

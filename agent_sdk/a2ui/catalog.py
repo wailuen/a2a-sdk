@@ -99,7 +99,9 @@ def _annotation_str(ann: object, required: bool, depth: int = 0) -> tuple[str, b
         return "{key: " + value_str + "}", required
 
     if origin is _typing.Literal:
-        return '"' + "|".join(str(v) for v in ann.__args__) + '"', required  # type: ignore[attr-defined]
+        values = ann.__args__  # type: ignore[attr-defined]
+        joined = "|".join(str(v) for v in values)
+        return (f'"{joined}"' if all(isinstance(v, str) for v in values) else joined), required
 
     if isinstance(ann, type) and issubclass(ann, enum.Enum):
         return '"' + "|".join(str(m.value) for m in ann) + '"', required
@@ -116,10 +118,35 @@ def _annotation_str(ann: object, required: bool, depth: int = 0) -> tuple[str, b
     return raw, required
 
 
-def _wire_required(info: FieldInfo) -> bool:
-    """True when ``wire()`` always writes the field: it has no default, or its
-    default is not ``None`` (``wire()`` drops ``None`` values)."""
+def _is_nullable(ann: object) -> bool:
+    import types as _types
+    import typing as _typing
+
+    if ann is None or ann is type(None):
+        return True
+    if isinstance(ann, _types.UnionType) or getattr(ann, "__origin__", None) is _typing.Union:
+        return type(None) in ann.__args__  # type: ignore[attr-defined]
+    return False
+
+
+def _wire_required(
+    info: FieldInfo, model: type[BaseModel] | None = None, name: str | None = None
+) -> bool:
+    """True when ``wire()`` always writes the field (GH-262). Read from the
+    model's shared omission rule, never guessed: a name in ``wire_omitted`` is
+    optional; a nullable field is optional (``wire()`` drops ``None``) unless
+    named in ``wire_keeps_null``; otherwise it has no default or a non-None
+    default."""
     if info.exclude:
+        return False
+    omitted: frozenset[str] = getattr(model, "wire_omitted", frozenset())
+    keeps_null: frozenset[str] = getattr(model, "wire_keeps_null", frozenset())
+    if name is not None:
+        if name in omitted:
+            return False
+        if name in keeps_null:
+            return True
+    if _is_nullable(info.annotation):
         return False
     if info.is_required():
         return True
@@ -134,7 +161,7 @@ def _nested_fields(model: type[BaseModel], depth: int) -> str:
         if info.exclude:
             continue
         wire_name = info.serialization_alias or info.alias or name
-        required = _wire_required(info)
+        required = _wire_required(info, model, name)
         ann = info.annotation
         type_str = "any" if ann is None else _annotation_str(ann, required, depth)[0]
         parts.append(f"{wire_name}{'' if required else '?'}: {type_str}")
@@ -204,7 +231,7 @@ def _summary_at_depth(cls: type[ContentModel], depth: int) -> tuple[str, bool]:
         if not declared_here and name in ContentModel.model_fields:
             continue
         wire_name = info.serialization_alias or info.alias or name
-        required = _wire_required(info)
+        required = _wire_required(info, cls, name)
         ann = info.annotation
         if ann is None:
             type_str = "any"
@@ -217,7 +244,7 @@ def _summary_at_depth(cls: type[ContentModel], depth: int) -> tuple[str, bool]:
     # the end first; a required field is never dropped or cut.
     kept = list(parts)
     dropped = False
-    while len(", ".join(p for p, _ in kept)) > 250:
+    while len("{" + ", ".join(p for p, _ in kept) + "}") > 250 - (5 if dropped else 0):
         for i in range(len(kept) - 1, -1, -1):
             if not kept[i][1]:
                 del kept[i]
@@ -226,7 +253,7 @@ def _summary_at_depth(cls: type[ContentModel], depth: int) -> tuple[str, bool]:
         else:
             break
     texts = [p for p, _ in kept]
-    fits = not dropped and len(", ".join(texts)) <= 250
+    fits = not dropped and len("{" + ", ".join(texts) + "}") <= 250
     if dropped:
         texts.append("...")
     return f"{{{', '.join(texts)}}}", fits
@@ -266,6 +293,7 @@ _COMPACT_SCHEMAS: dict[str, str] = {
     "TimeSeriesChart": '{"chart_type":"line|area|bar","title":str,"subtitle?":str,"x_key":"date","y_key":"value","total_count":int,"data":[{date:str,value:num|null,label?:str}]}',
     "ComparisonTable": '{"columns":[{key,label,type?}],"rows":[{...}],"title?":str}',
     "BarChart": '{"bars":[{category:str,value:float}],"title?":str,"x_key?":str,"y_key?":str}',
+    # EntityList title?/showing? are SDK extensions (not in the Standard Profile); receivers ignore them.
     "EntityList": '{"entity_type":str,"items":[{id,name,summary?}],"total_count?":int,"has_more?":bool,"title?":str,"showing?":int}',
     # prose exception — see annotation in get_system_prompt_section()
     "MarketBriefing": "(prose exception) return MarketBriefing(title=..., as_of=..., prose='...markdown...') — the wire value is a markdown string, not a card",
@@ -284,6 +312,7 @@ _COMPACT_SCHEMAS: dict[str, str] = {
     "CalendarEvents": '{"events":[{id:str,subject:str,start:str,end:str,is_all_day:bool,is_cancelled:bool,is_recurring:bool,organizer:{name,email},attendees_count:int,importance:"low|normal|high",show_as:"free|tentative|busy|oof|workingElsewhere|unknown",location?:{display_name:str,is_online:bool,join_url?:str},response_status?:"accepted|tentative|declined|none",web_link:str}],"date_range":{"start":str,"end":str},"total_count":int,"has_more":bool}',
     # UserPresence sub-shape: {availability,activity,status_message?}
     # OutOfOfficeSettings sub-shape: {is_enabled,start_date?,end_date?,internal_message?,external_message?}
+    # UserProfile is a partial schema: nested presence/out_of_office list only the Profile-required keys.
     "UserProfile": '{"id":str,"display_name":str,"email":str,"given_name?":str,"surname?":str,"job_title?":str,"department?":str,"office_location?":str,"mobile_phone?":str,"business_phones":list,"manager?":{"id":str,"display_name":str,"email":str,"job_title?":str},"presence?":{"availability":str,"activity":str},"photo_url?":str,"out_of_office?":{"is_enabled":bool}}',
     "UserList": '{"users":[{id:str,display_name:str,email:str,job_title?:str,department?:str,presence?:{availability,activity}}],"total_count":int,"has_more":bool,"query?":str}',
     # DocumentItem sub-shape: {id,name,type?,modified?,link?,size?}

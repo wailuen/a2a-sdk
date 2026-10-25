@@ -33,7 +33,7 @@ CARD = KpiCard(metrics=[MetricItem(label="A", value=1)])
 def _a2a_caps(raw: object) -> A2uiCapabilities:
     message = SimpleNamespace(metadata={"a2uiClientCapabilities": raw})
     request = SimpleNamespace(headers={"x-a2a-extensions": A2UI_EXTENSION_URI})
-    return _capabilities(message, request)  # type: ignore[arg-type]
+    return _capabilities(message, request, a2ui_enabled=True)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("raw", [{"tier": "core"}, {}, {"catalogs": "x"}])
@@ -86,7 +86,8 @@ def test_transport_scoped_kwarg_keeps_present_list() -> None:
 
 def test_ag_ui_custom_unchanged() -> None:
     caps = ag_ui_capabilities(
-        {"forwardedProps": {"a2uiClientCapabilities": {"catalogs": [OTHER]}}}
+        {"forwardedProps": {"a2uiClientCapabilities": {"catalogs": [OTHER]}}},
+        a2ui_enabled=True,
     )
     mapper = _RunMapper(thread_id="t", run_id="r", capabilities=caps)
     event = ArtifactEvent(data_type=CARD.data_type, tool_name="t", model=CARD)
