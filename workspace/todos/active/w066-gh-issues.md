@@ -136,7 +136,7 @@ Each issue body lists file:line and the fix for every numbered item. Implement e
 
 - [ ] `GH-260` shared per-IP limiter can 429 the 401 challenge and the OAuth chain ‖ group:G6
   - Creates: (modifies `agent_sdk/auth/middleware.py`, `agent_sdk/routes/oauth.py`, `docs/protocols.md` (auth section only), new `tests/test_gh260_rate_limit.py`, `CHANGELOG.md`)
-  - Reads: `agent_sdk/config.py`, `agent_sdk/common/ratelimit.py`
+  - Reads: `agent_sdk/config.py`, `agent_sdk/common/limits.py`
   - Severity: medium
   - Root cause: the bearer-less 401 path shares the unauth bucket with the OAuth endpoints, and OAuth 429s use FastAPI's `{detail}`.
   - AC (a): 31 bearer-less requests to `/mcp` inside a minute all get 401 with the PRM challenge, never 429.
