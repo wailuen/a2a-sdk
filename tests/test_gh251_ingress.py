@@ -215,8 +215,30 @@ def test_header_parsed_once(monkeypatch) -> None:
     assert len(loads_calls) == 1
 
 
-def test_header_too_deep_fails_closed(caplog) -> None:
-    raw = b'{"src":' + b"[" * 100 + b"1" + b"]" * 100 + b"}"
+def test_header_too_deep_fails_closed(monkeypatch, caplog) -> None:
+    """Fails if the depth cap in ``loads_strict`` is removed or ``parse_header``
+    stops catching it: the spy asserts ``NestingTooDeep`` was actually raised
+    (the old input also failed the shape check, so it guarded nothing). The
+    marker must not reach logs."""
+    from agent_sdk.common.json_strict import NestingTooDeep
+
+    marker = "HDR-MARKER-91c2"
+    raw = (
+        b'{"src":{"api_key":"' + marker.encode() + b'","x":'
+        + b"[" * 100 + b"1" + b"]" * 100 + b"}}"
+    )
+    raised: list[BaseException] = []
+    real = forwarding.loads_strict
+
+    def spy(data, **kw):
+        try:
+            return real(data, **kw)
+        except Exception as exc:
+            raised.append(exc)
+            raise
+
+    monkeypatch.setattr(forwarding, "loads_strict", spy)
     with caplog.at_level(logging.DEBUG):
         assert forwarding.parse_header(_header(raw)) == {}
-    assert "src" not in caplog.text
+    assert len(raised) == 1 and isinstance(raised[0], NestingTooDeep)
+    assert marker not in caplog.text and marker not in str(raised[0])

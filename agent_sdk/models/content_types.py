@@ -82,6 +82,8 @@ from __future__ import annotations
 import abc
 import contextvars
 import functools
+import inspect
+import logging
 import math
 import re
 import typing
@@ -168,6 +170,8 @@ CATALOG_ID = "urn:a2ui-profile:standard:v1"
 A2UI_VERSION = "v0.9.1"
 A2UI_EXTENSION_URI = "https://a2ui.org/a2a-extension/a2ui/v0.9.1"
 A2UI_MIME_TYPE = "application/a2ui+json"
+
+logger = logging.getLogger(__name__)
 
 RESERVED_COMPONENTS = ("TradeActivity", "CompanyInfo", "DealList", "InvestorProfile")
 
@@ -359,7 +363,17 @@ def _float_field_plan(cls: type[BaseModel]) -> tuple[tuple[str, bool], ...]:
 class _Wire(BaseModel):
     # hide_input_in_errors: a rejected non-finite value must never be echoed
     # back in the error text (GH-173).
-    model_config = ConfigDict(populate_by_name=True, hide_input_in_errors=True)
+    # ser_json_inf_nan="constants": the GH-270 base ``model_serializer`` below
+    # puts every dump through pydantic's function-serializer path, whose JSON
+    # mode turns nan/inf into ``None`` under the default ``"null"``. That would
+    # make ``wire()`` silently write ``null`` for a value mutated past
+    # validation, instead of keeping the float so every strict writer
+    # (``dumps_strict``, the MCP writers) refuses it (GH-173). ``"constants"``
+    # keeps the float in ``model_dump(mode="json")``. Validated models never
+    # hold one (``_finite_floats``), so normal output is unchanged.
+    model_config = ConfigDict(
+        populate_by_name=True, hide_input_in_errors=True, ser_json_inf_nan="constants"
+    )
 
     # GH-262: the one omission rule. ``wire_omitted`` lists field names a
     # serializer may pop; ``wire_keeps_null`` lists nullable fields whose
@@ -398,8 +412,115 @@ class _Wire(BaseModel):
                 self.__dict__[name] = None
         return self
 
+    @model_serializer(mode="wrap")
+    def _wire_rule(self, handler: SerializerFunctionWrapHandler, info: SerializationInfo):
+        """GH-270: the one place the omission rule is applied (C-094). A
+        ``wire_keeps_null`` field is written as ``null`` when unset, which the
+        blanket ``exclude_none`` of ``wire()`` would drop (LRN-110). A
+        ``wire_omitted`` field is popped unless it is a ``True`` flag.
+        ``_wire_reshape`` is the per-class hook that runs between the two.
+
+        No return annotation on purpose: pydantic builds the serialization
+        JSON schema from it, and ``dict[str, Any]`` would wipe every content
+        model's ``properties``/``required`` (``model_json_schema(mode=
+        "serialization")``, read by the MCP route's required-null restore)."""
+        data = handler(self)
+        fields = type(self).model_fields
+
+        def key(name: str) -> str:
+            if not info.by_alias:
+                return name
+            f = fields[name]
+            return f.serialization_alias or f.alias or name
+
+        for name in self.wire_keeps_null:
+            if getattr(self, name) is None:
+                data[key(name)] = None
+        hook = _reshape_hook(type(self))
+        if hook is not None and not hook(self, data, info):
+            return data
+        for name in self.wire_omitted:
+            if getattr(self, name) is not True:
+                data.pop(key(name), None)
+        return data
+
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+        """GH-270: warn (never raise) when a subclass collides with the
+        ``_wire_reshape`` hook name or replaces the base ``_wire_rule``.
+
+        Both shapes worked in v0.24.0, and the #270 ruling did not ask for a
+        new class-creation error, so this logs once per class instead. A
+        ``_wire_reshape`` that is not ``(self, data, info)`` is not called by
+        ``_wire_rule``; the nearest valid hook up the MRO is used."""
+        super().__pydantic_init_subclass__(**kwargs)
+        reshape = cls.__dict__.get("_wire_reshape")
+        if reshape is not None and not _is_reshape_hook(reshape):
+            logger.warning(
+                "%s._wire_reshape is not the (self, data, info) -> bool wire "
+                "hook; the wire serializer skips it (GH-270)",
+                cls.__name__,
+            )
+        if cls.wire_keeps_null or cls.wire_omitted:
+            sers = cls.__pydantic_decorators__.model_serializers
+            base = sers.get("_wire_rule")
+            if len(sers) != 1 or base is None or base.func is not _wire_rule_func:
+                logger.warning(
+                    "%s declares wire_keeps_null/wire_omitted and replaces the "
+                    "base _wire_rule serializer, so that rule is not applied; "
+                    "use the _wire_reshape hook instead (GH-270)",
+                    cls.__name__,
+                )
+
+    def _wire_reshape(self, data: dict[str, Any], info: SerializationInfo) -> bool:
+        """Edit the serialised *data* in place; return ``False`` to skip the
+        ``wire_omitted`` pops for this dump."""
+        return True
+
     def wire(self) -> dict[str, Any]:
         return self.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+
+_wire_rule_func = _Wire.__pydantic_decorators__.model_serializers["_wire_rule"].func
+
+# GH-270: per-class cache of the ``_wire_reshape`` hook ``_wire_rule`` calls.
+# ``None`` means no hook (the base one is a no-op that returns True).
+_RESHAPE_HOOKS: weakref.WeakKeyDictionary[type, Any] = weakref.WeakKeyDictionary()
+
+
+def _is_reshape_hook(fn: Any) -> bool:
+    """True when *fn* is a plain function shaped ``(self, data, info)``."""
+    if not inspect.isfunction(fn):
+        return False
+    try:
+        params = list(inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    if any(p.kind is p.VAR_POSITIONAL for p in params):
+        return True
+    plain = [p for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    required_kw = [p for p in params if p.kind is p.KEYWORD_ONLY and p.default is p.empty]
+    return len(plain) == 3 and not required_kw
+
+
+def _reshape_hook(cls: type) -> Any:
+    """The nearest valid ``_wire_reshape`` up *cls*'s MRO, below ``_Wire``.
+    A same-named method with another shape is skipped, so an unrelated
+    helper that predates the hook keeps working (GH-270)."""
+    try:
+        return _RESHAPE_HOOKS[cls]
+    except KeyError:
+        pass
+    hook = None
+    for klass in cls.__mro__:
+        if klass is _Wire:
+            break
+        fn = klass.__dict__.get("_wire_reshape")
+        if fn is not None and _is_reshape_hook(fn):
+            hook = fn
+            break
+    _RESHAPE_HOOKS[cls] = hook
+    return hook
 
 
 class ContentModel(_Wire, abc.ABC):
@@ -746,19 +867,6 @@ class TimeSeriesDataPoint(_Wire):
     # are {date, value, label?} only. Store it for Python-side grouping only.
     series: str | None = Field(default=None, exclude=True)
 
-    @model_serializer(mode="wrap")
-    def _wire_value(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        """``value`` is required-but-nullable on the frozen time_series contract
-        (a data gap is a real point, not an absent one) — unlike ``label``, which
-        is genuinely optional. ``_Wire.wire()``'s blanket ``exclude_none=True``
-        can't distinguish the two, so re-insert ``value: null`` here when the
-        field was actually ``None`` (LRN-110)."""
-        data = handler(self)
-        for name in self.wire_keeps_null:
-            if getattr(self, name) is None:
-                data[name] = None
-        return data
-
 
 class TimeSeriesSummary(_Wire):
     min: float | None = None
@@ -781,8 +889,8 @@ class TimeSeriesChart(ContentModel):
     chart_type: Literal["line", "area", "bar"]
     title: str
     subtitle: str | None = None
-    x_key: Literal["date"] = "date"
-    y_key: Literal["value"] = "value"
+    x_key: Literal["date"] = Field(default="date", frozen=True)
+    y_key: Literal["value"] = Field(default="value", frozen=True)
     x_label: str | None = None
     y_label: str | None = None
     data: list[TimeSeriesDataPoint]
@@ -837,14 +945,6 @@ class ColumnDef(_Wire):
     is_id: bool = False
 
     wire_omitted: ClassVar[frozenset[str]] = frozenset({"is_id"})
-
-    @model_serializer(mode="wrap")
-    def _omit_is_id_when_false(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        data = handler(self)
-        for name in self.wire_omitted:
-            if not getattr(self, name):
-                data.pop(name, None)
-        return data
 
 
 class ComparisonTable(ContentModel):
@@ -1484,10 +1584,7 @@ class DocumentItem(_Wire):
     last_modified: str | None = None
     modified_by: str | None = None
 
-    @model_serializer(mode="wrap")
-    def _wire_contract_keys(
-        self, handler: SerializerFunctionWrapHandler, info: SerializationInfo
-    ) -> dict[str, Any]:
+    def _wire_reshape(self, data: dict[str, Any], info: SerializationInfo) -> bool:
         """GH-177: the frozen DocumentItem contract is id/name/type/modified/
         link/size. ``web_url`` and ``last_modified`` stay model-side aliases:
         they fill an empty ``link``/``modified`` and are never emitted.
@@ -1496,16 +1593,13 @@ class DocumentItem(_Wire):
         (``agent/loop.py::fold_result_content``, the model's own copy of a
         tool result) keeps both keys, so the agent's model still sees a
         ``last_modified`` that differs from ``modified`` (w050 RT-001 r8)."""
-        data = handler(self)
         if isinstance(info.context, dict) and info.context.get(TRANSCRIPT_DUMP_CONTEXT):
-            return data
+            return False
         if self.web_url and not data.get("link"):
             data["link"] = self.web_url
         if self.last_modified and not data.get("modified"):
             data["modified"] = self.last_modified
-        for name in self.wire_omitted:
-            data.pop(name, None)
-        return data
+        return True
 
 
 class DocumentList(ContentModel):
@@ -1550,6 +1644,19 @@ class DocumentList(ContentModel):
 _REGISTRY: dict[str, type[ContentModel]] = {}
 _PROFILE_SEALED = False
 _COMPONENT_NAME_RE = re.compile(r"[A-Z][A-Za-z0-9]*")
+_SNAKE_CASE_RE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
+
+
+def _reserved_data_type_for(data_type: str) -> str | None:
+    """The RESERVED component whose snake_case name (or PascalCase spelling)
+    equals *data_type* ignoring case, else ``None``. Derived from
+    ``RESERVED_COMPONENTS`` at call time so the two cannot drift."""
+    folded = data_type.casefold()
+    for reserved in RESERVED_COMPONENTS:
+        snake = re.sub(r"(?<!^)(?=[A-Z])", "_", reserved).casefold()
+        if folded in (snake, reserved.casefold()):
+            return reserved
+    return None
 
 
 def _case_clash_hint(cls: type[ContentModel], component: object) -> str:
@@ -1630,6 +1737,21 @@ def register_content_type(cls: type[ContentModel]) -> type[ContentModel]:
     existing = _REGISTRY.get(data_type)
     if existing is not None and existing is not cls:
         raise ValueError(f"data_type {data_type!r} already registered by {existing.__name__}")
+    if isinstance(data_type, str):
+        reserved_owner = _reserved_data_type_for(data_type)
+        if reserved_owner is not None:
+            raise ValueError(
+                f"data_type {data_type!r} is RESERVED in Standard Profile v1 "
+                f"(it matches the reserved name {reserved_owner!r} ignoring case); "
+                f"rename the data_type"
+            )
+        if existing is None and not _SNAKE_CASE_RE.fullmatch(data_type):
+            logger.warning(
+                "content type %s: data_type %r is not snake_case "
+                "(^[a-z][a-z0-9]*(_[a-z0-9]+)*$); registered anyway",
+                cls.__name__,
+                data_type,
+            )
     _REGISTRY[data_type] = cls
     return cls
 

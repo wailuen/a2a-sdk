@@ -32,7 +32,10 @@ three out when you build it. An explicit `null` for
 Import from `agent_sdk.models.content_types`. The standard catalog is
 **closed**: you cannot add types to it, and the reserved component names
 (`TradeActivity`, `CompanyInfo`, `DealList`, `InvestorProfile`) cannot be
-claimed by domain cards either — no field contract exists for them.
+claimed by domain cards either — no field contract exists for them. The
+same names are refused as a `data_type` (`trade_activity`, `company_info`,
+`deal_list`, `investor_profile`, in any letter case). A `data_type` that is not
+snake_case logs one warning and still registers.
 
 Field contracts are frozen wire shapes; construct with the typed fragments
 (`MetricItem`, `TimeSeriesDataPoint`, …) and the SDK guarantees the A2UI

@@ -108,7 +108,7 @@ from ..common.admission import (
     slot_table,
 )
 from ..common.body import BodyTooLarge, is_json_content_type, read_capped_body
-from ..common.media import media_type_match
+from ..common.media import accepts_a2ui_mode, media_type_match
 from ..common.origin import guard_origin
 from ..common.json_strict import (
     NESTING_TOO_DEEP_MESSAGE,
@@ -325,6 +325,7 @@ def _echo_extensions(
     response: Response,
     *,
     activatable: frozenset[str] = _ECHO_EXTENSION_URIS,
+    a2ui_active: bool = True,
 ) -> None:
     """X-A2A-Extensions: response echoes the activated subset (§5.1).
 
@@ -342,6 +343,11 @@ def _echo_extensions(
     ``_STREAM_ONLY_EXTENSION_URIS``; ``tasks/cancel`` does not call this at
     all (it returns a Task, so it uses ``_echo_a2ui_if_present`` exactly like
     ``tasks/get``).
+
+    GH-271: ``a2ui_active`` is the per-request A2UI decision the build used
+    (``record.a2ui_opted_in`` and ``accepts_a2ui_mode``); when false the A2UI
+    URI is never echoed, so the header cannot claim an activation that did
+    not happen.
 
     RT-005: callers must invoke this ONLY on the code path that has actually
     reached the activation it echoes for — never unconditionally from a route
@@ -365,6 +371,7 @@ def _echo_extensions(
         uri.strip()
         for uri in requested.split(",")
         if uri.strip() in activatable and uri.strip() in declared
+        and (a2ui_active or uri.strip() != A2UI_EXTENSION_URI)
     ]
     if activated:
         response.headers["X-A2A-Extensions"] = ", ".join(activated)
@@ -437,6 +444,14 @@ def _a2ui_opt_in(request: Request) -> bool:
     """GH-261: this request's A2UI opt-in (app gate AND the header); read for
     the decision only, never echoed or activated."""
     return bool(request.app.state.a2ui_enabled) and _a2ui_header(request)
+
+
+def _a2ui_decision(record: TaskRecord, params: MessageSendParams) -> bool:
+    """GH-271: the per-request A2UI decision (app gate AND header opt-in AND
+    modes accept A2UI), identical to the one ``_build_capabilities`` applies."""
+    config = params.configuration
+    modes = config.accepted_output_modes if config is not None else None
+    return record.a2ui_opted_in and accepts_a2ui_mode(modes)
 
 
 def _capabilities(
@@ -605,10 +620,11 @@ def _resume_or_error(
         return a2a_error(
             A2A_UNSUPPORTED_OPERATION,
             "task is in a terminal state and cannot accept new messages",
-            status=400,
+            status=400,  # GH-266 deviation: A2A v0.3.0 says 501 (issue 266)
         )
     if state not in INTERRUPT_STATES:
         # working task not awaiting input: continuing it is not a supported op
+        # GH-266 deviation: A2A v0.3.0 says 501
         return a2a_error(A2A_UNSUPPORTED_OPERATION, "task is not awaiting input", status=400)
     if msg.context_id and msg.context_id != record.task.context_id:
         return a2a_invalid_params("contextId does not match the task")
@@ -756,7 +772,7 @@ async def message_send(
         # RT-005: the sole path on this route that can activate either
         # extension — echoed only now that _capabilities()/_start_worker have
         # actually run.
-        _echo_extensions(request, response)
+        _echo_extensions(request, response, a2ui_active=_a2ui_decision(record, params))
         if sub is not None:
             await _wait_blocking(request, sub)
     finally:
@@ -1050,7 +1066,7 @@ async def message_stream(
             return a2a_error(
                 A2A_UNSUPPORTED_OPERATION,
                 "task is in a terminal state and cannot accept new messages",
-                status=400,
+                status=400,  # GH-266 deviation: A2A v0.3.0 says 501 (issue 266)
             )
         stream, abort = await _open_stream(
             request, record, identity, history_length=history_length
@@ -1087,7 +1103,7 @@ async def message_stream(
         # RT-005: the sole path on this route that can activate either
         # extension — echoed only now that _capabilities()/_start_worker
         # have actually run.
-        _echo_extensions(request, response)
+        _echo_extensions(request, response, a2ui_active=_a2ui_decision(record, params))
     return StreamingResponse(
         stream,
         media_type="text/event-stream",

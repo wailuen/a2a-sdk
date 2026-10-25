@@ -45,7 +45,7 @@
 | C-052 | CredentialStore.list_items (single-query {field: plaintext} namespace read; base-class list_fields+get fallback) | agent_sdk/credentials/store.py::CredentialStore.list_items (overrides in azure_table.py, encrypted_sqlite.py) | present |
 | C-053 | cancel_task_record (shared run teardown: cancel worker + bg task, fail resume future, transcript repair via C-018, CANCELED via C-019; takes identity-scoped TaskRecord, SI-5) | agent_sdk/routes/a2a.py::cancel_task_record (move to agent_sdk/agent/runner.py beside C-019 planned; used by A2A tasks/cancel + AG-UI disconnect) | present |
 | C-054 | _check_mcp_session (Mcp-Session-Id >64 chars -> 400; unknown/expired/other-owner -> 404; one helper for mcp_post/mcp_get/mcp_delete/messages) | agent_sdk/routes/mcp.py | planned |
-| C-055 | agent_sdk.testing.turns throttled turn (cross-process file-lock slot limit + 429/empty-reply back-off, AG-UI message-list rollback; outer guard for timeouts, transport errors and cancels, and for RUN_ERROR / no-terminal-event runs) | agent_sdk/testing/turns.py | present |
+| C-055 | agent_sdk.testing.turns throttled turn (cross-process file-lock slot limit + 429/empty-reply back-off, AG-UI message-list rollback; outer guard for timeouts, transport errors and cancels, and for RUN_ERROR / no-terminal-event runs; failure reasons include malformed-stream (bad A2A/AG-UI frame shape) and card-fetch 429/5xx, retried with the card driver cached only after a successful fetch) | agent_sdk/testing/turns.py | present |
 | C-056 | agent_sdk.testing.mcp McpTestClient (initialize + paginated tools/list + tools/call; paginated prompts/list + prompts/get (GH-205); key file; MCP_INTERRUPT_SUFFIX; built-in load_skill is not counted against --expected-count: matched by its fixed shape (LOAD_SKILL_TOOL, title, annotations, single required name) or the skills_tool option, so a domain tier-1 load_skill is counted; sends the negotiated MCP-Protocol-Version header and rejects a negotiated version outside SUPPORTED_PROTOCOL_VERSIONS and an initialize result with no protocolVersion (fixed error text, GH-264); run_gate checks structuredContent against outputSchema (GH-245) and reports an unresolvable $ref as a failure (GH-256)) | agent_sdk/testing/mcp.py | present |
 | C-057 | CREATES_GATE (deterministic per-tier deliverable check; fail closed on null; cross-runner parity test) | .claude/workflows/sdk-wave.js + harness/workflows/wave-cycle.js (+ mirrors) | planned |
 | C-058 | STALE_FINDING_FILTER (grep -F quote check per redteam finding; fail closed on empty/null; cross-runner parity test) | .claude/workflows/sdk-wave.js + harness/workflows/wave-cycle.js (+ mirrors) | planned |
@@ -70,12 +70,12 @@
 | C-077 | read_capped_body (async; refuses a declared over-cap Content-Length before reading, else reads `request.stream()` and stops once the cap is passed; raises `BodyTooLarge` so callers keep their own reply, e.g. 413 on MCP, drop+202 on webhooks; GH-246) | agent_sdk/common/body.py | present |
 | C-078 | drop_format_chars (removes Unicode Cf format/bidi chars, e.g. U+202A-202E, U+2066-2069; used by safe_line_text, safe_cell_text, safe_id_text, safe_joined_id_text, safe_block_text (GH-251) and so the SafeValueError hint path; C-034 sibling, GH-250) | agent_sdk/common/redact.py::drop_format_chars | present |
 | C-079 | normalize_media_type (lowercase, drop parameters, `text` -> `text/plain`) and media_type_match(mode, supported) (built on it; matches `*/*` and `type/*` wildcards against a caller-supplied supported set; GH-259 uses it for A2A acceptedOutputModes validation and artifact part filtering; MCP Content-Type compare GH-246; the JSON Content-Type checks use C-087, not this; one helper, not three copies) | agent_sdk/common/media.py | present |
-| C-080 | a2ui_client_activation (test clients: agent-card discovery + X-A2A-Extensions A2UI URI header + a2uiClientCapabilities message metadata; ChatDriver.a2ui_client_activation, shared by ChatDriver and turns.py `_a2a_attempt`; header sent only when the card advertises the extension; the card is fetched once and its supportedCatalogIds go in through the public ChatDriver constructor parameters extra_catalogs and card, merged with the standard catalog and de-duplicated; the AG-UI turn declares the same catalogs, GH-256/GH-264) | agent_sdk/testing/chat.py (ChatDriver._discover_card + _caps + a2ui_client_activation) | present |
+| C-080 | a2ui_client_activation (test clients: agent-card discovery + X-A2A-Extensions A2UI URI header + a2uiClientCapabilities message metadata; one card path, `fetch_agent_card` in agent_sdk/testing/chat.py, used by every caller: ChatDriver._discover_card / a2ui_client_activation, and turns.py `_card_driver`, `_a2a_attempt`, `_agui_attempt`; header sent only when the card advertises the extension; the card is fetched once per successful fetch (a 429/5xx fetch fails the attempt and is retried) and its supportedCatalogIds (non-empty, at most 512 chars each, at most 32, standard first) go in through the public ChatDriver constructor parameters extra_catalogs and card, merged with the standard catalog and de-duplicated; catalogs come only from extra_catalogs; the AG-UI turn declares the same catalogs, GH-256/GH-264/GH-268) | agent_sdk/testing/chat.py (fetch_agent_card + card_catalog_ids + ChatDriver._discover_card + _caps + a2ui_client_activation) | present |
 | C-081 | runExclusive (console busy-guard + try/catch wrapper shared by send() and the interrupt resume-form submit; for any future console action that posts a run; GH-243) | agent_sdk/console/static/chat.js | present |
 | C-082 | v1_internal_error_handler (path-scoped exception handler returning fixed-text JSON-RPC -32603, logs exception type only; SI-2 safe-error pattern, reusable for other route prefixes; GH-248) | agent_sdk/app.py / agent_sdk/routes/a2a.py | present |
 | C-083 | OAuth 429 surface split: `_a2a_auth_envelope` OAuth 429 branch (agent_sdk/app.py), `_token_error` + `_error_page` + `BROWSER_OAUTH_ROUTES` (agent_sdk/routes/oauth.py) | agent_sdk/app.py, agent_sdk/routes/oauth.py | present |
 | C-084 | clip (code-point-aware string cap) | agent_sdk/console/static/a2ui.js (beside C-059 capRows/moreNote) | present |
-| C-085 | scrub_non_finite | agent_sdk/common/json_strict.py (beside scrub_unencodable, C-040) | present |
+| C-085 | scrub_non_finite (no such symbol; `scrub_unencodable` is C-040) | agent_sdk/common/json_strict.py | duplicate-of-C-040 |
 | C-086 | compute_a2ui_enabled | agent_sdk/routes/agent_card.py | present |
 | C-087 | is_json_content_type | agent_sdk/common/body.py | present |
 | C-088 | postSse abort signal | agent_sdk/console/static/api.js::postSse | present |
@@ -84,12 +84,19 @@
 | C-091 | RateLimiter (per-key per-minute window) | agent_sdk/common/limits.py::RateLimiter | present |
 | C-092 | oauth _error_page (branded HTML error/notice page, status param) | agent_sdk/routes/oauth.py::_error_page (on agent_sdk/routes/_consent_ui.py::render_notice_page) | duplicate-of-C-083 |
 | C-093 | wire_errors code-to-HTTP-status map | agent_sdk/common/wire_errors.py | present |
-| C-094 | wire_omitted omission rule (extends C-020) | agent_sdk/models/content_types.py::ContentModel.wire_omitted + agent_sdk/a2ui/catalog.py::_wire_required | present |
+| C-094 | wire_omitted / wire_keeps_null omission rule (extends C-020); applied by the _Wire base serializer, read by the catalog | agent_sdk/models/content_types.py::_Wire._wire_rule + agent_sdk/a2ui/catalog.py::_wire_required | present |
 | C-095 | abortable back-off sleep | agent_sdk/console/static/retry.js::postWithRetry | present |
-| C-096 | failed-bearer per-IP limiter | agent_sdk/auth/middleware.py::AuthRuntime (wired in agent_sdk/app.py) | present |
-| C-097 | accepts_a2ui_mode predicate | agent_sdk/common/media.py | present |
+| C-096 | failed-bearer per-IP limiter (callers: require_identity, /oauth/revoke bad bearer) | agent_sdk/auth/middleware.py::AuthRuntime (wired in agent_sdk/app.py) | present |
+| C-097 | accepts_a2ui_mode(modes) predicate (built on C-079 media_type_match; absent/empty modes accept; shared by runner._build_capabilities and routes/a2a.py::_echo_extensions via _a2ui_decision) | agent_sdk/common/media.py::accepts_a2ui_mode | present |
 | C-098 | oauth browser 429 route set | agent_sdk/routes/oauth.py | duplicate-of-C-083 |
 | C-099 | _prm_challenge invalid_token form | agent_sdk/auth/middleware.py::_prm_challenge | present |
+| C-100 | parse_decision | agent_sdk/contrib/action_gate/gate.py::parse_decision | present |
+| C-101 | close_open_text_messages | agent_sdk/routes/ag_ui.py (mapper.run_error / _emit failure branch) | present |
+| C-102 | session_effective_protocol_version | agent_sdk/routes/mcp.py | present |
+| C-103 | RESERVED_DATA_TYPES | agent_sdk/models/content_types.py (beside RESERVED_COMPONENTS, :172) | present |
+| C-104 | A2UI catalog-id bounds constants | agent_sdk/a2ui/translator.py (or agent_sdk/common/limits.py) | present |
+| C-105 | parse_sse_json_frame (shape-guarded test-client frame parser) | agent_sdk/testing/chat.py | present |
+| C-106 | owned_session_version | agent_sdk/routes/mcp.py (_session_alive with touch flag) | present |
 
 ## Descriptions
 

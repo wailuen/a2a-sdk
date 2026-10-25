@@ -140,7 +140,11 @@ async def test_present_unrecognized_version_header_returns_400(
 async def test_present_supported_version_header_echoed(
     client: httpx.AsyncClient,
 ) -> None:
-    session_id = await _init(client, "2025-06-18")
+    """A present header that matches the session's negotiated version is
+    dispatched and echoed. GH-273 made a valid-but-different header on a known
+    session a 400 (tests/test_gh273_mcp_session_version.py), so this test
+    negotiates 2025-03-26 and sends the matching header."""
+    session_id = await _init(client, "2025-03-26")
     r = await client.post(
         "/mcp",
         json={"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}},

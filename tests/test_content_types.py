@@ -1653,3 +1653,79 @@ def test_gh167_safe_line_text_keeps_row_delimiters_and_strips_indent():
     assert safe_line_text("  padded  ") == "padded"
     assert safe_line_text("\t  Rev: 1") == "Rev: 1"
     assert "separators" not in inspect.signature(safe_line_text).parameters
+
+
+# ── GH-270 item 1: reserved and non-snake_case data_types ──
+
+
+def _snake(name: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def _card_with_data_type(data_type: str, component: str) -> type:
+    class _C(ContentModel):
+        def _body_text(self) -> str:
+            return ""
+
+    _C.data_type = data_type  # type: ignore[misc]
+    _C.component = component  # type: ignore[misc]
+    _C.catalog_id = "urn:test-gh270:v1"  # type: ignore[misc]
+    return _C
+
+
+def _variants(reserved_data_type: str) -> list[str]:
+    parts = reserved_data_type.split("_")
+    return [
+        reserved_data_type,
+        reserved_data_type.upper(),
+        "_".join(p.capitalize() for p in parts),
+        "".join(p.capitalize() for p in parts),
+    ]
+
+
+@pytest.mark.parametrize("reserved", content_types_module.RESERVED_COMPONENTS)
+def test_reserved_data_type_and_case_variants_refused(reserved: str) -> None:
+    for i, variant in enumerate(_variants(_snake(reserved))):
+        cls = _card_with_data_type(variant, f"Gh270Res{i}{reserved}")
+        try:
+            with pytest.raises(ValueError, match="RESERVED"):
+                register_content_type(cls)
+        finally:
+            _REGISTRY.pop(variant, None)
+
+
+def test_reserved_data_types_follow_reserved_components(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        content_types_module,
+        "RESERVED_COMPONENTS",
+        (*content_types_module.RESERVED_COMPONENTS, "FutureReservedCard"),
+    )
+    cls = _card_with_data_type("future_reserved_card", "Gh270Other")
+    try:
+        with pytest.raises(ValueError, match="RESERVED"):
+            register_content_type(cls)
+    finally:
+        _REGISTRY.pop("future_reserved_card", None)
+
+
+def test_non_snake_case_data_type_warns_once_and_registers(caplog: pytest.LogCaptureFixture) -> None:
+    cls = _card_with_data_type("Gh270-Odd", "Gh270Odd")
+    try:
+        with caplog.at_level("WARNING", logger=content_types_module.__name__):
+            assert register_content_type(cls) is cls
+            register_content_type(cls)
+        records = [r for r in caplog.records if "snake_case" in r.getMessage()]
+        assert len(records) == 1
+        assert _REGISTRY["Gh270-Odd"] is cls
+    finally:
+        _REGISTRY.pop("Gh270-Odd", None)
+
+
+def test_snake_case_data_type_does_not_warn(caplog: pytest.LogCaptureFixture) -> None:
+    cls = _card_with_data_type("gh270_fine", "Gh270Fine")
+    try:
+        with caplog.at_level("WARNING", logger=content_types_module.__name__):
+            register_content_type(cls)
+        assert not caplog.records
+    finally:
+        _REGISTRY.pop("gh270_fine", None)

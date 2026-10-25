@@ -569,7 +569,7 @@ def test_protocols_doc_mcp_void_deviation_names_condition() -> None:
     from pathlib import Path
 
     text = (Path(__file__).parent.parent / "docs" / "protocols.md").read_text()
-    i = text.index("Deviation (GH-266)")
+    i = text.rindex("Deviation (GH-266)")
     para = text[i : i + 600]
     for word in ("`emits`", "`outputSchema`", "`structuredContent`"):
         assert word in para
@@ -609,3 +609,79 @@ async def test_deferred_site_no_acceptable_mode_is_32005(settings) -> None:
             assert not done.get("artifacts")
     app.state.credential_store.close()
     gc.collect()
+
+
+# ── GH-271: per-request A2UI decision drives the echo; mimeType rewritten ──
+
+
+def test_accepts_a2ui_mode() -> None:
+    from agent_sdk.common.media import accepts_a2ui_mode
+
+    assert accepts_a2ui_mode(None) is True
+    assert accepts_a2ui_mode([]) is True
+    assert accepts_a2ui_mode(["application/a2ui+json"]) is True
+    assert accepts_a2ui_mode(["application/*"]) is True
+    assert accepts_a2ui_mode(["*/*"]) is True
+    assert accepts_a2ui_mode(["application/json"]) is False
+    assert accepts_a2ui_mode(["text/plain"]) is False
+
+
+@pytest.mark.parametrize("path", ["/v1/message:send", "/v1/message:stream"])
+async def test_echo_omits_a2ui_when_modes_rule_it_out(client, fake_model, path) -> None:
+    from agent_sdk.models.content_types import A2UI_EXTENSION_URI
+
+    fake_model.script(reply("ok"))
+    r = await client.post(
+        path,
+        json=_body(configuration={"acceptedOutputModes": ["application/json"]}),
+        headers={"X-A2A-Extensions": A2UI_EXTENSION_URI},
+    )
+    assert r.status_code == 200, r.text
+    assert A2UI_EXTENSION_URI not in r.headers.get("x-a2a-extensions", "")
+
+
+@pytest.mark.parametrize("path", ["/v1/message:send", "/v1/message:stream"])
+async def test_echo_keeps_a2ui_when_no_modes(client, fake_model, path) -> None:
+    from agent_sdk.models.content_types import A2UI_EXTENSION_URI
+
+    fake_model.script(reply("ok"))
+    r = await client.post(
+        path, json=_body(), headers={"X-A2A-Extensions": A2UI_EXTENSION_URI}
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers.get("x-a2a-extensions") == A2UI_EXTENSION_URI
+
+
+def test_apply_output_modes_rewrites_mimetype_to_kept_type() -> None:
+    from agent_sdk.agent.runner import apply_output_modes
+    from agent_sdk.models.a2a import Artifact, DataPart
+
+    art = Artifact(
+        artifactId="a",
+        parts=[
+            DataPart(data={"a2ui": 1}, metadata={"mimeType": "application/a2ui+json"}),
+            DataPart(data={"k": 1}),
+        ],
+        metadata={"mimeType": "application/a2ui+json"},
+    )
+    out = apply_output_modes(art, ["application/json"])
+    assert [p.kind for p in out.parts] == ["data"]
+    assert out.metadata["mimeType"] == "application/json"
+
+
+def test_apply_output_modes_drops_mimetype_when_kept_parts_are_mixed() -> None:
+    from agent_sdk.agent.runner import apply_output_modes
+    from agent_sdk.models.a2a import Artifact, DataPart, TextPart
+
+    art = Artifact(
+        artifactId="a",
+        parts=[
+            DataPart(data={"a2ui": 1}, metadata={"mimeType": "application/a2ui+json"}),
+            DataPart(data={"k": 1}),
+            TextPart(text="t"),
+        ],
+        metadata={"mimeType": "application/a2ui+json"},
+    )
+    out = apply_output_modes(art, ["application/json", "text/plain"])
+    assert len(out.parts) == 2
+    assert "mimeType" not in out.metadata

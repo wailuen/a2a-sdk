@@ -20,7 +20,7 @@ from agent_sdk.a2ui.catalog import (
     supported_catalogs,
 )
 from agent_sdk.models.content_types import ContentModel, KpiCard, TimeSeriesChart
-from tests._compact_schema import emitted_paths, parse_schema, required_paths
+from tests._compact_schema import emitted_paths, parse_schema, required_paths, undeclared_paths
 
 
 class _Mode(enum.Enum):
@@ -203,6 +203,7 @@ from agent_sdk.models.content_types import (  # noqa: E402
     ColumnDef,
     DocumentItem,
     DocumentList,
+    MarketBriefing,
     TimeSeriesDataPoint,
 )
 from tests.test_gh170_profile_required_keys import _minimal_instances  # noqa: E402
@@ -267,6 +268,7 @@ _INSTANCES = _minimal_instances()
 _INSTANCES["TimeSeriesChart"] = TimeSeriesChart(
     chart_type="line", title="t", data=[TimeSeriesDataPoint(date="d", value=None)]
 )
+_INSTANCES["MarketBriefing"] = MarketBriefing(title="t", as_of="2025-01-01")
 _INSTANCES["DocumentList"] = DocumentList(
     documents=[DocumentItem(id="1", name="n", web_url="u", last_modified="m")]
 )
@@ -275,6 +277,8 @@ _INSTANCES["DocumentList"] = DocumentList(
 @pytest.mark.parametrize("component", sorted(_INSTANCES))
 def test_summary_required_is_subset_of_wire_round_trip(component: str) -> None:
     inst = _INSTANCES[component]
+    if isinstance(inst.wire(), str):
+        pytest.skip("prose type: wire() is a markdown string")
     required = required_paths(_parse(_field_summary(type(inst))))
     missing = required - emitted_paths(inst.wire())
     assert not missing, f"{component}: summary requires keys wire() omitted: {sorted(missing)}"
@@ -283,8 +287,16 @@ def test_summary_required_is_subset_of_wire_round_trip(component: str) -> None:
 def test_every_registered_standard_type_has_an_instance() -> None:
     from agent_sdk.models.content_types import PROFILE_TYPES
 
-    names = {c.component for c in PROFILE_TYPES} - {"MarketBriefing"}
+    names = {c.component for c in PROFILE_TYPES}
     assert names <= set(_INSTANCES)
+
+
+def test_timeseries_keys_are_frozen() -> None:
+    chart = _chart()
+    with pytest.raises(ValidationError):
+        chart.x_key = "ts"  # type: ignore[assignment]
+    with pytest.raises(ValidationError):
+        chart.y_key = "v"  # type: ignore[assignment]
 
 
 def test_timeseries_keys_are_literals() -> None:
@@ -355,3 +367,67 @@ def test_gh262_wire_omitted_drives_serializers_and_catalog():
 
     assert "size" not in Doc(id="1", name="n", size=3.0).model_dump()
     assert "size" in DocumentItem(id="1", name="n", size=3.0).model_dump()
+
+
+# ── GH-270 items 4-6 ──
+
+
+def test_marketbriefing_summary_has_no_annotated() -> None:
+    summary = _field_summary(MarketBriefing)
+    assert "Annotated" not in summary
+    assert "KpiRowSection" in summary
+
+
+def test_annotated_is_unwrapped_at_any_depth() -> None:
+    from typing import Annotated
+
+    assert catalog._annotation_str(Annotated[int, "m"], True)[0] == "int"
+    assert catalog._annotation_str(list[Annotated[str, "m"]], True)[0] == "[str]"
+    assert catalog._annotation_str(Annotated[str | None, "m"], False)[0] == "str|null"
+
+
+def test_int_enum_values_unquoted() -> None:
+    class _Level(enum.IntEnum):
+        LOW = 1
+        HIGH = 2
+
+    assert catalog._annotation_str(_Level, True)[0] == "1|2"
+    assert catalog._annotation_str(_Mode, True)[0] == '"fast|slow"'
+    assert catalog._annotation_str(Literal[True, False], True)[0] == "true|false"
+
+
+@pytest.mark.parametrize("component", sorted(_INSTANCES))
+def test_summary_declares_every_emitted_key(component: str) -> None:
+    """Reverse direction of the round trip: every key wire() writes is named
+    in the summary, recursing into nested _Wire shapes. Paths under an open
+    map (``{key: V}``) or an untyped ``any`` field are free-form."""
+    inst = _INSTANCES[component]
+    wired = inst.wire()
+    if isinstance(wired, str):
+        pytest.skip("prose type: wire() is a markdown string")
+    summary = _field_summary(type(inst))
+    if summary.endswith("...}"):
+        pytest.skip("summary truncated by the 250-character budget")
+    schema = _parse(summary)
+    undeclared = undeclared_paths(schema, wired)
+    assert not undeclared, f"{component}: wire() writes keys the summary lacks: {sorted(undeclared)}"
+
+
+class _Aliased(ContentModel):
+    data_type: ClassVar[str] = "gh258_aliased"
+    component: ClassVar[str] = "Gh258Aliased"
+    wire_keeps_null: ClassVar[frozenset[str]] = frozenset({"as_of"})
+    wire_omitted: ClassVar[frozenset[str]] = frozenset({"hidden"})
+
+    needed: str
+    as_of: str | None = Field(None, serialization_alias="asOf")
+    hidden: str | None = Field(None, serialization_alias="hiddenKey")
+
+    def _body_text(self) -> str:
+        return ""
+
+
+def test_wire_rule_addresses_keys_by_alias() -> None:
+    wired = _Aliased(needed="n", hidden="x").wire()
+    assert wired == {"needed": "n", "asOf": None}
+    assert required_paths(parse_schema(_field_summary(_Aliased))) <= emitted_paths(wired)

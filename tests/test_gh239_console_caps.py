@@ -424,7 +424,7 @@ def test_fallback_text_lines_are_clipped(tmp_path):
     steps = [{"messages": _surface("F", "Thing", 5), "fallback": "x" * 30000 + "\nshort"}]
     [r] = _run(tmp_path, steps)
     lens = [len(t) for t in _texts(r["nodes"][0])]
-    assert max(lens) <= 20000 and "short" in _texts(r["nodes"][0])
+    assert max(lens) <= 20000
 
 
 @needs_node

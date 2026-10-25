@@ -197,3 +197,74 @@ async def test_token_responses_have_pragma_no_cache(app):
     assert r.status_code == 400
     assert r.headers["pragma"] == "no-cache"
     assert r.headers["cache-control"] == "no-store"
+
+
+# GH-272 -------------------------------------------------------------------
+
+async def _drain(app, method, path, **kw):
+    app.state.auth.bearer_limiter = RateLimiter(1)
+    h = {"Authorization": f"Bearer {BAD}"}
+    first = await _req(app, method, path, headers=h, **kw)
+    assert first.status_code == 401
+    return await _req(app, method, path, headers=h, **kw)
+
+
+@pytest.mark.parametrize("method,path,kw,mcp", [
+    ("GET", "/v1/tasks", {}, False),
+    ("POST", "/ag-ui/run", {"json": {}}, False),
+    ("POST", "/mcp", {"json": {}}, True),
+])
+async def test_bearer_429_carries_invalid_token_challenge(app, method, path, kw, mcp):
+    r = await _drain(app, method, path, **kw)
+    assert r.status_code == 429
+    assert r.headers["retry-after"] == "60"
+    www = r.headers["www-authenticate"]
+    assert www.startswith(INVALID)
+    assert ("oauth-protected-resource/mcp" in www) is mcp
+    assert BAD not in r.text and BAD not in str(dict(r.headers))
+
+
+async def test_v1_429_body_is_fixed_minus_32000(app):
+    r = await _drain(app, "GET", "/v1/tasks")
+    assert r.json() == {"error": {"code": -32000, "message": "rate limit exceeded"}}
+
+
+async def test_expired_token_429_carries_challenge(app, monkeypatch):
+    from agent_sdk.auth import oauth_tokens
+
+    pair = app.state.auth.oauth.mint_token_pair(
+        client_id="c", scope="mcp", audience="http://test/mcp"
+    )
+    tok = pair["access_token"]
+    real = oauth_tokens._now
+    monkeypatch.setattr(oauth_tokens, "_now", lambda: real() + 10_000_000)
+    app.state.auth.bearer_limiter = RateLimiter(1)
+    h = {"Authorization": f"Bearer {tok}"}
+    assert (await _req(app, "GET", "/v1/tasks", headers=h)).status_code == 401
+    r = await _req(app, "GET", "/v1/tasks", headers=h)
+    assert r.status_code == 429
+    assert r.headers["www-authenticate"].startswith(INVALID)
+    assert tok not in r.text and tok not in str(dict(r.headers))
+
+
+async def test_revoke_bad_bearer_counts_and_429s(app):
+    app.state.auth.bearer_limiter = RateLimiter(1)
+    h = {"Authorization": f"Bearer {BAD}"}
+    first = await _req(app, "POST", "/oauth/revoke", data={"token": "x"}, headers=h)
+    assert first.status_code == 401
+    r = await _req(app, "POST", "/oauth/revoke", data={"token": "x"}, headers=h)
+    assert r.status_code == 429
+    assert r.json() == {
+        "error": "temporarily_unavailable",
+        "error_description": "rate limit exceeded",
+    }
+    assert r.headers["retry-after"] == "60"
+    assert r.headers["cache-control"] == "no-store"
+    assert BAD not in r.text and BAD not in str(dict(r.headers))
+
+
+async def test_revoke_without_bearer_not_counted(app):
+    app.state.auth.bearer_limiter = RateLimiter(1)
+    for _ in range(3):
+        r = await _req(app, "POST", "/oauth/revoke", data={"token": "x"})
+        assert r.status_code == 401

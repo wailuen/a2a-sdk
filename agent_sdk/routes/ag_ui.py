@@ -348,7 +348,11 @@ class _RunMapper:
             self.last_message_id = message_id  # parent for this turn's tool calls
             return [
                 {"type": "TEXT_MESSAGE_START", "messageId": message_id, "role": "assistant"},
-                {"type": "TEXT_MESSAGE_CONTENT", "messageId": message_id, "delta": event.text},
+                {
+                    "type": "TEXT_MESSAGE_CONTENT",
+                    "messageId": message_id,
+                    "delta": scrub_unencodable(event.text),
+                },
                 {"type": "TEXT_MESSAGE_END", "messageId": message_id},
             ]
 
@@ -708,9 +712,14 @@ async def ag_ui_run(
         # serialized frames in the batch are kept, so a STEP_FINISHED that
         # preceded a bad RUN_FINISHED still reaches the client.
         out: list[bytes] = []
+        open_message: str | None = None
         for frame in frames:
             try:
                 out.append(sse_data(frame))
+                if frame.get("type") == "TEXT_MESSAGE_START":
+                    open_message = frame.get("messageId")
+                elif frame.get("type") == "TEXT_MESSAGE_END":
+                    open_message = None
             except ValueError:
                 logger.error(
                     "ag-ui frame not serializable frame_type=%s run_id=%s",
@@ -719,6 +728,8 @@ async def ag_ui_run(
                 )
                 # the bad frame may itself have been the terminal one
                 mapper.terminal_sent = False
+                if open_message is not None:
+                    out.append(sse_data({"type": "TEXT_MESSAGE_END", "messageId": open_message}))
                 out.extend(sse_data(f) for f in mapper.run_error(what, "internal"))
                 break
         return b"".join(out)

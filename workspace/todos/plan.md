@@ -84,6 +84,7 @@ Fix 5 protocol conformance bugs surfaced by downstream agents after the 0.4.0 re
 | W65 [x] ✅ 2026-10-24 (GH-243/244 console, GH-245 test clients, GH-246 MCP body cap + id checks, GH-247 AG-UI resume validation, GH-248 A2A route, GH-249 A2UI gating, GH-250 core ingress + bidi safe text; archived by hand) | completed/w065-gh-issues.md | G | 8 | — |
 | W66 [x] ✅ 2026-10-25 (GH-251 ingress, GH-252 docs/lock, GH-253 regression tests, GH-254/255 console, GH-256 test clients, GH-257 single A2UI gate, GH-258 catalog, GH-259 A2A route, GH-260 rate limit; /sdk-autoloop cycle 1, archived by hand) | completed/w066-gh-issues.md | G | 10 | — |
 | W67 [x] ✅ 2026-10-25 (GH-261 A2UI per-request decision, GH-262 catalog wire rules, GH-263 console, GH-264 test helpers, GH-265 failed-bearer limiter, GH-266 error-code mapping, GH-267 cleanup; /sdk-autoloop cycle 2, archived by hand) | completed/w067-gh-issues.md | G | 7 | — |
+| W68 [x] ✅ 2026-10-26 (GH-268 test helpers, GH-269 AG-UI text scrub + console caps, GH-270 A2UI reserved data_types + catalog, GH-271 A2A echo/mimeType/docs, GH-272 failed-bearer 429 challenge, GH-273 MCP session version, GH-274 example/tests/registry; /sdk-autoloop cycle 3, archived by hand) | completed/w068-gh-issues.md | G | 7 | — |
 
 ## Dependency graph
 

@@ -38,7 +38,7 @@ from typing import Any
 
 import httpx
 
-from .chat import ChatDriver, card_catalog_ids, fetch_agent_card
+from .chat import MALFORMED_STREAM_TEXT, ChatDriver, card_catalog_ids, fetch_agent_card
 
 logger = logging.getLogger("agent_sdk.testing.turns")
 
@@ -132,12 +132,17 @@ def _safe(run_key: str) -> str:
 async def _card_driver(client: httpx.AsyncClient) -> ChatDriver:
     """A ChatDriver whose catalogs include the card's ``supportedCatalogIds``.
 
-    The card is fetched once here; a failed or non-object card counts as an
-    agent that does not advertise A2UI.
+    A 429 or 5xx card response propagates as ``httpx.HTTPStatusError`` so the
+    attempt fails and is retried; any other failure or a non-object card counts
+    as an agent that does not advertise A2UI.
     """
     card: Any = {}
     try:
         card = await fetch_agent_card(client)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 429 or exc.response.status_code >= 500:
+            raise
+        logger.warning("agent card fetch failed: %s", type(exc).__name__)
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning("agent card fetch failed: %s", type(exc).__name__)
     if not isinstance(card, dict):
@@ -145,8 +150,42 @@ async def _card_driver(client: httpx.AsyncClient) -> ChatDriver:
     return ChatDriver(client, extra_catalogs=card_catalog_ids(card), card=card)
 
 
+class _MalformedStream(Exception):
+    pass
+
+
+def _obj(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise _MalformedStream
+    return value
+
+
+def _str_of(value: Any) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise _MalformedStream
+    return value
+
+
 def _text_of(parts: Any) -> str:
-    return "\n".join(p["text"] for p in parts or [] if isinstance(p, dict) and p.get("kind") == "text")
+    if parts is None:
+        return ""
+    if not isinstance(parts, list):
+        raise _MalformedStream
+    texts = [p.get("text") for p in parts if isinstance(p, dict) and p.get("kind") == "text"]
+    strs = [t for t in texts if isinstance(t, str)]
+    if len(strs) != len(texts):
+        raise _MalformedStream
+    return "\n".join(strs)
+
+
+def _card_failed(at: _Attempt, exc: httpx.HTTPStatusError) -> _Attempt:
+    at.status = exc.response.status_code
+    at.classify()
+    return at
 
 
 async def _a2a_attempt(
@@ -156,7 +195,10 @@ async def _a2a_attempt(
     driver: ChatDriver | None = None,
 ) -> _Attempt:
     at = _Attempt()
-    driver = driver or await _card_driver(client)
+    try:
+        driver = driver or await _card_driver(client)
+    except httpx.HTTPStatusError as exc:
+        return _card_failed(at, exc)
     msg: dict[str, Any] = {
         "kind": "message",
         "role": "user",
@@ -190,30 +232,34 @@ async def _a2a_attempt(
                     break
                 kind = ev.get("kind")
                 if kind == "task":
-                    task_id = task_id or ev.get("id", "")
-                    ctx_id = ctx_id or ev.get("contextId", "")
+                    task_id = task_id or _str_of(ev.get("id"))
+                    ctx_id = ctx_id or _str_of(ev.get("contextId"))
                 elif kind == "status-update":
-                    task_id = task_id or ev.get("taskId", "")
-                    ctx_id = ctx_id or ev.get("contextId", "")
-                    st = (ev.get("status") or {}).get("state") or ""
+                    task_id = task_id or _str_of(ev.get("taskId"))
+                    ctx_id = ctx_id or _str_of(ev.get("contextId"))
+                    status = _obj(ev.get("status"))
+                    st = _str_of(status.get("state"))
                     if st:
                         cur_state = st
                     if ev.get("final") or st == "completed":
-                        at.reply = _text_of(((ev.get("status") or {}).get("message") or {}).get("parts"))
+                        at.reply = _text_of(_obj(status.get("message")).get("parts"))
                     if ev.get("final"):
                         break
                 elif kind == "message":
-                    task_id = task_id or ev.get("taskId", "")
-                    ctx_id = ctx_id or ev.get("contextId", "")
+                    task_id = task_id or _str_of(ev.get("taskId"))
+                    ctx_id = ctx_id or _str_of(ev.get("contextId"))
                     at.reply = _text_of(ev.get("parts"))
                     message_seen = True
                     break
                 elif kind == "artifact-update":
-                    art = ev.get("artifact") or {}
-                    dtype = (art.get("metadata") or {}).get("data_type") or art.get("name")
-                    for part in art.get("parts", []):
-                        if part.get("kind") == "data":
-                            meta = part.get("metadata") or {}
+                    art = _obj(ev.get("artifact"))
+                    dtype = _obj(art.get("metadata")).get("data_type") or art.get("name")
+                    parts = art.get("parts") or []
+                    if not isinstance(parts, list):
+                        raise _MalformedStream
+                    for part in parts:
+                        if isinstance(part, dict) and part.get("kind") == "data":
+                            meta = _obj(part.get("metadata"))
                             ct = dtype or meta.get("data_type") or meta.get("mimeType")
                             if ct and ct not in at.content_types:
                                 at.content_types.append(ct)
@@ -221,6 +267,8 @@ async def _a2a_attempt(
         at.status = exc.response.status_code
     except httpx.TransportError:
         at.reason = "transport-error"
+    except _MalformedStream:
+        at.reason = "malformed-stream"
     if message_seen:
         task_id = cur_state = ""
     at.failed = cur_state in ("failed", "rejected", "canceled")
@@ -238,7 +286,10 @@ async def _agui_attempt(
     driver: ChatDriver | None = None,
 ) -> _Attempt:
     at = _Attempt()
-    driver = driver or await _card_driver(client)
+    try:
+        driver = driver or await _card_driver(client)
+    except httpx.HTTPStatusError as exc:
+        return _card_failed(at, exc)
     errors: list[str] = []
     snapshot = list(messages)
     try:
@@ -256,6 +307,8 @@ async def _agui_attempt(
         at.status = exc.response.status_code
     except httpx.TransportError:
         at.reason = "transport-error"
+    if MALFORMED_STREAM_TEXT in errors:
+        at.reason = "malformed-stream"
     at.error_text = " ".join(errors)
     at.failed = bool(errors) and not at.reply
     return _restore_if_failed(at, messages, snapshot)
@@ -332,15 +385,16 @@ async def run_turn(
             "context_id": _read(files["ctx"]),
             "state": _read(files["state"]),
         }
-        card_driver: dict[str, ChatDriver] = {}
-
-        async def _driver() -> ChatDriver:
-            if "d" not in card_driver:
-                card_driver["d"] = await _card_driver(client)
-            return card_driver["d"]
+        card_driver: ChatDriver | None = None
 
         async def _run_attempt() -> _Attempt:
-            drv = await _driver()
+            nonlocal card_driver
+            if card_driver is None:
+                try:
+                    card_driver = await _card_driver(client)
+                except httpx.HTTPStatusError as exc:
+                    return _card_failed(_Attempt(), exc)
+            drv = card_driver
             if transport == "a2a":
                 return await _a2a_attempt(client, query, a2a_state, drv)
             return await _agui_attempt(client, query, f"{key}-agui", messages, drv)

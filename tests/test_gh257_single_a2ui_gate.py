@@ -128,6 +128,7 @@ async def test_modes_with_a2ui_off(settings) -> None:
                 r = await c.post(
                     "/v1/message:send",
                     json=_msg(configuration={"acceptedOutputModes": ["application/a2ui+json"]}),
+                    headers={"X-A2A-Extensions": A2UI_EXTENSION_URI},
                 )
                 assert r.json()["error"]["code"] == -32005
                 for mode in ("application/*", "*/*"):
@@ -137,6 +138,23 @@ async def test_modes_with_a2ui_off(settings) -> None:
                         json=_msg(configuration={"acceptedOutputModes": [mode], "blocking": True}),
                     )
                     assert "error" not in r.json(), r.text
+    finally:
+        app.state.credential_store.close()
+        gc.collect()
+
+
+async def test_modes_with_a2ui_on_control_same_request_succeeds(settings) -> None:
+    model = FakeModelClient().script(reply("ok"))
+    app = _build(settings, model, True)
+    try:
+        async with app.router.lifespan_context(app):
+            async with await _client(app) as c:
+                r = await c.post(
+                    "/v1/message:send",
+                    json=_msg(configuration={"acceptedOutputModes": ["application/a2ui+json"], "blocking": True}),
+                    headers={"X-A2A-Extensions": A2UI_EXTENSION_URI},
+                )
+                assert "error" not in r.json(), r.text
     finally:
         app.state.credential_store.close()
         gc.collect()

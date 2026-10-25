@@ -398,9 +398,12 @@ function appendMetadataFootnote(node, data) {
 function fallbackNode(fallbackText, reason) {
   const node = el("div", { class: "a2ui-surface a2ui-fallback" });
   if (fallbackText) {
-    for (const para of String(fallbackText).split(/\n/)) {
-      node.appendChild(el("div", { class: "a2ui-fallback-line" }, clip(para, MAX_PROSE)));
+    const lines = String(clip(fallbackText, MAX_PROSE)).split(/\n/);
+    for (const para of capRows(lines)) {
+      node.appendChild(el("div", { class: "a2ui-fallback-line" }, para));
     }
+    const more = moreNote(lines.length - MAX_ROWS);
+    if (more) node.appendChild(more);
   } else {
     node.appendChild(el("div", { class: "dim" }, clip(reason)));
   }

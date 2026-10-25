@@ -332,16 +332,83 @@ async def test_oauth_register_nested_is_invalid_client_metadata(client, objects)
     assert MARKER not in r.text
 
 
-@pytest.mark.parametrize("objects", [False, True])
-async def test_a2a_deep_metadata_never_breaks_task_list(client, objects):
-    open_, close = ('{"a":', "}") if objects else ("[", "]")
-    deep = open_ * 300 + "1" * objects + close * 300
-    body = (
-        '{"message":{"role":"user","messageId":"m1","parts":[{"text":"hi"}],"metadata":'
-        + deep
-        + "}}"
+def _meta_body(metadata: str) -> bytes:
+    return (
+        '{"message":{"kind":"message","role":"user","messageId":"m1",'
+        '"parts":[{"kind":"text","text":"hi"}],"metadata":' + metadata + "}}"
     ).encode()
-    r = await client.post("/v1/message:send", content=body, headers=JSON_HEADERS)
+
+
+@pytest.mark.parametrize("objects", [False, True])
+async def test_a2a_deep_metadata_never_breaks_task_list(client, fake_model, objects):
+    """The body is a valid message, so only the depth check can reject it.
+
+    Fails if the 64-level cap in ``loads_strict`` is removed: the deep request
+    would then be accepted (200) instead of answering -32700. The shallow
+    control proves the same body shape succeeds."""
+    fake_model.script(reply("ok"))
+    open_, close = ('{"a":', "}") if objects else ("[", "]")
+    shallow = '{"k":' + open_ * 3 + "1" * objects + close * 3 + "}"
+    ok = await client.post("/v1/message:send", content=_meta_body(shallow), headers=JSON_HEADERS)
+    assert ok.status_code == 200, ok.text
+    deep = '{"k":' + open_ * 300 + "1" * objects + close * 300 + "}"
+    r = await client.post("/v1/message:send", content=_meta_body(deep), headers=JSON_HEADERS)
     assert r.status_code == 400, r.text
     assert r.json()["error"] == {"code": -32700, "message": TOO_DEEP}
     assert (await client.get("/v1/tasks")).status_code != 500
+
+
+async def _park_publish_note(client, fake_model) -> str:
+    fake_model.script(tool_call("publish_note", {"note": "n1"}), reply("after"))
+    r = await client.post(
+        "/v1/message:send",
+        json={"message": {"kind": "message", "role": "user", "messageId": uuid.uuid4().hex,
+                          "parts": [{"kind": "text", "text": "publish"}]}},
+    )
+    task_id = r.json()["id"]
+    for _ in range(300):
+        if (await client.get(f"/v1/tasks/{task_id}")).json()["status"]["state"] == "input-required":
+            return task_id
+        await asyncio.sleep(0.02)
+    raise AssertionError("task never parked")
+
+
+async def _resume_with_data(client, fake_model, task_id: str, data: dict) -> dict:
+    r = await client.post(
+        "/v1/message:send",
+        json={"message": {"kind": "message", "role": "user", "messageId": uuid.uuid4().hex,
+                          "taskId": task_id, "parts": [{"kind": "data", "data": data}]}},
+    )
+    assert r.status_code == 200, r.text
+    for _ in range(300):
+        if (await client.get(f"/v1/tasks/{task_id}")).json()["status"]["state"] == "completed":
+            break
+        await asyncio.sleep(0.02)
+    result = fake_model.calls[-1]["messages"][-1]["content"][0]["toolResult"]
+    return result["content"][0]["json"]
+
+
+async def test_example_resume_payload_status_alone_does_not_publish(client, fake_model):
+    """Fails if the example reads ``payload.status`` again: the status-only
+    DataPart would then publish."""
+    task_id = await _park_publish_note(client, fake_model)
+    out = await _resume_with_data(client, fake_model, task_id, {"status": "approved"})
+    assert out == {"published": False, "reason": "user declined"}
+
+
+async def test_example_resume_payload_decision_publishes(client, fake_model):
+    """Control: the explicit decision still publishes."""
+    task_id = await _park_publish_note(client, fake_model)
+    out = await _resume_with_data(client, fake_model, task_id, {"decision": "approved"})
+    assert out == {"published": True, "note": "n1"}
+
+
+async def test_agui_cancelled_resume_with_approved_decision_does_not_publish(client, fake_model):
+    fake_model.script(tool_call("publish_note", {"note": "n"}), reply("after"))
+    frames = await run(client, run_body("publish"))
+    intr = frames[-1]["outcome"]["interrupts"][0]
+    entry = {"interruptId": intr["id"], "status": "cancelled", "payload": {"decision": "approved"}}
+    frames = await run(client, run_body(resume=[entry]))
+    assert not _errors(frames)
+    result = fake_model.calls[-1]["messages"][-1]["content"][0]["toolResult"]
+    assert result["content"][0]["json"]["published"] is False

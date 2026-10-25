@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from ..auth.context import ResumeEnvelope, bind_identity
 from ..a2ui.translator import A2uiCapabilities, translate
 from ..common.json_strict import dumps_strict, scrub_unencodable
-from ..common.media import media_type_match
+from ..common.media import accepts_a2ui_mode, media_type_match, normalize_media_type
 from ..common.tz import load_zone, valid_timezone
 from ..models.a2a import (
     Artifact,
@@ -422,7 +422,7 @@ def _build_capabilities(
     """GH-261: the per-build A2UI decision. A client whose ``acceptedOutputModes``
     does not accept A2UI (directly or by wildcard) gets the non-A2UI build, so
     the JSON/Text fallback exists before ``apply_output_modes`` filters."""
-    if accepted_modes and not any(media_type_match(m, {A2UI_MIME_TYPE}) for m in accepted_modes):
+    if not accepts_a2ui_mode(accepted_modes):
         return A2uiCapabilities.gated(False, None)
     return capabilities
 
@@ -455,10 +455,15 @@ def apply_output_modes(artifact: Artifact, modes: Sequence[str] | None) -> Artif
         kept = [TextPart(text=text)]
     update: dict[str, Any] = {"parts": kept}
     meta = artifact.metadata
-    if meta and meta.get("mimeType") and not any(
-        (getattr(p, "metadata", None) or {}).get("mimeType") == meta["mimeType"] for p in kept
+    if meta and meta.get("mimeType") and (
+        len(kept) != len(artifact.parts) or any(k is not o for k, o in zip(kept, artifact.parts))
     ):
-        update["metadata"] = {k: v for k, v in meta.items() if k != "mimeType"}
+        kept_types = {normalize_media_type(_part_media_type(p)) for p in kept}
+        rest = {k: v for k, v in meta.items() if k != "mimeType"}
+        if len(kept_types) == 1:
+            update["metadata"] = {**rest, "mimeType": next(iter(kept_types))}
+        else:
+            update["metadata"] = rest
     return artifact.model_copy(update=update)
 
 

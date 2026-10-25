@@ -9,7 +9,8 @@ The Claude.ai-connector-compatible chain, mounted at the app root:
   ``code_challenge_methods_supported: ["S256"]`` is load-bearing for
   Claude.ai's PKCE probe.
 - ``POST /oauth/register`` — RFC 7591 DCR, unauthenticated + per-IP
-  rate-limited. The security gate is the admin-gated /authorize, not DCR.
+  rate-limited (``unauth_limiter``; failed bearers on ``/oauth/revoke`` count
+  in the separate ``bearer_limiter``, GH-265/GH-272). The security gate is the admin-gated /authorize, not DCR.
 - ``GET/POST /oauth/authorize`` — minimal inline consent page (no template
   dependency; ``frame-ancestors 'none'`` + ``X-Frame-Options: DENY``).
   ``form-action`` is dynamically widened from a bare ``'self'`` to include
@@ -31,7 +32,9 @@ The Claude.ai-connector-compatible chain, mounted at the app root:
 Every advertised URL derives from PUBLIC_URL via the OAuthTokenStore's
 ``issuer``/``canonical_resource`` (one-origin topology, §10.3) — never from
 the Host header, so a malformed Host can never 503 this surface. 401s carry
-``WWW-Authenticate`` pointing at the PRM (``AuthRuntime.prm_url``).
+``WWW-Authenticate`` pointing at the PRM (``AuthRuntime.prm_url``). A 429 is
+JSON (``temporarily_unavailable``) with ``Retry-After`` and ``no-store`` on API
+routes and the branded HTML page on the four browser routes.
 
 Errors never echo caller-supplied values (codes, verifiers, tokens, URIs).
 """
@@ -54,6 +57,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from ..auth.middleware import (
     AuthRuntime,
     _client_key,
+    _rate_limited,
     _prm_challenge,
     unauth_rate_limit,
 )
@@ -1195,6 +1199,8 @@ async def oauth_revoke(request: Request) -> JSONResponse:
         if identity is None:
             identity = store.verify(presented)
         if identity is None:
+            if not runtime.bearer_limiter.allow(_client_key(request, runtime)):
+                raise _rate_limited()
             # Bad Bearer — reject; do NOT fall through to client_id path.
             raise HTTPException(
                 status_code=401,

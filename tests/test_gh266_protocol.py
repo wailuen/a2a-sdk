@@ -56,6 +56,15 @@ async def test_not_awaiting_input_send_is_400(client, app) -> None:
     assert r.json()["error"]["message"] == "task is not awaiting input"
 
 
+async def test_not_awaiting_input_stream_is_400(client, app) -> None:
+    ident = _identity_of(app, client)
+    task_id = app.state.task_store.create(new_task(), ident).task.id
+    r = await client.post("/v1/message:stream", json=_body(task_id))
+    assert (r.status_code, r.json()["error"]["code"]) == (400, -32004)
+    assert "text/event-stream" not in r.headers.get("content-type", "")
+    assert r.json()["error"]["message"] == "task is not awaiting input"
+
+
 async def test_colon_guard_stays_501(client) -> None:
     r = await client.get("/v1/tasks/abc:cancel")
     assert (r.status_code, r.json()["error"]["code"]) == (501, -32004)

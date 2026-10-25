@@ -17,7 +17,7 @@ Entries ordered by LRN number.
 | LRN-011 | Bootstrap token goes to stderr; agent-verify boot command must use 2>&1 | [LRN-011](LRN-011--Users-wailuen-Development-a2a-sdk-harness-skills-agent-verify-SKILL-md.md) |
 | LRN-012 | wave-cycle.js A2UI audit prompt misstated Standard Profile type counts as Core 7 + Extended 11 instead of Core 6 + Extended 8 | [LRN-012](LRN-012-harness-workflows-wave-cycle-js.md) |
 | LRN-013 | AC "integration note" wording targets the Integration section, not step bodies | [LRN-013](LRN-013-harness-skills-upgrade-SKILL-md.md) |
-| LRN-014 | pytest -q tests/ bypasses addopts ignore exclusions | [LRN-014](LRN-014-pytest-explicit-path-bypasses-addopts.md) |
+| LRN-014 | `pytest -q tests/` bypasses `addopts` ignore exclusions | [LRN-014](LRN-014-pytest-explicit-path-bypasses-addopts.md) |
 | LRN-015 | MCP tools/call — emits coercion failure must return isError:True, never except:pass | [LRN-015](LRN-015-mcp-coercion-failure-must-return-iserror.md) |
 | LRN-016 | SSRF IP-block logic must live in agent_sdk/common/http.py — never duplicated | [LRN-016](LRN-016-ssrf-single-predicate-common-http.md) |
 | LRN-017 | wave-cycle.js — schema-gated gate agents required at redteam and proto-fix checkpoints | [LRN-017](LRN-017-wave-cycle-gate-agents-at-checkpoints.md) |
@@ -77,7 +77,7 @@ Entries ordered by LRN number.
 | LRN-071 | template/ is a peer repo — wave todos must commit+push to wailuen/a2a-agent-template, not to a2a-sdk | [LRN-071](LRN-071-template-is-peer-repo-not-submodule.md) |
 | LRN-072 | git add on a directory containing .git creates a gitlink (mode 160000), not file tracking | [LRN-072](LRN-072-git-add-nested-repo-creates-gitlink-not-files.md) |
 | LRN-073 | Scenario runner filter(Boolean) turns crashed agents into silent pass-rate inflation | [LRN-073](LRN-073-acceptance-filter-boolean-nan-denominator.md) |
-| LRN-074 | inspect.get_annotations collapses explicit -> None and missing annotation to the same value | [LRN-074](LRN-074-inspect-get-annotations-none-ambiguity.md) |
+| LRN-074 | inspect.get_annotations collapses explicit `-> None` and missing annotation to the same value | [LRN-074](LRN-074-inspect-get-annotations-none-ambiguity.md) |
 | LRN-075 | Harness workflow fixes don't propagate to template peer repo | [LRN-075](LRN-075-harness-workflow-template-sync-gap.md) |
 | LRN-076 | Wave redteam fix loop must invoke debug agent unconditionally at round 4+ — not only on stall | [LRN-076](LRN-076-redteam-loop-must-call-debug-at-round-4.md) |
 | LRN-077 | Wire-up fixes in build_app() need their own integration test at the app.state seam | [LRN-077](LRN-077-build-app-wire-up-needs-integration-test.md) |
@@ -118,7 +118,7 @@ Entries ordered by LRN number.
 | LRN-112 | Monotonic clock value fed to datetime.fromtimestamp() as if it were epoch time | [LRN-112](LRN-112-monotonic-clock-epoch-confusion.md) |
 | LRN-113 | New abstractmethod on public ABC breaks external subclasses | [LRN-113](LRN-113-public-abc-new-abstractmethod.md) |
 | LRN-114 | Non-total content extraction crashes AG-UI SSE stream without terminal frame | [LRN-114](LRN-114-non-total-sse-validation-crash.md) |
-| LRN-115 | AG-UI _capabilities() fail-closed tier="none" default is intentional — do not "align" it to spec's tier="core | [LRN-115](LRN-115-agui-capabilities-fail-closed-tier-none-default.md) |
+| LRN-115 | AG-UI _capabilities() fail-closed tier="none" default is intentional — do not "align" it to spec's tier="core" | [LRN-115](LRN-115-agui-capabilities-fail-closed-tier-none-default.md) |
 | LRN-116 | MCP tools/call bypasses generator tool dispatch, breaking long-running Tier-1 tools | [LRN-116](LRN-116-mcp-tools-call-bypasses-generator-dispatch.md) |
 | LRN-117 | Allowlist must cover LLM system-prompt teaching surface | [LRN-117](LRN-117-allowlist-must-cover-llm-teaching-surface.md) |
 | LRN-118 | DESIGN.md MCP version-header rule stale after transport split | [LRN-118](LRN-118-protocol-doc-behavior-drift.md) |
@@ -557,3 +557,17 @@ Entries ordered by LRN number.
 | LRN-558 | New rejection filed under Changed instead of Breaking | [LRN-558](LRN-558-new-rejection-filed-under-changed.md) |
 | LRN-559 | New exported testing API lacks Added bullet and file paths | [LRN-559](LRN-559-public-testing-api-no-added-bullet.md) |
 | LRN-560 | Challenge-site test passes without reaching the branch | [LRN-560](LRN-560-vacuous-challenge-site-test.md) |
+| LRN-561 | Stream reader shape guard misses dereferenced fields | [LRN-561](LRN-561-stream-reader-field-guards.md) |
+| LRN-562 | Wire scalars persisted without type check | [LRN-562](LRN-562-wire-scalar-type-check.md) |
+| LRN-563 | Parallel group adds duplicate Unreleased heading | [LRN-563](LRN-563-duplicate-unreleased-heading.md) |
+| LRN-564 | New MockTransport lacks justification comment | [LRN-564](LRN-564-mocktransport-missing-justification.md) |
+| LRN-565 | Base serializer edits dict by field name not alias | [LRN-565](LRN-565-serializer-alias-keys.md) |
+| LRN-566 | Public base-class hook names are reserved and need guards | [LRN-566](LRN-566-reserved-base-hook-names.md) |
+| LRN-567 | Breaking bullet needs ruling URL and accurate scope | [LRN-567](LRN-567-breaking-bullet-ruling-scope.md) |
+| LRN-568 | Each Breaking bullet needs its own path, ruling, migration | [LRN-568](LRN-568-sibling-bullet-completeness.md) |
+| LRN-569 | CHANGELOG file coverage must use full paths | [LRN-569](LRN-569-changelog-full-path-coverage.md) |
+| LRN-570 | No wave-added break may ship with Ruling PENDING | [LRN-570](LRN-570-pending-ruling-break.md) |
+| LRN-571 | CHANGELOG bullet names symbols but not file paths | [LRN-571](LRN-571-changelog-omits-file-paths.md) |
+| LRN-572 | Test listed under Reads rewritten without declaring scope | [LRN-572](LRN-572-undeclared-test-rewrite-scope.md) |
+| LRN-573 | DESIGN.md left stale after protocol rule change | [LRN-573](LRN-573-design-doc-stale-after-protocol-rule.md) |
+| LRN-574 | Resume handler drops protocol cancelled status | [LRN-574](LRN-574-resume-cancelled-status-dropped.md) |

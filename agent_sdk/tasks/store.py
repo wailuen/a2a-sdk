@@ -217,7 +217,12 @@ class TaskStore(abc.ABC):
     def get(self, task_id: str, identity: Identity | None = None) -> TaskRecord | None:
         """Identity-bound lookup: mismatched identity → None (existence is
         not leaked; routes answer 404 + -32001). ``identity=None`` or an
-        admin api_key identity bypasses the binding."""
+        admin api_key identity bypasses the binding.
+
+        GH-271: the record returned for a live task MUST still carry its
+        ``a2ui_opted_in`` and ``accepted_output_modes``. They are runtime-only
+        fields captured at task start; a store that rebuilds records from
+        storage must persist them, or a resume loses the A2UI decision."""
 
     @abc.abstractmethod
     def subscribe(self, task_id: str) -> Subscription:

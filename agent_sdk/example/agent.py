@@ -11,6 +11,7 @@ from ..agent.loop import ToolInterrupt
 from ..agent.registry import ToolSet
 from ..app import Agent
 from ..config import BaseAgentSettings
+from ..contrib.action_gate import Outcome, parse_decision
 from ..models.content_types import (
     KpiCard,
     MetricItem,
@@ -73,14 +74,7 @@ async def publish_note(inp: PublishInput) -> dict[str, Any]:
     """Publish a note (requires user confirmation — interrupt demo)."""
 
     async def confirmed(value: Any) -> dict[str, Any]:
-        if isinstance(value, dict):
-            payload = value.get("payload")
-            status = value.get("status")
-            if status in (None, "resolved") and isinstance(payload, dict):
-                status = payload.get("decision") or payload.get("status")
-        else:
-            status = value
-        if str(status).lower() in ("approved", "yes", "confirm", "true"):
+        if parse_decision(value).outcome is Outcome.APPROVED:
             return {"published": True, "note": inp.note}
         return {"published": False, "reason": "user declined"}
 

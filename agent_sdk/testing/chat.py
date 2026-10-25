@@ -31,6 +31,10 @@ from ..validation.validators import safe_id
 
 logger = logging.getLogger("agent_sdk.testing.chat")
 
+MALFORMED_STREAM_TEXT = "malformed stream frame"
+_MAX_CATALOGS = 32
+_MAX_CATALOG_ID_LEN = 512
+
 
 def _a2ui_extension(card: Any) -> dict[str, Any] | None:
     if not isinstance(card, dict):
@@ -48,11 +52,21 @@ def _advertises_a2ui(card: Any) -> bool:
 
 
 def card_catalog_ids(card: Any) -> list[str]:
-    """``supportedCatalogIds`` from the card's A2UI extension params (strings only)."""
+    """``supportedCatalogIds`` from the card's A2UI extension params.
+
+    Non-empty strings of at most 512 characters, de-duplicated, the standard
+    catalog first when listed, at most 32 entries.
+    """
     ext = _a2ui_extension(card)
     params = ext.get("params") if ext else None
     ids = params.get("supportedCatalogIds") if isinstance(params, dict) else None
-    return [i for i in ids if isinstance(i, str)] if isinstance(ids, list) else []
+    if not isinstance(ids, list):
+        return []
+    good = list(dict.fromkeys(i for i in ids if isinstance(i, str) and 0 < len(i) <= _MAX_CATALOG_ID_LEN))
+    if _STANDARD_CATALOG in good:
+        good.remove(_STANDARD_CATALOG)
+        good.insert(0, _STANDARD_CATALOG)
+    return good[:_MAX_CATALOGS]
 
 
 async def fetch_agent_card(client: Any) -> Any:
@@ -318,12 +332,23 @@ class ChatDriver:
                 raw = raw.strip()
                 if not raw.startswith("data:"):
                     continue
-                frame = json.loads(raw[5:].strip())
+                try:
+                    frame = json.loads(raw[5:].strip())
+                except ValueError:
+                    frame = None
+                if not isinstance(frame, dict):
+                    errored = True
+                    self._fire(emit, "error", MALFORMED_STREAM_TEXT)
+                    break
                 t = frame.get("type")
                 custom_name = frame.get("name") if t == "CUSTOM" else None
 
                 if t == "TOOL_CALL_START":
-                    _pending_tool = frame.get("toolCallName", "")
+                    _pending_tool = frame.get("toolCallName") or ""
+                    if not isinstance(_pending_tool, str):
+                        errored = True
+                        self._fire(emit, "error", MALFORMED_STREAM_TEXT)
+                        break
                     self._fire(emit, "tool_start", _pending_tool)
                 elif t == "TOOL_CALL_ARGS":
                     try:
@@ -335,8 +360,16 @@ class ChatDriver:
                     self._fire(emit, "tool_done")
                     _pending_tool = None
                 elif custom_name == "AGENT_ARTIFACT":
-                    v = frame.get("value") or {}
-                    self._fire(emit, "artifact", v.get("dataType", ""), v.get("toolName", ""))
+                    v = frame.get("value")
+                    if v is None:
+                        v = {}
+                    data_type = v.get("dataType") or "" if isinstance(v, dict) else None
+                    tool_name = v.get("toolName") or "" if isinstance(v, dict) else None
+                    if not isinstance(data_type, str) or not isinstance(tool_name, str):
+                        errored = True
+                        self._fire(emit, "error", MALFORMED_STREAM_TEXT)
+                        break
+                    self._fire(emit, "artifact", data_type, tool_name)
                 elif custom_name == "A2UI_UPDATE":
                     # RT-001 (w038 group G): mirror the tolerant read used by
                     # extract_a2ui() and the console's handleCustom() — accept
@@ -364,6 +397,10 @@ class ChatDriver:
                         roles[str(frame["messageId"])] = frame["role"]
                 elif t in ("TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_CHUNK"):
                     delta = frame.get("delta") or ""
+                    if not isinstance(delta, str):
+                        errored = True
+                        self._fire(emit, "error", MALFORMED_STREAM_TEXT)
+                        break
                     msg_id = frame.get("messageId")
                     if t == "TEXT_MESSAGE_CHUNK":
                         # AG-UI sends messageId on the first chunk only.
@@ -378,13 +415,23 @@ class ChatDriver:
                     self._fire(emit, "text", delta)
                 elif t == "RUN_ERROR":
                     errored = True
-                    self._fire(emit, "error", frame.get("message") or "run failed")
+                    message = frame.get("message") or "run failed"
+                    if not isinstance(message, str):
+                        message = MALFORMED_STREAM_TEXT
+                    self._fire(emit, "error", message)
                     break
                 elif t == "RUN_FINISHED":
                     finished = True
-                    outcome = frame.get("outcome") or {}
+                    outcome = frame.get("outcome")
+                    if not isinstance(outcome, dict):
+                        outcome = {}
                     if outcome.get("type") == "interrupt":
                         interrupts = outcome.get("interrupts") or []
+                        if not isinstance(interrupts, list):
+                            finished = False
+                            errored = True
+                            self._fire(emit, "error", MALFORMED_STREAM_TEXT)
+                            break
                         self._fire(emit, "interrupt", interrupts[0] if interrupts else outcome)
                     break
 

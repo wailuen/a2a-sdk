@@ -311,25 +311,32 @@ def _evict_identity_lru(
 
 
 def _session_alive(
-    sessions: "OrderedDict[str, tuple[float, str, str]]", session_id: str, owner: str
-) -> bool:
-    """Presence + idle-TTL + ownership check; touches last-seen (LRU) when
-    alive AND owned. A mismatched owner is treated as not-found (no existence
-    oracle; the client's recovery path is identical — re-initialize). Never
-    evict on owner mismatch, only on TTL expiry, so one caller can't delete
-    another's live session."""
+    sessions: "OrderedDict[str, tuple[float, str, str]]",
+    session_id: str,
+    owner: str,
+    *,
+    touch: bool = True,
+) -> str | None:
+    """Presence + idle-TTL + ownership check. Returns the owned, live session's
+    negotiated protocol version, else None. ``touch`` refreshes last-seen (LRU)
+    when alive AND owned; ``touch=False`` never refreshes or reorders, so a
+    request that is rejected early cannot keep a session alive. A mismatched
+    owner is treated as not-found (no existence oracle; the client's recovery
+    path is identical — re-initialize). Never evict on owner mismatch, only on
+    TTL expiry, so one caller can't delete another's live session."""
     rec = sessions.get(session_id)
     if rec is None:
-        return False
+        return None
     last_seen, sess_owner, sess_version = rec
     if last_seen <= time.time() - SESSION_TTL_SECONDS:
         sessions.pop(session_id, None)
-        return False
+        return None
     if sess_owner != owner:
-        return False
-    sessions[session_id] = (time.time(), owner, sess_version)
-    sessions.move_to_end(session_id)
-    return True
+        return None
+    if touch:
+        sessions[session_id] = (time.time(), owner, sess_version)
+        sessions.move_to_end(session_id)
+    return sess_version
 
 
 # RT-002 (round 5): the slot record is `common.admission.StreamSlot` (C-024),
@@ -1108,6 +1115,21 @@ async def mcp_post(
     _prune_sessions(sessions)
     owner = _identity_key(identity)
 
+    # GH-273: early exits echo the version of a session the caller OWNS (an
+    # unknown, expired or other-owner id gets the newest, SI-5). touch=False:
+    # a request rejected here must not refresh the session's last-seen.
+    early_id = request.headers.get(_SESSION_ID_HEADER)
+    session_version: str | None = None
+    if early_id is not None and len(early_id) <= 64:
+        session_version = _session_alive(sessions, early_id, owner, touch=False)
+    early_headers = {
+        _PROTOCOL_VERSION_HEADER: (
+            session_version
+            if session_version in SUPPORTED_PROTOCOL_VERSIONS
+            else SUPPORTED_PROTOCOL_VERSIONS[0]
+        )
+    }
+
     # MCP Streamable HTTP 2025-06-18 §3.2.1: clients MUST send
     # Content-Type: application/json.  Reject non-conforming requests with 415;
     # a missing header passes through (dev tools often omit it), and the compare
@@ -1117,7 +1139,7 @@ async def mcp_post(
         return JSONResponse(
             status_code=415,
             content={"error": "Content-Type must be application/json"},
-            headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
+            headers=early_headers,
         )
 
     # RTGA-006: parse the message FIRST so we can determine is_initialize before
@@ -1128,19 +1150,19 @@ async def mcp_post(
     except BodyTooLarge:
         return JSONResponse(
             status_code=413, content={"error": "request body too large"},
-            headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
+            headers=early_headers,
         )
     try:
         message = loads_strict(raw.decode("utf-8")) if raw else {}
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         return JSONResponse(
             content=_error(None, _PARSE_ERROR, _parse_failure_text(exc)),
-            headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
+            headers=early_headers,
         )
     if not isinstance(message, dict):
         return JSONResponse(
             content=_error(None, _INVALID_REQUEST, "invalid request"),
-            headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
+            headers=early_headers,
         )
 
     is_initialize = message.get("method") == "initialize"
@@ -1156,7 +1178,7 @@ async def mcp_post(
         return JSONResponse(
             status_code=400,
             content={"error": "unsupported MCP-Protocol-Version"},
-            headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
+            headers=early_headers,
         )
     # Absent/unrecognized on initialize: fall back to our highest so
     # base_headers is always a valid version string.
@@ -1179,20 +1201,28 @@ async def mcp_post(
             content={"error": "invalid session id"},
             headers=base_headers,
         )
+    live_version: str | None = None
     if presented_session is not None and not is_initialize:
-        if not _session_alive(sessions, presented_session, owner):
+        live_version = _session_alive(sessions, presented_session, owner)
+        if live_version is None:
             return JSONResponse(
                 status_code=404, content={"error": "session not found"}, headers=base_headers
+            )
+        # GH-273: decided only from the owner-checked lookup above, so it is
+        # never an existence/version oracle for another identity's session.
+        if isinstance(version, str) and version != live_version:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "unsupported MCP-Protocol-Version"},
+                headers={_PROTOCOL_VERSION_HEADER: SUPPORTED_PROTOCOL_VERSIONS[0]},
             )
     # GH-200: absent header on a non-initialize request → the version the
     # session negotiated at initialize, else 2025-03-26. Only values from
     # SUPPORTED_PROTOCOL_VERSIONS are ever echoed.
     if version is _HEADER_ABSENT and not is_initialize:
         fallback = "2025-03-26"
-        if presented_session is not None:
-            rec = sessions.get(presented_session)
-            if rec is not None and rec[2] in SUPPORTED_PROTOCOL_VERSIONS:
-                fallback = rec[2]
+        if live_version in SUPPORTED_PROTOCOL_VERSIONS:
+            fallback = live_version
         base_headers = {_PROTOCOL_VERSION_HEADER: fallback}
 
     if _is_jsonrpc_response(message):
@@ -1278,7 +1308,7 @@ async def mcp_get(
             )
         sessions = _sessions(request.app)
         _prune_sessions(sessions)
-        if not _session_alive(sessions, presented_session, _identity_key(identity)):
+        if _session_alive(sessions, presented_session, _identity_key(identity)) is None:
             return JSONResponse(
                 status_code=404,
                 content={"error": "session not found"},

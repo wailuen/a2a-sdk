@@ -30,9 +30,11 @@ on `/v1/*` → 500 `-32603` "internal error" (fixed text). `acceptedOutputModes`
 matching is case-insensitive, ignores parameters, and accepts `*/*` and `type/*`
 (`text` stays an alias of `text/plain`); `Content-Type` is compared
 case-insensitively; `historyLength` applies to the resume reply and the first
-stream snapshot. `-32004` takes its HTTP status per call site (GH-266): a wrong-state message
-(terminal-task resume on `message:send` or `message:stream`, and `message:send`
-to a task that is not awaiting input) → 400; an unsupported operation and the
+stream snapshot. Deviation (GH-266): A2A v0.3.0 maps `-32004` to HTTP 501; the SDK answers 400 for wrong-state messages
+(ruling: https://github.com/wailuen/a2a-sdk/issues/266#issuecomment-6395232882, restated in
+https://github.com/wailuen/a2a-sdk/issues/271#issuecomment-6398502964). `-32004` takes its HTTP status per call site: a wrong-state message
+(terminal-task resume on `message:send` or `message:stream`, and `message:send` or
+`message:stream` to a task that is not awaiting input) → 400; an unsupported operation and the
 colon-id wrong-verb guard (`GET /v1/tasks/{id}:cancel`) → 501; the 405 a wrong
 HTTP verb gets from the router is transport-level and also carries `-32004`.
 JSON-RPC client codes map `-32600` → 400 and `-32601` → 404 (with `-32700` and
@@ -170,7 +172,10 @@ never `RUN_ERROR`.
   bearer gets `Bearer error="invalid_token", resource_metadata="..."`. Failed
   bearers count in their own per-IP window and the `/oauth/*` endpoints in
   another; both are sized by `AGENT_SDK_UNAUTH_RATE_LIMIT`, so one cannot drain
-  the other. An API `/oauth/*` 429 (`register`, `token`, `revoke`) is
+  the other. `POST /oauth/revoke` with a bad bearer also counts in the
+  failed-bearer window. When that window is spent, the 429 carries `Retry-After`
+  and the same `Bearer error="invalid_token", resource_metadata="..."` challenge
+  as the 401 (that surface's PRM URL), so a client knows to re-authenticate. An API `/oauth/*` 429 (`register`, `token`, `revoke`) is
   `{"error":"temporarily_unavailable","error_description":"rate limit exceeded"}`
   with `Retry-After` and `Cache-Control: no-store`; the four browser routes
   (`GET`/`POST /oauth/authorize`, `GET /oauth/idp/callback`,
@@ -179,6 +184,10 @@ never `RUN_ERROR`.
 - Versions: `initialize` echoes the client's `protocolVersion` when it is
   2025-11-25, 2025-06-18 or 2025-03-26; any other value gets the newest
   (2025-11-25). `serverInfo.title` is sent only at 2025-11-25 (the title gate).
+  After `initialize`, a present `MCP-Protocol-Version` on a request that carries
+  an owned `Mcp-Session-Id` must equal the version that session negotiated, else
+  400 `unsupported MCP-Protocol-Version` (GH-273). An absent header uses the
+  session's version. An unknown or other-owner session id stays 404.
   Deviation (GH-266): a tool that declares `emits` (so it advertises
   `outputSchema`) but returns no value (None) answers `isError: false` with an
   empty text block and no `structuredContent`, although MCP 2025-06-18 says a

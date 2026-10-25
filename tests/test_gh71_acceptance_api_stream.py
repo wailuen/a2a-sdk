@@ -500,9 +500,10 @@ _EXTRACTION_INVARIANTS = (
         'if ev.get("final") or st == "completed":',
         'if ev.get("final") or st == "completed":',
     ),
-    # (2) art_dtype = metadata.data_type or name
+    # (2) art_dtype = metadata.data_type or name (GH-268: metadata goes through
+    # the _obj shape guard so a non-object metadata cannot raise)
     (
-        'dtype = (art.get("metadata") or {}).get("data_type") or art.get("name")',
+        'dtype = _obj(art.get("metadata")).get("data_type") or art.get("name")',
         'art_dtype = art_meta.get("data_type") or art.get("name")',
     ),
 )

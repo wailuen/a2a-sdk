@@ -1065,3 +1065,133 @@ def test_check_structured_other_validator_error_is_not_reported_as_ref(monkeypat
     tool = {"outputSchema": {"type": "object"}}
     out = mcp_mod._check_structured(tool, {"structuredContent": {}})
     assert "$ref" not in out and "secret detail" not in out and out
+
+
+# ── GH-268 ────────────────────────────────────────────────────────────────────
+
+_MARK = "marker-77c2-LEAK"
+
+
+def _task_frame():
+    return {"kind": "task", "id": "t1", "contextId": "c1"}
+
+
+def _bad_a2a_bodies():
+    status = lambda s: {"kind": "status-update", "taskId": "t1", "final": True, "status": s}  # noqa: E731
+    return {
+        "bad-json": f"data: {{bad {_MARK}\n\n".encode(),
+        "array": f'data: ["{_MARK}"]\n\n'.encode(),
+        "status-not-object": _sse(_task_frame(), status(f"{_MARK}")),
+        "id-not-string": _sse({"kind": "task", "id": 123, "contextId": "c1"}),
+        "state-not-string": _sse(
+            _task_frame(), {"kind": "status-update", "taskId": "t1", "final": True, "status": {"state": ["x"]}}
+        ),
+        "text-not-string": _sse(
+            _task_frame(),
+            status({"state": "completed", "message": {"parts": [{"kind": "text", "text": {"x": _MARK}}]}}),
+        ),
+        "parts-not-list": _sse(
+            _task_frame(), status({"state": "completed", "message": {"parts": {"kind": "text", "text": _MARK}}})
+        ),
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", list(_bad_a2a_bodies()))
+async def test_a2a_bad_frame_shape_is_malformed_stream(shape, caplog):
+    client = _card_client({"capabilities": {}}, [], _bad_a2a_bodies()[shape])
+    with caplog.at_level("DEBUG"):
+        at = await _a2a_attempt(client, "q", {})
+    assert at.reason == "malformed-stream"
+    assert not at.classify()
+    assert _MARK not in at.reply and _MARK not in at.error_text and _MARK not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_card_429_then_success_gets_the_real_card(tmp_path):
+    from agent_sdk.testing import turns
+
+    gets: list = []
+    posts: list = []
+    body = _sse({"kind": "message", "role": "agent", "parts": [{"kind": "text", "text": "ok"}]})
+    card = _a2ui_card(["urn:real"])
+    cards = [httpx.Response(429), httpx.Response(200, json=card)]
+
+    def handler(req):
+        if req.method == "GET":
+            gets.append(req)
+            return cards.pop(0)
+        posts.append(req)
+        return httpx.Response(200, content=body)
+
+    # MockTransport: build_app cannot serve a 429 agent card then a good one.
+    client = httpx.AsyncClient(base_url="http://t", transport=httpx.MockTransport(handler))
+    orig, turns._sleep = turns._sleep, _no_sleep
+    try:
+        out = await turns.run_turn(
+            transport="a2a", base_url="http://t", key_file="unused", query="q", run_key="c429",
+            state_dir=tmp_path, lock_dir=tmp_path / "locks", client=client,
+        )
+    finally:
+        turns._sleep = orig
+    assert out["ok"] is True and out["attempts"] == 2
+    assert len(gets) == 2 and len(posts) == 1
+    caps = json.loads(posts[0].content)["message"]["metadata"]["a2uiClientCapabilities"]
+    assert caps["catalogs"] == [_STD, "urn:real"]
+
+
+@pytest.mark.asyncio
+async def test_card_429_failure_reports_http_429(tmp_path):
+    # MockTransport: build_app cannot serve a 429 agent card.
+    client = httpx.AsyncClient(
+        base_url="http://t", transport=httpx.MockTransport(lambda req: httpx.Response(429))
+    )
+    from agent_sdk.testing.turns import run_turn
+
+    out = await run_turn(
+        transport="a2a", base_url="http://t", key_file="unused", query="q", run_key="c429b",
+        state_dir=tmp_path, lock_dir=tmp_path / "locks", budget_s=0.05, client=client,
+    )
+    assert out["ok"] is False and out["reason"] == "http-429" and out["failureClass"] == "rate-limited"
+
+
+@pytest.mark.asyncio
+async def test_card_retry_builds_no_new_client(tmp_path, monkeypatch):
+    from agent_sdk.testing import turns
+
+    built: list = []
+    real = httpx.AsyncClient.__init__
+
+    def counting(self, *a, **k):
+        built.append(1)
+        real(self, *a, **k)
+
+    cards = [httpx.Response(503), httpx.Response(200, json={"capabilities": {}})]
+
+    def handler(req):
+        if req.method == "GET":
+            return cards.pop(0)
+        return httpx.Response(200, content=_sse({"kind": "message", "parts": [{"kind": "text", "text": "ok"}]}))
+
+    # MockTransport: build_app cannot serve a 429 agent card then a good one.
+    client = httpx.AsyncClient(base_url="http://t", transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", counting)
+    monkeypatch.setattr(turns, "_sleep", _no_sleep)
+    out = await turns.run_turn(
+        transport="a2a", base_url="http://t", key_file="unused", query="q", run_key="c503",
+        state_dir=tmp_path, lock_dir=tmp_path / "locks", client=client,
+    )
+    assert out["ok"] is True and out["attempts"] == 2
+    assert built == []
+
+
+def test_card_catalog_ids_are_bounded():
+    from agent_sdk.testing.chat import card_catalog_ids
+
+    ids = [f"urn:c{i}" for i in range(97)] + ["", "x" * 1000, _STD]
+    assert len(ids) == 100
+    got = card_catalog_ids(_a2ui_card(ids))
+    assert len(got) <= 32
+    assert got[0] == _STD
+    assert all(g and len(g) <= 512 for g in got)
+    assert len(set(got)) == len(got)

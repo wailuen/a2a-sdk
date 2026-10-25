@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import enum
 import inspect
+import json
 import logging
 from collections.abc import Sequence
 
@@ -65,6 +66,14 @@ def _own_annotation_names(klass: type) -> frozenset[str]:
         return frozenset(vars(klass).get("__annotations__", {}))
 
 
+def _values_str(values: Sequence[object]) -> str:
+    """``a|b`` for allowed values: all-string values share one pair of quotes,
+    anything else is rendered as JSON (``1|2``, ``true|false``)."""
+    if all(isinstance(v, str) for v in values):
+        return '"' + "|".join(str(v) for v in values) + '"'
+    return "|".join(json.dumps(v) for v in values)
+
+
 def _annotation_str(ann: object, required: bool, depth: int = 0) -> tuple[str, bool]:
     """Return a (short_type_name, is_required) pair for a Pydantic field annotation.
 
@@ -75,6 +84,9 @@ def _annotation_str(ann: object, required: bool, depth: int = 0) -> tuple[str, b
     """
     import types as _types
     import typing as _typing
+
+    if _typing.get_origin(ann) is _typing.Annotated:
+        return _annotation_str(_typing.get_args(ann)[0], required, depth)
 
     origin = getattr(ann, "__origin__", None)
     if isinstance(ann, _types.UnionType) or origin is _typing.Union:
@@ -99,12 +111,10 @@ def _annotation_str(ann: object, required: bool, depth: int = 0) -> tuple[str, b
         return "{key: " + value_str + "}", required
 
     if origin is _typing.Literal:
-        values = ann.__args__  # type: ignore[attr-defined]
-        joined = "|".join(str(v) for v in values)
-        return (f'"{joined}"' if all(isinstance(v, str) for v in values) else joined), required
+        return _values_str(ann.__args__), required  # type: ignore[attr-defined]
 
     if isinstance(ann, type) and issubclass(ann, enum.Enum):
-        return '"' + "|".join(str(m.value) for m in ann) + '"', required
+        return _values_str([m.value for m in ann]), required
 
     cls_name = getattr(ann, "__name__", None)
     if cls_name:

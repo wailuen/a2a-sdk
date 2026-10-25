@@ -741,3 +741,83 @@ def test_send_while_busy_shows_the_fixed_note_and_keeps_the_text():
 def test_run_paths_pass_the_same_signal_to_the_retry_wait(call):
     out = _node_run([], f"state.abort = new AbortController(); await {call};")
     assert out["retrySignalMatches"] is True
+
+
+# ── GH-268: malformed AG-UI frames ───────────────────────────────────────────
+
+MARKER = "marker-9d41-LEAK"
+
+
+def _bad_frames():
+    return [
+        f"data: {{bad {MARKER}\n\n".encode(),
+        f'data: ["{MARKER}"]\n\n'.encode(),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", _bad_frames())
+async def test_agui_bad_frame_is_a_failed_attempt_not_an_exception(bad, caplog):
+    from agent_sdk.testing.turns import _agui_attempt
+
+    d = _driver(_content_frame_then(bad))
+    messages = [{"id": "x", "role": "user", "content": "old"}]
+    before = list(messages)
+    with caplog.at_level("DEBUG"):
+        at = await _agui_attempt(d._client, "q", "th", messages, d)
+    assert at.reason == "malformed-stream"
+    assert messages == before
+    assert MARKER not in at.error_text and MARKER not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", _bad_frames())
+async def test_agui_turn_bad_frame_appends_nothing(bad):
+    d = _driver(_content_frame_then(bad))
+    messages: list = []
+    errors: list = []
+    assert await d.agui_turn("q", "th", messages, emit={"error": errors.append}) == ""
+    assert messages == []
+    assert errors and all(MARKER not in e for e in errors)
+
+
+def _bad_shape_frames():
+    def f(d):
+        return f"data: {json.dumps(d)}\n\n".encode()
+
+    return [
+        f({"type": "CUSTOM", "name": "AGENT_ARTIFACT", "value": "x"}),
+        f({"type": "RUN_FINISHED", "outcome": {"type": "interrupt", "interrupts": {"a": 1}}}),
+        f({"type": "RUN_ERROR", "message": 123}),
+        f({"type": "TOOL_CALL_START", "toolCallName": 5}),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", _bad_shape_frames())
+async def test_agui_wrong_typed_field_is_malformed_stream(bad):
+    from agent_sdk.testing.turns import _agui_attempt
+
+    d = _driver(_content_frame_then(bad))
+    at = await _agui_attempt(d._client, "q", "th", [], d)
+    assert at.reason == "malformed-stream"
+
+
+def _content_frame_then(bad):
+    return _sse(_content("partial")) + bad + _sse(FINISHED)
+
+
+@pytest.mark.asyncio
+async def test_run_turn_reports_malformed_stream_reason(tmp_path):
+    def handler(req):
+        if req.method == "GET":
+            return httpx.Response(200, json={"capabilities": {}})
+        return httpx.Response(200, content=_content_frame_then(_bad_frames()[0]))
+
+    client = httpx.AsyncClient(base_url="http://t", transport=httpx.MockTransport(handler))
+    out = await run_turn(
+        transport="agui", base_url="http://t", key_file="unused", query="q", run_key="m1",
+        state_dir=tmp_path, lock_dir=tmp_path / "locks", budget_s=0.05, client=client,
+    )
+    assert out["ok"] is False and out["reason"] == "malformed-stream"
+    assert MARKER not in json.dumps(out)

@@ -84,6 +84,31 @@ def emitted_paths(value: Any, prefix: str = "") -> set[str]:
     return out
 
 
+def undeclared_paths(node: Any, value: Any, prefix: str = "") -> set[str]:
+    """Reverse walk: paths in an emitted *value* that the parsed schema *node*
+    does not name, recursing into nested objects and lists. A schema node that
+    is a bare type (a string, ``None``) or an empty ``{}`` (an open map) is
+    free-form below it."""
+    if isinstance(value, list):
+        if not isinstance(node, list):
+            return set()
+        out: set[str] = set()
+        for item in value:
+            out |= undeclared_paths(node[0], item, prefix + "[]")
+        return out
+    if not isinstance(value, dict) or not isinstance(node, dict) or not node:
+        return set()
+    declared = {key.rstrip("?"): sub for key, sub in node.items()}
+    out = set()
+    for key, sub in value.items():
+        path = f"{prefix}.{key}" if prefix else key
+        if key not in declared:
+            out.add(path)
+        else:
+            out |= undeclared_paths(declared[key], sub, path)
+    return out
+
+
 def top_level_keys(schema: str) -> set[str]:
     """Top-level key names (optional marker stripped); empty for prose schemas."""
     if not schema.startswith("{"):
