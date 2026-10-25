@@ -56,3 +56,6 @@ Findings are deduped by file+description across all redteam rounds. Unicode char
 - Problem: GH-250 makes both helpers drop Unicode format/bidi characters. Only the `safe_id_text` paragraph was updated. The Standalone slots (`safe_line_text`) and `safe_cell_text` sections still list only line-break and control handling, so developers won't expect ZWJ emoji sequences or Persian ZWNJ to be removed from titles and cells.
 - Fix: add to both sections: "Unicode format and bidi characters (category Cf, e.g. U+202E, ZWJ, ZWNJ) are dropped (GH-250)."
 - sdkCandidate: true
+
+---
+Filed 2026-10-25 by /sdk-autoloop cycle 1: verified still-present mediums (and lows sharing a fix) are in #251–#260. Other lows stay here, unfiled.

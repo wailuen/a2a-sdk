@@ -69,3 +69,6 @@ Findings were raised across several redteam rounds. Duplicates (same file + same
 ### D11. DESIGN.md §5.3 lacks the new resume rules [SDK]
 - File: `DESIGN.md:357` (RT-010 r4)
 - Fix: add: `resume` holds exactly one entry; non-list, multi-entry, non-object entry, or a present status other than resolved/cancelled ends the run with RUN_ERROR `invalid resume entry` (code validation); missing/null status delivered as None; absent/null/empty `resume` is a fresh run (GH-247).
+
+---
+Filed 2026-10-25 by /sdk-autoloop cycle 1: verified still-present mediums (and lows sharing a fix) are in #251–#260. Other lows stay here, unfiled.

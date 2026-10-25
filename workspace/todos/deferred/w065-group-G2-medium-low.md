@@ -116,3 +116,6 @@ Findings were raised across several redteam rounds; duplicates (same file + same
 - Source: RT-013 — sdkCandidate
 - Problem: `['S-1','S-99']` or `['S-1', 5]` silently drops unmatched ids (same fail-open class as GH-245 item 8).
 - Fix: in both byte-identical copies, throw fixed text (e.g. 'acceptance-api: some onlyIds matched no scenario', no echo) when scenarios.length < distinct onlyIds count. Add node mutation case to tests/test_gh131_acceptance_api_args_normalization.py. Commit/push template copy only (LRN-071).
+
+---
+Filed 2026-10-25 by /sdk-autoloop cycle 1: verified still-present mediums (and lows sharing a fix) are in #251–#260. Other lows stay here, unfiled.

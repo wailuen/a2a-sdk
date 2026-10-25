@@ -49,3 +49,6 @@ Quote: `_MAX_BODY_BYTES = 1 * 1024 * 1024  # 1 MB — consistent with AG-UI cap`
 _mode_accepted was inserted mid constant block; _MAX_BODY_BYTES follows its `return` with no blank lines (PEP 8 E305), reading as part of the function body.
 
 Fix: Move _mode_accepted below the constant block (after the RT-002 comment and constants), with two blank lines before and after.
+
+---
+Filed 2026-10-25 by /sdk-autoloop cycle 1: verified still-present mediums (and lows sharing a fix) are in #251–#260. Other lows stay here, unfiled.

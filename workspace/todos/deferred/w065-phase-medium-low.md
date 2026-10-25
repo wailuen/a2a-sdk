@@ -143,3 +143,6 @@ Findings were raised across several redteam rounds. Repeats of the same file and
 - Rounds: RT-015, RT-012
 - Issue: one blank line after `_TASK_ID_SHAPE`; `_MAX_BODY_BYTES` sits right under `_mode_accepted`'s body.
 - Fix: add blank lines; move `_MAX_BODY_BYTES` next to `_SUPPORTED_MODES` above `_mode_accepted`.
+
+---
+Filed 2026-10-25 by /sdk-autoloop cycle 1: verified still-present mediums (and lows sharing a fix) are in #251–#260. Other lows stay here, unfiled.

@@ -44,3 +44,6 @@ All items are sdkCandidate: true.
 - File: tests/test_gh246_mcp_route.py:85
 - Problem: no test for a non-numeric Content-Length (`except ValueError: pass` fallback) or a Content-Length claiming less than the cap while the body streams past it (the lying-header case the module docstring defends against). A change trusting the declared length would pass all current tests.
 - Fix: (a) headers `[(b"content-length", b"abc")]` with a body under the cap returns the body; (b) headers `[(b"content-length", b"5")]` with chunks totalling more than the cap raises `BodyTooLarge`, and `served[0]` stays small.
+
+---
+Filed 2026-10-25 by /sdk-autoloop cycle 1: verified still-present mediums (and lows sharing a fix) are in #251–#260. Other lows stay here, unfiled.

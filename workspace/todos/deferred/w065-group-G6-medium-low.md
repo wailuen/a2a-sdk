@@ -44,3 +44,6 @@ All items are sdkCandidate: true.
 - Quote: `return f"{cls_name}{_nested_fields(ann, depth - 1)}", required`
 - Problem: the budget loop drops only whole top-level optional fields; optional inner fields of a required nested field are never dropped, so a required nested model with many optional fields yields a system-prompt line far over 250 chars, breaking the `_field_summary` budget promise.
 - Fix: track optional inner fields in `_nested_fields` and drop them (append `...`) when over budget; or cap each expanded nested part (required inner fields, plus optional ones under a per-field cap). Test: required nested model with ~20 optional fields → len(summary) bounded.
+
+---
+Filed 2026-10-25 by /sdk-autoloop cycle 1: verified still-present mediums (and lows sharing a fix) are in #251–#260. Other lows stay here, unfiled.

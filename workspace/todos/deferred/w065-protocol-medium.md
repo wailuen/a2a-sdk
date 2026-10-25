@@ -90,3 +90,6 @@ Still open:
 - [AG-UI/low] one NaN in tool args replaces all args with {} (ag_ui.py ~352).
 - [AG-UI/low] Reset doesn't abort the running stream; history snapshot taken after await catalogIdsReady (chat.js ~229-243, ~545).
 - [AG-UI/low] NestingTooDeep is not copy/pickle-safe (json_strict.py ~68-72).
+
+---
+Filed 2026-10-25 by /sdk-autoloop cycle 1: verified still-present mediums (and lows sharing a fix) are in #251–#260. Other lows stay here, unfiled.

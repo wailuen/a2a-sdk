@@ -97,3 +97,6 @@ All items are sdkCandidate: true.
 - File: tests/test_gh239_console_caps.py:114 (and test_no_spread_over_payload_arrays, line 173)
 - Problem: they read source text only, but skip without node, incl. the "no Math.max(...spread)" guard.
 - Fix: remove @needs_node from both.
+
+---
+Filed 2026-10-25 by /sdk-autoloop cycle 1: verified still-present mediums (and lows sharing a fix) are in #251–#260. Other lows stay here, unfiled.
