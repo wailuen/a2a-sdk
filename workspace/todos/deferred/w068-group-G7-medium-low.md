@@ -43,3 +43,7 @@ Non-blocking — these did not block w068's archive. Address opportunistically o
 - Quote: `"properties": {"decision": {"enum": ["approved", "denied"]}},`
 - Problem: example imports contrib.action_gate yet keeps its own schema with 'approved'/'denied', differing from `action_gate.DEFAULT_CONFIRM_SCHEMA` and docs/protocols.md wording ('approved'/'rejected'). Second copy of a registered capability.
 - Fix: Import and pass `DEFAULT_CONFIRM_SCHEMA` as response_schema, or change enum to ['approved', 'rejected']; note in the GH-274 CHANGELOG line.
+
+---
+
+Autoloop cycle 4 (2026-10-26): critical/high-only filter. The 4 high candidates (sdk-candidates 2/4/5, G3 migration line) were re-verified at v0.25.0: all fixed or low. Nothing filed; loop finished.

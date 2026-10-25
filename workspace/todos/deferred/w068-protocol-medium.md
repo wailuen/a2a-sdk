@@ -141,3 +141,7 @@ Wave: w068. Date: 2026-10-26. Source: the wave's final protocol audit.
 - Rule: mcp-protocol §1 / §14: batching rules by version
 - Description: routes/mcp.py:1162-1166 answers any JSON array body with -32600 and HTTP 200. That is right for 2025-06-18 and later (no batching). A session that negotiated 2025-03-26 may legally send batches, so those would be refused. Separately, routes/oauth.py:229 advertises scopes_supported: [] (allowed, but an empty array can confuse strict clients), and the AS metadata has no openid-configuration fallback and no RFC 9207 iss response parameter. None of these block Claude.ai.
 - Fix: Either state in docs that 2025-03-26 is supported without batching, or drop 2025-03-26. Omit scopes_supported while no scopes exist. Optionally add iss to authorization responses.
+
+---
+
+Autoloop cycle 4 (2026-10-26): critical/high-only filter. The 4 high candidates (sdk-candidates 2/4/5, G3 migration line) were re-verified at v0.25.0: all fixed or low. Nothing filed; loop finished.

@@ -73,3 +73,7 @@ Findings were collected across every redteam round and deduped by file and descr
 - Issue: Omits the "task is not awaiting input" trigger on `message:send`/`message:stream` and the GH-266 HTTP 400 deviation (GH-271 ruling item 4). docs/protocols.md was updated; this table was not.
 - Fix: Extend the row: "terminal-task re-message or message to a task not awaiting input (`message:send`, `message:stream`) → HTTP 400 (GH-266 deviation; A2A v0.3.0 says 501); any unimplemented method → 501". DESIGN.md is outside G4's Modifies list; route via the owning group or a follow-up.
 - sdkCandidate: true
+
+---
+
+Autoloop cycle 4 (2026-10-26): critical/high-only filter. The 4 high candidates (sdk-candidates 2/4/5, G3 migration line) were re-verified at v0.25.0: all fixed or low. Nothing filed; loop finished.

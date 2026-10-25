@@ -104,3 +104,7 @@ All entries are `[SDK]`, sdkCandidate: true.
 - File: `agent_sdk/models/content_types.py:415`
 - Problem: every dump now goes through a Python callback, even for 40+ classes with no rule. 5000-item EntityList wire(): 0.79 ms -> 5.38 ms (~7x); 5000-point TimeSeriesChart: 2.5 ms -> 5.8 ms. Hits every A2A/AG-UI/MCP artifact build.
 - Fix: cache per class whether it has keeps_null/omitted/hook and return `handler(self)` early; or move the rule to an intermediate base (e.g. `_WireRule(_Wire)`) used only by TimeSeriesDataPoint, ColumnDef, DocumentItem, and warn in `__pydantic_init_subclass__` when a class declares the ClassVars without it.
+
+---
+
+Autoloop cycle 4 (2026-10-26): critical/high-only filter. The 4 high candidates (sdk-candidates 2/4/5, G3 migration line) were re-verified at v0.25.0: all fixed or low. Nothing filed; loop finished.

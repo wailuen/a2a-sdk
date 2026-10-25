@@ -65,3 +65,7 @@ Findings are deduped by file + description across all redteam rounds. Later-roun
 - Problem: Same header read into `early_id` and `presented_session`, each with its own 64-char check. Easy to drift.
 - Fix: Read once at the top as `presented_session` and reuse for both lookups.
 - SDK candidate: yes
+
+---
+
+Autoloop cycle 4 (2026-10-26): critical/high-only filter. The 4 high candidates (sdk-candidates 2/4/5, G3 migration line) were re-verified at v0.25.0: all fixed or low. Nothing filed; loop finished.

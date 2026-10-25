@@ -37,3 +37,7 @@ Quote: `import pytest`
 - Description: Unused import: nothing in the new test file uses pytest.
 - Fix: Remove the `import pytest` line.
 - SDK candidate: yes
+
+---
+
+Autoloop cycle 4 (2026-10-26): critical/high-only filter. The 4 high candidates (sdk-candidates 2/4/5, G3 migration line) were re-verified at v0.25.0: all fixed or low. Nothing filed; loop finished.

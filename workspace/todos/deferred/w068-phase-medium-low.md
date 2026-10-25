@@ -76,3 +76,7 @@ accepts_a2ui_mode (C-097) hard-codes its own copy instead of reusing content_typ
 `modes = config.accepted_output_modes if config is not None else None`
 C-006/C-097: echo must read the same per-request decision the build used. _a2ui_decision recomputes from params.configuration while the runner builds from record.accepted_output_modes; they agree only because _create_task_record copies non-empty modes. Also the G5 SI-2 AC (token absent from logs and HTML 429 page) has no caplog assertion in tests/test_gh260_rate_limit.py.
 - Fix: _a2ui_decision reads record.accepted_output_modes; add caplog checks that the bad bearer never appears in logs on /v1, /ag-ui/run, /mcp and /oauth/revoke 429 paths.
+
+---
+
+Autoloop cycle 4 (2026-10-26): critical/high-only filter. The 4 high candidates (sdk-candidates 2/4/5, G3 migration line) were re-verified at v0.25.0: all fixed or low. Nothing filed; loop finished.

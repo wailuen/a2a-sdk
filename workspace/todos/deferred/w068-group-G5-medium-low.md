@@ -45,3 +45,7 @@ Quote: `("POST", "/mcp", {"json": {}}, True),`
 - Description: Ruling item 4 asks for a test of the POST /mcp 429 shape. The parametrized test checks status, Retry-After and the challenge, but not the /mcp 429 body. The expired-token case is tested only on /v1, and the 401 it gets before the limiter is spent is checked for status only, not for the invalid_token challenge (SI-5 AC: expired bearers still 401 with resource_metadata).
 - Fix: For the /mcp case, assert the exact 429 body (today {'detail': 'rate limit exceeded'}). In test_expired_token_429_carries_challenge, assert that the first response's www-authenticate starts with INVALID, and parametrize over /mcp so the MCP-suffixed PRM is checked.
 - SDK candidate: yes
+
+---
+
+Autoloop cycle 4 (2026-10-26): critical/high-only filter. The 4 high candidates (sdk-candidates 2/4/5, G3 migration line) were re-verified at v0.25.0: all fixed or low. Nothing filed; loop finished.

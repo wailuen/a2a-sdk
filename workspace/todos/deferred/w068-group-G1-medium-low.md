@@ -102,3 +102,7 @@ Findings come from several redteam rounds. IDs repeat across rounds, so each ent
 - Fix: Change to `# MockTransport: build_app cannot serve a 503 agent card then a good one.`
 
 All findings above are sdkCandidate: true.
+
+---
+
+Autoloop cycle 4 (2026-10-26): critical/high-only filter. The 4 high candidates (sdk-candidates 2/4/5, G3 migration line) were re-verified at v0.25.0: all fixed or low. Nothing filed; loop finished.
