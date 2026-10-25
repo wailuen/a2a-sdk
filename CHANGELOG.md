@@ -4,7 +4,7 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
-## [Unreleased]
+## [0.25.0] — 2026-10-26
 
 ### 🔴 Breaking changes
 - GH-273: `POST /mcp` now answers 400 `unsupported MCP-Protocol-Version` when a request on an owned, live session carries an `MCP-Protocol-Version` that differs from the version that session negotiated at `initialize` (it was accepted before). An unknown, expired or other-owner `Mcp-Session-Id` still gets 404 `session not found`. Early exits (415, 413, parse error, invalid request, unknown-version 400) echo the owned session's negotiated version, else the newest; they no longer refresh the session's last-seen. `_session_alive` (`agent_sdk/routes/mcp.py`) gains keyword-only `touch=True` and returns the session version or None (was bool). Ruling: https://github.com/wailuen/a2a-sdk/issues/273#issuecomment-6398503498. **Migration:** send the same `MCP-Protocol-Version` on every request of a session that you negotiated at `initialize`, or omit the header. Tests: `tests/test_gh273_mcp_session_version.py`; `tests/test_mcp_gh77_absent_version_header.py` (`test_present_supported_version_header_echoed` now inits the session at 2025-03-26, because the old case, session 2025-06-18 with header 2025-03-26, is now the GH-273 400). Docs: `docs/protocols.md`.
