@@ -137,19 +137,17 @@ export function renderA2ui(messages, opts = {}) {
       if (existing && existing.closed) {
         notes.push(`createSurface rejected: surface ${surfaceId} is closed`);
         return;
-      } else if (existing && !existing.closed) {
+      } else if (existing) {
         console.warn("[a2ui] duplicate createSurface for open surface ignored (replay); updates still applied", surfaceId);
         return;
       }
-      if (!existing) {
-        surfaces.set(surfaceId, {
-          catalogId: catalogId || "",
-          _componentMap: new Map(),
-          dataModel: {},
-          node: null,
-          closed: false,
-        });
-      }
+      surfaces.set(surfaceId, {
+        catalogId: catalogId || "",
+        _componentMap: new Map(),
+        dataModel: {},
+        node: null,
+        closed: false,
+      });
       touched.add(surfaceId);
     } else if (msg.updateComponents) {
       const { surfaceId, components } = msg.updateComponents;
@@ -210,8 +208,10 @@ export function renderA2ui(messages, opts = {}) {
   for (const surfaceId of deletions) {
     const entry = surfaces.get(surfaceId);
     if (entry) {
-      entry.closed = true;
-      surfaces.delete(surfaceId); // painted node persists as a snapshot
+      entry.closed = true; // tombstone: a later createSurface for this id is rejected
+      entry.node = null; // painted node persists in the transcript as a snapshot
+      entry._componentMap = new Map();
+      entry.dataModel = {};
     }
   }
 
@@ -400,16 +400,35 @@ function fallbackNode(fallbackText, reason) {
 
 export const MAX_ROWS = 100;
 
-function capRows(items) {
-  return items.length > MAX_ROWS ? items.slice(0, MAX_ROWS) : items;
+export function capRows(items, limit = MAX_ROWS) {
+  return items.length > limit ? items.slice(0, limit) : items;
 }
 
-function moreNote(items) {
-  const extra = items.length - MAX_ROWS;
-  return extra > 0 ? el("div", { class: "dim a2ui-more" }, `${extra} more`) : null;
+/* `extra` is the number of items left out; `noun` labels what they are. */
+export function moreNote(extra, noun) {
+  return extra > 0 ? el("div", { class: "dim a2ui-more" }, noun ? `${extra} more ${noun}` : `${extra} more`) : null;
 }
 
 export const MAX_COLUMNS = 10;
+export const MAX_SECTIONS = 10;
+export const MAX_CELLS = 1000;
+
+/* ── field-length cap (GH-255): one clip for every string a renderer prints ── */
+
+export const MAX_TEXT = 256;
+export const MAX_LONG_TEXT = 2000;
+export const MAX_PROSE = 20000;
+export const MAX_RAW = 50000;
+
+export function clip(value, max = MAX_TEXT) {
+  if (value === null || value === undefined) return "";
+  const text = String(value);
+  if (text.length <= max) return text;
+  let cut = text.slice(0, max - 1);
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+  return `${cut}…`;
+}
 
 function maxOf(values, floor) {
   return values.reduce((acc, v) => (v > acc ? v : acc), floor);
@@ -417,11 +436,6 @@ function maxOf(values, floor) {
 
 function minOf(values, ceil) {
   return values.reduce((acc, v) => (v < acc ? v : acc), ceil);
-}
-
-function moreColumnsNote(columns) {
-  const extra = columns.length - MAX_COLUMNS;
-  return extra > 0 ? el("div", { class: "dim a2ui-more" }, `${extra} more columns`) : null;
 }
 
 /* ── generic data-driven renderer for components with no dedicated one ── */
@@ -440,7 +454,7 @@ function isScalar(v) {
 
 function scalarText(v) {
   if (v === null || v === undefined) return "—";
-  return typeof v === "number" ? fmtNum(v) : String(v);
+  return typeof v === "number" ? fmtNum(v) : clip(v, MAX_LONG_TEXT);
 }
 
 function compactText(v) {
@@ -465,7 +479,7 @@ function genericTable(rows) {
   return el(
     "table",
     { class: "tbl a2ui-table" },
-    el("thead", null, el("tr", null, columns.map((c) => el("th", null, c)))),
+    el("thead", null, el("tr", null, columns.map((c) => el("th", null, clip(c))))),
     el(
       "tbody",
       null,
@@ -479,14 +493,18 @@ function genericTable(rows) {
 function renderGeneric(componentName, data) {
   const scalarRows = [];
   const sections = [];
+  let sectionCount = 0;
   for (const [key, value] of Object.entries(data)) {
     if (key === "metadata") continue; // rendered once by appendMetadataFootnote
     const isRowArray =
       Array.isArray(value) && value.length > 0 && value.every((x) => x && typeof x === "object" && !Array.isArray(x));
     if (isRowArray) {
-      sections.push(el("div", { class: "a2ui-card-sub" }, key), genericTable(value), moreNote(value));
+      sectionCount += 1;
+      if (sectionCount <= MAX_SECTIONS) {
+        sections.push(el("div", { class: "a2ui-card-sub" }, clip(key)), genericTable(value), moreNote(value.length - MAX_ROWS));
+      }
     } else {
-      scalarRows.push([key, compactText(value)]);
+      scalarRows.push([clip(key), compactText(value)]);
     }
   }
   const children = [];
@@ -497,13 +515,13 @@ function renderGeneric(componentName, data) {
         { class: "tbl tbl-kv" },
         el("tbody", null, capRows(scalarRows).map(([k, v]) => el("tr", null, el("th", null, k), el("td", null, v))))
       ),
-      moreNote(scalarRows)
+      moreNote(scalarRows.length - MAX_ROWS)
     );
   }
-  children.push(...sections);
+  children.push(...sections, moreNote(sectionCount - MAX_SECTIONS, "sections"));
   const raw = el("details", { class: "a2ui-raw" }, el("summary", null, "Raw JSON"));
   const pre = el("pre", { class: "a2ui-json" });
-  pre.appendChild(document.createTextNode(JSON.stringify(data, null, 2)));
+  pre.appendChild(document.createTextNode(clip(JSON.stringify(data, null, 2), MAX_RAW)));
   raw.appendChild(pre);
   children.push(raw);
   return card(titleFromComponent(componentName) || "Details", null, ...children);
@@ -528,7 +546,7 @@ function svg(tag, attrs, ...children) {
 
 function svgText(x, y, content, cls, anchor) {
   const t = svg("text", { x, y, class: cls || "a2ui-svg-label", "text-anchor": anchor || "start" });
-  t.appendChild(document.createTextNode(String(content)));
+  t.appendChild(document.createTextNode(clip(content)));
   return t;
 }
 
@@ -536,22 +554,22 @@ function card(title, subtitle, ...children) {
   return el(
     "div",
     { class: "a2ui-card" },
-    title ? el("div", { class: "a2ui-card-title" }, title) : null,
-    subtitle ? el("div", { class: "a2ui-card-sub" }, subtitle) : null,
+    title ? el("div", { class: "a2ui-card-title" }, clip(title)) : null,
+    subtitle ? el("div", { class: "a2ui-card-sub" }, clip(subtitle, MAX_LONG_TEXT)) : null,
     children
   );
 }
 
 function fmtNum(v) {
   if (v === null || v === undefined) return "—";
-  if (typeof v !== "number") return String(v);
+  if (typeof v !== "number") return clip(v);
   if (Number.isInteger(v) && Math.abs(v) < 1e15) return v.toLocaleString();
   return v.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
 function money(m) {
   if (!m || m.amount === null || m.amount === undefined) return null;
-  return `${fmtNum(m.amount)} ${m.currency || "USD"}`;
+  return `${fmtNum(m.amount)} ${clip(m.currency || "USD", 16)}`;
 }
 
 const ARROWS = { up: "▲", down: "▼", flat: "→" };
@@ -610,18 +628,18 @@ function renderKpiCard(data) {
       el(
         "div",
         { class: "a2ui-kpi" },
-        el("div", { class: "a2ui-kpi-value mono" }, `${fmtNum(m.value)}${m.unit ? ` ${m.unit}` : ""}`),
-        el("div", { class: "a2ui-kpi-label" }, m.label !== undefined ? String(m.label) : ""),
+        el("div", { class: "a2ui-kpi-value mono" }, `${fmtNum(m.value)}${m.unit ? ` ${clip(m.unit, 32)}` : ""}`),
+        el("div", { class: "a2ui-kpi-label" }, clip(m.label)),
         trendSpan(m.trend, m.change_pct !== undefined ? m.change_pct : null)
       )
     )
   );
-  return card(data.title || null, null, grid, moreNote(metrics));
+  return card(data.title || null, null, grid, moreNote(metrics.length - MAX_ROWS));
 }
 
 function renderTimeSeriesChart(data) {
   const allPoints = data.data || [];
-  const points = capRows(allPoints);
+  const points = allPoints.length > MAX_ROWS ? allPoints.slice(-MAX_ROWS) : allPoints;
   const W = 560;
   const H = 180;
   const PAD = 28;
@@ -659,8 +677,8 @@ function renderTimeSeriesChart(data) {
     if (points.length) {
       const first = points[0] || {};
       const last = points[points.length - 1] || {};
-      node.appendChild(svgText(PAD, H - 4, String(first.date || ""), "a2ui-svg-label"));
-      node.appendChild(svgText(W - PAD, H - 4, String(last.date || ""), "a2ui-svg-label", "end"));
+      node.appendChild(svgText(PAD, H - 4, clip(first.date), "a2ui-svg-label"));
+      node.appendChild(svgText(W - PAD, H - 4, clip(last.date), "a2ui-svg-label", "end"));
     }
   }
   const summaryBits = [];
@@ -669,19 +687,19 @@ function renderTimeSeriesChart(data) {
     summaryBits.push(`${s.change_percent > 0 ? "+" : ""}${fmtNum(s.change_percent)}%`);
   }
   if (s.average !== undefined && s.average !== null) summaryBits.push(`avg ${fmtNum(s.average)}`);
-  summaryBits.push(`${data.total_count !== undefined ? data.total_count : allPoints.length} points`);
+  summaryBits.push(`${data.total_count !== undefined ? clip(data.total_count, 32) : allPoints.length} points`);
   return card(
     data.title || "Time series",
     data.subtitle || null,
     node,
     el("div", { class: "dim a2ui-chart-foot" }, summaryBits.join(" · ")),
-    moreNote(allPoints)
+    moreNote(allPoints.length - MAX_ROWS, "older points")
   );
 }
 
 function renderComparisonTable(data) {
   const allColumns = data.columns || [];
-  const columns = allColumns.length > MAX_COLUMNS ? allColumns.slice(0, MAX_COLUMNS) : allColumns;
+  const columns = capRows(allColumns, MAX_COLUMNS);
   const rows = data.rows || [];
   const table = el(
     "table",
@@ -689,7 +707,7 @@ function renderComparisonTable(data) {
     el(
       "thead",
       null,
-      el("tr", null, columns.map((c) => el("th", null, `${c.label !== undefined ? c.label : c.key}${c.unit ? ` (${c.unit})` : ""}`)))
+      el("tr", null, columns.map((c) => el("th", null, clip(`${c.label !== undefined ? c.label : c.key}${c.unit ? ` (${clip(c.unit, 32)})` : ""}`))))
     ),
     el(
       "tbody",
@@ -701,14 +719,14 @@ function renderComparisonTable(data) {
           columns.map((c) => {
             const v = row ? row[c.key] : undefined;
             // GH-212: an is_id column is shown byte-exact, never locale-formatted.
-            const text = v === undefined || v === null ? "—" : c.is_id ? String(v) : fmtNum(v);
+            const text = v === undefined || v === null ? "—" : c.is_id ? clip(v) : fmtNum(v);
             return el("td", { class: typeof v === "number" || c.is_id ? "mono" : null }, text);
           })
         )
       )
     )
   );
-  return card(data.title || null, null, table, moreNote(rows), moreColumnsNote(allColumns));
+  return card(data.title || null, null, table, moreNote(rows.length - MAX_ROWS), moreNote(allColumns.length - MAX_COLUMNS, "columns"));
 }
 
 function renderBarChart(data) {
@@ -725,13 +743,13 @@ function renderBarChart(data) {
   bars.forEach((b, i) => {
     const y = PAD + i * rowH;
     const w = (Math.abs(values[i]) / maxAbs) * (W - labelW - 90);
-    node.appendChild(svgText(labelW - 8, y + rowH / 2 + 4, String(b.category !== undefined ? b.category : ""), "a2ui-svg-label", "end"));
+    node.appendChild(svgText(labelW - 8, y + rowH / 2 + 4, clip(b.category), "a2ui-svg-label", "end"));
     node.appendChild(
       svg("rect", { x: labelW, y: y + 4, width: Math.max(w, 1), height: rowH - 8, class: values[i] < 0 ? "a2ui-svg-bar neg" : "a2ui-svg-bar" })
     );
     node.appendChild(svgText(labelW + Math.max(w, 1) + 6, y + rowH / 2 + 4, fmtNum(values[i]), "a2ui-svg-label"));
   });
-  return card(data.title || null, null, node, moreNote(allBars));
+  return card(data.title || null, null, node, moreNote(allBars.length - MAX_ROWS));
 }
 
 function renderEntityList(data) {
@@ -743,25 +761,25 @@ function renderEntityList(data) {
       el(
         "div",
         { class: "a2ui-list-row" },
-        el("div", { class: "a2ui-list-name" }, item.name !== undefined ? String(item.name) : ""),
-        item.summary ? el("div", { class: "dim" }, String(item.summary)) : null
+        el("div", { class: "a2ui-list-name" }, clip(item.name)),
+        item.summary ? el("div", { class: "dim" }, clip(item.summary, MAX_LONG_TEXT)) : null
       )
     )
   );
   const showing = data.showing !== undefined && data.showing !== null ? data.showing : items.length;
   const total = data.total_count !== undefined && data.total_count !== null ? data.total_count : items.length;
   return card(
-    data.title || `${data.entity_type || "entity"} list`,
-    `showing ${showing} of ${total}${data.has_more ? " · more available" : ""}`,
+    data.title || `${clip(data.entity_type || "entity", 64)} list`,
+    `showing ${clip(showing, 32)} of ${clip(total, 32)}${data.has_more ? " · more available" : ""}`,
     list,
-    moreNote(items)
+    moreNote(items.length - MAX_ROWS)
   );
 }
 
 /* PROSE exception (§7.1): the wire value is a markdown string; render as
  * plain-text paragraphs with NO card chrome. */
 function renderMarketBriefing(value) {
-  const text = typeof value === "string" ? value : value && value.title ? String(value.title) : "";
+  const text = clip(typeof value === "string" ? value : value && value.title ? String(value.title) : "", MAX_PROSE);
   const node = el("div", { class: "a2ui-prose" });
   for (const block of text.split(/\n{2,}/)) {
     const p = el("p", { class: "a2ui-prose-p" });
@@ -808,12 +826,12 @@ function renderWaterfallChart(data) {
     const y2 = toY(Math.min(start, cum));
     const cls = isTotal ? "a2ui-svg-bar total" : val >= 0 ? "a2ui-svg-bar" : "a2ui-svg-bar neg";
     node.appendChild(svg("rect", { x, y: y1, width: bw, height: Math.max(y2 - y1, 1.5), class: cls }));
-    const label = String(s.label !== undefined ? s.label : "");
+    const label = clip(s.label, 64);
     node.appendChild(svgText(x + bw / 2, H - 6, label.length > 12 ? `${label.slice(0, 11)}…` : label, "a2ui-svg-label", "middle"));
   });
-  const subBits = [data.subtitle, data.entity_name, data.currency, data.as_of_date].filter(Boolean);
-  if (data.date_range && data.date_range.start) subBits.push(`${data.date_range.start} – ${data.date_range.end}`);
-  return card(data.title || "Waterfall", subBits.join(" · ") || null, node, moreNote(allSegments));
+  const subBits = [data.subtitle, data.entity_name, data.currency, data.as_of_date].filter(Boolean).map((b) => clip(b, 64));
+  if (data.date_range && data.date_range.start) subBits.push(`${clip(data.date_range.start, 32)} – ${clip(data.date_range.end, 32)}`);
+  return card(data.title || "Waterfall", subBits.join(" · ") || null, node, moreNote(allSegments.length - MAX_ROWS));
 }
 
 function renderMultiCategoryChart(data) {
@@ -829,13 +847,16 @@ function renderMultiCategoryChart(data) {
       }
     });
   });
-  const categories = capRows(allCategories);
+  const categories = capRows(allCategories, Math.max(1, Math.min(MAX_ROWS, Math.floor(MAX_CELLS / Math.max(periods.length, 1)))));
   const W = 560;
   const H = 200;
   const PAD = 28;
   const innerH = H - PAD * 2 - 16;
   const totals = periods.map((p) =>
-    Object.values(p.categories || {}).reduce((acc, c) => acc + (c && typeof c.value === "number" ? c.value : 0), 0)
+    categories.reduce((acc, cat) => {
+      const c = ((p && p.categories) || {})[cat];
+      return acc + (c && typeof c.value === "number" ? Math.abs(c.value) : 0);
+    }, 0)
   );
   const maxTotal = maxOf(totals, 1);
   const step = (W - PAD * 2) / Math.max(periods.length, 1);
@@ -846,30 +867,32 @@ function renderMultiCategoryChart(data) {
     const x = PAD + i * step + (step - bw) / 2;
     let yCursor = H - PAD - 16;
     categories.forEach((cat, ci) => {
-      const cell = (p.categories || {})[cat];
+      const cell = ((p && p.categories) || {})[cat];
       const v = cell && typeof cell.value === "number" ? cell.value : 0;
       const h = (Math.abs(v) / maxTotal) * innerH;
       yCursor -= h;
       node.appendChild(svg("rect", { x, y: yCursor, width: bw, height: Math.max(h, 0.5), class: `a2ui-svg-bar cat-${ci % 6}` }));
     });
-    const label = String(p.period !== undefined ? p.period : "");
+    const label = clip(p && p.period, 64);
     node.appendChild(svgText(x + bw / 2, H - 6, label.length > 10 ? `${label.slice(0, 9)}…` : label, "a2ui-svg-label", "middle"));
   });
   const legend = el(
     "div",
     { class: "a2ui-legend" },
     categories.map((cat, ci) =>
-      el("span", { class: "a2ui-legend-item" }, el("span", { class: `a2ui-swatch cat-${ci % 6}` }), cat)
+      el("span", { class: "a2ui-legend-item" }, el("span", { class: `a2ui-swatch cat-${ci % 6}` }), clip(cat))
     )
   );
   const range = data.date_range || {};
-  const subBits = [data.subtitle, data.unit_label, range.first ? `${range.first} – ${range.last}` : null].filter(Boolean);
-  return card(data.title || "Categories", subBits.join(" · ") || null, node, legend, moreNote(allPeriods), moreNote(allCategories));
+  const subBits = [data.subtitle, data.unit_label, range.first ? `${clip(range.first, 32)} – ${clip(range.last, 32)}` : null]
+    .filter(Boolean)
+    .map((b) => clip(b, 64));
+  return card(data.title || "Categories", subBits.join(" · ") || null, node, legend, moreNote(allPeriods.length - MAX_ROWS, "periods"), moreNote(allCategories.length - categories.length, "categories"));
 }
 
 /* sole camelCase-wire type */
 function renderFundPerformance(data) {
-  const pct = (v) => (v === null || v === undefined ? null : `${(v * 100).toFixed(1)}%`);
+  const pct = (v) => (v === null || v === undefined ? null : `${(Number(v) * 100).toFixed(1)}%`);
   const mult = (v) => (v === null || v === undefined ? null : `${fmtNum(v)}x`);
   const entries = [
     ["IRR", pct(data.irr)],
@@ -879,7 +902,7 @@ function renderFundPerformance(data) {
     ["DPI", mult(data.dpi)],
     ["RVPI", mult(data.rvpi)],
     ["MOIC", mult(data.moic)],
-    ["Quartile", data.quartile !== undefined && data.quartile !== null ? `Q${data.quartile}` : null],
+    ["Quartile", data.quartile !== undefined && data.quartile !== null ? `Q${clip(data.quartile, 8)}` : null],
     ["NAV", money(data.nav)],
     ["Dry powder", money(data.dryPowder)],
     ["Distributed", money(data.distributed)],
@@ -895,11 +918,11 @@ function renderFundPerformance(data) {
       el("div", { class: "a2ui-kpi" }, el("div", { class: "a2ui-kpi-value mono" }, value), el("div", { class: "a2ui-kpi-label" }, label))
     )
   );
-  const periodBits = [data.asOfQuarter ? `Q${data.asOfQuarter}` : null, data.asOfYear ? String(data.asOfYear) : null].filter(Boolean);
+  const periodBits = [data.asOfQuarter ? `Q${clip(data.asOfQuarter, 8)}` : null, data.asOfYear ? clip(data.asOfYear, 8) : null].filter(Boolean);
   const subBits = [
     periodBits.length ? periodBits.join(" ") : null,
-    data.asOfDate ? `as of ${data.asOfDate}` : null,
-    data.pbId ? `source ${data.pbId}` : null,
+    data.asOfDate ? `as of ${clip(data.asOfDate, 32)}` : null,
+    data.pbId ? `source ${clip(data.pbId, 64)}` : null,
   ].filter(Boolean);
   return card("Fund performance", subBits.join(" · ") || null, grid);
 }
@@ -918,19 +941,19 @@ function renderEmailList(data) {
           "div",
           { class: "a2ui-row-line" },
           m.is_read === false ? el("span", { class: "dot dot-ok" }) : null,
-          el("span", { class: "a2ui-list-name" }, String(m.subject !== undefined ? m.subject : "")),
+          el("span", { class: "a2ui-list-name" }, clip(m.subject)),
           m.has_attachments ? el("span", { class: "badge" }, "attachment") : null,
           m.importance === "high" ? el("span", { class: "badge badge-err" }, "high") : null
         ),
-        el("div", { class: "dim" }, `${from.name || from.email || ""} · ${m.received_at || ""}`),
-        m.preview ? el("div", { class: "a2ui-preview" }, String(m.preview)) : null
+        el("div", { class: "dim" }, `${clip(from.name || from.email)} · ${clip(m.received_at, 64)}`),
+        m.preview ? el("div", { class: "a2ui-preview" }, clip(m.preview, MAX_LONG_TEXT)) : null
       );
     })
   );
-  const sub = [`${data.total_count !== undefined ? data.total_count : messages.length} message(s)`];
-  if (data.folder) sub.push(data.folder);
+  const sub = [`${data.total_count !== undefined ? clip(data.total_count, 32) : messages.length} message(s)`];
+  if (data.folder) sub.push(clip(data.folder, 64));
   if (data.has_more) sub.push("more available");
-  return card("Mail", sub.join(" · "), list, moreNote(messages));
+  return card("Mail", sub.join(" · "), list, moreNote(messages.length - MAX_ROWS));
 }
 
 function renderCalendarEvents(data) {
@@ -948,19 +971,19 @@ function renderCalendarEvents(data) {
         el(
           "div",
           { class: "a2ui-row-line" },
-          el("span", { class: "a2ui-list-name" }, String(e.subject !== undefined ? e.subject : "")),
+          el("span", { class: "a2ui-list-name" }, clip(e.subject)),
           e.is_cancelled ? el("span", { class: "badge badge-err" }, "cancelled") : null,
           online ? el("span", { class: "badge badge-ok" }, "online") : null,
           e.is_recurring ? el("span", { class: "badge" }, "recurring") : null
         ),
-        el("div", { class: "dim mono" }, e.is_all_day ? `${e.start || ""} · all day` : `${e.start || ""} → ${e.end || ""}`),
+        el("div", { class: "dim mono" }, e.is_all_day ? `${clip(e.start, 64)} · all day` : `${clip(e.start, 64)} → ${clip(e.end, 64)}`),
         el(
           "div",
           { class: "dim" },
           [
-            loc.display_name,
-            e.organizer && e.organizer.name ? `organizer ${e.organizer.name}` : null,
-            e.attendees_count ? `${e.attendees_count} attendees` : null,
+            loc.display_name ? clip(loc.display_name) : null,
+            e.organizer && e.organizer.name ? `organizer ${clip(e.organizer.name)}` : null,
+            e.attendees_count ? `${clip(e.attendees_count, 16)} attendees` : null,
           ]
             .filter(Boolean)
             .join(" · ")
@@ -970,9 +993,9 @@ function renderCalendarEvents(data) {
   );
   return card(
     "Calendar",
-    `${data.total_count !== undefined ? data.total_count : events.length} event(s)${range.start ? ` · ${range.start} – ${range.end}` : ""}${data.has_more ? " · more available" : ""}`,
+    `${data.total_count !== undefined ? clip(data.total_count, 32) : events.length} event(s)${range.start ? ` · ${clip(range.start, 64)} – ${clip(range.end, 64)}` : ""}${data.has_more ? " · more available" : ""}`,
     list,
-    moreNote(events)
+    moreNote(events.length - MAX_ROWS)
   );
 }
 
@@ -986,13 +1009,13 @@ function renderUserProfile(data) {
     ["Office", data.office_location],
     ["Mobile", data.mobile_phone],
     ["Phones", (data.business_phones || []).join(", ") || null],
-    ["Manager", manager ? `${manager.display_name} <${manager.email}>` : null],
-    ["Presence", presence ? `${presence.availability}${presence.status_message ? ` — ${presence.status_message}` : ""}` : null],
+    ["Manager", manager ? `${clip(manager.display_name)} <${clip(manager.email)}>` : null],
+    ["Presence", presence ? `${clip(presence.availability, 64)}${presence.status_message ? ` — ${clip(presence.status_message)}` : ""}` : null],
   ].filter(([, v]) => v);
   const table = el(
     "table",
     { class: "tbl tbl-kv" },
-    el("tbody", null, rows.map(([k, v]) => el("tr", null, el("th", null, k), el("td", null, String(v)))))
+    el("tbody", null, rows.map(([k, v]) => el("tr", null, el("th", null, k), el("td", null, clip(v, MAX_LONG_TEXT)))))
   );
   const ooo = data.out_of_office;
   return card(
@@ -1000,7 +1023,7 @@ function renderUserProfile(data) {
     null,
     table,
     ooo && ooo.is_enabled
-      ? el("div", { class: "alert alert-warn" }, `Out of office${ooo.start_date ? ` ${ooo.start_date} – ${ooo.end_date || ""}` : ""}`)
+      ? el("div", { class: "alert alert-warn" }, `Out of office${ooo.start_date ? ` ${clip(ooo.start_date, 64)} – ${clip(ooo.end_date, 64)}` : ""}`)
       : null
   );
 }
@@ -1017,18 +1040,18 @@ function renderUserList(data) {
         el(
           "div",
           { class: "a2ui-row-line" },
-          el("span", { class: "a2ui-list-name" }, String(u.display_name !== undefined ? u.display_name : "")),
-          u.presence ? el("span", { class: "badge" }, String(u.presence.availability)) : null
+          el("span", { class: "a2ui-list-name" }, clip(u.display_name)),
+          u.presence ? el("span", { class: "badge" }, clip(u.presence.availability, 64)) : null
         ),
-        el("div", { class: "dim" }, [u.email, u.job_title, u.department].filter(Boolean).join(" · "))
+        el("div", { class: "dim" }, [u.email, u.job_title, u.department].filter(Boolean).map((x) => clip(x)).join(" · "))
       )
     )
   );
   return card(
     "People",
-    `${data.total_count !== undefined ? data.total_count : users.length} user(s)${data.query ? ` · "${data.query}"` : ""}${data.has_more ? " · more available" : ""}`,
+    `${data.total_count !== undefined ? clip(data.total_count, 32) : users.length} user(s)${data.query ? ` · "${clip(data.query, 64)}"` : ""}${data.has_more ? " · more available" : ""}`,
     list,
-    moreNote(users)
+    moreNote(users.length - MAX_ROWS)
   );
 }
 
@@ -1058,8 +1081,9 @@ function renderDocumentList(data) {
       const when = d.modified || d.last_modified;
       const meta = [d.type, when ? `modified ${when}` : null, d.modified_by, d.size ? `${fmtNum(d.size)} bytes` : null]
         .filter(Boolean)
+        .map((x) => clip(x, 64))
         .join(" · ");
-      const name = String(d.name !== undefined ? d.name : "");
+      const name = clip(d.name);
       const href = safeHttpUrl(d.link) || safeHttpUrl(d.web_url);
       return el(
         "div",
@@ -1071,7 +1095,7 @@ function renderDocumentList(data) {
       );
     })
   );
-  return card("Documents", `${data.total_count !== undefined ? data.total_count : documents.length} document(s)`, list, moreNote(documents));
+  return card("Documents", `${data.total_count !== undefined ? clip(data.total_count, 32) : documents.length} document(s)`, list, moreNote(documents.length - MAX_ROWS));
 }
 
 const RENDERERS = {

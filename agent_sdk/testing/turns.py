@@ -10,6 +10,9 @@ or env var) and is never written to state/lock files or logs.  Log lines and
 the failure record carry only a status code, an attempt count and fixed reason
 text, never headers, the query, or response bodies.
 
+Non-goal: A2A ``additionalInterfaces`` and the card ``url`` are not followed; the
+turn always goes to ``/v1/message:stream`` on the client it is given.
+
 CLI::
 
     ACC_QUERY="..." python -m agent_sdk.testing.turns --transport a2a|agui \
@@ -35,8 +38,7 @@ from typing import Any
 
 import httpx
 
-from ..models.content_types import A2UI_EXTENSION_URI
-from .chat import ChatDriver
+from .chat import ChatDriver, card_catalog_ids
 
 logger = logging.getLogger("agent_sdk.testing.turns")
 
@@ -128,12 +130,21 @@ def _safe(run_key: str) -> str:
 
 
 async def _a2ui_advertised(driver: ChatDriver) -> bool:
-    try:
-        card = await driver._discover_card()
-    except (httpx.HTTPError, ValueError):
-        return False
-    exts = (card.get("capabilities") or {}).get("extensions") or []
-    return any(isinstance(e, dict) and e.get("uri") == A2UI_EXTENSION_URI for e in exts)
+    return await driver._a2ui_advertised()
+
+
+async def _card_driver(client: httpx.AsyncClient) -> ChatDriver:
+    """A ChatDriver whose catalogs include the card's ``supportedCatalogIds``."""
+    probe = ChatDriver(client)
+    if not await probe._a2ui_advertised():
+        return probe
+    driver = ChatDriver(client, extra_catalogs=card_catalog_ids(probe._card))
+    driver._card = probe._card
+    return driver
+
+
+def _text_of(parts: Any) -> str:
+    return "\n".join(p["text"] for p in parts or [] if isinstance(p, dict) and p.get("kind") == "text")
 
 
 async def _a2a_attempt(
@@ -143,21 +154,19 @@ async def _a2a_attempt(
     driver: ChatDriver | None = None,
 ) -> _Attempt:
     at = _Attempt()
-    driver = driver or ChatDriver(client)
-    a2ui = await _a2ui_advertised(driver)
+    driver = driver or await _card_driver(client)
     msg: dict[str, Any] = {
         "kind": "message",
         "role": "user",
         "messageId": uuid.uuid4().hex,
         "parts": [{"kind": "text", "text": query}],
     }
-    headers: dict[str, str] = {}
-    if a2ui:
-        headers["X-A2A-Extensions"] = A2UI_EXTENSION_URI
-        msg["metadata"] = {"a2uiClientCapabilities": driver._caps}
+    headers, meta = await driver.a2ui_client_activation()
+    if meta:
+        msg["metadata"] = meta
     if state.get("task_id") and state.get("state") in ("input-required", "auth-required"):
         msg["taskId"] = state["task_id"]
-    elif state.get("context_id"):
+    if state.get("context_id"):
         msg["contextId"] = state["context_id"]
     task_id = ctx_id = cur_state = ""
     try:
@@ -180,8 +189,14 @@ async def _a2a_attempt(
                     if st:
                         cur_state = st
                     if ev.get("final") or st == "completed":
-                        parts = ((ev.get("status") or {}).get("message") or {}).get("parts", [])
-                        at.reply = "\n".join(p["text"] for p in parts if p.get("kind") == "text")
+                        at.reply = _text_of(((ev.get("status") or {}).get("message") or {}).get("parts"))
+                    if ev.get("final"):
+                        break
+                elif kind == "message":
+                    task_id = task_id or ev.get("taskId", "")
+                    ctx_id = ctx_id or ev.get("contextId", "")
+                    at.reply = _text_of(ev.get("parts"))
+                    break
                 elif kind == "artifact-update":
                     art = ev.get("artifact") or {}
                     dtype = (art.get("metadata") or {}).get("data_type") or art.get("name")
@@ -299,7 +314,7 @@ async def run_turn(
             "context_id": _read(files["ctx"]),
             "state": _read(files["state"]),
         }
-        a2a_driver = ChatDriver(client) if transport == "a2a" else None
+        a2a_driver = await _card_driver(client) if transport == "a2a" else None
         attempts = 0
         any_rate_limited = False
         last: _Attempt | None = None

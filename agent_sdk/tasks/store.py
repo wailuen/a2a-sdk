@@ -115,6 +115,9 @@ class TaskRecord:
     # GH-154: the task's own ``Today is ...`` line, fixed on first run so a
     # resumed/continued turn keeps the original date.
     date_line: str | None = None
+    # GH-259: the client's ``configuration.acceptedOutputModes`` from the
+    # submitting request; runtime-only, applied to artifact parts.
+    accepted_output_modes: list[str] | None = None
 
 
 class TaskStore(abc.ABC):

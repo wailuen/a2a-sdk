@@ -81,6 +81,10 @@ function append(node, child) {
   }
 }
 
+// GH-215/GH-255 row-cap and text-clip helpers live outside the sliced
+// ranges; load the real ones (exports turned into plain declarations).
+eval(src.slice(src.indexOf("export const MAX_ROWS"), src.indexOf("function maxOf"))
+  .replace(/export const /g, "var ").replace(/export function /g, "function "));
 eval(src.slice(cardStart, cardEnd));
 eval(src.slice(rfpStart, rfpEnd));
 

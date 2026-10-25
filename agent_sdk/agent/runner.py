@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from ..auth.context import ResumeEnvelope, bind_identity
 from ..a2ui.translator import A2uiCapabilities, translate
 from ..common.json_strict import dumps_strict, scrub_unencodable
+from ..common.media import media_type_match
 from ..common.tz import load_zone, valid_timezone
 from ..models.a2a import (
     Artifact,
@@ -138,6 +139,16 @@ def _scrub_model(model: Any) -> Any:
     if scrubbed is dumped:
         return model
     return type(model).model_validate(scrubbed)
+
+
+def _carries_error_text(message: Message | None, error_text: str) -> bool:
+    """GH-259/GH-155: True when ``message`` is an agent-role, text-only
+    message whose text already includes ``error_text``."""
+    if message is None or message.role != "agent" or not message.parts:
+        return False
+    if not all(isinstance(p, TextPart) for p in message.parts):
+        return False
+    return any(error_text in p.text for p in message.parts)  # type: ignore[union-attr]
 
 
 def set_task_status(
@@ -259,8 +270,16 @@ def set_task_status(
     # not only at ingress and the artifact gate. Otherwise a single bad
     # status message made GET /v1/tasks/{id} and GET /v1/tasks answer 502
     # for the whole identity.
-    message = _scrub_model(message)
     error = _scrub_model(error)
+    message = _scrub_model(message)
+    if state == TaskState.FAILED and error is not None and not _carries_error_text(
+        message, error.message
+    ):
+        # GH-259: status.message is the spec channel; it carries the same safe
+        # text as the ``error`` extension, built here once for every call site.
+        # A caller message that is agent-role, text-only and already carries
+        # that text is kept as-is (GH-155: the cap-exit summary precedes it).
+        message = _scrub_model(_agent_message(record, error.message))
     record.task.status = TaskStatus(state=state, message=message, timestamp=_now(), error=error)
     if store is None:
         return
@@ -383,6 +402,45 @@ def validate_a2ui_delivery(
             "translate() output"
         )
     return open_messages
+
+
+def _part_media_type(part: Any) -> str:
+    if isinstance(part, TextPart):
+        return "text/plain"
+    meta = getattr(part, "metadata", None) or {}
+    declared = meta.get("mimeType")
+    if isinstance(declared, str) and declared:
+        return declared
+    if isinstance(part, DataPart):
+        return "application/json"
+    return str(getattr(part.file, "mime_type", None) or "application/octet-stream")
+
+
+def apply_output_modes(artifact: Artifact, modes: Sequence[str] | None) -> Artifact:
+    """GH-259: keep only the parts whose media type the client accepts. When
+    none remain, keep one TextPart fallback if ``text/plain`` is accepted;
+    otherwise raise an ``AgentError`` carrying -32005."""
+    if not modes:
+        return artifact
+    kept = [
+        p for p in artifact.parts
+        if any(media_type_match(m, {_part_media_type(p)}) for m in modes)
+    ]
+    if not kept:
+        if not any(media_type_match(m, {"text/plain"}) for m in modes):
+            raise AgentError(
+                ErrorCategory.VALIDATION,
+                "no acceptable output mode",
+                a2a_code=-32005,
+            )
+        texts = [p.text for p in artifact.parts if isinstance(p, TextPart)]
+        if not texts:
+            texts = [
+                dumps_strict(p.data) if isinstance(p, DataPart) else ""
+                for p in artifact.parts
+            ]
+        kept = [TextPart(text="\n".join(t for t in texts if t))]
+    return artifact.model_copy(update={"parts": kept})
 
 
 def build_text_only_artifact(event: ArtifactEvent) -> Artifact:
@@ -1106,6 +1164,7 @@ async def _run_deferred_background(
             artifact = build_text_only_artifact(artifact_ev)
         else:
             artifact = build_artifact(artifact_ev, capabilities)
+        artifact = apply_output_modes(artifact, record.accepted_output_modes)
         # RT-002: serialize the wire frame HERE (inside the guarded block) but
         # do NOT mutate task.artifacts yet — the append is deferred to AFTER
         # publish() has actually delivered the frame (second try block below).
@@ -1131,7 +1190,9 @@ async def _run_deferred_background(
         logger.warning(
             "deferred artifact build failed error_type=%s", type(exc).__name__
         )
-        if isinstance(exc, ValueError):
+        if isinstance(exc, AgentError) and exc.a2a_code == -32005:
+            _fail(exc.message, code=-32005, category="validation")
+        elif isinstance(exc, ValueError):
             _fail("invalid agent response", code=-32006, category="validation")
         else:
             _fail("internal error")
@@ -1393,7 +1454,9 @@ async def run_task_worker(
                 # Exit the for-loop; the background task takes over from here.
                 break
             elif isinstance(event, ArtifactEvent):
-                artifact = build_artifact(event, capabilities)
+                artifact = apply_output_modes(
+                    build_artifact(event, capabilities), record.accepted_output_modes
+                )
                 # RT-002: serialize the wire frame BEFORE mutating
                 # task.artifacts, AND append only AFTER publish() has actually
                 # delivered the frame. This closes BOTH pre-delivery failure

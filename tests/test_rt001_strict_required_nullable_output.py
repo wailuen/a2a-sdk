@@ -122,6 +122,10 @@ def _sample(node: dict, defs: dict, depth: int = 0, *, fill_optional: bool = Fal
         return 1.5
     if kind == "boolean":
         return True
+    if isinstance(node.get("default"), str):
+        # GH-258: some string fields accept only their default
+        # (TimeSeriesChart x_key/y_key), so a string default is the sample.
+        return node["default"]
     return "2026-01-01" if node.get("format") in ("date", "date-time") else "x"
 
 

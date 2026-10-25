@@ -153,10 +153,12 @@ def test_field_summary_renders_literal_list_and_all_union_arms():
             return ""
 
     summary = catalog._field_summary(_Rich)
-    assert 'mode?: "a|b"' in summary
-    assert "tags?: [str]" in summary
+    # GH-258: a non-None default is always written by wire(), so those
+    # fields read as required; only the None-default field keeps ``?``.
+    assert 'mode: "a|b"' in summary
+    assert "tags: [str]" in summary
     assert "scores?: [int]|null" in summary
-    assert "either?: int|str" in summary
+    assert "either: int|str" in summary
 
 
 def test_legend_explains_null_marker():

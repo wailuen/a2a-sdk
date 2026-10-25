@@ -117,8 +117,6 @@ async def _resolve_identity(request: Request) -> Identity:
     ip_key = _client_key(request, runtime)
     token = _bearer(request)
     if token is None:
-        if not runtime.unauth_limiter.allow(ip_key):
-            raise _rate_limited()
         raise _unauthorized(request, runtime, "missing bearer credentials")
 
     identity = await asyncio.to_thread(runtime.api_keys.verify, token)

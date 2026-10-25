@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 import pytest
@@ -12,7 +12,9 @@ from pydantic import BaseModel, Field, field_serializer
 from agent_sdk.testing.chat import ChatDriver
 from agent_sdk import BaseAgentSettings
 from agent_sdk.agent.registry import ToolSet
+from agent_sdk.agent.loop import ToolInterrupt
 from agent_sdk.app import Agent
+from agent_sdk.models.content_types import _REGISTRY, KpiCard, MetricItem, register_content_type
 from agent_sdk.testing import FakeModelClient
 from agent_sdk.testing.mcp import McpClient, run_gate
 from agent_sdk.testing.turns import _a2a_attempt, _agui_attempt
@@ -68,6 +70,7 @@ def _driver(events, bodies=None):
             bodies.append(json.loads(req.content))
         return httpx.Response(200, content=_sse(*events))
 
+    # MockTransport: scripted frames or failures a real app cannot produce.
     client = httpx.AsyncClient(base_url="http://t", transport=httpx.MockTransport(handler))
     return client, ChatDriver(client)
 
@@ -131,6 +134,7 @@ async def test_turn_error_or_no_terminal_leaves_messages(events):
 @pytest.mark.asyncio
 async def test_turn_http_error_leaves_messages():
     client = httpx.AsyncClient(
+        # MockTransport: scripted frames or failures a real app cannot produce.
         base_url="http://t", transport=httpx.MockTransport(lambda r: httpx.Response(500))
     )
     msgs: list = []
@@ -250,17 +254,28 @@ async def test_run_gate_excludes_load_skill_from_count(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a2a_message_has_kind():
-    seen: list = []
+async def test_a2a_message_has_kind(tmp_path):
+    class _Bodies(httpx.AsyncBaseTransport):
+        def __init__(self, inner):
+            self.inner = inner
+            self.posted: list = []
 
-    def handler(req):
-        if req.method == "POST":
-            seen.append(json.loads(req.content))
-        return httpx.Response(200, content=b"")
+        async def handle_async_request(self, request):
+            if request.method == "POST":
+                self.posted.append(json.loads(request.content))
+            return await self.inner.handle_async_request(request)
 
-    client = httpx.AsyncClient(base_url="http://t", transport=httpx.MockTransport(handler))
-    await _a2a_attempt(client, "q", {})
-    assert seen[0]["message"]["kind"] == "message"
+    app = _fake_tools_app(tmp_path, skills=False)
+    rec = _Bodies(httpx.ASGITransport(app=app))
+    async with app.router.lifespan_context(app):
+        _, token = app.state.auth.api_keys.mint("t", admin=True)
+        async with httpx.AsyncClient(
+            transport=rec, base_url="http://test", headers={"Authorization": f"Bearer {token}"}
+        ) as client:
+            at = await _a2a_attempt(client, "q", {})
+    app.state.credential_store.close()
+    assert rec.posted[0]["message"]["kind"] == "message"
+    assert at.status is None
 
 
 def _fake_tools_app(tmp_path, *, skills: bool, domain_load_skill: bool = False, extra_tools=()):
@@ -462,48 +477,6 @@ async def test_run_gate_output_schema_failure_does_not_echo_values(tmp_path):
     assert "SECRET-VALUE" not in " ".join(res.failures)
 
 
-@pytest.mark.asyncio
-async def test_a2a_attempt_activates_a2ui_when_advertised():
-    from agent_sdk.models.content_types import A2UI_EXTENSION_URI
-
-    posts: list = []
-    gets: list = []
-
-    def handler(req):
-        if req.method == "GET":
-            gets.append(req.url.path)
-            return httpx.Response(
-                200, json={"preferredTransport": "HTTP+JSON", "capabilities": {"extensions": [{"uri": A2UI_EXTENSION_URI}]}}
-            )
-        posts.append(req)
-        return httpx.Response(200, content=b"")
-
-    client = httpx.AsyncClient(base_url="http://t", transport=httpx.MockTransport(handler))
-    drv = ChatDriver(client)
-    await _a2a_attempt(client, "q", {}, drv)
-    await _a2a_attempt(client, "q", {}, drv)
-    assert len(gets) == 1
-    for req in posts:
-        assert req.headers["x-a2a-extensions"] == A2UI_EXTENSION_URI
-        assert json.loads(req.content)["message"]["metadata"]["a2uiClientCapabilities"] == drv._caps
-
-
-@pytest.mark.asyncio
-async def test_a2a_attempt_no_extension_when_not_advertised():
-    posts: list = []
-
-    def handler(req):
-        if req.method == "GET":
-            return httpx.Response(200, json={"capabilities": {"extensions": []}})
-        posts.append(req)
-        return httpx.Response(200, content=b"")
-
-    client = httpx.AsyncClient(base_url="http://t", transport=httpx.MockTransport(handler))
-    await _a2a_attempt(client, "q", {})
-    assert "x-a2a-extensions" not in posts[0].headers
-    assert "a2uiClientCapabilities" not in (json.loads(posts[0].content)["message"].get("metadata") or {})
-
-
 def test_not_authenticated_renamed_with_deprecated_alias():
     from agent_sdk.testing.chat import A2AError
 
@@ -516,6 +489,7 @@ async def test_missing_preferred_transport_defaults_to_jsonrpc_and_is_rejected()
     def handler(req):
         return httpx.Response(200, json={"name": "x"})
 
+    # MockTransport: scripted frames or failures a real app cannot produce.
     client = httpx.AsyncClient(base_url="http://t", transport=httpx.MockTransport(handler))
     with pytest.raises(ValueError, match="JSONRPC"):
         await ChatDriver(client).a2a_turn("q")
@@ -541,6 +515,7 @@ async def test_agui_turn_connect_error_leaves_messages_unchanged():
     def handler(req):
         raise httpx.ConnectError("down")
 
+    # MockTransport: scripted frames or failures a real app cannot produce.
     client = httpx.AsyncClient(base_url="http://t", transport=httpx.MockTransport(handler))
     msgs: list = [{"role": "user", "content": "old", "id": "x"}]
     before = list(msgs)
@@ -561,6 +536,7 @@ async def test_agui_turn_cancel_after_first_frame_leaves_messages_unchanged():
     def handler(req):
         return httpx.Response(200, stream=_Stream())
 
+    # MockTransport: scripted frames or failures a real app cannot produce.
     client = httpx.AsyncClient(base_url="http://t", transport=httpx.MockTransport(handler))
     msgs: list = []
     task = asyncio.ensure_future(ChatDriver(client).agui_turn("q", "t", msgs))
@@ -569,3 +545,298 @@ async def test_agui_turn_cancel_after_first_frame_leaves_messages_unchanged():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert msgs == []
+
+
+class _Recorder(httpx.AsyncBaseTransport):
+    def __init__(self, inner):
+        self.inner = inner
+        self.posts: list = []
+
+    async def handle_async_request(self, request):
+        if request.method == "POST":
+            self.posts.append(request)
+        return await self.inner.handle_async_request(request)
+
+
+class _DomCatalog(KpiCard):
+    catalog_id: ClassVar[str] = "urn:test-gh256-domain:v1"
+    data_type: ClassVar[str] = "gh256_dom"
+    component: ClassVar[str] = "Gh256Dom"
+
+
+def _a2ui_app(tmp_path, model=None, *, domain=False):
+    ts = ToolSet()
+
+    if domain:
+
+        @ts.tool(tier=1, read_only=True, emits=_DomCatalog, sample={"a": "x"})
+        async def dom(inp: _GateIn) -> _DomCatalog:
+            """Emit a domain card."""
+            return _DomCatalog(title="d", metrics=[MetricItem(label="Rev", value="1")])
+
+    @ts.tool(tier=1, read_only=True, emits=KpiCard, sample={"a": "x"})
+    async def kpi(inp: _GateIn) -> KpiCard:
+        """Emit a KPI card."""
+        return KpiCard(title="k", metrics=[MetricItem(label="Rev", value="1")])
+
+    @ts.tool(tier=1)
+    async def ask(inp: _GateIn) -> str:
+        """Pause for input."""
+        raise ToolInterrupt("need", "more?", response_schema={"type": "object"})
+
+    return Agent(
+        settings=BaseAgentSettings(DEV_MODE=True, DATA_DIR=str(tmp_path / "data"), AGENT_NAME="t"),
+        model_client=model or FakeModelClient(),
+        persona="p",
+        toolsets=[ts],
+    ).build_app()
+
+
+async def _asgi_client(app, rec):
+    _, token = app.state.auth.api_keys.mint("t", admin=True)
+    return httpx.AsyncClient(
+        transport=rec, base_url="http://test", headers={"Authorization": f"Bearer {token}"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_a2a_attempt_activates_a2ui_when_advertised(tmp_path):
+    from agent_sdk.models.content_types import A2UI_EXTENSION_URI
+    from agent_sdk.testing.chat import card_catalog_ids
+
+    app = _a2ui_app(tmp_path)
+    rec = _Recorder(httpx.ASGITransport(app=app))
+    async with app.router.lifespan_context(app):
+        async with await _asgi_client(app, rec) as client:
+            card = (await client.get("/.well-known/agent-card.json")).json()
+            uris = [e["uri"] for e in card["capabilities"]["extensions"]]
+            assert A2UI_EXTENSION_URI in uris
+            drv = ChatDriver(client)
+            await _a2a_attempt(client, "q", {}, drv)
+            await _a2a_attempt(client, "q", {}, drv)
+    app.state.credential_store.close()
+    assert len(rec.posts) == 2
+    for req in rec.posts:
+        assert req.headers["x-a2a-extensions"] == A2UI_EXTENSION_URI
+        caps = json.loads(req.content)["message"]["metadata"]["a2uiClientCapabilities"]
+        assert caps == drv._caps
+        for cid in card_catalog_ids(card):
+            assert cid in caps["catalogs"]
+
+
+@pytest.mark.asyncio
+async def test_a2a_attempt_no_extension_when_not_advertised(tmp_path):
+    from agent_sdk.models.content_types import A2UI_EXTENSION_URI
+
+    app = _fake_tools_app(tmp_path, skills=False)
+    rec = _Recorder(httpx.ASGITransport(app=app))
+    async with app.router.lifespan_context(app):
+        async with await _asgi_client(app, rec) as client:
+            card = (await client.get("/.well-known/agent-card.json")).json()
+            uris = [e["uri"] for e in card["capabilities"].get("extensions", [])]
+            assert A2UI_EXTENSION_URI not in uris
+            await _a2a_attempt(client, "q", {})
+    app.state.credential_store.close()
+    assert "x-a2a-extensions" not in rec.posts[0].headers
+    assert "a2uiClientCapabilities" not in (json.loads(rec.posts[0].content)["message"].get("metadata") or {})
+
+
+@pytest.mark.asyncio
+async def test_card_catalog_ids_reach_a2ui_capabilities_over_build_app(tmp_path):
+    from agent_sdk.testing.chat import card_catalog_ids
+
+    register_content_type(_DomCatalog)
+    try:
+        app = _a2ui_app(tmp_path, domain=True)
+        rec = _Recorder(httpx.ASGITransport(app=app))
+        async with app.router.lifespan_context(app):
+            async with await _asgi_client(app, rec) as client:
+                card = (await client.get("/.well-known/agent-card.json")).json()
+                ids = card_catalog_ids(card)
+                assert "urn:test-gh256-domain:v1" in ids and len(ids) > 1
+                await _a2a_attempt(client, "q", {})
+        app.state.credential_store.close()
+    finally:
+        _REGISTRY.pop("gh256_dom", None)
+    caps = json.loads(rec.posts[0].content)["message"]["metadata"]["a2uiClientCapabilities"]
+    assert "urn:test-gh256-domain:v1" in caps["catalogs"]
+
+
+@pytest.mark.asyncio
+async def test_a2a_resume_over_build_app_sends_task_and_context_id(tmp_path):
+    from agent_sdk.testing import reply, tool_call
+
+    model = FakeModelClient([tool_call("ask", {}), reply("done")])
+    app = _a2ui_app(tmp_path, model)
+    rec = _Recorder(httpx.ASGITransport(app=app))
+    async with app.router.lifespan_context(app):
+        async with await _asgi_client(app, rec) as client:
+            first = await _a2a_attempt(client, "go", {})
+            assert first.status is None
+            assert first.ids["state"] == "input-required"
+            second = await _a2a_attempt(client, "answer", first.ids)
+    app.state.credential_store.close()
+    assert second.status is None
+    msg = json.loads(rec.posts[1].content)["message"]
+    assert msg["taskId"] == first.ids["task_id"]
+    assert msg["contextId"] == first.ids["context_id"]
+    assert second.ids["task_id"] == first.ids["task_id"]
+
+
+# ── GH-256 ────────────────────────────────────────────────────────────────────
+
+
+def _card_client(card, posts, stream_body=b""):
+    # MockTransport: build_app cannot serve a non-object card, a failing card
+    # fetch, or a hand-written stream body.
+    def handler(req):
+        if req.method == "GET":
+            if isinstance(card, Exception):
+                raise card
+            return httpx.Response(200, json=card)
+        posts.append(req)
+        return httpx.Response(200, content=stream_body)
+
+    return httpx.AsyncClient(base_url="http://t", transport=httpx.MockTransport(handler))
+
+
+def _a2ui_card(ids):
+    from agent_sdk.models.content_types import A2UI_EXTENSION_URI
+
+    return {
+        "preferredTransport": "HTTP+JSON",
+        "capabilities": {
+            "extensions": [{"uri": A2UI_EXTENSION_URI, "params": {"supportedCatalogIds": ids}}]
+        },
+    }
+
+
+async def _attempt_over_app(tmp_path, state, model=None):
+    app = _a2ui_app(tmp_path, model)
+    rec = _Recorder(httpx.ASGITransport(app=app))
+    async with app.router.lifespan_context(app):
+        async with await _asgi_client(app, rec) as client:
+            at = await _a2a_attempt(client, "q", state)
+    app.state.credential_store.close()
+    return at, rec
+
+
+@pytest.mark.asyncio
+async def test_resume_sends_both_task_and_context_id(tmp_path):
+    state = {"task_id": "t1", "context_id": "c1", "state": "input-required"}
+    _, rec = await _attempt_over_app(tmp_path, state)
+    msg = json.loads(rec.posts[0].content)["message"]
+    assert msg["taskId"] == "t1" and msg["contextId"] == "c1"
+
+
+@pytest.mark.asyncio
+async def test_context_only_when_not_interrupted(tmp_path):
+    state = {"task_id": "t1", "context_id": "c1", "state": "completed"}
+    _, rec = await _attempt_over_app(tmp_path, state)
+    msg = json.loads(rec.posts[0].content)["message"]
+    assert "taskId" not in msg and msg["contextId"] == "c1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("card", [[], "x", None, {"capabilities": []}, {"capabilities": {"extensions": "x"}}])
+async def test_non_object_card_is_not_advertised(card):
+    from agent_sdk.testing.turns import _a2ui_advertised
+
+    client = _card_client(card, [])
+    assert await _a2ui_advertised(ChatDriver(client)) is False
+
+
+@pytest.mark.asyncio
+async def test_card_fetch_failure_logged_by_type_only(caplog):
+    from agent_sdk.testing.turns import _a2ui_advertised
+
+    client = _card_client(httpx.ConnectError("secret-host-detail"), [])
+    with caplog.at_level("WARNING"):
+        assert await _a2ui_advertised(ChatDriver(client)) is False
+    assert "ConnectError" in caplog.text
+    assert "secret-host-detail" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stream_message_event_is_reply():
+    # MockTransport: build_app never streams a bare kind=="message" event.
+    body = _sse(
+        {"kind": "message", "role": "agent", "contextId": "c9", "parts": [{"kind": "text", "text": "hello"}]},
+        {"kind": "status-update", "taskId": "late", "status": {"state": "failed"}, "final": True},
+    )
+    client = _card_client({"capabilities": {}}, [], body)
+    at = await _a2a_attempt(client, "q", {})
+    assert at.reply == "hello" and at.ids["context_id"] == "c9" and at.ids["state"] == ""
+
+
+@pytest.mark.asyncio
+async def test_stream_stops_at_final_over_build_app(tmp_path):
+    from agent_sdk.testing import reply
+
+    at, _ = await _attempt_over_app(tmp_path, {}, FakeModelClient([reply("done")]))
+    assert at.ids["state"] == "completed" and at.reply == "done"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("advertised", [False, True])
+async def test_chat_driver_sends_a2ui_header_only_when_advertised(tmp_path, advertised):
+    app = _a2ui_app(tmp_path) if advertised else _fake_tools_app(tmp_path, skills=False)
+    rec = _Recorder(httpx.ASGITransport(app=app))
+    async with app.router.lifespan_context(app):
+        async with await _asgi_client(app, rec) as client:
+            d = ChatDriver(client)
+            await d.a2a_turn("q")
+            try:
+                await d.resume("no-task", "no-ctx", "r")
+            except Exception:  # unknown task: the server refuses, the request still went out
+                pass
+    app.state.credential_store.close()
+    assert len(rec.posts) == 2
+    for req in rec.posts:
+        assert ("x-a2a-extensions" in req.headers) is advertised
+        meta = json.loads(req.content)["message"].get("metadata") or {}
+        assert ("a2uiClientCapabilities" in meta) is advertised
+
+
+@pytest.mark.asyncio
+async def test_a2a_attempt_over_build_app_asgi(tmp_path):
+    app = _fake_tools_app(tmp_path, skills=False)
+    async with app.router.lifespan_context(app):
+        _, token = app.state.auth.api_keys.mint("t", admin=True)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as client:
+            at = await _a2a_attempt(client, "hello", {})
+    app.state.credential_store.close()
+    assert at.status is None
+    assert at.ids["task_id"] and at.ids["context_id"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_client_rejects_unsupported_negotiated_version(tmp_path):
+    from agent_sdk.testing.mcp import McpError
+
+    # MockTransport: a real server never negotiates an unsupported version.
+    def handler(req):
+        body = json.loads(req.content)
+        if body.get("method") == "initialize":
+            return httpx.Response(
+                200, json={"jsonrpc": "2.0", "id": body["id"], "result": {"protocolVersion": "1999-01-01"}}
+            )
+        return httpx.Response(202)
+
+    kf = tmp_path / "key"
+    kf.write_text("tok")
+    async with McpClient("http://t", key_file=kf, transport=httpx.MockTransport(handler)) as c:
+        with pytest.raises(McpError):
+            await c.initialize()
+
+
+def test_check_structured_unresolvable_ref_is_failure():
+    from agent_sdk.testing.mcp import _check_structured
+
+    tool = {"outputSchema": {"type": "object", "properties": {"a": {"$ref": "#/$defs/missing"}}}}
+    out = _check_structured(tool, {"structuredContent": {"a": 1}})
+    assert "$ref" in out

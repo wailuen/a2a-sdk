@@ -16,6 +16,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
     { name = "jinja2" },
+    { name = "jsonschema" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "tzdata" },
@@ -29,7 +30,6 @@ azure = [
 ]
 dev = [
     { name = "httpx" },
-    { name = "jsonschema" },
     { name = "mypy" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "pytest" },
@@ -55,7 +55,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "jinja2", specifier = ">=3.1" },
-    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.20" },
+    { name = "jsonschema", specifier = ">=4.20" },
     { name = "msal", marker = "extra == 'obo'", specifier = ">=1.26" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=1.0" },

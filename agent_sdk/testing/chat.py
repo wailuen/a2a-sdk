@@ -5,21 +5,54 @@ Drives a single A2A or AG-UI turn against a live agent via an
 usable directly in integration tests that need a human-readable turn.
 
 A2UI caps are declared automatically (``tier=core+extended``, standard-profile
-catalog always included); pass ``extra_catalogs`` for domain catalogs.
+catalog always included); pass ``extra_catalogs`` for domain catalogs.  The
+A2UI extension header and capabilities are sent only when the agent card
+advertises the extension.
+
+Non-goal: A2A ``additionalInterfaces`` and the card ``url`` are not followed.
+The clients target the SDK's own app through the client they are given.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from typing import Any, Callable
+
+import httpx
 
 from ..models.content_types import A2UI_EXTENSION_URI as _A2UI_EXT_URI
 from ..models.content_types import A2UI_MIME_TYPE as A2UI_MIME
 from ..models.content_types import A2UI_VERSION as _A2UI_VERSION
 from ..models.content_types import CATALOG_ID as _STANDARD_CATALOG
 from ..validation.validators import safe_id
+
+logger = logging.getLogger("agent_sdk.testing.chat")
+
+
+def _a2ui_extension(card: Any) -> dict[str, Any] | None:
+    if not isinstance(card, dict):
+        return None
+    caps = card.get("capabilities")
+    exts = caps.get("extensions") if isinstance(caps, dict) else None
+    for e in exts if isinstance(exts, list) else []:
+        if isinstance(e, dict) and e.get("uri") == _A2UI_EXT_URI:
+            return e
+    return None
+
+
+def _advertises_a2ui(card: Any) -> bool:
+    return _a2ui_extension(card) is not None
+
+
+def card_catalog_ids(card: Any) -> list[str]:
+    """``supportedCatalogIds`` from the card's A2UI extension params (strings only)."""
+    ext = _a2ui_extension(card)
+    params = ext.get("params") if ext else None
+    ids = params.get("supportedCatalogIds") if isinstance(params, dict) else None
+    return [i for i in ids if isinstance(i, str)] if isinstance(ids, list) else []
 
 
 def _is_role(value: Any) -> bool:
@@ -145,6 +178,31 @@ class ChatDriver:
             r.raise_for_status()
             self._card = r.json()
         return self._card
+
+    async def _a2ui_advertised(self) -> bool:
+        """True when the agent card lists the A2UI extension.
+
+        A non-object card or a card-fetch failure counts as not advertised;
+        a failure is logged by exception type only.
+        """
+        try:
+            card = await self._discover_card()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("agent card fetch failed: %s", type(exc).__name__)
+            return False
+        return _advertises_a2ui(card)
+
+    async def a2ui_client_activation(self) -> tuple[dict[str, str], dict[str, Any]]:
+        """Return ``(headers, message_metadata)`` that activate A2UI.
+
+        Both are empty when the agent card does not advertise the extension.
+        """
+        if not await self._a2ui_advertised():
+            return {}, {}
+        return (
+            self._merged_headers({"X-A2A-Extensions": _A2UI_EXT_URI}),
+            {"a2uiClientCapabilities": self._caps},
+        )
 
     def _fire(self, emit: dict[str, Callable] | None, key: str, *args: Any) -> None:
         if emit:
@@ -372,15 +430,17 @@ class ChatDriver:
                 "supports HTTP+JSON (see DESIGN.md non-goals)"
             )
 
+        a2ui_headers, a2ui_meta = await self.a2ui_client_activation()
         body: dict[str, Any] = {
             "message": {
                 "kind": "message",
                 "role": "user",
                 "messageId": uuid.uuid4().hex,
                 "parts": [{"kind": "text", "text": query}],
-                "metadata": {"a2uiClientCapabilities": self._caps},
             }
         }
+        if a2ui_meta:
+            body["message"]["metadata"] = a2ui_meta
         if context_id:
             body["message"]["contextId"] = context_id
 
@@ -389,7 +449,7 @@ class ChatDriver:
         r = await self._client.post(
             "/v1/message:send",
             json=body,
-            headers=self._merged_headers({"X-A2A-Extensions": _A2UI_EXT_URI}),
+            headers=a2ui_headers or self._merged_headers(),
         )
         self._raise_a2a_error(emit, r)
         # D7.11: confirm A2UI extension was activated by reading the response echo
@@ -440,6 +500,7 @@ class ChatDriver:
         to satisfy the A2A MUST that interrupted tasks continue with the
         SAME taskId + contextId.  Returns the same result as :meth:`a2a_turn`.
         """
+        a2ui_headers, a2ui_meta = await self.a2ui_client_activation()
         body: dict[str, Any] = {
             "message": {
                 "kind": "message",
@@ -448,13 +509,14 @@ class ChatDriver:
                 "taskId": task_id,
                 "contextId": context_id,
                 "parts": [{"kind": "text", "text": reply}],
-                "metadata": {"a2uiClientCapabilities": self._caps},
             }
         }
+        if a2ui_meta:
+            body["message"]["metadata"] = a2ui_meta
         r = await self._client.post(
             "/v1/message:send",
             json=body,
-            headers=self._merged_headers({"X-A2A-Extensions": _A2UI_EXT_URI}),
+            headers=a2ui_headers or self._merged_headers(),
         )
         self._raise_a2a_error(emit, r)
         result = r.json()

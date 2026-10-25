@@ -128,12 +128,19 @@ def task_error_extension() -> AgentExtension:
     )
 
 
+def a2ui_enabled(allowed_components: list[str] | None, emits: list[type]) -> bool:
+    """The single A2UI on/off gate (GH-257); computed once in ``build_app()``."""
+    return bool(supported_catalogs(allowed_components, emits))
+
+
 def build_agent_card(
     settings: BaseAgentSettings,
     registry: ToolRegistry,
     credential_fields: dict[str, list[CredentialField]] | None = None,
     *,
     allowed_components: list[str] | None = None,
+    a2ui_enabled: bool = False,
+    emits: list[type] | None = None,
 ) -> dict[str, Any]:
     """Assemble the wire-ready card dict once at boot (app.state.agent_card).
 
@@ -149,12 +156,17 @@ def build_agent_card(
     advertises catalog IDs for the listed component types. Catalog IDs come
     from the registered tools' ``emits`` types (GH-188). With no catalog to
     advertise the A2UI extension is left off the card (GH-249).
+
+    ``a2ui_enabled`` (GH-257) is the app's single gate; the card never
+    recomputes it. ``emits`` is the flattened emits list, built from the
+    registry when omitted.
     """
     base_url = settings.resolved_base_url
-    emits = [m for e in registry.all() for m in e.decl.emits_types]
+    if emits is None:
+        emits = [m for e in registry.all() for m in e.decl.emits_types]
     extensions = []
     output_modes = ["text/plain", "application/json"]
-    if supported_catalogs(allowed_components, emits):
+    if a2ui_enabled:
         extensions.append(a2ui_extension(allowed_components, emits))
         output_modes.append("application/a2ui+json")
     extensions += [

@@ -601,7 +601,7 @@ def test_card_x_sdk_emits_list_and_catalogs(settings):
             """s"""
             return _kpi()
 
-        card = build_agent_card(settings, ToolRegistry([ts], {}))
+        card = build_agent_card(settings, ToolRegistry([ts], {}), a2ui_enabled=True)
         skills = {s["id"]: s for s in card["skills"]}
         assert skills["dom"]["x-sdk"]["emits"] == ["gh225_a", "gh225_b"]
         assert skills["single"]["x-sdk"]["emits"] == "kpi_card"

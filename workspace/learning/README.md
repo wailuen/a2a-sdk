@@ -518,3 +518,22 @@ Entries ordered by LRN number.
 | LRN-519 | Sweep every request.body() when adding a capped-body helper | [LRN-519](LRN-519-uncapped-body-sibling-sweep.md) |
 | LRN-520 | Phase gate must check git diff, not declared files | [LRN-520](LRN-520-undeclared-modified-files.md) |
 | LRN-521 | List absorbed message shapes before removing a catch-all | [LRN-521](LRN-521-catchall-removal-shape-audit.md) |
+| LRN-522 | Parallel group changes serializer fallback, another group's tests still pin old output | [LRN-522](LRN-522-cross-group-fallback-tests.md) |
+| LRN-523 | CHANGELOG gets a second Unreleased heading | [LRN-523](LRN-523-duplicate-unreleased-heading.md) |
+| LRN-524 | CHANGELOG bullet names changed file by basename only | [LRN-524](LRN-524-changelog-basename-path.md) |
+| LRN-525 | New exports not named in CHANGELOG bullet | [LRN-525](LRN-525-changelog-missing-export-names.md) |
+| LRN-526 | New exports mentioned only under Fixed, no Added section | [LRN-526](LRN-526-exports-need-added-section.md) |
+| LRN-527 | Multi-file CHANGELOG bullets must name every changed file by path | [LRN-527](LRN-527-changelog-per-file-paths.md) |
+| LRN-528 | Planned "Reuses C-NNN" helpers must import the component | [LRN-528](LRN-528-reuse-registered-helper.md) |
+| LRN-529 | Catalog required-ness must match what wire() really writes | [LRN-529](LRN-529-catalog-required-vs-wire.md) |
+| LRN-530 | Testing-client ACs need build_app() card, not MockTransport | [LRN-530](LRN-530-testing-client-real-card.md) |
+| LRN-531 | CHANGELOG must name files by repo path, not class names | [LRN-531](LRN-531-changelog-name-file-not-class.md) |
+| LRN-532 | CHANGELOG bullets must name harness and template paths in full | [LRN-532](LRN-532-changelog-peer-repo-paths.md) |
+| LRN-533 | Real-app test with a pre-built driver skips the code under test | [LRN-533](LRN-533-prebuilt-driver-skips-code.md) |
+| LRN-534 | New testing-client tests regress to MockTransport | [LRN-534](LRN-534-new-tests-mocktransport-regress.md) |
+| LRN-535 | Testing-client change needs Added and Breaking entries, not only Fixed | [LRN-535](LRN-535-changelog-added-and-breaking.md) |
+| LRN-536 | Hardening a stable-core redact helper's output is Breaking | [LRN-536](LRN-536-redact-helper-output-breaking.md) |
+| LRN-537 | Behavior changes filed under Fixed | [LRN-537](LRN-537-behavior-change-under-fixed.md) |
+| LRN-538 | Changelog must name every changed file by full path | [LRN-538](LRN-538-changelog-full-path-coverage.md) |
+| LRN-539 | Field added to a Reads-only file escapes scope gates | [LRN-539](LRN-539-reads-only-file-modified.md) |
+| LRN-540 | MockTransport exceptions must be named in the check | [LRN-540](LRN-540-mocktransport-exceptions-unnamed.md) |

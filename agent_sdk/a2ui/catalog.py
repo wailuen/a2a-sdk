@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import enum
 import inspect
 import logging
-from collections.abc import Iterable
+from collections.abc import Sequence
 
 from pydantic import BaseModel
+from pydantic.fields import FieldInfo
 
 from ..models.a2a import AgentExtension
 from ..models.content_types import (
@@ -66,8 +68,8 @@ def _own_annotation_names(klass: type) -> frozenset[str]:
 def _annotation_str(ann: object, required: bool, depth: int = 0) -> tuple[str, bool]:
     """Return a (short_type_name, is_required) pair for a Pydantic field annotation.
 
-    ``required`` is passed through unchanged: whether a field is required comes
-    from ``FieldInfo.is_required()`` only, never from the annotation. A union
+    ``required`` is passed through unchanged: whether a field is required is
+    decided by ``_wire_required()``, never from the annotation. A union
     containing ``None`` makes the type read ``X|null`` instead. With *depth* > 0
     a nested model is expanded to its own field list (GH-249).
     """
@@ -91,8 +93,16 @@ def _annotation_str(ann: object, required: bool, depth: int = 0) -> tuple[str, b
             return f"[{_annotation_str(targs[0], required, depth)[0]}]", required
         return "list", required
 
+    if origin is dict:
+        dargs: tuple[object, ...] = getattr(ann, "__args__", ())
+        value_str = _annotation_str(dargs[1], required, depth)[0] if len(dargs) == 2 else "any"
+        return "{key: " + value_str + "}", required
+
     if origin is _typing.Literal:
         return '"' + "|".join(str(v) for v in ann.__args__) + '"', required  # type: ignore[attr-defined]
+
+    if isinstance(ann, type) and issubclass(ann, enum.Enum):
+        return '"' + "|".join(str(m.value) for m in ann) + '"', required
 
     cls_name = getattr(ann, "__name__", None)
     if cls_name:
@@ -106,21 +116,25 @@ def _annotation_str(ann: object, required: bool, depth: int = 0) -> tuple[str, b
     return raw, required
 
 
-def _serialization_required(model: type[BaseModel]) -> frozenset[str]:
-    try:
-        return frozenset(model.model_json_schema(mode="serialization").get("required", []))
-    except Exception:
-        return frozenset()
+def _wire_required(info: FieldInfo) -> bool:
+    """True when ``wire()`` always writes the field: it has no default, or its
+    default is not ``None`` (``wire()`` drops ``None`` values)."""
+    if info.exclude:
+        return False
+    if info.is_required():
+        return True
+    if info.default_factory is not None:
+        return True
+    return info.default is not None
 
 
 def _nested_fields(model: type[BaseModel], depth: int) -> str:
-    wire_required = _serialization_required(model)
     parts: list[str] = []
     for name, info in model.model_fields.items():
         if info.exclude:
             continue
         wire_name = info.serialization_alias or info.alias or name
-        required = info.is_required() or wire_name in wire_required
+        required = _wire_required(info)
         ann = info.annotation
         type_str = "any" if ann is None else _annotation_str(ann, required, depth)[0]
         parts.append(f"{wire_name}{'' if required else '?'}: {type_str}")
@@ -131,72 +145,19 @@ def _field_summary(cls: type[ContentModel]) -> str:
     """Return a compact one-liner describing the required/notable fields of *cls*.
 
     Reads the Pydantic model's ``model_fields`` to enumerate field names and
-    their annotation strings.  Optional fields (``not is_required()``) are suffixed
-    with ``?``; nullable types read ``X|null``.  Over 250 characters, whole
-    optional fields are dropped (never a required one) and ``...`` is appended.
+    their annotation strings.  A field is required when ``wire()`` always
+    writes it (no default, or a non-None default); the rest are suffixed with
+    ``?``.  Nullable types read ``X|null``.  Nested models are expanded one
+    level when that keeps the line within 250 characters; otherwise they stay
+    a bare name.  Over 250 characters, whole optional fields are dropped
+    (never a required one) and ``...`` is appended.
     """
     try:
-        parts: list[tuple[str, bool]] = []
-        wire_required = _serialization_required(cls)
-        for name, info in cls.model_fields.items():
-            if name.startswith("_"):
-                continue
-            # RT-003/RT-005: `metadata` lives on `ContentModel` itself (the
-            # SDK-wide GH-63 out-of-band disclosure envelope) and is
-            # deliberately absent from every per-type frozen field table —
-            # see that class's docstring and the content_types.py module
-            # docstring. Because base-class fields come first in pydantic's
-            # `model_fields`, leaving it in would put a cross-cutting,
-            # non-domain field ahead of a type's real required fields in
-            # this budget-truncated (250 char) teaching string for every
-            # single registered content type, and would teach the model a
-            # field its own catalog explicitly does not want it prompted
-            # with per-type. The skip is keyed on WHO DECLARED the field,
-            # not its name: a base-class field the subclass did not itself
-            # declare is skipped (covers `metadata` today and any future
-            # `ContentModel` field automatically), but a domain card that
-            # deliberately redeclares `metadata` with its own semantics
-            # keeps it in its own summary.
-            # RT-008: "declared" must walk the full MRO, not just `cls`'s own
-            # annotations — a two-level (or deeper) subclass of a card that
-            # redeclares `metadata` inherits that domain declaration and must
-            # keep it in its summary even without redeclaring it again.
-            # RT-001: the per-class read goes through _own_annotation_names(),
-            # NOT `vars(klass)["__annotations__"]` — see that helper's
-            # docstring for why the raw read is silently always-empty on 3.14.
-            declared_here = any(
-                name in _own_annotation_names(klass)
-                for klass in cls.__mro__
-                if klass is not ContentModel and issubclass(klass, ContentModel)
-            )
-            if not declared_here and name in ContentModel.model_fields:
-                continue
-            wire_name = info.serialization_alias or info.alias or name
-            required = info.is_required() or wire_name in wire_required
-            ann = info.annotation
-            if ann is None:
-                type_str = "any"
-            else:
-                type_str, required = _annotation_str(ann, required, 1)
-            suffix = "" if required else "?"
-            parts.append((f"{wire_name}{suffix}: {type_str}", required))
-
-        # Keep system-prompt tokens manageable: drop whole optional fields from
-        # the end first; a required field is never dropped or cut.
-        kept = list(parts)
-        dropped = False
-        while len(", ".join(p for p, _ in kept)) > 250:
-            for i in range(len(kept) - 1, -1, -1):
-                if not kept[i][1]:
-                    del kept[i]
-                    dropped = True
-                    break
-            else:
-                break
-        texts = [p for p, _ in kept]
-        if dropped:
-            texts.append("...")
-        return f"{{{', '.join(texts)}}}"
+        for depth in (1, 0):
+            summary, fits = _summary_at_depth(cls, depth)
+            if fits:
+                return summary
+        return summary
     except Exception:
         logger.warning(
             "a2ui catalog: field summary generation failed for %s; using "
@@ -204,6 +165,71 @@ def _field_summary(cls: type[ContentModel]) -> str:
             getattr(cls, "__qualname__", cls),
         )
         return "{...}"
+
+
+def _summary_at_depth(cls: type[ContentModel], depth: int) -> tuple[str, bool]:
+    """One summary line plus whether it fit the 250-char budget untouched."""
+    parts: list[tuple[str, bool]] = []
+    for name, info in cls.model_fields.items():
+        if name.startswith("_") or info.exclude:
+            continue
+        # RT-003/RT-005: `metadata` lives on `ContentModel` itself (the
+        # SDK-wide GH-63 out-of-band disclosure envelope) and is
+        # deliberately absent from every per-type frozen field table —
+        # see that class's docstring and the content_types.py module
+        # docstring. Because base-class fields come first in pydantic's
+        # `model_fields`, leaving it in would put a cross-cutting,
+        # non-domain field ahead of a type's real required fields in
+        # this budget-truncated (250 char) teaching string for every
+        # single registered content type, and would teach the model a
+        # field its own catalog explicitly does not want it prompted
+        # with per-type. The skip is keyed on WHO DECLARED the field,
+        # not its name: a base-class field the subclass did not itself
+        # declare is skipped (covers `metadata` today and any future
+        # `ContentModel` field automatically), but a domain card that
+        # deliberately redeclares `metadata` with its own semantics
+        # keeps it in its own summary.
+        # RT-008: "declared" must walk the full MRO, not just `cls`'s own
+        # annotations — a two-level (or deeper) subclass of a card that
+        # redeclares `metadata` inherits that domain declaration and must
+        # keep it in its summary even without redeclaring it again.
+        # RT-001: the per-class read goes through _own_annotation_names(),
+        # NOT `vars(klass)["__annotations__"]` — see that helper's
+        # docstring for why the raw read is silently always-empty on 3.14.
+        declared_here = any(
+            name in _own_annotation_names(klass)
+            for klass in cls.__mro__
+            if klass is not ContentModel and issubclass(klass, ContentModel)
+        )
+        if not declared_here and name in ContentModel.model_fields:
+            continue
+        wire_name = info.serialization_alias or info.alias or name
+        required = _wire_required(info)
+        ann = info.annotation
+        if ann is None:
+            type_str = "any"
+        else:
+            type_str, required = _annotation_str(ann, required, depth)
+        suffix = "" if required else "?"
+        parts.append((f"{wire_name}{suffix}: {type_str}", required))
+
+    # Keep system-prompt tokens manageable: drop whole optional fields from
+    # the end first; a required field is never dropped or cut.
+    kept = list(parts)
+    dropped = False
+    while len(", ".join(p for p, _ in kept)) > 250:
+        for i in range(len(kept) - 1, -1, -1):
+            if not kept[i][1]:
+                del kept[i]
+                dropped = True
+                break
+        else:
+            break
+    texts = [p for p, _ in kept]
+    fits = not dropped and len(", ".join(texts)) <= 250
+    if dropped:
+        texts.append("...")
+    return f"{{{', '.join(texts)}}}", fits
 
 
 _FEW_SHOT_EXAMPLES: dict[str, str] = {
@@ -237,7 +263,7 @@ _FEW_SHOT_EXAMPLES: dict[str, str] = {
 
 _COMPACT_SCHEMAS: dict[str, str] = {
     "KpiCard": '{"metrics":[{label,value,unit?,trend?,change_pct?}],"title?":str}',
-    "TimeSeriesChart": '{"chart_type":"line|area|bar","title":str,"subtitle?":str,"x_key":str,"y_key":str,"total_count":int,"data":[{date:str,value:num|null,label?:str}]}',
+    "TimeSeriesChart": '{"chart_type":"line|area|bar","title":str,"subtitle?":str,"x_key":"date","y_key":"value","total_count":int,"data":[{date:str,value:num|null,label?:str}]}',
     "ComparisonTable": '{"columns":[{key,label,type?}],"rows":[{...}],"title?":str}',
     "BarChart": '{"bars":[{category:str,value:float}],"title?":str,"x_key?":str,"y_key?":str}',
     "EntityList": '{"entity_type":str,"items":[{id,name,summary?}],"total_count?":int,"has_more?":bool,"title?":str,"showing?":int}',
@@ -344,7 +370,7 @@ def _filtered_types(
 
 def supported_catalogs(
     allowed_components: list[str] | None = None,
-    emits: Iterable[type] | None = None,
+    emits: Sequence[type] | None = None,
 ) -> list[str]:
     """Catalog IDs to advertise (SC-D2, GH-188).
 
@@ -352,13 +378,17 @@ def supported_catalogs(
     types a tool can actually emit are listed, after the
     *allowed_components* filter; the Standard Profile comes first when
     present.  Without *emits*, falls back to the Standard Profile plus every
-    registered catalog.
+    registered catalog; the Standard Profile is listed only when a Standard
+    type passes the *allowed_components* filter (GH-258).
     """
     if emits is None:
-        catalogs = [CATALOG_ID]
+        catalogs: list[str] = []
         for cls in _filtered_types(allowed_components).values():
             if cls.catalog_id not in catalogs:
                 catalogs.append(cls.catalog_id)
+        if CATALOG_ID in catalogs:
+            catalogs.remove(CATALOG_ID)
+            catalogs.insert(0, CATALOG_ID)
         return catalogs
     allowed = None if allowed_components is None else set(allowed_components)
     found: list[str] = []
@@ -387,7 +417,7 @@ def data_types_for_catalog(
 
 def a2ui_extension(
     allowed_components: list[str] | None = None,
-    emits: Iterable[type] | None = None,
+    emits: Sequence[type] | None = None,
 ) -> AgentExtension:
     """The card's A2UI extension declaration (activated via
     X-A2A-Extensions echo, §5.1).

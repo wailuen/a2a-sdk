@@ -177,8 +177,10 @@ const state = {
   threadId: uuid(),
   aguiMessages: [],
   busy: false,
+  abort: null, // AbortController of the in-flight run; Reset aborts it
   // GH-180: every catalog ID the agent card advertises (data only, never HTML)
   catalogIds: ["urn:a2ui-profile:standard:v1"],
+  a2uiAdvertised: false,
 };
 
 export function render(pane, ctx) {
@@ -227,6 +229,7 @@ export function render(pane, ctx) {
   modeAgui.classList.toggle("active", state.mode === "agui");
 
   resetBtn.addEventListener("click", () => {
+    if (state.abort) state.abort.abort();
     state.contextId = null;
     state.threadId = uuid();
     state.aguiMessages = [];
@@ -356,6 +359,7 @@ export function render(pane, ctx) {
       const exts = (card.capabilities && card.capabilities.extensions) || [];
       const ext = exts.find((e) => e && typeof e.uri === "string" && e.uri.indexOf("a2ui.org/a2a-extension/a2ui/") !== -1);
       const ids = ext && ext.params && ext.params.supportedCatalogIds;
+      state.a2uiAdvertised = !!ext;
       if (Array.isArray(ids)) {
         const std = "urn:a2ui-profile:standard:v1";
         const clean = ids
@@ -369,24 +373,48 @@ export function render(pane, ctx) {
   }
   const catalogIdsReady = loadCatalogIds();
 
+  // A Reset swaps threadId; output from a run started before it must not land.
+  function staleGuard(fn, threadAtSend) {
+    return (...args) => {
+      if (state.threadId === threadAtSend) fn(...args);
+    };
+  }
+
+  // An aborted request is not a network failure: report it as a closed
+  // request so postWithRetry neither retries nor logs "network error".
+  async function postAbortable(signal, doPost) {
+    try {
+      return await doPost();
+    } catch (err) {
+      if (signal && signal.aborted) return { ok: false, status: 499, text: async () => "" };
+      throw err;
+    }
+  }
+
   async function sendA2a(text) {
     await catalogIdsReady;
+    const threadAtSend = state.threadId;
+    const signal = state.abort ? state.abort.signal : undefined;
     const message = {
       kind: "message",
       role: "user",
       parts: [{ kind: "text", text }],
       messageId: uuid(),
-      metadata: { a2uiClientCapabilities: { version: "v0.9.1", catalogs: state.catalogIds, tier: "core+extended" } },
     };
+    if (state.a2uiAdvertised) {
+      message.metadata = { a2uiClientCapabilities: { version: "v0.9.1", catalogs: state.catalogIds, tier: "core+extended" } };
+    }
     if (state.contextId) message.contextId = state.contextId;
 
     const resp = await postWithRetry(
-      () => postSse(`${state.base}/v1/message:stream`, { message }, {
-        "X-A2A-Extensions": "https://a2ui.org/a2a-extension/a2ui/v0.9.1",
-      }),
-      { systemLine, traceFrame, label: "stream request" }
+      () => postAbortable(signal, () => postSse(`${state.base}/v1/message:stream`, { message },
+        state.a2uiAdvertised ? { "X-A2A-Extensions": "https://a2ui.org/a2a-extension/a2ui/v0.9.1" } : {}, signal)),
+      { systemLine: staleGuard(systemLine, threadAtSend), traceFrame: staleGuard(traceFrame, threadAtSend), label: "stream request" }
     );
     if (!resp) return;
+    const setContextId = (id) => {
+      if (state.threadId === threadAtSend) state.contextId = id || state.contextId;
+    };
 
     let sawFinal = false;
     let agentStream = null; // streaming bubble for A2A status-update text parts
@@ -396,13 +424,13 @@ export function render(pane, ctx) {
       if (!json) return;
       const kind = json.kind;
       if (kind === "task") {
-        state.contextId = json.contextId || state.contextId;
+        setContextId(json.contextId);
         systemLine(`task ${json.id} · ${json.status ? json.status.state : "?"}`);
       } else if (kind === "message") {
         for (const part of json.parts || []) {
           if (part.kind === "text" && part.text) bubble("agent", part.text);
         }
-        state.contextId = json.contextId || state.contextId;
+        setContextId(json.contextId);
       } else if (kind === "status-update") {
         const status = json.status || {};
         const audit = json.metadata && json.metadata.audit;
@@ -517,14 +545,20 @@ export function render(pane, ctx) {
   }
 
   async function runExclusive(work) {
-    if (state.busy) return;
+    if (state.busy) {
+      systemLine("busy: wait for the current run to finish");
+      return;
+    }
     state.busy = true;
     sendBtn.disabled = true;
+    const controller = new AbortController();
+    state.abort = controller;
     try {
       await work();
     } catch (err) {
-      systemLine(`error: ${err.message || err}`);
+      if (!controller.signal.aborted) systemLine(`error: ${err.message || err}`);
     } finally {
+      if (state.abort === controller) state.abort = null;
       state.busy = false;
       sendBtn.disabled = false;
       input.focus();
@@ -533,6 +567,7 @@ export function render(pane, ctx) {
 
   async function sendAgui(text, payloadOverride) {
     const threadAtSend = state.threadId;
+    const signal = state.abort ? state.abort.signal : undefined;
     await catalogIdsReady;
     let body;
     let resumed = null;
@@ -581,8 +616,8 @@ export function render(pane, ctx) {
 
     // Retry only 429/503 (honouring Retry-After) and network failures, and only
     // here, before any SSE frame has been read.
-    const resp = await postWithRetry(() => postSse(`${state.base}/ag-ui/run`, body), {
-      systemLine, traceFrame, label: "run request",
+    const resp = await postWithRetry(() => postAbortable(signal, () => postSse(`${state.base}/ag-ui/run`, body, undefined, signal)), {
+      systemLine: staleGuard(systemLine, threadAtSend), traceFrame: staleGuard(traceFrame, threadAtSend), label: "run request",
     });
     if (!resp) {
       if (resumed && state.threadId === threadAtSend && pendingInterrupt === null) {
@@ -599,11 +634,12 @@ export function render(pane, ctx) {
     const toolArgBuffers = new Map(); // toolCallId -> accumulated JSON fragment string
     let terminal = false;
     let finished = false; // RUN_FINISHED seen: only then do chunk-only messages count as a reply
-    const seenChunkIds = new Set();
+    const textSeen = new Set(); // ids with buffered text: a role may only be recorded before this (chat.py parity)
     let chunkId; // AG-UI sends messageId on the first chunk only; later chunks inherit it
     const processStream = async () => {
       try {
         await readSse(resp, ({ json, data }) => {
+          if (state.threadId !== threadAtSend) return;
           traceFrame(json && json.type ? json.type : "data", json !== null ? json : data);
           if (!json || !json.type) return;
           switch (json.type) {
@@ -633,8 +669,8 @@ export function render(pane, ctx) {
                 if (!order.includes(id)) order.push(id);
               }
               if (json.type === "TEXT_MESSAGE_CHUNK" && id && typeof json.role === "string" && json.role
-                  && !roles.has(id) && !seenChunkIds.has(id)) roles.set(id, json.role);
-              if (json.type === "TEXT_MESSAGE_CHUNK" && id) seenChunkIds.add(id);
+                  && !roles.has(id) && !textSeen.has(id)) roles.set(id, json.role);
+              textSeen.add(id);
               if (buf && json.delta) buf.append(json.delta);
               break;
             }
@@ -755,7 +791,7 @@ export function render(pane, ctx) {
         // second run (every tool runs twice), so never re-POST after a drop.
         if (!terminal) {
           terminal = true;
-          systemLine("stream dropped. The run may still finish on the server. It was not resent.");
+          if (state.threadId === threadAtSend) systemLine("stream dropped. The run may still finish on the server. It was not resent.");
         }
       }
     };
@@ -769,11 +805,11 @@ export function render(pane, ctx) {
       for (const id of order) {
         if (roles.has(id) && roles.get(id) !== "assistant") continue;
         const buf = textBuffers.get(id);
-        if (buf) state.aguiMessages.push({ id, role: "assistant", content: buf.text() });
+        if (buf && buf.text()) state.aguiMessages.push({ id: id || uuid(), role: "assistant", content: buf.text() });
       }
     }
 
-    if (!terminal) systemLine("stream closed without RUN_FINISHED/RUN_ERROR");
+    if (!terminal && state.threadId === threadAtSend) systemLine("stream closed without RUN_FINISHED/RUN_ERROR");
   }
 
   /* ALL frozen CUSTOM payload contracts (§5.3 table) */

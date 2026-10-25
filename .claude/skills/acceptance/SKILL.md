@@ -198,7 +198,7 @@ key in `.env`, in argv, or in this file.
 ```bash
 python -m agent_sdk.testing.mcp --base-url <base_url> --key-file <service_key_file> \
   --samples-file <samples.json> --expected-count <N tier-1 tools> \
-  [--allow-error <tool>]... [--opt-in <tool>]...
+  [--allow-error <tool>]... [--opt-in <tool>]... [--skills-tool]
 ```
 
 It does, in order:
@@ -223,6 +223,10 @@ It does, in order:
    - Any other `isError: true` not on the allow-list (`--allow-error <tool>`,
      use sparingly and record why): the gate stops at once. Stop acceptance
      before any model run and report the tool name and its `sample=` args.
+   - A tool with an `outputSchema` whose result has no `structuredContent`
+     (a void result is fine), has `structuredContent` that does not match the
+     schema, or has a schema with an unresolvable `$ref`: the gate stops at
+     once. Stop acceptance before any model run and report the tool name.
 
 Output names the tool and `sample=` args only. It never prints the
 Authorization header or the raw `tools/call` error body (SI-2, SI-6). Exit

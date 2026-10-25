@@ -14,9 +14,10 @@ CLI::
 
     python -m agent_sdk.testing.mcp --base-url URL --key-file PATH \
         --samples-file samples.json [--expected-count N] [--size-budget BYTES] \
-        [--allow-error TOOL]... [--opt-in TOOL]...
+        [--allow-error TOOL]... [--opt-in TOOL]... [--skills-tool]
 
-``samples.json`` maps tool name to its ``sample=`` args (or ``null``).
+``--skills-tool`` excludes the built-in ``load_skill`` by name instead of by
+shape.  ``samples.json`` maps tool name to its ``sample=`` args (or ``null``).
 """
 
 from __future__ import annotations
@@ -116,7 +117,11 @@ class McpClient:
             },
         )
         negotiated = result.get("protocolVersion")
-        self._version = negotiated if isinstance(negotiated, str) and negotiated else PROTOCOL_VERSION
+        if negotiated is None:
+            negotiated = PROTOCOL_VERSION
+        if negotiated not in SUPPORTED_PROTOCOL_VERSIONS:
+            raise McpError("mcp negotiated protocol version is not supported")
+        self._version = negotiated
         await self._post({"jsonrpc": "2.0", "method": "notifications/initialized"})
         return result
 
@@ -236,6 +241,9 @@ def _check_structured(tool: dict[str, Any], call: dict[str, Any]) -> str:
         return "structuredContent does not match outputSchema"
     except jsonschema.SchemaError:
         return "outputSchema is not a valid JSON Schema"
+    except Exception:
+        # An unresolvable $ref surfaces as a library-specific error; it is a gate failure.
+        return "outputSchema has an unresolvable $ref"
     return ""
 
 

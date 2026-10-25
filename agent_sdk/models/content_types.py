@@ -94,6 +94,7 @@ from pydantic import (
     Field,
     SerializationInfo,
     SerializerFunctionWrapHandler,
+    ValidationInfo,
     field_serializer,
     field_validator,
     model_serializer,
@@ -779,6 +780,14 @@ class TimeSeriesChart(ContentModel):
     # series is NOT on the wire: Profile v1 time_series has no top-level series
     # field. Store it for Python-side multi-series grouping only.
     series: list[SeriesMeta] | None = Field(default=None, exclude=True)
+
+    @field_validator("x_key", "y_key")
+    @classmethod
+    def _fixed_keys(cls, v: str, info: ValidationInfo) -> str:
+        expected = "date" if info.field_name == "x_key" else "value"
+        if v != expected:
+            raise ValueError(f"TimeSeriesChart {info.field_name} must be fixed")
+        return v
 
     @model_validator(mode="before")
     @classmethod

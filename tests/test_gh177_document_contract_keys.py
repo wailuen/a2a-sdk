@@ -94,9 +94,10 @@ function el(tag, attrs, ...children) {
 }
 function card(title, sub, body) { return el("section", {}, body); }
 function fmtNum(n) { return String(n); }
-// GH-215 row-cap helpers live outside the sliced range; stub them.
-function capRows(items) { return items; }
-function moreNote(items) { return null; }
+// GH-215/GH-255 row-cap and text-clip helpers live outside the sliced
+// ranges; load the real ones (exports turned into plain declarations).
+eval(src.slice(src.indexOf("export const MAX_ROWS"), src.indexOf("function maxOf"))
+  .replace(/export const /g, "var ").replace(/export function /g, "function "));
 eval(src.slice(start, end));
 process.stdout.write(JSON.stringify(renderDocumentList(JSON.parse(process.argv[2]))));
 """

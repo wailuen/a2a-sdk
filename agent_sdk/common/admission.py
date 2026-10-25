@@ -3,7 +3,7 @@
 Every route in this SDK that holds an open ``text/event-stream`` admits it
 against a bounded budget before the ``StreamingResponse`` is ever constructed:
 ``GET /mcp`` and ``GET /mcp/sse`` (routes/mcp.py), ``POST /v1/message:stream``
-and ``POST /v1/tasks/{id}:subscribe`` (routes/a2a.py), and ``POST /ag-ui/run``
+and ``GET``/``POST /v1/tasks/{id}:subscribe`` (routes/a2a.py), and ``POST /ag-ui/run``
 (routes/ag_ui.py, which admits against the A2A budget). The server is
 single-process by design (DESIGN.md §2), so those streams all contend for one
 connection pool.

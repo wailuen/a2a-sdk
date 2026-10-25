@@ -194,7 +194,7 @@ def _extract(chat_js: str, signature: str) -> str:
 
 
 _HARNESS = r"""
-const state = { threadId: "T1", aguiMessages: [], catalogIds: [], busy: false, contextId: null };
+const state = { threadId: "T1", aguiMessages: [], catalogIds: [], busy: false, contextId: null, abort: null };
 const sendBtn = { disabled: false };
 const resetBtn = { addEventListener(t, fn) { resetBtn.fn = fn; } };
 const trace = { id: "trace" };
@@ -204,7 +204,7 @@ const clear = (n) => { if (n.children) n.children.length = 0; };
 let n = 0;
 const uuid = () => "uuid-" + (++n);
 const catalogIdsReady = Promise.resolve();
-const log = { forms: 0, lines: [], placeholder: "" };
+const log = { forms: 0, lines: [], placeholder: "", custom: 0 };
 const formNodes = [];
 function mkForm() {
   const f = { removed: false, listeners: {}, children: [] };
@@ -226,12 +226,17 @@ const formFields = (schema) => (schema && schema.fields) || null;
 const buildResumePayload = () => ({ ok: true, payload: { decision: "yes" } });
 const buildPayloadFromValues = () => ({ ok: true, payload: { decision: "yes" } });
 const streamingBubble = () => { let t = ""; return { append(d) { t += d; }, text: () => t }; };
-const handleCustom = () => {};
+const handleCustom = () => { log.custom++; };
+const bubble = () => {};
+const handleA2aArtifact = () => {};
+const auditLine = () => {};
+let lastSignal = null;
+let onFrame = null;
 let pendingInterrupt = null;
 let shownForm = null;
 let postFails = false;
 let onPost = null;
-const postSse = (url, body) => { lastBody = body; return {}; };
+const postSse = (url, body, headers, signal) => { lastBody = body; lastSignal = signal; return {}; };
 const postWithRetry = async (fn) => {
   posts++;
   if (onPost) onPost();
@@ -239,7 +244,7 @@ const postWithRetry = async (fn) => {
   const r = fn();
   return postFails ? null : r;
 };
-const readSse = async (resp, cb) => { for (const f of FRAMES) cb({ json: f, data: "" }); };
+const readSse = async (resp, cb) => { for (const f of FRAMES) { if (onFrame) onFrame(f); cb({ json: f, data: "" }); } };
 """
 
 
@@ -257,7 +262,10 @@ def _node_run(frames, scenario: str) -> dict:
         for sig in (
             "  function removeInterruptForm()",
             "  function interruptForm(",
+            "  function staleGuard(",
+            "  async function postAbortable(",
             "  async function runExclusive(",
+            "  async function sendA2a(",
             "  async function sendAgui(",
         )
     )
@@ -267,6 +275,7 @@ def _node_run(frames, scenario: str) -> dict:
         "process.stdout.write(JSON.stringify({ msgs: state.aguiMessages, pending: pendingInterrupt, "
         "forms: formNodes.map(f => f.removed), placeholder: input.placeholder, posts, lastBody, "
         "busy: state.busy, lines: log.lines, thread: state.threadId, "
+        "ctx: state.contextId, custom: log.custom, signalMatches: lastSignal ? lastSignal === (state.abort && state.abort.signal) : null, aborted: state.abort ? state.abort.signal.aborted : null, "
         "live: transcript.children.filter(c => c.listeners && !c.removed).length })); })();\n"
     )
     out = subprocess.run([_NODE, "-e", script], capture_output=True, text=True, timeout=20, check=True)
@@ -547,3 +556,121 @@ def test_reset_handler_clears_pending_interrupt_and_form():
     assert out["pending"] is None
     assert out["live"] == 0 and out["forms"] == [True]
     assert out["thread"] != "T1"
+
+
+_ACTIVE_ASSISTANT = lambda out: [(m["id"], m["content"]) for m in out["msgs"] if m["role"] == "assistant"]  # noqa: E731
+
+
+@needs_node
+def test_chunk_role_ignored_after_content_text_for_same_id():
+    frames = [
+        _msg("TEXT_MESSAGE_CONTENT", "k1", "a"),
+        _msg("TEXT_MESSAGE_CHUNK", "k1", "b") | {"role": "tool"},
+        _FIN,
+    ]
+    out = _node_run(frames, 'await sendAgui("hi");')
+    assert _ACTIVE_ASSISTANT(out) == [("k1", "ab")]
+
+
+@needs_node
+def test_chunk_role_ignored_after_earlier_chunk_text():
+    frames = [
+        _msg("TEXT_MESSAGE_CHUNK", "k1", "a"),
+        _msg("TEXT_MESSAGE_CHUNK", "k1", "b") | {"role": "tool"},
+        _FIN,
+    ]
+    out = _node_run(frames, 'await sendAgui("hi");')
+    assert _ACTIVE_ASSISTANT(out) == [("k1", "ab")]
+
+
+@needs_node
+def test_fold_skips_empty_text_and_mints_id_for_idless_buffer():
+    frames = [
+        _msg("TEXT_MESSAGE_START", "e1"),
+        _msg("TEXT_MESSAGE_END", "e1"),
+        _msg("TEXT_MESSAGE_CONTENT", None, "orphan"),
+        _FIN,
+    ]
+    out = _node_run(frames, 'await sendAgui("hi");')
+    got = _ACTIVE_ASSISTANT(out)
+    assert len(got) == 1 and got[0][1] == "orphan"
+    assert isinstance(got[0][0], str) and got[0][0]
+
+
+_A2A_TASK = {"kind": "task", "id": "t1", "contextId": "ctx-new", "status": {"state": "working"}}
+
+
+@needs_node
+def test_a2a_context_write_back_kept_without_reset():
+    out = _node_run([_A2A_TASK], 'await sendA2a("hi");')
+    assert out["ctx"] == "ctx-new"
+
+
+@needs_node
+def test_a2a_context_write_back_dropped_after_reset():
+    scenario = "onFrame = () => { state.threadId = 'T2'; }; await sendA2a('hi');"
+    out = _node_run([_A2A_TASK], scenario)
+    assert out["ctx"] is None
+
+
+@needs_node
+def test_reset_aborts_in_flight_request():
+    out = _node_run([], "state.abort = new AbortController(); resetBtn.fn();")
+    assert out["aborted"] is True
+
+
+@needs_node
+@pytest.mark.parametrize("call", ['sendAgui("hi")', 'sendA2a("hi")'])
+def test_run_paths_pass_controller_signal_through_post_sse(call):
+    out = _node_run([], f"state.abort = new AbortController(); await {call};")
+    assert out["signalMatches"] is True
+
+
+@needs_node
+def test_stale_custom_and_system_lines_dropped():
+    frames = [{"type": "CUSTOM", "name": "AGENT_NOTE", "value": {"note": "x"}}, _FIN]
+    out = _node_run(frames, "onFrame = () => { state.threadId = 'T2'; }; await sendAgui('hi');")
+    assert out["custom"] == 0
+    assert "run finished" not in out["lines"]
+    assert not any("stream closed" in ln or "stream dropped" in ln for ln in out["lines"])
+
+
+@needs_node
+def test_same_thread_custom_still_handled():
+    frames = [{"type": "CUSTOM", "name": "AGENT_NOTE", "value": {"note": "x"}}, _FIN]
+    out = _node_run(frames, "await sendAgui('hi');")
+    assert out["custom"] == 1 and "run finished" in out["lines"]
+
+
+@needs_node
+def test_resume_click_while_busy_shows_fixed_busy_note():
+    scenario = "state.busy = true; let ran = false; await runExclusive(async () => { ran = true; }); if (ran) throw new Error('ran');"
+    out = _node_run([], scenario)
+    assert out["lines"] == ["busy: wait for the current run to finish"]
+
+
+def test_chat_js_has_no_second_raw_fetch():
+    src = (STATIC / "chat.js").read_text()
+    assert len(re.findall(r"(?<![\w.])fetch\(", src)) == 1
+    assert "signal" in src and "AbortController" in src
+
+
+@needs_node
+def test_post_sse_passes_signal_and_keeps_auth_header(tmp_path):
+    assert _NODE is not None
+    mod = tmp_path / "api.mjs"
+    mod.write_text((STATIC / "api.js").read_text())
+    script = (
+        f"import {{ postSse, setKey }} from {json.dumps(mod.as_uri())};\n"
+        "globalThis.sessionStorage = { _v: {}, getItem(k) { return this._v[k] || null; }, setItem(k, v) { this._v[k] = v; } };\n"
+        "let seen; globalThis.fetch = async (u, init) => { seen = init; return {}; };\n"
+        "setKey('K'); const ac = new AbortController();\n"
+        "await postSse('/x', {}, undefined, ac.signal);\n"
+        "const a = seen.signal === ac.signal && seen.headers.Authorization === 'Bearer K';\n"
+        "await postSse('/x', {});\n"
+        "process.stdout.write(JSON.stringify({ a, none: seen.signal === undefined }));\n"
+    )
+    f = tmp_path / "run.mjs"
+    f.write_text(script)
+    out = subprocess.run([_NODE, str(f)], capture_output=True, text=True, timeout=20, check=True)
+    assert json.loads(out.stdout) == {"a": True, "none": True}

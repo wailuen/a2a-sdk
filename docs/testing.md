@@ -86,7 +86,16 @@ add custom request logic.
   fixed shape, so your own tier-1 tool named `load_skill` is counted. Pass
   `skills_tool=True` (CLI: `--skills-tool`) to exclude by name instead. For
   each tool with an `outputSchema`, the gate also checks that the call returns
-  `structuredContent` that matches the schema.
+  `structuredContent` that matches the schema; an `outputSchema` with an
+  unresolvable `$ref` is a gate failure. `initialize` raises `McpError` when the
+  server negotiates a version the SDK does not support.
+
+`ChatDriver` and `agent_sdk.testing.turns` send the A2UI extension header and
+capabilities only when the agent card advertises the A2UI extension, and
+`turns` adds the card's `supportedCatalogIds` to the declared catalogs. A
+resume sends both `taskId` and `contextId`. Non-goal: A2A `additionalInterfaces`
+and the card `url` are not followed; these clients drive the SDK's own app on
+the client you give them.
 
 See the SDK's own `tests/` and the template's `tests/` for working
 examples of all three.

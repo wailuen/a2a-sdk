@@ -107,7 +107,8 @@ from ..common.admission import (
     resolve_per_identity_limit,
     slot_table,
 )
-from ..common.body import BodyTooLarge, read_capped_body
+from ..common.body import BodyTooLarge, is_json_content_type, read_capped_body
+from ..common.media import media_type_match
 from ..common.origin import guard_origin
 from ..common.json_strict import (
     NESTING_TOO_DEEP_MESSAGE,
@@ -148,23 +149,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_SUPPORTED_MODES = {"text", "text/plain", "application/json", A2UI_MIME_TYPE}
-# GH-248: "text" is the documented legacy alias of text/plain.
-_NORMALIZED_MODES = {"text/plain" if m == "text" else m.lower() for m in _SUPPORTED_MODES}
+_BASE_MODES = {"text", "text/plain", "application/json"}
 
 
-def _mode_accepted(mode: str) -> bool:
-    """GH-248: case-insensitive, parameters ignored, ``*/*`` and ``type/*``
-    wildcards, ``text`` kept as a legacy alias of ``text/plain``."""
-    token = mode.split(";", 1)[0].strip().lower()
-    if token == "text":
-        token = "text/plain"
-    if token == "*/*":
-        return True
-    if token.endswith("/*"):
-        prefix = token[:-1]
-        return any(m.startswith(prefix) for m in _NORMALIZED_MODES)
-    return token in _NORMALIZED_MODES
+def _supported_modes(a2ui_enabled: bool) -> set[str]:
+    """Per-app supported output modes; the A2UI MIME only when A2UI is on (GH-257)."""
+    return _BASE_MODES | {A2UI_MIME_TYPE} if a2ui_enabled else set(_BASE_MODES)
+
+
 _MAX_BODY_BYTES = 1 * 1024 * 1024  # 1 MB — consistent with AG-UI cap
 
 # RT-002 (GH-143 follow-up): message_stream's taskId-resume branch and
@@ -434,19 +426,21 @@ def _resume_value(message: Message) -> Any | JSONResponse:
     return {"status": None, "payload": data_parts[0].data}
 
 
-def _capabilities(message: Message, request: Request) -> A2uiCapabilities:
+def _capabilities(
+    message: Message, request: Request, *, a2ui_enabled: bool = True
+) -> A2uiCapabilities:
     # Gate A2UI on the opt-in header — clients that never sent X-A2A-Extensions
     # containing A2UI_EXTENSION_URI must not receive A2UI DataParts. The
     # fail-closed default itself lives in A2uiCapabilities.gated (C-006) so
     # this transport cannot drift from ag_ui.py's independently.
     extensions = request.headers.get("x-a2a-extensions", "")
-    opted_in = A2UI_EXTENSION_URI in [u.strip() for u in extensions.split(",")]
+    opted_in = A2UI_EXTENSION_URI in [u.strip() for u in extensions.split(",")] and a2ui_enabled
     raw = (message.metadata or {}).get("a2uiClientCapabilities")
     # GH-240: A2A-only; AG-UI keeps the default.
     return A2uiCapabilities.gated(opted_in, raw, keep_declared_catalogs=True)
 
 
-def _config_error(params: MessageSendParams) -> JSONResponse | None:
+def _config_error(params: MessageSendParams, a2ui_enabled: bool = True) -> JSONResponse | None:
     # RT-005: never takes `headers` — a config error means _capabilities()/
     # _start_worker never ran, so nothing on this request was ever activated.
     config = params.configuration
@@ -458,10 +452,11 @@ def _config_error(params: MessageSendParams) -> JSONResponse | None:
             "push notifications are not supported",
         )
     if config.accepted_output_modes is not None and config.accepted_output_modes:
-        if not any(_mode_accepted(m) for m in config.accepted_output_modes):
+        supported = _supported_modes(a2ui_enabled)
+        if not any(media_type_match(m, supported) for m in config.accepted_output_modes):
             return a2a_error(
                 A2A_CONTENT_TYPE_NOT_SUPPORTED,
-                "no acceptable output mode; supported: " + ", ".join(sorted(_SUPPORTED_MODES)),
+                "no acceptable output mode; supported: " + ", ".join(sorted(supported)),
             )
     return None
 
@@ -469,9 +464,10 @@ def _config_error(params: MessageSendParams) -> JSONResponse | None:
 async def _parse_send(request: Request) -> MessageSendParams | JSONResponse:
     # RT-005: never takes `headers` — a parse failure means no branch of the
     # route ever ran, so nothing was activated.
-    # GH-15: reject non-JSON Content-Type before parsing (A2A §5.1 → -32005/HTTP 415)
-    ct = request.headers.get("content-type", "").split(";")[0].strip().lower()
-    if ct and ct != "application/json":
+    # GH-15: reject non-JSON Content-Type before parsing (A2A §5.1 → -32005/HTTP 415).
+    # A missing header passes; the check ignores case and accepts +json (GH-251).
+    ct = request.headers.get("content-type", "")
+    if ct and not is_json_content_type(ct):
         return a2a_error(A2A_CONTENT_TYPE_NOT_SUPPORTED, "Content-Type must be application/json")
     try:
         raw = await read_capped_body(request, _MAX_BODY_BYTES)
@@ -549,6 +545,9 @@ def _create_task_record(request: Request, params: MessageSendParams, identity: I
     history_entry = msg.model_copy(update={"context_id": task.context_id})
     task.history = [history_entry]
     record = request.app.state.task_store.create(task, identity)
+    config = params.configuration
+    if config is not None and config.accepted_output_modes:
+        record.accepted_output_modes = list(config.accepted_output_modes)
     # A2A §3 contextId continuation: carry prior conversation history into the
     # new task so the model can reference entities from earlier turns.
     # RT-002/RT-B-202: bridge_context_messages (agent/loop.py) re-asserts the
@@ -670,7 +669,7 @@ async def message_send(
     params = await _parse_send(request)
     if isinstance(params, JSONResponse):
         return params
-    if (err := _config_error(params)) is not None:
+    if (err := _config_error(params, request.app.state.a2ui_enabled)) is not None:
         return err
     blocking = bool(params.configuration and params.configuration.blocking)
     history_length = params.configuration.history_length if params.configuration else None
@@ -719,7 +718,7 @@ async def message_send(
         record = _create_task_record(request, params, identity)
         sub = slot.subscribe(record.task.id) if slot is not None else None
         _start_worker(
-            request, record, _capabilities(params.message, request), identity,
+            request, record, _capabilities(params.message, request, a2ui_enabled=request.app.state.a2ui_enabled), identity,
             (params.message.metadata or {}).get("timezone"),
         )
         # RT-005: the sole path on this route that can activate either
@@ -930,6 +929,11 @@ async def _open_stream(
                 contextId=record.task.context_id,
                 status=TaskStatus(
                     state=TaskState.FAILED,
+                    message=Message(
+                        role="agent",
+                        parts=[TextPart(text="invalid agent response")],
+                        messageId=uuid.uuid4().hex,
+                    ),
                     error=WireError(
                         code=A2A_INVALID_AGENT_RESPONSE,
                         message="invalid agent response",
@@ -998,7 +1002,7 @@ async def message_stream(
     params = await _parse_send(request)
     if isinstance(params, JSONResponse):
         return params
-    if (err := _config_error(params)) is not None:
+    if (err := _config_error(params, request.app.state.a2ui_enabled)) is not None:
         return err
     history_length = params.configuration.history_length if params.configuration else None
     if params.message.task_id:
@@ -1043,7 +1047,7 @@ async def message_stream(
             request, record, identity, slot=slot, history_length=history_length
         )
         _start_worker(
-            request, record, _capabilities(params.message, request), identity,
+            request, record, _capabilities(params.message, request, a2ui_enabled=request.app.state.a2ui_enabled), identity,
             (params.message.metadata or {}).get("timezone"),
         )
         # RT-005: the sole path on this route that can activate either

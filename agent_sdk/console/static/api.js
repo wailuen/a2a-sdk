@@ -135,7 +135,7 @@ export async function readSse(response, onFrame) {
 }
 
 /* POST that expects an SSE stream back; applies bearer + JSON body. */
-export async function postSse(path, body, extraHeaders) {
+export async function postSse(path, body, extraHeaders, signal) {
   const resp = await fetch(path, {
     method: "POST",
     headers: authHeaders(
@@ -145,6 +145,7 @@ export async function postSse(path, body, extraHeaders) {
       )
     ),
     body: JSON.stringify(body),
+    signal,
   });
   return resp;
 }

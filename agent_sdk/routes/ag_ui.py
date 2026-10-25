@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import time
 import uuid
@@ -41,7 +42,7 @@ from ..auth.middleware import require_identity
 from ..common.iso8601 import iso_utc
 from ..common.origin import guard_origin
 from ..common.redact import frame_locations
-from ..common.body import BodyTooLarge, read_capped_body
+from ..common.body import BodyTooLarge, is_json_content_type, read_capped_body
 from ..common.json_strict import (
     NESTING_TOO_DEEP_MESSAGE,
     NestingTooDeep,
@@ -192,9 +193,24 @@ _RESULT_FALLBACK = "tool result not serializable"
 
 def _tool_json(value: Any, fallback: str) -> str:
     try:
-        return dumps_strict(to_jsonable_python(value, fallback=str))
-    except (ValueError, TypeError):
+        jsonable = to_jsonable_python(value, fallback=str)
+        try:
+            return dumps_strict(jsonable)
+        except ValueError:
+            return dumps_strict(_null_non_finite(jsonable))
+    except Exception as exc:
+        logger.warning("tool json fallback (%s)", type(exc).__name__)
         return fallback
+
+
+def _null_non_finite(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {k: _null_non_finite(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_null_non_finite(v) for v in value]
+    return value
 
 
 _INVALID_RESUME = "invalid resume entry"
@@ -519,13 +535,13 @@ class _RunMapper:
 # ── route ──
 
 
-def _capabilities(body: dict[str, Any]) -> A2uiCapabilities:
+def _capabilities(body: dict[str, Any], *, a2ui_enabled: bool = True) -> A2uiCapabilities:
     # The fail-closed default itself lives in A2uiCapabilities.gated (C-006)
     # so this transport cannot drift from a2a.py's independently.
     forwarded = body.get("forwardedProps")
     if not isinstance(forwarded, dict) or "a2uiClientCapabilities" not in forwarded:
         return A2uiCapabilities.gated(False, None)
-    return A2uiCapabilities.gated(True, forwarded["a2uiClientCapabilities"])
+    return A2uiCapabilities.gated(a2ui_enabled, forwarded["a2uiClientCapabilities"])
 
 
 def _user_timezone(body: dict[str, Any]) -> str | None:
@@ -642,7 +658,7 @@ async def ag_ui_run(
 ) -> Response:
     guard_origin(request)
     ct = request.headers.get("content-type", "")
-    if ct and "application/json" not in ct:
+    if ct and not is_json_content_type(ct):
         return Response(status_code=415)
     try:
         raw = await read_capped_body(request, _MAX_BODY_BYTES)
@@ -680,7 +696,7 @@ async def ag_ui_run(
     thread_id = raw_thread if isinstance(raw_thread, str) and raw_thread else uuid.uuid4().hex
     run_id = raw_run if isinstance(raw_run, str) and raw_run else uuid.uuid4().hex
     store = request.app.state.task_store
-    mapper = _RunMapper(thread_id, run_id, _capabilities(body))
+    mapper = _RunMapper(thread_id, run_id, _capabilities(body, a2ui_enabled=request.app.state.a2ui_enabled))
 
     def _emit(frames: list[dict[str, Any]], *, what: str = "invalid agent response") -> bytes:
         # GH-173 (RT-002): sse_data refuses non-finite floats (allow_nan=False).

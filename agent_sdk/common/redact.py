@@ -300,7 +300,7 @@ def safe_block_text(value: str) -> str:
     C0/DEL/C1 are neutralised; CR and CRLF normalise to ``\\n``. ``|`` is
     left alone — markdown table syntax here, not a column delimiter this
     renderer joined on."""
-    return value.replace("\r\n", "\n").replace("\r", "\n").translate(
+    return drop_format_chars(value).replace("\r\n", "\n").replace("\r", "\n").translate(
         _BLOCK_CONTROL_CHARS
     )
 

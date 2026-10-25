@@ -111,7 +111,7 @@ from starlette.background import BackgroundTask
 from ..auth.context import bind_identity, unbind_identity
 from ..auth.identity import Identity
 from ..auth.middleware import require_identity
-from ..common.body import BodyTooLarge, read_capped_body
+from ..common.body import BodyTooLarge, is_json_content_type, read_capped_body
 from ..common.admission import (
     SlotTable,
     StreamSlot,
@@ -475,8 +475,8 @@ def _valid_request_id(request_id: Any) -> bool:
 
 
 def _is_json_content_type(request: Request) -> bool:
-    ct = request.headers.get("content-type", "").split(";")[0].strip().lower()
-    return not ct or ct == "application/json"
+    ct = request.headers.get("content-type", "")
+    return not ct or is_json_content_type(ct)
 
 
 def _page(entries: list[Any], cursor: Any) -> tuple[list[Any], str | None]:
@@ -1115,7 +1115,8 @@ async def mcp_post(
 
     # MCP Streamable HTTP 2025-06-18 §3.2.1: clients MUST send
     # Content-Type: application/json.  Reject non-conforming requests with 415;
-    # guard with `if ct` to preserve no-header pass-through (dev tools often omit it).
+    # a missing header passes through (dev tools often omit it), and the compare
+    # is case-insensitive and also takes a +json type (is_json_content_type).
     if not _is_json_content_type(request):
         return JSONResponse(
             status_code=415,
@@ -1518,7 +1519,7 @@ async def mcp_messages(
     queue = rec[0]
 
     # RT-001/RTGA-006: parse the body FIRST so is_initialize can be detected
-    # before the MCP-Protocol-Version gate — mirroring mcp_post (lines 451-487).
+    # before the MCP-Protocol-Version gate — mirroring mcp_post.
     # An initialize request on the legacy HTTP+SSE path carries no version header
     # on first contact and must not be rejected with 400 before negotiation.
     if not _is_json_content_type(request):

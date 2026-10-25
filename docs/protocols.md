@@ -14,7 +14,7 @@ identically across protocols.
 | `GET /v1/tasks/{id}` | Task; `historyLength` truncates (0 → `[]`) |
 | `POST /v1/tasks/{id}:cancel` | 200 + canceled Task; 404/409 per table |
 | `POST` or `GET /v1/tasks/{id}:subscribe` | re-attach SSE; both verbs share one handler, auth and stream cap |
-| `GET /v1/tasks` | 200; identity-scoped paginated list — query params `pageSize` (1–100, default 50) and `pageToken`; response `{tasks, totalSize, pageSize, nextPageToken}`; a non-empty `pageToken` that is not 32 lowercase hex characters → 400 `-32602` "invalid pageToken" (empty = first page) |
+| `GET /v1/tasks` | 200; identity-scoped paginated list — query params `pageSize` (1–100, default 50) and `pageToken`; response `{tasks, totalSize, pageSize, nextPageToken}`; a non-empty `pageToken` the task store rejects → 400 `-32602` "invalid pageToken" (empty = first page). The route asks `TaskStore.is_valid_page_token` (default accepts any token; `InMemoryTaskStore` accepts 32 lowercase hex characters) and pages with `TaskStore.list_tasks_for_identity`; a custom store overrides both. Listing is always scoped to the caller's identity, so a token from another identity pages nothing |
 
 Error table (body `{"error": {code, message}}`): unknown/foreign task →
 404 `-32001`; terminal-task cancel → 409 `-32002`; terminal-task resume
@@ -32,6 +32,12 @@ matching is case-insensitive, ignores parameters, and accepts `*/*` and `type/*`
 case-insensitively; `historyLength` applies to the resume reply and the first
 stream snapshot. `-32004` is 501 when raised by a handler; the 405 a wrong HTTP
 verb gets from the router is transport-level and also carries `-32004`.
+A request body over 1 MiB gets 400 `-32602` "request body too large". A failed task
+always carries `status.message` (role `agent`, one TextPart) with the same safe text
+as `status.error.message`; `status.error` is an SDK extension that spec-compliant
+clients can ignore. When a client sends `acceptedOutputModes`, artifact parts are
+filtered to the accepted types; if none remain and `text/plain` is accepted, one
+TextPart fallback is kept, otherwise the task fails with `-32005`.
 **Bare wire (GH-248):** success bodies and SSE frames are bare `Task | Message`
 or frame objects, not the proto's wrapped `SendMessageResponse` /
 `StreamResponse`; v0.3.0 HTTP+JSON examples and existing clients use the bare form. Task
@@ -65,7 +71,7 @@ one `A2UI_UPDATE`. Each artifact uses a fresh `surfaceId`; a caller-supplied `su
 https://github.com/wailuen/a2a-sdk/issues/214#issuecomment-6359828762).
 
 **Concurrent-stream cap.** `POST /v1/message:stream`,
-`POST /v1/tasks/{id}:subscribe` and AG-UI's `POST /ag-ui/run` each hold an
+`GET`/`POST /v1/tasks/{id}:subscribe` and AG-UI's `POST /ag-ui/run` each hold an
 indefinite `text/event-stream` on a single-process server, so they share one
 admission budget: global, then per-identity
 (`AGENT_SDK_MAX_A2A_STREAMS_PER_IDENTITY`), then per-task subscribers. The
@@ -120,10 +126,12 @@ as `None`. The error carries no entry content.
 
 On AG-UI the action gate reads the canonical form: `status="resolved"` (or
 `"cancelled"`) with the human decision in `payload.decision`
-(`"approved"`/`"rejected"`). The SDK shorthand (the domain word directly in
-`status`) is accepted on the A2A resume path only. The two are merged
-REJECT-WINS (a contradictory pair always denies); a `resolved` status with no
-`payload.decision` is UNCLEAR, which default-denies without aborting the run.
+(`"approved"`/`"rejected"`). A decision word directly in `status` is not
+accepted on AG-UI (the route rejects it with `invalid resume entry`). A2A
+resume has no `status` field: the gate reads the reply text, or
+`payload.decision` from one `DataPart` (delivered as `status: None`). Signals are merged REJECT-WINS (a contradictory pair always
+denies); a `resolved` status with no `payload.decision` is UNCLEAR, which
+default-denies without aborting the run.
 
 `RUN_FINISHED` always carries `outcome`: `{type: "success"}` on a normal
 finish, `{type: "interrupt", ...}` when paused. `RUN_ERROR` carries `code` — one
@@ -143,6 +151,11 @@ never `RUN_ERROR`.
 - Auth: OAuth 2.1 (Claude.ai connector flow) or API key; unauthenticated →
   401 with a `WWW-Authenticate` pointer to the protected-resource
   metadata. Discovery: both PRM variants + AS metadata, S256 PKCE only.
+  A request with no bearer always gets that 401 (never 429); an invalid
+  bearer and the `/oauth/*` endpoints share the per-IP
+  `AGENT_SDK_UNAUTH_RATE_LIMIT` window. An `/oauth/*` 429 body is
+  `{"error":"temporarily_unavailable","error_description":"rate limit exceeded"}`
+  with `Retry-After`.
 - `tools/list` exposes **Tier 1 tools only**; `emits` becomes
   `outputSchema` and results carry `structuredContent`.
 - Setting `AGENT_SDK_MCP_SCHEMA_MODE=strict` flattens `tools/list` schemas (inlined `$defs`, `anyOf` with null collapsed at property positions only, so list items and dict values keep `null`; no `default: null`; a recursive model keeps its `$ref`/`$defs`; `null` is also dropped from an `anyOf` of three or more members at property positions, with the same required and keep-null rules as the two-member case, while top-level unions stay intact). It applies to `inputSchema` and `outputSchema`, including the `emits` tuple `anyOf`, and `tools/list` only. Default `standard` is unchanged.
@@ -187,7 +200,7 @@ never `RUN_ERROR`.
 
 `/.well-known/agent-card.json` (ETag + 304; `agent.json` is a
 byte-identical alias): `protocolVersion: "0.3.0"`, HTTP+JSON transport,
-`capabilities.extensions` = the A2UI extension with `supportedCatalogIds` (left off the card when no registered tool emits an A2UI type, GH-249),
+`capabilities.extensions` = the A2UI extension with `supportedCatalogIds` (left off the card when no registered tool emits an A2UI type, GH-249; GH-257: that one decision is `app.state.a2ui_enabled`, computed once in `build_app()`, and it also drives the accepted output modes, the header and `forwardedProps` opt-in, and artifact building: with A2UI off, `application/a2ui+json` alone gets -32005, a header opt-in or `forwardedProps.a2uiClientCapabilities` is ignored, and results use the TextPart/JSON fallback),
 `x-sdk` per-skill metadata (tier, schemas, emits), and the `x-agui` block
 (transport, endpoint, customEvents). All URLs derive from `PUBLIC_URL`.
 

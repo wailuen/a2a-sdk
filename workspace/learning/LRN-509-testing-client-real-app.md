@@ -14,7 +14,7 @@ GH-237 tests for run_gate output-schema checks used a hand-written `_stub_client
 Stubs were quicker to write. A stub only proves the stub and hides gate/server contract disagreements (LRN-496).
 
 ## Check
-Grep `tests/test_gh237_testing_clients.py` for `_stub_client`, `MockTransport` and `mkdtemp` and confirm no match. Confirm the tests use `build_app()` with `httpx.ASGITransport` and `tmp_path`.
+Grep `tests/test_gh237_testing_clients.py` for `_stub_client` and `mkdtemp` and confirm no match. `MockTransport` is allowed only in tests that need a shape a real app cannot produce, each with a `# MockTransport:` comment naming why: the scripted AG-UI frame tests (`_driver`, `test_turn_http_error_leaves_messages`, `test_agui_turn_connect_error_leaves_messages_unchanged`, `test_agui_turn_cancel_after_first_frame_leaves_messages_unchanged`), `test_missing_preferred_transport_defaults_to_jsonrpc_and_is_rejected`, the `_card_client` helper (non-object card, failing card fetch, bare `kind=="message"` stream event) and `test_mcp_client_rejects_unsupported_negotiated_version`. Any other `MockTransport` use fails the check. Confirm the tests use `build_app()` with `httpx.ASGITransport` and `tmp_path`.
 
 ## Prevention
 When planning tests for a testing-client feature, require a real `build_app()` over ASGI. Use a tier-1 tool returning None for the absent case and `Out.model_construct(...)` for the mismatch case. Wrap the transport in a recorder for header assertions.

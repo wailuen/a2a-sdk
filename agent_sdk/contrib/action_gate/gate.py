@@ -128,11 +128,11 @@ def parse_decision(resume_value: Any) -> Decision:
       ``DataPart``/``FilePart`` arrives as ``""`` → UNCLEAR). Classify exact-
       match: a reply that merely *contains* "yes" ⇒ UNCLEAR, never approved.
     - **AG-UI** → a dict ``{"status": ..., "payload": ...}``. The decision is
-      read from EITHER the envelope ``status`` (this SDK's core convention,
-      e.g. ``status="approved"``) OR ``payload.decision`` (canonical AG-UI,
-      where ``status`` is the protocol literal ``resolved``/``cancelled``).
-      Both are classified and merged REJECT-WINS, so the gate is correct
-      whichever placement a client uses and a contradictory pair denies.
+      canonical: ``status`` is the protocol literal ``resolved``/``cancelled``
+      and the human decision is ``payload.decision``. The route rejects any
+      other AG-UI ``status``; the gate still classifies a decision-word
+      ``status`` (defence in depth). Both are classified and merged
+      REJECT-WINS, so a contradictory pair denies.
       ``payload.status`` is NEVER read as a decision (blocks nested-status
       injection).
     - anything else (``None``, list, number, dict without status/payload) →
@@ -144,7 +144,7 @@ def parse_decision(resume_value: Any) -> Decision:
         signals: list[Outcome] = []
         status = resume_value.get("status")
         if status is not None:
-            # 'cancelled'/'rejected' → REJECTED; 'approved' → APPROVED;
+            # 'cancelled'/'rejected' → REJECTED; a decision word → its outcome;
             # 'resolved'/unknown → UNCLEAR (handled by the vocab).
             signals.append(_classify(str(status)))
         if payload is not None and payload.get("decision") is not None:

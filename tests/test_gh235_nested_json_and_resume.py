@@ -17,7 +17,7 @@ from agent_sdk.common import json_strict
 from agent_sdk.common.json_strict import loads_strict
 from agent_sdk.routes import a2a as a2a_module
 from agent_sdk.routes.mcp import _sse_queues
-from agent_sdk.routes.ag_ui import _RunMapper
+from agent_sdk.routes.ag_ui import _RESULT_FALLBACK, _RunMapper
 from agent_sdk.testing import reply, tool_call
 
 from .conftest import sse_frames
@@ -68,15 +68,34 @@ async def test_bad_status_is_run_error_before_lookup(client, app, status):
     assert store.find_interrupt("gh235-int", Identity(kind="api_key", subject="o")) is not None
 
 
-async def test_missing_status_is_still_delivered(client, fake_model):
+def _capture_resume(app, monkeypatch) -> list:
+    store = app.state.task_store
+    published: list = []
+    real = store.deliver_resume
+
+    def spy(task_id, envelope):
+        published.append(envelope.value)
+        return real(task_id, envelope)
+
+    monkeypatch.setattr(store, "deliver_resume", spy)
+    return published
+
+
+@pytest.mark.parametrize("entry_status", ["absent", None])
+async def test_missing_or_null_status_is_delivered_as_none(
+    client, app, fake_model, monkeypatch, entry_status
+):
     fake_model.script(tool_call("publish_note", {"note": "n"}), reply("after"))
     frames = await run(client, run_body("publish"))
     intr = frames[-1]["outcome"]["interrupts"][0]
-    frames = await run(
-        client, run_body(resume=[{"interruptId": intr["id"], "payload": {"decision": "approved"}}])
-    )
+    published = _capture_resume(app, monkeypatch)
+    entry = {"interruptId": intr["id"], "payload": {"decision": "approved"}}
+    if entry_status != "absent":
+        entry["status"] = entry_status
+    frames = await run(client, run_body(resume=[entry]))
     assert not _errors(frames)
     assert frames[-1]["type"] == "RUN_FINISHED"
+    assert published == [{"status": None, "payload": {"decision": "approved"}}]
 
 
 async def test_two_entry_resume_at_cap_is_run_error_not_429(client, app, monkeypatch):
@@ -106,6 +125,24 @@ async def test_two_entry_resume_at_cap_is_run_error_not_429(client, app, monkeyp
         await _cancel(held)
 
 
+async def test_two_entry_resume_below_cap_is_run_error(client, app):
+    store = app.state.task_store
+    record = store.create(new_task(), Identity(kind="api_key", subject="gh235-owner"))
+    store.mark_interrupted(record.task.id, "gh235-below")
+    frames = await run(
+        client,
+        run_body(
+            resume=[
+                {"interruptId": "gh235-below", "status": "resolved"},
+                {"interruptId": "other", "status": "resolved"},
+            ]
+        ),
+    )
+    errs = _errors(frames)
+    assert len(errs) == 1 and errs[0]["message"] == "invalid resume entry"
+    assert MARKER not in str(frames)
+
+
 async def test_bad_status_resume_at_cap_is_run_error_not_429(client, app, monkeypatch):
     monkeypatch.setattr(a2a_module, "_MAX_A2A_STREAMS_PER_TASK", 1)
     store = app.state.task_store
@@ -128,16 +165,16 @@ async def test_bad_status_resume_at_cap_is_run_error_not_429(client, app, monkey
         await _cancel(held)
 
 
-def test_tool_call_args_with_nan_use_fixed_fallback():
+def test_tool_call_args_with_nan_become_null():
     frames = _mapper().map(
         ToolCallEvent(tool_call_id="c1", tool_name="t", arguments={"x": float("nan")})
     )
     delta = next(f for f in frames if f["type"] == "TOOL_CALL_ARGS")["delta"]
-    assert delta == "{}"
+    assert delta == '{"x":null}'
     assert "NaN" not in str(frames)
 
 
-def test_tool_result_with_nan_uses_fixed_fallback():
+def test_tool_result_with_inf_becomes_null():
     m = _mapper()
     m.map(ToolCallEvent(tool_call_id="c1", tool_name="t", arguments={}))
     frames = m.map(
@@ -145,6 +182,17 @@ def test_tool_result_with_nan_uses_fixed_fallback():
     )
     content = next(f for f in frames if f["type"] == "TOOL_CALL_RESULT")["content"]
     assert "Infinity" not in content and "inf" not in content.lower().replace("information", "")
+    assert content == '{"x":null}'
+
+
+def test_tool_json_serializer_failure_uses_fixed_fallback(monkeypatch):
+    from agent_sdk.routes import ag_ui
+
+    def boom(*a, **k):
+        raise ValueError("x")
+
+    monkeypatch.setattr(ag_ui, "to_jsonable_python", boom)
+    assert ag_ui._tool_json({"x": 1}, _RESULT_FALLBACK) == _RESULT_FALLBACK
 
 
 def test_tool_result_with_native_types_still_serializes():
@@ -197,14 +245,17 @@ DEPTHS = [65, 100, 255, 5000]
 TOO_DEEP = "nesting too deep"
 
 
-def nested(depth: int) -> bytes:
+def nested(depth: int, *, objects: bool = False) -> bytes:
+    if objects:
+        return ('{"a":' * depth + f'"{MARKER}"' + "}" * depth).encode()
     return ("[" * depth + f'"{MARKER}"' + "]" * depth).encode()
 
 
+@pytest.mark.parametrize("objects", [False, True])
 @pytest.mark.parametrize("depth", DEPTHS)
-def test_loads_strict_nested_is_too_deep(depth):
+def test_loads_strict_nested_is_too_deep(depth, objects):
     with pytest.raises(json.JSONDecodeError) as ei:
-        loads_strict(nested(depth))
+        loads_strict(nested(depth, objects=objects))
     assert ei.value.msg == TOO_DEEP
     assert MARKER not in str(ei.value)
 
@@ -266,3 +317,25 @@ async def test_ag_ui_run_nested_is_too_deep(client, depth):
     assert len(errors) == 1
     assert errors[0]["message"] == TOO_DEEP
     assert MARKER not in r.text
+
+
+@pytest.mark.parametrize("objects", [False, True])
+async def test_oauth_register_nested_is_invalid_client_metadata(client, objects):
+    body = nested(2000, objects=objects)
+    assert len(body) < 16 * 1024
+    r = await client.post("/oauth/register", content=body, headers=JSON_HEADERS)
+    assert r.status_code == 400, r.text
+    assert r.json() == {
+        "error": "invalid_client_metadata",
+        "error_description": "request body must be valid JSON",
+    }
+    assert MARKER not in r.text
+
+
+@pytest.mark.parametrize("objects", [False, True])
+async def test_a2a_deep_metadata_never_breaks_task_list(client, objects):
+    open_, close = ('{"a":', "}") if objects else ("[", "]")
+    body = ('{"message":{"metadata":' + open_ * 300 + "1" * objects + close * 300 + "}}").encode()
+    r = await client.post("/v1/message:send", content=body, headers=JSON_HEADERS)
+    assert r.status_code == 400, r.text
+    assert (await client.get("/v1/tasks")).status_code != 500

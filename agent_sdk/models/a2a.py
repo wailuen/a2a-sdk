@@ -113,7 +113,7 @@ class TaskStatus(_Wire):
     state: TaskState
     message: Message | None = None
     timestamp: str | None = None
-    error: WireError | None = None  # intentional extension — not in A2A v0.3.0 spec; ignored by spec-compliant consumers
+    error: WireError | None = None  # SDK extension, not in A2A v0.3.0; failed tasks also carry the same safe text in `message`
 
 
 class Artifact(_Wire):

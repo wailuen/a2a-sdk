@@ -45,7 +45,7 @@ from .credentials.encrypted_sqlite import EncryptedSqliteStore
 from .models.content_types import ContentModel, MarketBriefing, content_type_for
 from .observability import configure_logging, request_id_middleware
 from .observability.logging import configure_access_log_filter
-from .routes.agent_card import build_agent_card
+from .routes.agent_card import a2ui_enabled, build_agent_card
 from .sources import SourceAdapter
 from .tasks.memory import InMemoryTaskStore
 from .tasks.store import TaskStore
@@ -925,6 +925,15 @@ class Agent:
                     content={"error": {"code": code, "message": str(exc.detail)}},
                     headers=getattr(exc, "headers", None) or None,
                 )
+            if exc.status_code == 429 and request.url.path.startswith("/oauth/"):
+                return _JSONResponse(
+                    status_code=429,
+                    content={
+                        "error": "temporarily_unavailable",
+                        "error_description": "rate limit exceeded",
+                    },
+                    headers=getattr(exc, "headers", None) or None,
+                )
             return await http_exception_handler(request, exc)
 
         # GH-248: non-/v1 paths keep Starlette's plain 500. /v1/* is handled by
@@ -990,9 +999,13 @@ class Agent:
         app.state.system_prompt = system_prompt
         app.state.inject_current_date = settings.inject_current_date
         app.state.timezone = settings.timezone
+        emits = [m for e in registry.all() for m in e.decl.emits_types]
+        app.state.a2ui_enabled = a2ui_enabled(allowed_components, emits)
         app.state.agent_card = build_agent_card(
             settings, registry, app.state.credential_fields,
             allowed_components=allowed_components,
+            a2ui_enabled=app.state.a2ui_enabled,
+            emits=emits,
         )
         app.state.default_capabilities = A2uiCapabilities()
         app.state.console_static_dirs = []

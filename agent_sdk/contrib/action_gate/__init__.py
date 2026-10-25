@@ -37,8 +37,9 @@ Resume transport notes (the SDK enforces these; tool authors just need to know):
 - The confirmation must come from the SAME authenticated identity as the
   original task submitter — the task store looks up by ``(task_id, identity)``,
   so a different caller gets task-not-found, not a 403.
-- AG-UI sends the decision in the ``status`` field (this SDK's core convention)
-  or in ``payload.decision`` (canonical AG-UI); the gate accepts both.
+- AG-UI sends ``status="resolved"`` (or ``"cancelled"``) with the decision in
+  ``payload.decision`` (``"approved"``/``"rejected"``). Any other AG-UI
+  ``status`` is rejected by the route before the gate sees it.
 - If the interrupted task's TTL expires before the user replies, the resume is
   rejected as task-not-found (a delayed confirmation can therefore fail even
   though the proposal was shown).

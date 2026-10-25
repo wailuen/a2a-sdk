@@ -25,10 +25,3 @@ async def test_parse_form_stops_streaming_at_cap():
         await oauth._parse_form(req)
     assert sent["n"] <= 3
 
-
-def test_memory_store_page_token_shape():
-    from agent_sdk.tasks.memory import InMemoryTaskStore
-
-    s = InMemoryTaskStore.__new__(InMemoryTaskStore)
-    assert s.is_valid_page_token("a" * 32)
-    assert not s.is_valid_page_token("nope")

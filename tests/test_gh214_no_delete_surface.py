@@ -8,6 +8,11 @@ client-managed; each artifact uses a fresh surfaceId.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -75,24 +80,36 @@ def test_agent_card_param_removed():
     assert "deleteSurfaceSemantics" not in a2ui_extension().params
 
 
+_NODE = shutil.which("node")
+_STATIC = Path(__file__).resolve().parent.parent / "agent_sdk" / "console" / "static"
+_IN_CI = os.environ.get("CI", "").strip().lower() in {"1", "true", "yes"}
+
+
+def test_gh214_node_available_in_ci():
+    if not _IN_CI:
+        pytest.skip("not running in CI; local runs may lack node")
+    assert _NODE is not None, "node is required in CI for the a2ui.js live tests"
+
+
+def test_console_chat_never_emits_delete_surface():
+    assert "deleteSurface" not in (_STATIC / "chat.js").read_text()
+
+
+@pytest.mark.skipif(_NODE is None, reason="node not installed")
 def test_console_still_renders_surface_without_close():
     """The console keeps every surface mounted: a2ui.js only closes a surface
     on a received deleteSurface, which the SDK no longer sends. A deleteSurface
     from another producer closes the registry entry; the painted node stays
     attached and a later updateComponents for that surfaceId is dropped."""
-    import shutil
-    import subprocess
-    import tempfile
-    from pathlib import Path
-
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node not installed")
     from tests.test_gh215_console_generic_renderer import _STUB_API
+    from tests.test_gh239_console_caps import _CONNECTED_STUB
 
-    static = Path(__file__).resolve().parent.parent / "agent_sdk" / "console" / "static"
+    static = _STATIC
     harness = """
 import { renderA2ui } from "./a2ui.js";
+import { FNode } from "./api.js";
+const transcript = new FNode("div");
+transcript.isRoot = true;
 const v = "v0.9.1";
 const open = [
   { version: v, createSurface: { surfaceId: "s", catalogId: "c" } },
@@ -101,6 +118,7 @@ const open = [
 ];
 const first = renderA2ui(open, { fallbackText: "F" });
 const painted = first.nodes[0];
+transcript.appendChild(painted);
 const closed = renderA2ui([{ version: v, deleteSurface: { surfaceId: "s" } }], { fallbackText: "F" });
 const later = renderA2ui(
   [{ version: v, updateComponents: { surfaceId: "s", components: [{ id: "x", component: "KpiCard" }] } }],
@@ -108,7 +126,7 @@ const later = renderA2ui(
 );
 process.stdout.write(JSON.stringify({
   first: first.nodes.length,
-  attached: painted.isConnected !== false,
+  attached: painted.isConnected === true,
   closedNodes: closed.nodes.length,
   laterNodes: later.nodes.length,
   laterNotes: later.notes,
@@ -117,10 +135,10 @@ process.stdout.write(JSON.stringify({
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
         (d / "package.json").write_text('{"type": "module"}')
-        (d / "api.js").write_text(_STUB_API)
+        (d / "api.js").write_text(_STUB_API + _CONNECTED_STUB)
         (d / "a2ui.js").write_text((static / "a2ui.js").read_text())
         (d / "h.js").write_text(harness)
-        proc = subprocess.run([node, "h.js"], cwd=d, capture_output=True, text=True, timeout=30)
+        proc = subprocess.run([_NODE, "h.js"], cwd=d, capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
     assert out["first"] == 1
@@ -128,5 +146,3 @@ process.stdout.write(JSON.stringify({
     assert out["closedNodes"] == 0
     assert out["laterNodes"] == 0
     assert any("unknown/closed surface s" in n for n in out["laterNotes"])
-    chat = (static / "chat.js").read_text()
-    assert "deleteSurface" not in chat
