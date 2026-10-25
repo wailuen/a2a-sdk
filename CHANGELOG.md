@@ -4,7 +4,7 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
-## [Unreleased]
+## [0.24.0] — 2026-10-25
 
 ### 🔴 Breaking changes
 - GH-265: an invalid, expired or refused bearer now gets `WWW-Authenticate: Bearer error="invalid_token", resource_metadata="..."` (was the bare `Bearer resource_metadata="..."`); a missing bearer keeps the bare challenge. Failed bearers count in a new per-IP `AuthRuntime.bearer_limiter` (same `AGENT_SDK_UNAUTH_RATE_LIMIT`), separate from `unauth_limiter` (OAuth endpoints). The four browser OAuth routes now answer 429 with the branded HTML page; Ruling: https://github.com/wailuen/a2a-sdk/issues/265#issuecomment-6395232689. **Migration:** clients that matched the exact bare challenge string must accept the `error="invalid_token"` form. Changed: `agent_sdk/auth/middleware.py`, `agent_sdk/routes/oauth.py`, `agent_sdk/app.py`, `DESIGN.md`, `docs/protocols.md`. Tests: `tests/test_gh260_rate_limit.py`, `tests/test_gh152_api_key_optout.py`.
