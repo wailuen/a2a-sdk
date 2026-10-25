@@ -4,7 +4,7 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
-## [Unreleased]
+## [0.23.0] — 2026-10-25
 
 ### 🔴 Breaking changes
 - GH-258: `TimeSeriesChart` now rejects any `x_key` other than `"date"` and any `y_key` other than `"value"` with a fixed `ValidationError` message (`TimeSeriesChart x_key must be fixed`); the data points cannot carry other keys, so such a chart never rendered. The A2UI prompt schema shows `"x_key":"date","y_key":"value"`. Ruling: https://github.com/wailuen/a2a-sdk/issues/258#issuecomment-6393088394. **Migration:** drop custom `x_key`/`y_key` arguments.
