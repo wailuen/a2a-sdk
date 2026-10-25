@@ -11,7 +11,7 @@ Each issue body lists file:line and the fix for every numbered item. Implement e
 ## G1 — console (chat.js, a2ui.js) and console/regression tests
 
 - [ ] `GH-254` chat.js role/fold parity with ChatDriver and Reset race ‖ group:G1
-  - Creates: (modifies `agent_sdk/console/static/chat.js`, `tests/test_gh234_agui_chat_driver.py`, `CHANGELOG.md`)
+  - Creates: (modifies `agent_sdk/console/static/chat.js`, `tests/test_gh234_agui_chat_driver.py`, `workspace/components/README.md` (C-074 row only), `CHANGELOG.md`)
   - Reads: `agent_sdk/testing/chat.py`
   - Severity: medium
   - Root cause: the CHUNK role guard checks only `seenChunkIds`, the history fold has no empty/id check, and Reset neither aborts the request nor guards the A2A contextId write-back.
@@ -21,6 +21,8 @@ Each issue body lists file:line and the fix for every numbered item. Implement e
   - AC (item 4, lows): Reset aborts the in-flight fetch with an AbortController, and stale CUSTOM/system lines are dropped. A resume click while busy shows a fixed "busy" note. The thread-change test changes the thread mid-stream via an onFrame hook.
   - Ruling: https://github.com/wailuen/a2a-sdk/issues/254#issuecomment-6393089186
   - GH: https://github.com/wailuen/a2a-sdk/issues/254
+  - Reuses: C-074  # update agui_history_fold_rule row (role only before first buffered text; skip empty; mint id for id-less buffer); track turns.py/chat.py parity.
+  - Reuses: C-081  # put the resume-while-busy note inside guardedSend, not a separate busy check.
 
 - [ ] `GH-255` a2ui.js renderers lack field-length caps; duplicated cap helpers ‖ group:G1
   - Creates: (modifies `agent_sdk/console/static/a2ui.js`, `tests/test_gh239_console_caps.py`, `DESIGN.md` (§7.1 only), `workspace/components/README.md` (C-059 row only), `CHANGELOG.md`)
@@ -51,35 +53,41 @@ Each issue body lists file:line and the fix for every numbered item. Implement e
 ## G2 — A2A / AG-UI / MCP routes and runner
 
 - [ ] `GH-257` runtime still enables A2UI when the card does not advertise it ‖ group:G2
-  - Creates: (modifies `agent_sdk/routes/a2a.py`, `agent_sdk/agent/runner.py`, `agent_sdk/console/static/chat.js` (sendA2a opt-in only), `tests/test_gh249_a2ui_gating.py`, `docs/protocols.md` (A2UI section only), `CHANGELOG.md`)
-  - Reads: `agent_sdk/a2ui/catalog.py`, `agent_sdk/routes/agent_card.py`, `agent_sdk/routes/ag_ui.py`
+  - Creates: (modifies `agent_sdk/app.py` (compute `app.state.a2ui_enabled` once, next to `build_agent_card`, only), `agent_sdk/routes/agent_card.py` (A2UI extension/output-mode gate and the new `a2ui_enabled` helper only; app.py imports it from there), `agent_sdk/routes/a2a.py`, `agent_sdk/agent/runner.py`, `agent_sdk/routes/ag_ui.py` (`_capabilities` only), `agent_sdk/console/static/chat.js` (sendA2a opt-in only), `tests/test_gh249_a2ui_gating.py`, `tests/test_gh225_multi_type_emits.py` (the :604 `build_agent_card` call only: pass `a2ui_enabled=True`), `docs/protocols.md` (A2UI section only), `workspace/components/README.md` (C-006 row only), `CHANGELOG.md`)
+  - Reads: `agent_sdk/a2ui/catalog.py`
   - Severity: medium
   - Depends: GH-254
   - Root cause: GH-249 gated only the card; the request opt-in, the accepted modes and artifact building still assume A2UI is always on.
-  - AC: one helper (e.g. `a2ui_enabled(app)`, computed from `supported_catalogs(allowed_components, emits)` once at build) drives `_capabilities`, `_SUPPORTED_MODES` and both `runner.py` artifact paths (:419 and :1097-1105). With A2UI off, a header opt-in gets no A2UI DataPart, `acceptedOutputModes: ["application/a2ui+json"]` alone gets -32005, and results use the TextPart/JSON fallback. The console sends the A2UI header and client capabilities only when the fetched card declares the extension. Tests over `build_app()` for an agent with no emitting tools and one with emitting tools. Breaking entry with migration.
+  - AC (single gate): one helper, `a2ui_enabled(allowed_components, emits) -> bool` (true when `supported_catalogs(allowed_components, emits)` is non-empty), is called exactly once in `build_app()` and stored as `app.state.a2ui_enabled`. `a2ui_enabled` is defined in `agent_sdk/routes/agent_card.py` (which already imports `supported_catalogs`) and `app.py` imports it from there; `agent_sdk/a2ui/catalog.py` is not edited by GH-257 (GH-258 in G3 owns that file). That one value drives every consumer named in the ruling: (a) the card's A2UI extension and `application/a2ui+json` output mode (`build_agent_card` takes it as a keyword-only argument `a2ui_enabled: bool = False` instead of computing it, so callers with no emitting tools (tests/test_gh188_catalogs_from_emits.py:53, tests/test_rt002_placeholder_identity.py:278/314, tests/test_gh86_agent_name_warning.py) keep passing unedited; agent_card.py:154-157 no longer calls `supported_catalogs(allowed_components, emits)` as the on/off test, so no second computation of the gate remains), (b) `_capabilities` in both `routes/a2a.py` and `routes/ag_ui.py`, (c) `_SUPPORTED_MODES`, and (d) both `runner.py` artifact paths (:419 and :1097-1105). `a2ui_extension()` may still call `supported_catalogs` to list catalog IDs, but not to decide on/off. GH-258 (G3) changes `supported_catalogs` later in this wave; because there is one gate, the card and runtime still agree after that change. Test over `build_app()`: for an agent with no emitting tools and one with emitting tools, (card declares the A2UI extension and `application/a2ui+json`) == `app.state.a2ui_enabled` == (runtime emits an A2UI DataPart for a header opt-in). Both `_capabilities` pass `opted_in = <client opt-in> and a2ui_enabled` into `A2uiCapabilities.gated()` (A2A: header opt-in; AG-UI: `forwardedProps.a2uiClientCapabilities`). The per-app supported set (A2UI MIME included only when `a2ui_enabled`) is passed as an argument into the shared C-079 matcher: GH-257 changes `_mode_accepted` to take the supported set as an argument, and GH-259 then moves it to `common/media.py`, so there is only one matcher at every step. No module-level supported set (`_NORMALIZED_MODES`) remains. With A2UI off, a header opt-in gets no A2UI DataPart, `acceptedOutputModes: ["application/a2ui+json"]` alone gets -32005, `["application/*"]` and `["*/*"]` return no A2UI DataPart, and results use the TextPart/JSON fallback. The console sends the A2UI header and client capabilities only when the fetched card declares the extension. Tests over `build_app()` for an agent with no emitting tools and one with emitting tools, including a /ag-ui/run test with A2UI off that sends `forwardedProps.a2uiClientCapabilities` and asserts no A2UI_UPDATE CUSTOM event. Breaking entry with migration, naming both `routes/a2a.py` and `routes/ag_ui.py`.
   - Ruling: https://github.com/wailuen/a2a-sdk/issues/257#issuecomment-6393088260
   - GH: https://github.com/wailuen/a2a-sdk/issues/257
+  - Reuses: C-006  # both a2a.py and ag_ui.py `_capabilities` feed A2uiCapabilities.gated with `opted_in = <client opt-in> and a2ui_enabled`; no second inline none-tier fallback (LRN-046); update C-006 row.
+  - Reuses: C-079  # `_mode_accepted` takes the per-app supported set as an argument (GH-259 then moves it to common/media.py).
 
 - [ ] `GH-259` TaskStatus.error spec message, acceptedOutputModes shaping, pageToken docs/tests ‖ group:G2
-  - Creates: (modifies `agent_sdk/routes/a2a.py`, `agent_sdk/agent/runner.py`, `agent_sdk/models/a2a.py`, `docs/protocols.md` (A2A section only), `tests/test_rt001_oauth_capped_body.py`, new `tests/test_gh259_a2a_route.py`, `CHANGELOG.md`)
+  - Creates: (modifies `agent_sdk/routes/a2a.py`, `agent_sdk/agent/runner.py`, `agent_sdk/models/a2a.py`, `docs/protocols.md` (A2A section only), `tests/test_rt001_oauth_capped_body.py`, new `tests/test_gh259_a2a_route.py`, new `agent_sdk/common/media.py`, `workspace/components/README.md` (C-079 row only), `CHANGELOG.md`)
   - Reads: `agent_sdk/tasks/store.py`, `agent_sdk/tasks/memory.py`
   - Severity: medium
   - Depends: GH-257
   - Root cause: the failed status relies on the extension field alone; acceptedOutputModes is only checked, never applied; the pageToken docs predate the store hook.
   - AC (item 1): every failed task has `status.message` (role agent, one TextPart holding the same safe text as `status.error.message`). `error` is kept and documented as an SDK extension. Test over `build_app()`.
   - AC (item 2): when a client sends `acceptedOutputModes`, artifact parts are filtered to the accepted types. If none remain and `text/plain` is accepted, one TextPart fallback is kept; otherwise -32005. Tests for `["text/plain"]`, `["application/json"]`, and both.
+  - AC (item 2b): `normalize_media_type(value)` (lowercase, drop parameters) and `media_type_match(mode, supported)` (built on it) in `agent_sdk/common/media.py`; replaces `_mode_accepted` and takes the supported set as an argument; `_mode_accepted` and `_NORMALIZED_MODES` are deleted from `routes/a2a.py`; acceptedOutputModes part filtering uses it.
   - AC (item 3): docs/protocols.md describes the store hook. The hook test moves to `tests/test_gh259_a2a_route.py` with a custom-store route test.
   - AC (item 4): docs say an over-cap A2A body gets 400 invalid params. The `a2a.py:167-168` layout is fixed.
   - Ruling: https://github.com/wailuen/a2a-sdk/issues/259#issuecomment-6393088522
   - GH: https://github.com/wailuen/a2a-sdk/issues/259
+  - Reuses: C-079  # GH-259 owns C-079: builds `media_type_match` in common/media.py (lowercase, drop params, */* and type/* wildcards, text alias) from `_mode_accepted`, uses it for acceptedOutputModes filtering, and updates the C-079 row.
+  - Reuses: C-019  # build the agent-role TextPart status.message once in set_task_status, not at each FAILED call site.
+  - SI: SI-5  # AC: the custom-store test asserts a second identity cannot see or page into the first identity's tasks via a pageToken.
 
 - [ ] `GH-251` unify JSON Content-Type check, test body caps, strict JSON + format-char gaps ‖ group:G2
-  - Creates: (modifies `agent_sdk/common/body.py`, `agent_sdk/routes/ag_ui.py`, `agent_sdk/routes/a2a.py`, `agent_sdk/routes/mcp.py`, `agent_sdk/common/redact.py`, `agent_sdk/credentials/forwarding.py`, new `tests/test_gh251_ingress.py`, `CHANGELOG.md`)
+  - Creates: (modifies `agent_sdk/common/body.py`, `agent_sdk/routes/ag_ui.py`, `agent_sdk/routes/a2a.py`, `agent_sdk/routes/mcp.py`, `agent_sdk/common/redact.py`, `agent_sdk/credentials/forwarding.py`, new `tests/test_gh251_ingress.py`, `workspace/components/README.md` (C-078 row, and the caller note in the C-079 row after GH-259 updates it, only), `CHANGELOG.md`)
   - Reads: `agent_sdk/common/json_strict.py`, `tests/test_gh246_mcp_route.py`
   - Severity: medium
   - Depends: GH-259
   - Root cause: three hand-copied media-type checks, one of them case-sensitive; cap and fallback paths with no tests; two text/JSON helpers outside the strict rules.
-  - AC (item 1): `is_json_content_type(ct)` in `common/body.py` (case-insensitive, exact `application/json` or `+json` suffix after stripping params) is used by all three routes. Tests: `Application/JSON` is accepted, `application/json-seq` gets 415, on each route.
+  - AC (item 1): `is_json_content_type(ct)` in `common/body.py` (case-insensitive, exact `application/json` or `+json` suffix after stripping params) is used by all three routes. Tests on each route: `Application/JSON` and `application/problem+json` are accepted; `application/json-seq`, `*/*`, `application/*` and `text` get 415.
   - AC (item 2): an over-cap body test on `/v1/message:send` and `/ag-ui/run`, plus `read_capped_body` tests for a non-numeric and a lying Content-Length.
   - AC (item 3): `_tool_json` catches `Exception`, logs the type only once per fallback, and a NaN in tool args is replaced per value (not the whole dict). Tests.
   - AC (item 4): `safe_block_text` calls `drop_format_chars`, keeping newlines. Test.
@@ -87,6 +95,11 @@ Each issue body lists file:line and the fix for every numbered item. Implement e
   - AC (item 6): the stale comments are fixed.
   - Ruling: https://github.com/wailuen/a2a-sdk/issues/251#issuecomment-6393088850
   - GH: https://github.com/wailuen/a2a-sdk/issues/251
+  - Reuses: C-079  # `is_json_content_type` in body.py reuses only the normalization step of C-079 (GH-259 exposes `normalize_media_type` in common/media.py: lowercase, drop parameters), NOT its wildcard matching; delete mcp.py:477 `_is_json_content_type`, no fourth copy; GH-259 owns the C-079 row; GH-251 only adds `is_json_content_type` (body.py) and the three route callers to that row's note.
+  - Reuses: C-078  # safe_block_text calls drop_format_chars; add safe_block_text to C-078 callers.
+  - Reuses: C-040  # X-Agent-Credentials loads_strict + _tool_json NaN fallback use the dumps_strict/loads_strict pair; no local re-check.
+  - Reuses: C-077  # new cap tests hit shared read_capped_body, not a route-local cap.
+  - SI: SI-6, SI-4  # AC: NaN/duplicate-key rejection never logs or echoes the header, decoded bytes, or a field name/value; parse_header stays fail-closed (returns {}, never raises, forwarding.py:60-63) unless the ruling says otherwise; state which layer emits the 'existing fixed error'.
 
 ## G3 — A2UI catalog
 
@@ -94,17 +107,19 @@ Each issue body lists file:line and the fix for every numbered item. Implement e
   - Creates: (modifies `agent_sdk/a2ui/catalog.py`, `agent_sdk/models/content_types.py`, `DESIGN.md` (A2UI catalog section only), new `tests/test_gh258_catalog.py`, `CHANGELOG.md`)
   - Reads: `agent_sdk/a2ui/translator.py`, `tests/test_gh225_multi_type_emits.py`
   - Severity: medium
+  - Depends: GH-257
   - Root cause: required-ness comes from the serialization schema, which omits defaulted fields; the TimeSeriesChart key fields are free strings the data points cannot satisfy.
   - AC (item 1): a field is shown as required when `wire()` always writes it (no default, or a non-None default). Docstrings are updated, nested expansion respects the 250-char budget, and tests use a model without `json_schema_serialization_defaults_required`.
   - AC (item 2): the compact schema shows `"x_key":"date","y_key":"value"`, and `TimeSeriesChart` rejects any other value with a fixed message. Breaking entry.
   - AC (item 3, lows): `dict[K,V]` renders as `{key: V}`, enum/Literal fields list their values, `supported_catalogs(emits=None)` adds CATALOG_ID only when a Standard type passes the filter, and `emits` is a `Sequence` (or is listed once). EntityList `title?`/`showing?` are recorded in DESIGN.md as SDK extensions that receivers ignore.
   - Ruling: https://github.com/wailuen/a2a-sdk/issues/258#issuecomment-6393088394
   - GH: https://github.com/wailuen/a2a-sdk/issues/258
+  - Reuses: C-020  # use tests/_compact_schema.py parse_schema/required_paths/emitted_paths in tests/test_gh258_catalog.py; no new helpers.
 
 ## G4 — testing clients and acceptance docs
 
 - [ ] `GH-256` A2A test clients not spec-conformant ‖ group:G4
-  - Creates: (modifies `agent_sdk/testing/turns.py`, `agent_sdk/testing/chat.py`, `agent_sdk/testing/mcp.py`, `tests/test_gh237_testing_clients.py`, `harness/skills/acceptance/SKILL.md`, `.claude/skills/acceptance/SKILL.md`, `template/.claude/skills/acceptance/SKILL.md`, `docs/testing.md`, `CHANGELOG.md`)
+  - Creates: (modifies `agent_sdk/testing/turns.py`, `agent_sdk/testing/chat.py`, `agent_sdk/testing/mcp.py`, `tests/test_gh237_testing_clients.py`, `harness/skills/acceptance/SKILL.md`, `.claude/skills/acceptance/SKILL.md`, `template/.claude/skills/acceptance/SKILL.md`, `docs/testing.md`, `workspace/components/README.md` (C-056 and C-080 rows only), `CHANGELOG.md`)
   - Reads: `agent_sdk/routes/a2a.py`, `agent_sdk/routes/agent_card.py`
   - Severity: medium
   - Root cause: turns.py treats taskId and contextId as either/or, takes a bool for A2UI support, and does not finish stream handling; one test still uses a MockTransport card.
@@ -116,6 +131,8 @@ Each issue body lists file:line and the fix for every numbered item. Implement e
   - AC (item 6, lows): `McpClient` rejects a negotiated version not in `SUPPORTED_PROTOCOL_VERSIONS`, and the gate reports an unresolvable `$ref` as a failure, not a crash. Tests.
   - Ruling: https://github.com/wailuen/a2a-sdk/issues/256#issuecomment-6393088084
   - GH: https://github.com/wailuen/a2a-sdk/issues/256
+  - Reuses: C-080  # route turns.py `_a2ui_advertised` through a2ui_client_activation (ChatDriver._discover_card + _caps); no second card parser; update the C-080 row so it no longer says the helper is inline in ChatDriver only.
+  - Reuses: C-056  # McpTestClient: update the C-056 row (SUPPORTED_PROTOCOL_VERSIONS check, unresolvable $ref = failure).
 
 ## G5 — docs and build records
 
@@ -144,3 +161,5 @@ Each issue body lists file:line and the fix for every numbered item. Implement e
   - AC (c): an OAuth 429 body is `{"error":"temporarily_unavailable","error_description":"rate limit exceeded"}` with `Retry-After`. Non-OAuth 429s are unchanged. Tests over `build_app()`.
   - Ruling: https://github.com/wailuen/a2a-sdk/issues/260#issuecomment-6393088715
   - GH: https://github.com/wailuen/a2a-sdk/issues/260
+  - Reuses: C-027  # any new/split per-IP bucket keys on client_ip via auth/middleware.py::_client_key (trusted-proxy aware); never request.client.host.
+  - SI: SI-5  # AC: missing-bearer path always returns 401 + PRM challenge (never passes through); invalid-bearer attempts (middleware.py:128,150) stay rate-limited so removing 429 from the missing-bearer path opens no brute-force room.
