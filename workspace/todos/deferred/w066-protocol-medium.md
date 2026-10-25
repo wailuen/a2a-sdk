@@ -76,3 +76,6 @@ No critical/high from any advisor.
 
 - [A2A/low] agent_card.py:204 declares defaultInputModes ["text/plain"] but a resume message accepts one DataPart (routes/a2a.py:411-426, application/json) and `_BASE_MODES` (a2a.py:152) contains the non-MIME token "text". The card therefore under-advertises what the server accepts on resume, and "text" is not a media type. Output modes advertised in the card match what is produced. Fix: Either add application/json to defaultInputModes (or the skill/resume docs) or document the resume DataPart as an out-of-card extension. Drop or normalise the bare "text" token.
 
+
+---
+Filed 2026-10-25 by /sdk-autoloop cycle 2: verified still-present mediums (and lows sharing a fix) are in #261–#267. Other lows stay here, unfiled.

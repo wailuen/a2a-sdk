@@ -111,3 +111,6 @@ Findings were collected across every phase redteam round and deduped by file + d
 - File: `agent_sdk/routes/agent_card.py:142` — `a2ui_enabled: bool = False,`
 - Problem: inside build_agent_card the name is the bool, so calling the helper there raises `TypeError: 'bool' object is not callable`. Separately, a2a.py:932 builds a FAILED status.message by hand, against GH-259's C-019 note to build it once in set_task_status.
 - Fix: rename the helper (e.g. `compute_a2ui_enabled`) or the parameter (`a2ui_on`); update the app.py import and CHANGELOG. For a2a.py:932, build via `runner._agent_message`, or note why the frame-serialization fallback cannot use set_task_status.
+
+---
+Filed 2026-10-25 by /sdk-autoloop cycle 2: verified still-present mediums (and lows sharing a fix) are in #261–#267. Other lows stay here, unfiled.

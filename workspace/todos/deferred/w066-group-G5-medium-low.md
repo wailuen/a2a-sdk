@@ -35,3 +35,6 @@ Non-blocking — these did not block w066's archive. Address opportunistically o
 [SDK] The reference example's publish_note interrupt sends a responseSchema that asks for a `status` field with values approved/denied. Its handler also reads payload.get("status") as the decision. This teaches the pattern GH-252 removed from the docs: a decision word under `status`, read through the nested-status path that action_gate deliberately never reads. It also disagrees with docs/testing.md:178 ('publish_note approves when payload.decision is "approved"') and with the canonical `payload.decision` form in docs/protocols.md. This file is outside G5's listed scope, but it undermines the AC 'no doc or docstring teaches status="approved"'.
 
 - Fix: Change the example's response_schema to {"properties": {"decision": {"enum": ["approved", "rejected"]}}, "required": ["decision"]} (or reuse action_gate.DEFAULT_CONFIRM_SCHEMA). Drop the payload.get("status") fallback in `confirmed`, or move the example onto confirmation_required/parse_decision. Add a CHANGELOG note, since the example's wire schema changes.
+
+---
+Filed 2026-10-25 by /sdk-autoloop cycle 2: verified still-present mediums (and lows sharing a fix) are in #261–#267. Other lows stay here, unfiled.

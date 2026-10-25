@@ -74,3 +74,6 @@ Findings are deduped by file + description across all redteam rounds. Round-loca
 - Quote: `except Exception:  # unknown task: the server refuses, the request still went out`
 - Problem: a ChatDriver crash after the POST is hidden; test still passes.
 - Fix: `pytest.raises(A2AError)` and assert code TASK_NOT_FOUND.
+
+---
+Filed 2026-10-25 by /sdk-autoloop cycle 2: verified still-present mediums (and lows sharing a fix) are in #261–#267. Other lows stay here, unfiled.

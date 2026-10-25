@@ -105,3 +105,6 @@ Findings are deduped by file + description across all redteam rounds. Original r
 - Round IDs: RT-010 (r2), RT-007 (r3)
 - Issue: `assert 0 < len(tables) < 40` passes for 1..39; the note count is not checked, so MAX_SECTIONS = 10 is not pinned.
 - Fix: assert `len(tables) == 10` and `"30 more sections" in _text(node)`.
+
+---
+Filed 2026-10-25 by /sdk-autoloop cycle 2: verified still-present mediums (and lows sharing a fix) are in #261–#267. Other lows stay here, unfiled.

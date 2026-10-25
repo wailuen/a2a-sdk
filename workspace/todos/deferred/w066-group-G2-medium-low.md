@@ -104,3 +104,6 @@ Findings accumulated across every redteam round, deduped by file + description (
 - Quote: `parts=[TextPart(text="invalid agent response")],`
 - Problem: _unserializable_tail builds status.message by hand (no taskId/contextId), bypassing set_task_status (C-019); literal duplicated beside WireError.message. Resume's new acceptedOutputModes are checked but not stored.
 - Fix: use runner._agent_message(record, msg) with msg shared with the WireError; on resume update record.accepted_output_modes when non-empty modes are sent.
+
+---
+Filed 2026-10-25 by /sdk-autoloop cycle 2: verified still-present mediums (and lows sharing a fix) are in #261–#267. Other lows stay here, unfiled.

@@ -32,3 +32,6 @@
 - **Quote:** `@router.post("/oauth/register", dependencies=[Depends(unauth_rate_limit)])`
 - **Issue:** [SDK] The G6 todo lists agent_sdk/routes/oauth.py under Creates/Modifies, but the file has no diff. The OAuth 429 shape was correctly placed in the app.py handler per C-082, so the todo scope line is inaccurate (Dimension 5: listed files not modified).
 - **Fix:** Remove agent_sdk/routes/oauth.py from the GH-260 Modifies line, or move it to Reads, so the todo matches the landed change set and LRN-413/LRN-437 audits stay accurate.
+
+---
+Filed 2026-10-25 by /sdk-autoloop cycle 2: verified still-present mediums (and lows sharing a fix) are in #261–#267. Other lows stay here, unfiled.

@@ -59,3 +59,6 @@ Quote: `- GH-258: \`TimeSeriesChart\` now rejects any \`x_key\` other than \`"da
 Quote: `            type_str, required = _annotation_str(ann, required, depth)`
 - Problem: after GH-258 `_annotation_str` never changes `required` but still takes/returns it; the caller reassigns it. Dead weight that invites the annotation overriding `_wire_required()` again.
 - Fix: make `_annotation_str(ann, depth)` return only the type string; drop `required` from recursive calls and from `_nested_fields` / `_summary_at_depth`.
+
+---
+Filed 2026-10-25 by /sdk-autoloop cycle 2: verified still-present mediums (and lows sharing a fix) are in #261–#267. Other lows stay here, unfiled.
