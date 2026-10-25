@@ -174,6 +174,8 @@ with the wave workflow's candidate file.
   quotes or code. Anything it leaves in `workspace/sdk-candidates.md` (no `Issue:` line,
   or `Status: fixed-in-wave`) still comes here for confirmation. `fixed-in-wave` candidates
   need no issue.
+  Second exception: `/sdk-autoloop` step 1 files verified critical/high/medium findings
+  without a prompt, under the rules written there.
 - **Never file agent-domain findings as SDK issues.** Classification is mandatory.
 - **No credentials in issue bodies.** Describe the credential type, never the value.
 - **Deduplicate.** Check `gh issue list` before composing the body (step 7a).

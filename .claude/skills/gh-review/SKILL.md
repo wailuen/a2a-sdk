@@ -192,6 +192,10 @@ These are NOT actionable without developer input:
 - **Never auto-close an issue** without confirming it is already fixed in landed code
   (Phase 2 — `already_fixed` path).
 - **Never execute the wave** without developer confirmation (Phase 3 step 6).
+  Exception: `--auto`, used only by `/sdk-autoloop`. It skips issues labelled
+  `deferred`, takes the recommended ruling for each decision item, posts it as an
+  issue comment before the wave, and runs the wave without asking (see
+  `.claude/skills/sdk-autoloop/SKILL.md` step 2).
 - **Never include `intent_change` or `needs_decision` issues in the wave** — surface
   them for the developer to resolve. They may become a separate wave after a decision.
 - **One wave file per `/gh-review` run.** If a second run is needed (e.g., after
