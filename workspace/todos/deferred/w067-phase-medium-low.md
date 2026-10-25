@@ -74,3 +74,7 @@ Non-blocking — these did not block w067's archive. Address opportunistically o
 - Quote: `assert a2a._INVALID_RESPONSE_TEXT == "invalid agent response"`
 - Description: [SDK] GH-261 low 'FAILED tail message is built by hand with a duplicated literal' is only half fixed. The literal became a constant, but a2a.py:960-972 still builds the failed TaskStatus/Message/WireError by hand instead of going through set_task_status (which builds status.message once). The pinning test only asserts the constant's value, so it cannot catch the two sites drifting apart.
 - Fix: Build the tail frame from the shared failed-status builder used by set_task_status, or test that the frame's status.message text equals status.error.message, instead of testing the constant's value.
+
+---
+
+Autoloop cycle 3 (2026-10-25): mediums verified at v0.24.0; still-present ones filed as #268–#274 (testing #268, AG-UI/console #269, A2UI #270, A2A #271, auth #272, MCP #273, example/tests/registry #274). P-022 not filed (conflicts with #246 ruling). Lows not filed.

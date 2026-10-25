@@ -60,3 +60,7 @@ Findings were merged across redteam rounds and de-duplicated by file + descripti
 - Source: RT-008 (round 2). SDK candidate.
 - Problem: Key 'd' dict used as a mutable cell; obscures intent.
 - Fix: `driver: ChatDriver | None = None` with `nonlocal driver` in `_driver()`. Combine with D-3.
+
+---
+
+Autoloop cycle 3 (2026-10-25): mediums verified at v0.24.0; still-present ones filed as #268–#274 (testing #268, AG-UI/console #269, A2UI #270, A2A #271, auth #272, MCP #273, example/tests/registry #274). P-022 not filed (conflicts with #246 ruling). Lows not filed.

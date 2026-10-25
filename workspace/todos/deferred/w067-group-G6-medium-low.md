@@ -60,3 +60,7 @@ Findings were collected across every redteam round. Repeats of the same file and
 - Quote: `def test_loads_strict_duplicate_keys_option(caplog) -> None:`
 - Issue: `caplog` is requested but never used. The test never pins the fixed text `duplicate key` promised by the docstring, registry and CHANGELOG. SI-6 log checks look only for key names (`api_key`, `src` at :222), never a value; the duplicate-key values `a`/`b` cannot be searched for in logs, so "asserts no header value in captured logs" is not really tested.
 - Fix: Drop or use `caplog`. Assert `ei.value.msg == "duplicate key"`. In `test_header_nan_or_duplicate_key_fails_closed` and `test_header_too_deep_fails_closed`, use a distinctive value (e.g. `SECRET-VAL-9x`) and assert it is not in `caplog.text`.
+
+---
+
+Autoloop cycle 3 (2026-10-25): mediums verified at v0.24.0; still-present ones filed as #268–#274 (testing #268, AG-UI/console #269, A2UI #270, A2A #271, auth #272, MCP #273, example/tests/registry #274). P-022 not filed (conflicts with #246 ruling). Lows not filed.

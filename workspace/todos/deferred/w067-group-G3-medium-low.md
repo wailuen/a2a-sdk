@@ -71,3 +71,7 @@ Findings were merged across redteam rounds (deduped by file + description). All 
 - File: agent_sdk/models/content_types.py:845 (`if not getattr(self, name):`); DocumentItem :1506
 - Issue: ColumnDef pops a listed key only when falsy; DocumentItem always pops. Subclass behaviour depends on parent.
 - Fix: pick one meaning (always), with ColumnDef `is_id`-when-False as its own named condition; or split into `wire_omitted` and `wire_omitted_when_falsy`. Ties into D1.
+
+---
+
+Autoloop cycle 3 (2026-10-25): mediums verified at v0.24.0; still-present ones filed as #268–#274 (testing #268, AG-UI/console #269, A2UI #270, A2A #271, auth #272, MCP #273, example/tests/registry #274). P-022 not filed (conflicts with #246 ruling). Lows not filed.

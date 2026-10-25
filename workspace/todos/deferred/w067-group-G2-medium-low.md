@@ -125,3 +125,7 @@ Findings are deduped by file + description across all redteam rounds. Round-loca
 - Fix: use word boundaries in the AC grep (`grep -rnw` or `\ba2ui_enabled(`).
 
 All findings: sdkCandidate = true.
+
+---
+
+Autoloop cycle 3 (2026-10-25): mediums verified at v0.24.0; still-present ones filed as #268–#274 (testing #268, AG-UI/console #269, A2UI #270, A2A #271, auth #272, MCP #273, example/tests/registry #274). P-022 not filed (conflicts with #246 ruling). Lows not filed.

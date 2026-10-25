@@ -119,3 +119,7 @@ Findings are accumulated across every redteam round and deduped by file+descript
 - Issue: Pragma test covers only `_token_error` (grant_type=bogus); not `_token_success` or `_invalid_client`. Browser-route 429 test (:171-178) sends no client_id/redirect_uri, so cannot prove the HTML page omits them; never asserts `RATE_LIMITED_PAGE_TEXT`.
 - Fix: Add a successful PKCE (or refresh) exchange and an invalid_client case asserting `pragma == 'no-cache'` and `cache-control == 'no-store'`. In `test_browser_routes_429_is_branded_html`, send distinctive client_id/redirect_uri, assert absent from r.text, and assert `html.escape(RATE_LIMITED_PAGE_TEXT)` in r.text.
 - sdkCandidate: true
+
+---
+
+Autoloop cycle 3 (2026-10-25): mediums verified at v0.24.0; still-present ones filed as #268–#274 (testing #268, AG-UI/console #269, A2UI #270, A2A #271, auth #272, MCP #273, example/tests/registry #274). P-022 not filed (conflicts with #246 ruling). Lows not filed.

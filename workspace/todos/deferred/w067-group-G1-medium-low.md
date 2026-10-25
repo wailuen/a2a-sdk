@@ -53,3 +53,7 @@ Quote: `const BUSY_NOTE = "busy: wait for the current run to finish";`
 - Problem: The node harness defines its own BUSY_NOTE instead of extracting the constant from chat.js, so test_send_while_busy_shows_the_fixed_note_and_keeps_the_text compares the harness copy with itself and passes even if chat.js's BUSY_NOTE text changes or drifts.
 - Fix: Extract the `const BUSY_NOTE = ...;` line from chat.js into the harness (as the functions are extracted) and assert its value once against the expected literal.
 - SDK candidate: yes
+
+---
+
+Autoloop cycle 3 (2026-10-25): mediums verified at v0.24.0; still-present ones filed as #268–#274 (testing #268, AG-UI/console #269, A2UI #270, A2A #271, auth #272, MCP #273, example/tests/registry #274). P-022 not filed (conflicts with #246 ruling). Lows not filed.

@@ -166,3 +166,7 @@ Wave: w067. Date: 2026-10-25. Source: the wave's final protocol audit (no critic
 - Rule: Auth/origin enforced uniformly across A2A surface
 - Description: agent_sdk/routes/agent_card.py GET /v1/card (extended_card) requires identity but, unlike every other /v1/* handler in routes/a2a.py and every /mcp and /ag-ui handler, does not call guard_origin(request). A browser request from a non-allow-listed Origin gets the -32007 reply instead of the 403 'origin not allowed' that every other authenticated route returns. Impact is small (constant reply, no data), but it breaks the 'every browser-reachable authenticated route is origin-guarded' invariant stated in agent_sdk/common/origin.py.
 - Fix: Add request: Request and guard_origin(request) to extended_card, and add it to the origin-guard coverage test.
+
+---
+
+Autoloop cycle 3 (2026-10-25): mediums verified at v0.24.0; still-present ones filed as #268–#274 (testing #268, AG-UI/console #269, A2UI #270, A2A #271, auth #272, MCP #273, example/tests/registry #274). P-022 not filed (conflicts with #246 ruling). Lows not filed.
