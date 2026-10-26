@@ -17,20 +17,27 @@ spec decision, or would change SDK intent are surfaced for the developer first.
 /gh-review
 /gh-review --dry-run   (analyze + plan only; do not execute the wave)
 /gh-review --skip <N,M,...>   (exclude specific issue numbers from this run)
+/gh-review --include-deferred   (also triage issues labelled `deferred`)
 ```
 
 ## Steps
 
 ### Phase 0 — Fetch open issues
 
-1. Pull all open issues from the SDK repo:
+1. Pull all open issues from the SDK repo, **excluding any labelled `deferred`**:
    ```bash
    gh issue list --repo wailuen/a2a-sdk --state open --limit 50 \
+     --search "-label:deferred" \
      --json number,title,body,labels,createdAt
    ```
-   If zero open issues: report "No open issues. Nothing to do." and stop.
+   Deferred issues are parked by a ruling or by the developer. Never triage them,
+   never ask about them, and never put them in a wave. Only `--include-deferred`
+   brings them back.
+   If zero issues remain: report "No open issues (N deferred, skipped). Nothing to
+   do." and stop. Get N with `gh issue list ... --label deferred --json number --jq length`.
 
-2. Print a numbered list of the fetched issues (number, title, label if any).
+2. Print a numbered list of the fetched issues (number, title, label if any), and
+   one line naming the deferred issues that were skipped.
 
 ### Phase 1 — Triage each issue (parallel analysis agents)
 
@@ -189,11 +196,13 @@ These are NOT actionable without developer input:
 
 ## Rules
 
+- **Skip `deferred` issues.** Every run ignores issues labelled `deferred` unless
+  `--include-deferred` is passed. Never remove the label.
 - **Never auto-close an issue** without confirming it is already fixed in landed code
   (Phase 2 — `already_fixed` path).
 - **Never execute the wave** without developer confirmation (Phase 3 step 6).
-  Exception: `--auto`, used only by `/sdk-autoloop`. It skips issues labelled
-  `deferred`, takes the recommended ruling for each decision item, posts it as an
+  Exception: `--auto`, used only by `/sdk-autoloop`. Like every run, it skips issues
+  labelled `deferred`. It takes the recommended ruling for each decision item, posts it as an
   issue comment before the wave, and runs the wave without asking (see
   `.claude/skills/sdk-autoloop/SKILL.md` step 2).
 - **Never include `intent_change` or `needs_decision` issues in the wave** — surface
