@@ -57,3 +57,19 @@ def test_tool_input_validation_error_still_exposes_raw_validation_error():
     ve = _validation_error(SECRET)
     exc = ToolInputValidationError(ve, tool_name="my_tool")
     assert exc.validation_error is ve
+
+
+def test_literal_error_names_declared_values_not_input():
+    from typing import Literal
+
+    from agent_sdk.agent.loop import safe_validation_message
+
+    class _Sorted(BaseModel):
+        sort: Literal["a", "b"]
+
+    try:
+        _Sorted(sort=SECRET)
+    except ValidationError as ve:
+        text = safe_validation_message("t", ve, _Sorted)
+    assert 'sort — must be one of: "a", "b"' in text
+    assert SECRET not in text

@@ -131,6 +131,7 @@ from ..common.origin import guard_origin
 from ..common.schema import flatten_schema, strip_schema_titles
 from ..common.redact import TITLE_TEXT_MAX_LEN, frame_locations, safe_line_text, sanitize_text
 from ..common.sse import HEARTBEAT, SSE_HEADERS
+from ..common.text import cap_whole_entries
 from ..agent.loop import LOAD_SKILL_TOOL, ToolInterrupt, resolve_tool_timeout, safe_validation_message
 from ..agent.registry import ToolInputValidationError, _unknown_argument_error, match_emits_type
 from ..credentials import forwarding
@@ -672,21 +673,7 @@ def _skill_catalog(skills: list[Any]) -> str:
     """Whole entries within ``_MAX_SKILL_CATALOG_LEN`` chars; ``…and N more``
     ends the text when entries were left out."""
     entries = [f"{s.name}: {s.description}" for s in skills]
-    full = "; ".join(entries)
-    if len(full) <= _MAX_SKILL_CATALOG_LEN:
-        return full
-    kept: list[str] = []
-    used = 0
-    for entry in entries:
-        left = len(entries) - len(kept) - 1
-        suffix_len = len(f"; …and {left} more")
-        added = len(entry) + (2 if kept else 0)
-        if used + added + suffix_len > _MAX_SKILL_CATALOG_LEN:
-            continue
-        kept.append(entry)
-        used += added
-    more = f"…and {len(entries) - len(kept)} more"
-    return "; ".join([*kept, more])
+    return cap_whole_entries(entries, _MAX_SKILL_CATALOG_LEN)[0]
 
 
 def _load_skill_tool(skills: list[Any]) -> dict[str, Any]:

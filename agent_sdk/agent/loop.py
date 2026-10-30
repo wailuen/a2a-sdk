@@ -18,17 +18,21 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import enum
 import json
 import logging
 import re
 import time
+import types
 import uuid
 from dataclasses import dataclass, field
 from typing import (
+    Annotated,
     Any,
     AsyncIterator,
     Awaitable,
     Callable,
+    Literal,
     Sequence,
     TypeGuard,
     Union,
@@ -44,6 +48,7 @@ from pydantic_core import core_schema, to_jsonable_python
 from ..common.redact import frame_locations
 from ..common.redact import safe_line_text
 from ..common.redact import sanitize_text
+from ..common.text import cap_whole_entries
 from ..models.content_types import TRANSCRIPT_DUMP_CONTEXT
 from ..models.errors import AgentError, SafeValueError
 from .deferred import DeferredEvent, DeferredResult
@@ -1085,14 +1090,24 @@ def _unwrap_annotation(ann: Any) -> Any:
     Union we descend into the first non-``None`` member, which is sufficient
     to decide field-name vs. dict-key for the loc segment under inspection.
     """
-    origin = get_origin(ann)
-    if origin is Union:
+    while get_origin(ann) is Annotated:
+        ann = get_args(ann)[0]
+    if get_origin(ann) in _UNION_ORIGINS:
         members = [a for a in get_args(ann) if a is not type(None)]
-        return members[0] if members else ann
+        return _unwrap_annotation(members[0]) if members else ann
     return ann
 
 
+_UNION_ORIGINS: tuple[Any, ...] = (Union, types.UnionType)
+
+
 def _redact_loc(loc: tuple[Any, ...], err_type: str, model: type[BaseModel] | None) -> str:
+    return _walk_loc(loc, err_type, model)[0]
+
+
+def _walk_loc(
+    loc: tuple[Any, ...], err_type: str, model: type[BaseModel] | None
+) -> tuple[str, Any]:
     """Render a Pydantic error ``loc`` keeping only schema-declared identifiers.
 
     SI-2: a ``loc`` can carry user-supplied content — for ``extra_forbidden``
@@ -1104,25 +1119,42 @@ def _redact_loc(loc: tuple[Any, ...], err_type: str, model: type[BaseModel] | No
     list indices pass through verbatim; any segment that lands on a dict/mapping
     key, or the trailing extra-field name of an ``extra_forbidden`` error, is
     replaced with ``<key>`` so only schema-declared identifiers are ever echoed.
+
+    Returns ``(rendered loc, declared annotation at loc)``. The annotation is
+    ``None`` when any segment was redacted or unresolved, so a user-supplied
+    key never picks the annotation that gets rendered (GH-275).
     """
     n = len(loc)
     rendered: list[str] = []
     current: Any = model
+    clean = model is not None
     for i, seg in enumerate(loc):
         is_last = i == n - 1
         # extra_forbidden: trailing segment is the user-supplied extra field name.
         if is_last and err_type == "extra_forbidden":
             rendered.append("<extra>")
+            clean = False
             continue
         # Structural Pydantic markers (e.g. '[key]') are not user content.
         if isinstance(seg, str) and seg.startswith("[") and seg.endswith("]"):
             rendered.append(seg)
+            clean = False
             continue
         # List/tuple/set indices are integers — never user content.
         if isinstance(seg, int):
             rendered.append(str(seg))
             origin = get_origin(_unwrap_annotation(current)) if current is not None else None
-            if origin in (list, tuple, set, frozenset):
+            if origin is tuple:
+                args = get_args(_unwrap_annotation(current))
+                if len(args) == 2 and args[1] is Ellipsis:
+                    current = args[0]
+                elif 0 <= seg < len(args):
+                    # Fixed-length tuple: index i has its own annotation.
+                    current = args[seg]
+                else:
+                    current = None
+                    clean = False
+            elif origin in (list, set, frozenset):
                 args = get_args(_unwrap_annotation(current))
                 current = args[0] if args else None
             else:
@@ -1131,19 +1163,21 @@ def _redact_loc(loc: tuple[Any, ...], err_type: str, model: type[BaseModel] | No
         ann = _unwrap_annotation(current) if current is not None else None
         origin = get_origin(ann)
         # Walking a Pydantic model: a matching declared field name is safe.
-        if isinstance(current, type) and issubclass(current, BaseModel):
-            field = current.model_fields.get(str(seg))
+        if isinstance(ann, type) and issubclass(ann, BaseModel):
+            field = ann.model_fields.get(str(seg))
             if field is not None:
                 rendered.append(str(seg))
                 current = field.annotation
                 continue
             # Not a declared field → user-supplied (extra / unexpected) key.
             rendered.append("<key>")
+            clean = False
             current = None
             continue
         # Walking a dict/mapping: the segment IS a user-supplied key.
         if origin in (dict,) or (isinstance(origin, type) and issubclass(origin, dict)):
             rendered.append("<key>")
+            clean = False
             args = get_args(ann)
             current = args[1] if len(args) == 2 else None
             continue
@@ -1155,8 +1189,60 @@ def _redact_loc(loc: tuple[Any, ...], err_type: str, model: type[BaseModel] | No
             rendered.append(str(seg))
         else:
             rendered.append("<key>")
+        clean = False
         current = None
-    return ".".join(rendered) or "<root>"
+    return ".".join(rendered) or "<root>", (current if clean else None)
+
+
+def _declared_choices(ann: Any) -> list[Any] | None:
+    """Literal args or Enum member values of a declared annotation, else None."""
+    while True:
+        origin = get_origin(ann)
+        if origin is Annotated:
+            ann = get_args(ann)[0]
+        elif origin in _UNION_ORIGINS:
+            members = [a for a in get_args(ann) if a is not type(None)]
+            if len(members) != 1:
+                return None
+            ann = members[0]
+        else:
+            break
+    if origin is Literal:
+        return list(get_args(ann))
+    if isinstance(ann, type) and issubclass(ann, enum.Enum):
+        return [m.value for m in ann]
+    return None
+
+
+_ALLOWED_VALUES_MAX_LEN = 300
+_ALLOWED_VALUES_MAX_COUNT = 20
+
+
+def _allowed_values_phrase(ann: Any) -> str | None:
+    values = _declared_choices(ann)
+    if not values:
+        return None
+    texts: list[str] = []
+    skipped = 0
+    for value in values:
+        try:
+            raw = json.dumps(value)
+        except (TypeError, ValueError):
+            return None
+        if safe_line_text(raw) != raw:
+            skipped += 1
+        else:
+            texts.append(raw)
+    if not texts:
+        return None
+    text, _ = cap_whole_entries(
+        texts,
+        _ALLOWED_VALUES_MAX_LEN,
+        sep=", ",
+        max_entries=_ALLOWED_VALUES_MAX_COUNT,
+        omitted=skipped,
+    )
+    return f"must be one of: {text}"
 
 
 def _unknown_argument_loc(loc: tuple[Any, ...]) -> str:
@@ -1176,8 +1262,12 @@ _BUILTIN_ERROR_CODES: frozenset[str] = frozenset(
 ) | {UNKNOWN_ARGUMENT_ERROR_TYPE}
 
 
-def _validation_phrase(e: Any) -> str:
+def _validation_phrase(e: Any, declared: Any = None) -> str:
     err_type = e["type"]
+    if err_type in ("literal_error", "enum") and declared is not None:
+        allowed = _allowed_values_phrase(declared)
+        if allowed is not None:
+            return allowed
     if err_type == "value_error":
         err = (e.get("ctx") or {}).get("error")
         if isinstance(err, SafeValueError):
@@ -1213,11 +1303,14 @@ def safe_validation_message(
     falls back to the generic phrase, and ``SafeValueError`` refuses such a hint
     at class definition (``TypeError``, GH-250).
     """
-    fields = "; ".join(
-        f"{_unknown_argument_loc(e['loc']) if e['type'] == UNKNOWN_ARGUMENT_ERROR_TYPE else _redact_loc(tuple(e['loc']), e['type'], input_model)} — "
-        f"{_validation_phrase(e)}"
-        for e in exc.errors()
-    )
+    parts: list[str] = []
+    for e in exc.errors():
+        if e["type"] == UNKNOWN_ARGUMENT_ERROR_TYPE:
+            parts.append(f"{_unknown_argument_loc(e['loc'])} — {_validation_phrase(e)}")
+            continue
+        loc_text, declared = _walk_loc(tuple(e["loc"]), e["type"], input_model)
+        parts.append(f"{loc_text} — {_validation_phrase(e, declared)}")
+    fields = "; ".join(parts)
     return f"tool '{tool_name}' input invalid: {fields}"
 
 

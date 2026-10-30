@@ -205,6 +205,19 @@ non-blank string raises `TypeError` when the class is defined. An unknown pydant
 `PydanticCustomError(f"x_{v}", ...)`) is never echoed; it shows
 "input failed validation".
 
+### Allowed values (`Literal` and `Enum` fields)
+
+When a `Literal[...]` or `Enum` field gets a value outside its choices, the
+error names the choices: `sort — must be one of: "appointment_date", "-appointment_date"`.
+The values come from the field's declared type, never from the rejected input.
+At most 20 values and 300 characters are shown; when some are left out the list
+ends `, …and N more`. A single value that is too long to show whole (over 256
+characters after cleaning) is left out and counted in that tail, never shown cut.
+The old phrase `value is not one of the allowed choices` is kept when the choices
+cannot be read from the declared type (no input model, a dict key in the path, a
+custom validator on a plain field, a value that is not JSON) or when no value is
+short enough to show.
+
 ## Interrupts (human-in-the-loop)
 
 ```python
