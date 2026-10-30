@@ -4,7 +4,7 @@ All notable changes to `agent-sdk`. SemVer applies to the stable core
 (DESIGN.md §4.0); provisional surfaces (`agent_sdk.testing`, console
 internals, `contrib/`) may change in minors with notice here.
 
-## [Unreleased]
+## [0.25.1] — 2026-10-30
 
 ### Changed
 - GH-275: a `Literal` or `Enum` validation error now names the allowed values: `sort — must be one of: "appointment_date", "-appointment_date"`. Values come from the declared input model (never from the rejected input), capped at 20 values and 300 characters with a `, …and N more` tail; an over-long single value is left out. For a fixed-length tuple (`tuple[A, B]`) the choices come from the annotation at that index; `tuple[A, ...]`, list and set items use the item annotation. Unresolvable choices keep `value is not one of the allowed choices`. A field declared `n: N | None` or `Optional[N]` now renders its error location as `n.sort` (was `n.<key>`). The skill-catalog fit rule moved to `agent_sdk/common/text.py::cap_whole_entries` (C-075); `_skill_catalog` output is unchanged. Files: `agent_sdk/agent/loop.py`, `agent_sdk/common/text.py`, `agent_sdk/routes/mcp.py`, `docs/tools.md`. Tests: `tests/test_gh275_allowed_values.py`, `tests/test_rt003_tool_input_validation_error_message.py`.
