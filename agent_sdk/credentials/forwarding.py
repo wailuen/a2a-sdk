@@ -113,7 +113,10 @@ def bind(creds: Mapping[str, dict[str, str]]) -> contextvars.Token:
     A2A: call after parsing, before ``create_task`` — the spawned worker copies
     the context and keeps the snapshot (the token is not reset; the request task
     ends and its context is discarded). MCP: pair with :func:`unbind` in a
-    ``finally`` around synchronous dispatch.
+    ``finally`` around synchronous dispatch. MCP SSE answer mode (GH-224) runs
+    the tool inside the stream's own worker task, after ``mcp_post`` has
+    unbound: that worker calls ``bind`` at its start and ``unbind`` in its own
+    ``finally``, so the pairing stays inside one task.
     """
     return _forwarded.set(dict(creds))
 

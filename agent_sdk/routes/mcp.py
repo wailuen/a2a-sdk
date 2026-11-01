@@ -62,7 +62,8 @@ non-empty; bad arguments get the registry's GH-196 argument-error shape.
 negative cursor → -32602 ``invalid cursor`` (GH-236). With
 ``AGENT_SDK_MCP_SCHEMA_MODE=strict`` ``tools/list`` schemas are flattened
 (``common/schema.py``).
-``notifications/*`` → 202 empty, never answered. Per spec §10 the client
+``notifications/*`` → 202 empty, never answered (``notifications/cancelled``
+additionally ends a waiting SSE-mode ``tools/call``, GH-224). Per spec §10 the client
 MUST send ``MCP-Protocol-Version`` on every non-``initialize`` request, and
 the server MUST 400 a present-but-unrecognized version — both hold on every
 path below. Only the ABSENT-header case is a spec SHOULD (assume
@@ -87,7 +88,18 @@ hard reject), so the resolved identity here is already audience-checked.
 
 POST responses use JSON mode (``application/json``) — permitted by the
 Streamable HTTP spec for single responses even when the client's Accept
-prefers ``text/event-stream``.
+prefers ``text/event-stream`` — with ONE exception, GH-224 (ruling
+https://github.com/wailuen/a2a-sdk/issues/224#issuecomment-6556270463): SSE
+answer mode. A ``tools/call`` is answered as a ``text/event-stream`` only when
+the session's ``initialize`` declared ``capabilities.elicitation``, the
+negotiated version is 2025-06-18 or newer, and ``Accept`` includes
+``text/event-stream``; the stream carries at most one ``elicitation/create``
+request, then exactly one response for the call id (``_open_answer_stream``).
+Legacy SSE (``/mcp/sse`` + ``/mcp/messages``) is unchanged. These streams are
+admitted against their own budget (``_answer_streams()``), not the GET budget
+above, and a full budget answers in JSON mode, never 429. A POSTed JSON-RPC
+response whose id, session and identity match a pending ``elicitation/create``
+resolves it; ``notifications/cancelled`` for a waiting call's id ends that call.
 """
 
 from __future__ import annotations
@@ -98,6 +110,7 @@ import functools
 import json
 import logging
 import re
+import secrets
 import time
 import uuid
 from collections import OrderedDict
@@ -130,16 +143,39 @@ from ..common.json_strict import (
 from ..common.origin import guard_origin
 from ..common.schema import flatten_schema, strip_schema_titles
 from ..common.redact import TITLE_TEXT_MAX_LEN, frame_locations, safe_line_text, sanitize_text
-from ..common.sse import HEARTBEAT, SSE_HEADERS
+from ..common import sse as sse_mod
+from ..common.sse import HEARTBEAT, SSE_HEADERS, sse_data
 from ..common.text import cap_whole_entries
 from ..agent.loop import LOAD_SKILL_TOOL, ToolInterrupt, resolve_tool_timeout, safe_validation_message
 from ..agent.registry import ToolInputValidationError, _unknown_argument_error, match_emits_type
 from ..credentials import forwarding
 from ..models.content_types import ContentModel, MarketBriefing
 from ..models.errors import AgentError
+from .mcp_elicitation import (
+    CallState,
+    ElicitationCancelled,
+    ElicitationDisconnected,
+    PendingTable,
+    convert_schema,
+    validate_content,
+)
 
 MCP_INTERRUPT_SUFFIX = "This action needs user input that this connection cannot collect."
 _MCP_INTERRUPT_FALLBACK = "tool requires interactive confirmation, unsupported over MCP."
+# GH-224: one fixed isError text per elicitation outcome; user input is never echoed.
+MCP_ELICIT_DECLINED = "The user declined the request."
+MCP_ELICIT_CANCELLED = "The request was cancelled before the user answered."
+MCP_ELICIT_NO_ANSWER = "No answer was received from the user in time."
+MCP_ELICIT_INVALID = "The user's answer did not match the requested form."
+MCP_ELICIT_ERROR = "The client could not collect the user's answer."
+# No resume_handler on a tool that declares `emits`: the tool advertises an
+# outputSchema, so a success without structuredContent would break MCP
+# structured output, and user-typed content must never become typed output.
+MCP_ELICIT_NO_HANDLER_EMITS = "The user's answer cannot be returned for this tool."
+MCP_ELICIT_TOO_LARGE = "The user's answer was too large to return."
+_ELICITATION_MIN_VERSION = "2025-06-18"
+_ELICITATION_FORM_MODE_VERSION = "2025-11-25"
+_ELICIT_CONTENT_MAX_CHARS = 8192
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +250,9 @@ _MAX_GET_STREAMS = 500
 # org can raise it further via AGENT_SDK_MAX_MCP_STREAMS_PER_IDENTITY
 # (config.py) without a code change. See _max_streams_per_identity().
 _MAX_GET_STREAMS_PER_IDENTITY = 200
+# GH-224: global cap on POST /mcp SSE answer-mode streams, separate from the
+# GET budget above (see _answer_streams()).
+_MAX_ANSWER_STREAMS = _MAX_GET_STREAMS // 2
 # RT-001: a slot is registered in _get_streams() before the StreamingResponse
 # is ever constructed, so nothing guarantees the generator body — and thus
 # heartbeats()'s `finally` — ever runs (Starlette's spec_version<2.4 path can
@@ -271,24 +310,58 @@ def _max_streams_per_identity(app: Any) -> int:
     )
 
 
-def _sessions(app: Any) -> "OrderedDict[str, tuple[float, str, str]]":
+class _SessionTable(OrderedDict[str, tuple[float, str, str]]):
+    """The ``_sessions`` mapping plus its per-session siblings (GH-224): the
+    elicitation capability map and the pending server-request table. The record
+    stays today's 3-tuple; the siblings are only ever cleaned by
+    ``_remove_session``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.elicitation: dict[str, bool] = {}
+        self.pending = PendingTable()
+
+
+def _sessions(app: Any) -> _SessionTable:
     """Streamable HTTP sessions: id → (last-seen, owner identity key,
     protocol version negotiated at initialize — GH-200).
     Bounded LRU + idle TTL. The owner binding makes a stolen/guessed session
     id useless to any other caller (cross-identity session hijack defense)."""
     sessions = getattr(app.state, "mcp_sessions", None)
     if sessions is None:
-        sessions = OrderedDict()
+        sessions = _SessionTable()
         app.state.mcp_sessions = sessions
     return sessions
 
 
-def _prune_sessions(sessions: "OrderedDict[str, tuple[float, str, str]]") -> None:
+def _session_elicitation(app: Any) -> dict[str, bool]:
+    """Session id → whether ``initialize`` declared form-mode elicitation
+    (GH-224). Written only at the initialize insert; read with ``.get(sid,
+    False)`` after ``_session_alive`` accepted the session."""
+    return _sessions(app).elicitation
+
+
+def _pending_table(app: Any) -> PendingTable:
+    """Server requests awaiting a client answer (GH-224)."""
+    return _sessions(app).pending
+
+
+def _remove_session(sessions: _SessionTable, session_id: str) -> None:
+    """The one place a session disappears: DELETE, per-identity LRU, idle TTL,
+    the global cap, the TTL pop in ``_session_alive`` and the initialize-replace
+    pop all come here. Fails the session's pending server requests so a waiting
+    call ends with the cancel isError instead of a timeout."""
+    sessions.pop(session_id, None)
+    sessions.elicitation.pop(session_id, None)
+    sessions.pending.fail_session(session_id, ElicitationCancelled)
+
+
+def _prune_sessions(sessions: _SessionTable) -> None:
     cutoff = time.time() - SESSION_TTL_SECONDS
     for sid in [s for s, rec in sessions.items() if rec[0] <= cutoff]:
-        sessions.pop(sid, None)
+        _remove_session(sessions, sid)
     while len(sessions) > _MAX_SESSIONS:
-        sessions.popitem(last=False)
+        _remove_session(sessions, next(iter(sessions)))
 
 
 def _max_sessions_per_identity(app: Any) -> int:
@@ -303,16 +376,14 @@ def _max_sessions_per_identity(app: Any) -> int:
     )
 
 
-def _evict_identity_lru(
-    sessions: "OrderedDict[str, tuple[float, str, str]]", owner: str, cap: int
-) -> None:
+def _evict_identity_lru(sessions: _SessionTable, owner: str, cap: int) -> None:
     owned = [sid for sid, rec in sessions.items() if rec[1] == owner]
     for sid in owned[: max(0, len(owned) - (cap - 1))]:
-        sessions.pop(sid, None)
+        _remove_session(sessions, sid)
 
 
 def _session_alive(
-    sessions: "OrderedDict[str, tuple[float, str, str]]",
+    sessions: _SessionTable,
     session_id: str,
     owner: str,
     *,
@@ -330,7 +401,7 @@ def _session_alive(
         return None
     last_seen, sess_owner, sess_version = rec
     if last_seen <= time.time() - SESSION_TTL_SECONDS:
-        sessions.pop(session_id, None)
+        _remove_session(sessions, session_id)
         return None
     if sess_owner != owner:
         return None
@@ -356,7 +427,10 @@ def _get_streams(app: Any) -> SlotTable:
     ``StreamingResponse`` is created and count against the SAME
     ``_MAX_GET_STREAMS``/``_MAX_GET_STREAMS_PER_IDENTITY`` cap — they consume
     the same single-process connection pool, so a cap on only one transport
-    is trivially bypassed by calling the other (RT-001). Mirrors
+    is trivially bypassed by calling the other (RT-001).
+    ``POST /mcp`` SSE answer mode (GH-224) is deliberately NOT in this table:
+    it has its own ``_answer_streams()`` budget, so a burst of busy tool calls
+    can never make ``GET /mcp`` return 429. Mirrors
     ``_sse_queues()``'s lazy-init accessor pattern; ``_sse_queues()`` itself
     remains a separate structure, purely for legacy session→queue routing.
 
@@ -388,6 +462,20 @@ def _get_streams(app: Any) -> SlotTable:
     ``asyncio.Queue(maxsize=256)``, and — because the slot half self-healed —
     the admission cap never throttled the repetition."""
     return slot_table(app, "mcp_get_streams")
+
+
+def _answer_streams(app: Any) -> SlotTable:
+    """GH-224: the budget of ``POST /mcp`` SSE answer-mode streams, deliberately
+    NOT ``_get_streams()``. Answer-mode calls are bounded by a global cap and a
+    per-identity sub-cap (half the per-identity GET cap) counted only against
+    each other, so a burst of busy tool calls can never fill the GET budget and
+    turn ``GET /mcp`` into a 429, the Claude.ai "couldn't connect" failure mode.
+    A full answer budget is never an error: the call is answered in JSON mode."""
+    return slot_table(app, "mcp_answer_streams")
+
+
+def _max_answer_streams_per_identity(app: Any) -> int:
+    return max(1, _max_streams_per_identity(app) // 2)
 
 
 # RT-002 (round 5): the layer-3 backstop is `common.admission.prune_finished`
@@ -491,7 +579,9 @@ def _page(entries: list[Any], cursor: Any) -> tuple[list[Any], str | None]:
     return page, (_encode_cursor(next_offset) if next_offset < len(entries) else None)
 
 
-async def _dispatch(app: Any, message: dict[str, Any]) -> dict[str, Any] | None:
+async def _dispatch(
+    app: Any, message: dict[str, Any], call: CallState | None = None
+) -> dict[str, Any] | None:
     """Route one JSON-RPC message. Returns None for notifications (never
     answered — even when the client fabricates an id on one)."""
     request_id = message.get("id")
@@ -534,7 +624,7 @@ async def _dispatch(app: Any, message: dict[str, Any]) -> dict[str, Any] | None:
                 return _error(request_id, _INVALID_PARAMS, got["__jrpc_error__"])
             return _result(request_id, got)
         if method == "tools/call":
-            result = await _handle_tools_call(app, params)
+            result = await _handle_tools_call(app, params, call)
             if isinstance(result, dict) and "__jrpc_error__" in result:
                 return _error(request_id, _INVALID_PARAMS, result["__jrpc_error__"])
             if isinstance(result, dict) and "__jrpc_unknown_tool__" in result:
@@ -831,92 +921,22 @@ def _restore_required_nulls(model: BaseModel, dump: Any) -> Any:
     return dump
 
 
-async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]:
-    """Validate → invoke → fold. Protocol-shape faults surface via sentinels:
-    - ``__jrpc_error__``: invalid-params (-32602) — missing/non-string name,
-      non-dict arguments.
-    - ``__jrpc_unknown_tool__``: invalid-params (-32602, per the MCP spec) —
-      unknown tool name (Tier 2 tools are indistinguishable from unknown on this surface, §5.6).
-    Anything raised INSIDE the tool — AgentError or otherwise — is an
-    ``isError: true`` RESULT, never a JSON-RPC error (§5.5)."""
-    name = params.get("name")
-    if not isinstance(name, str) or not name:
-        return {"__jrpc_error__": "tools/call requires a 'name' string"}
-    arguments = params.get("arguments")
-    if arguments is None:
-        arguments = {}
-    if not isinstance(arguments, dict):
-        return {"__jrpc_error__": "tools/call 'arguments' must be an object"}
-
-    skills = _mcp_skills(app) if name == _LOAD_SKILL and _skills_mode(app) == "tool" else []
-    if skills:
-        requested = arguments.get("name")
-        bad_keys = [str(k) for k in arguments if k != "name"]
-        if bad_keys:
-            # SI-2/GH-196: the registry's argument-error shape; key names only
-            # (C-050 sanitises them), never a value.
-            text = safe_validation_message(
-                _LOAD_SKILL, _unknown_argument_error(bad_keys, tool_name=_LOAD_SKILL).validation_error
-            )
-            return {"content": [{"type": "text", "text": text}], "isError": True}
-        if not isinstance(requested, str):
-            # Missing or non-string name: pydantic's own error, so the text
-            # says "required"/"expected a string", not "unknown argument".
-            try:
-                _LoadSkillArgs.model_validate(arguments)
-            except ValidationError as exc:
-                text = safe_validation_message(_LOAD_SKILL, exc)
-                return {"content": [{"type": "text", "text": text}], "isError": True}
-        for skill in skills:
-            if isinstance(requested, str) and skill.name == requested:
-                return {"content": [{"type": "text", "text": skill.body}], "isError": False}
-        # SI-2: fixed text, the requested name is never echoed or logged.
-        return {
-            "content": [{"type": "text", "text": _SKILL_NOT_FOUND}],
-            "isError": True,
-        }
-
-    entry = app.state.registry.get(name)
-    # A Tier 2 tool must be indistinguishable from an unknown name on this
-    # surface (§5.6 — MCP exposes Tier 1 only).
-    if entry is None or entry.tier != 1:
-        # SI-2: never reflect user-supplied tool name in error text.
-        return {"__jrpc_unknown_tool__": "tool not found"}
-
-    timeout = resolve_tool_timeout(name, entry, app.state.loop_policies)
-    try:
-        # RT-001: dispatch through the shared ToolEntry.invoke_any() helper
-        # (registry.py) rather than re-implementing the is_generator branch
-        # here — it also resolves a long_running=True coroutine tool's
-        # DeferredResult inline (tools/call has no background task delivery
-        # channel to hand it off to, unlike agent/runner.py), under the
-        # SAME single timeout deadline as the initial invoke/drain (RT-003:
-        # the handle gets only the REMAINING budget, never a fresh `timeout`
-        # seconds on top) — never folding the DeferredResult itself (its
-        # repr, including the raw handle coroutine object, must never reach
-        # the wire, and the handle must never be silently dropped unawaited).
-        artifact = await entry.invoke_any(arguments, app.state.adapters, timeout=timeout)
-    except ToolInterrupt as interrupt:
-        # RT-001: MCP has no HITL/resume channel, so surface a distinct,
-        # diagnosable isError. GH-204: show the tool-authored message (already
-        # on the wire over A2A/AG-UI) sanitized and capped, then the fixed
-        # marker suffix so the cap never cuts it. Log the reason only (SI-2).
-        logger.warning(
-            "mcp tool interrupt tool=%s reason=%s", name, sanitize_text(interrupt.reason)
-        )
-        message = safe_line_text(str(interrupt.message), max_len=TITLE_TEXT_MAX_LEN)
-        lead = message or _MCP_INTERRUPT_FALLBACK
-        return {
-            "content": [{"type": "text", "text": f"{lead} {MCP_INTERRUPT_SUFFIX}"}],
-            "isError": True,
-        }
-    except AgentError as exc:
+def _tool_failure(
+    exc: Exception, name: str, entry: Any, timeout: float, *, resumed: bool = False
+) -> dict[str, Any]:
+    """The isError result for an exception raised by a tool body or by a
+    ``resume_handler`` (GH-224 shares one copy). Branch order matches the
+    original ``except`` chain. ``resumed``: the exception came from a
+    ``resume_handler``, which never goes through input-model coercion, so a
+    ``ToolInputValidationError`` is not rendered against ``input_model`` (it
+    takes the generic branch, as in agent/loop.py)."""
+    if isinstance(exc, AgentError):
         # AgentError.public() is the consumer-safe shape (no inputs/secrets).
         public = exc.public()
         text = f"[{public['category']}] {public['message']}"
         logger.warning("mcp tool error tool=%s category=%s", name, public["category"])
         return {"content": [{"type": "text", "text": text}], "isError": True}
-    except asyncio.TimeoutError:
+    if isinstance(exc, asyncio.TimeoutError):
         # RT-004: mirror agent/loop.py's timeout branch (lines 476-477/500-501)
         # so a timeout is diagnosable rather than folding into the generic
         # fallback below. `name` is a registry-resolved tool identifier, not
@@ -924,7 +944,7 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
         text = f"tool '{name}' timed out after {timeout:g}s"
         logger.warning("mcp tool timeout tool=%s timeout=%s", name, timeout)
         return {"content": [{"type": "text", "text": text}], "isError": True}
-    except ToolInputValidationError as exc:
+    if isinstance(exc, ToolInputValidationError) and not resumed:
         # RT-004/GH-135: mirror agent/loop.py's ToolInputValidationError branch
         # — safe_validation_message keeps only loc + type (schema-declared
         # field names and Pydantic type codes), never exc's raw msg/input
@@ -936,38 +956,59 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
         text = safe_validation_message(name, exc.validation_error, entry.decl.input_model)
         logger.warning("mcp tool input validation failed tool=%s", name)
         return {"content": [{"type": "text", "text": text}], "isError": True}
-    except Exception as exc:
-        # Message stays generic — nothing caller-supplied is echoed.
-        # SI-2/RT-001: a body-raised ValidationError (GH-135's discriminator
-        # only catches the input-model coercion step above) has a __str__
-        # that embeds the raw rejected value (`input_value=...`) — same for
-        # any other exception whose message interpolates caller/tool-derived
-        # data. `logger.exception`/`exc_info=True` would format that message
-        # straight into the log, so we never log exc's message or its
-        # formatted traceback text. RT-010: dropping the traceback ENTIRELY
-        # over-corrected — a genuine bug (AttributeError, KeyError, TypeError)
-        # in a tool body became undiagnosable (bare class name, no file/line).
-        # frame_locations() (common/redact.py) carries no interpolated values
-        # (FrameSummary.filename/lineno only — never `.line`, which echoes
-        # source text that could itself contain a caller-derived literal), so
-        # logging it satisfies SI-2 (suppresses the message) without
-        # sacrificing diagnosability. RT-004: the same helper backs
-        # routes/admin.py's try-tool and every agent/loop.py dispatch site so
-        # the cross-surface parity this comment claims is actually true.
-        frames = frame_locations(exc)
-        logger.error(
-            "mcp tool unexpected error tool=%s error_type=%s frames=%s",
-            name,
-            type(exc).__name__,
-            frames,
-        )
-        # SI-2: never reflect user-supplied / tool-derived names in error text;
-        # the tool name is already recorded in the structured log above.
-        return {
-            "content": [{"type": "text", "text": "tool execution failed"}],
-            "isError": True,
-        }
+    # Message stays generic — nothing caller-supplied is echoed.
+    # SI-2/RT-001: a body-raised ValidationError (GH-135's discriminator
+    # only catches the input-model coercion step above) has a __str__
+    # that embeds the raw rejected value (`input_value=...`) — same for
+    # any other exception whose message interpolates caller/tool-derived
+    # data. `logger.exception`/`exc_info=True` would format that message
+    # straight into the log, so we never log exc's message or its
+    # formatted traceback text. RT-010: dropping the traceback ENTIRELY
+    # over-corrected — a genuine bug (AttributeError, KeyError, TypeError)
+    # in a tool body became undiagnosable (bare class name, no file/line).
+    # frame_locations() (common/redact.py) carries no interpolated values
+    # (FrameSummary.filename/lineno only — never `.line`, which echoes
+    # source text that could itself contain a caller-derived literal), so
+    # logging it satisfies SI-2 (suppresses the message) without
+    # sacrificing diagnosability. RT-004: the same helper backs
+    # routes/admin.py's try-tool and every agent/loop.py dispatch site so
+    # the cross-surface parity this comment claims is actually true.
+    frames = frame_locations(exc)
+    logger.error(
+        "mcp tool unexpected error tool=%s error_type=%s frames=%s",
+        name,
+        type(exc).__name__,
+        frames,
+    )
+    # SI-2: never reflect user-supplied / tool-derived names in error text;
+    # the tool name is already recorded in the structured log above.
+    return {
+        "content": [{"type": "text", "text": "tool execution failed"}],
+        "isError": True,
+    }
 
+
+def _interrupt_result(name: str, interrupt: ToolInterrupt) -> dict[str, Any]:
+    """Today's isError for a ToolInterrupt MCP cannot resolve."""
+    # RT-001: MCP has no HITL/resume channel, so surface a distinct,
+    # diagnosable isError. GH-204: show the tool-authored message (already
+    # on the wire over A2A/AG-UI) sanitized and capped, then the fixed
+    # marker suffix so the cap never cuts it. Log the reason only (SI-2).
+    logger.warning(
+        "mcp tool interrupt tool=%s reason=%s", name, sanitize_text(interrupt.reason)
+    )
+    message = safe_line_text(str(interrupt.message), max_len=TITLE_TEXT_MAX_LEN)
+    lead = message or _MCP_INTERRUPT_FALLBACK
+    return {
+        "content": [{"type": "text", "text": f"{lead} {MCP_INTERRUPT_SUFFIX}"}],
+        "isError": True,
+    }
+
+
+def _finish_tool_result(entry: Any, name: str, artifact: Any) -> dict[str, Any]:
+    """Fold a tool's (or a ``resume_handler``'s) return into the tools/call
+    result: emits coercion, None artifact, outputSchema rules, structuredContent
+    (GH-224 moved this out of ``_handle_tools_call`` so both returns share it)."""
     emits_members = entry.decl.emits_types
     # RT-001/RT-002: a drained async-generator with no terminal yield resolves
     # to ToolTerminalResult(value=None) (registry.py's invoke_gen), and a plain
@@ -1082,6 +1123,84 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
     return result
 
 
+async def _handle_tools_call(
+    app: Any, params: dict[str, Any], call: CallState | None = None
+) -> dict[str, Any]:
+    """Validate → invoke → fold. Protocol-shape faults surface via sentinels:
+    - ``__jrpc_error__``: invalid-params (-32602) — missing/non-string name,
+      non-dict arguments.
+    - ``__jrpc_unknown_tool__``: invalid-params (-32602, per the MCP spec) —
+      unknown tool name (Tier 2 tools are indistinguishable from unknown on this surface, §5.6).
+    Anything raised INSIDE the tool — AgentError or otherwise — is an
+    ``isError: true`` RESULT, never a JSON-RPC error (§5.5)."""
+    name = params.get("name")
+    if not isinstance(name, str) or not name:
+        return {"__jrpc_error__": "tools/call requires a 'name' string"}
+    arguments = params.get("arguments")
+    if arguments is None:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        return {"__jrpc_error__": "tools/call 'arguments' must be an object"}
+
+    skills = _mcp_skills(app) if name == _LOAD_SKILL and _skills_mode(app) == "tool" else []
+    if skills:
+        requested = arguments.get("name")
+        bad_keys = [str(k) for k in arguments if k != "name"]
+        if bad_keys:
+            # SI-2/GH-196: the registry's argument-error shape; key names only
+            # (C-050 sanitises them), never a value.
+            text = safe_validation_message(
+                _LOAD_SKILL, _unknown_argument_error(bad_keys, tool_name=_LOAD_SKILL).validation_error
+            )
+            return {"content": [{"type": "text", "text": text}], "isError": True}
+        if not isinstance(requested, str):
+            # Missing or non-string name: pydantic's own error, so the text
+            # says "required"/"expected a string", not "unknown argument".
+            try:
+                _LoadSkillArgs.model_validate(arguments)
+            except ValidationError as exc:
+                text = safe_validation_message(_LOAD_SKILL, exc)
+                return {"content": [{"type": "text", "text": text}], "isError": True}
+        for skill in skills:
+            if isinstance(requested, str) and skill.name == requested:
+                return {"content": [{"type": "text", "text": skill.body}], "isError": False}
+        # SI-2: fixed text, the requested name is never echoed or logged.
+        return {
+            "content": [{"type": "text", "text": _SKILL_NOT_FOUND}],
+            "isError": True,
+        }
+
+    entry = app.state.registry.get(name)
+    # A Tier 2 tool must be indistinguishable from an unknown name on this
+    # surface (§5.6 — MCP exposes Tier 1 only).
+    if entry is None or entry.tier != 1:
+        # SI-2: never reflect user-supplied tool name in error text.
+        return {"__jrpc_unknown_tool__": "tool not found"}
+    if call is not None:
+        call.tool = name
+
+    timeout = resolve_tool_timeout(name, entry, app.state.loop_policies)
+    try:
+        # RT-001: dispatch through the shared ToolEntry.invoke_any() helper
+        # (registry.py) rather than re-implementing the is_generator branch
+        # here — it also resolves a long_running=True coroutine tool's
+        # DeferredResult inline (tools/call has no background task delivery
+        # channel to hand it off to, unlike agent/runner.py), under the
+        # SAME single timeout deadline as the initial invoke/drain (RT-003:
+        # the handle gets only the REMAINING budget, never a fresh `timeout`
+        # seconds on top) — never folding the DeferredResult itself (its
+        # repr, including the raw handle coroutine object, must never reach
+        # the wire, and the handle must never be silently dropped unawaited).
+        artifact = await entry.invoke_any(arguments, app.state.adapters, timeout=timeout)
+    except ToolInterrupt as interrupt:
+        if call is not None:
+            return await _elicit_interrupt(app, call, entry, name, timeout, interrupt)
+        return _interrupt_result(name, interrupt)
+    except Exception as exc:
+        return _tool_failure(exc, name, entry, timeout)
+    return _finish_tool_result(entry, name, artifact)
+
+
 # ---------------------------------------------------------------------------
 # Streamable HTTP — POST / GET / DELETE /mcp
 # ---------------------------------------------------------------------------
@@ -1090,6 +1209,293 @@ async def _handle_tools_call(app: Any, params: dict[str, Any]) -> dict[str, Any]
 def _is_jsonrpc_response(message: dict[str, Any]) -> bool:
     """result|error and no method: a client replying to a server request (id may be null)."""
     return "method" not in message and ("result" in message or "error" in message)
+
+
+def _declares_form_elicitation(initialize: dict[str, Any]) -> bool:
+    """``capabilities.elicitation`` present and form-capable: ``{}`` counts as
+    form mode; a declaration naming only ``url`` does not (GH-224)."""
+    params = initialize.get("params")
+    caps = params.get("capabilities") if isinstance(params, dict) else None
+    declared = caps.get("elicitation") if isinstance(caps, dict) else None
+    return isinstance(declared, dict) and (not declared or "form" in declared)
+
+
+def _version_at_least(version: str, floor: str) -> bool:
+    """Position compare in the newest-first ``SUPPORTED_PROTOCOL_VERSIONS``
+    (LRN-191), never a date string compare."""
+    return SUPPORTED_PROTOCOL_VERSIONS.index(version) <= SUPPORTED_PROTOCOL_VERSIONS.index(floor)
+
+
+def _elicitation_trigger(request: Request, session_id: str, live_version: str) -> bool:
+    """The three GH-224 conditions. ``live_version`` came from ``_session_alive``
+    (ownership + touch); the stored capability is read only after it."""
+    if live_version not in SUPPORTED_PROTOCOL_VERSIONS:
+        return False
+    if not _version_at_least(live_version, _ELICITATION_MIN_VERSION):
+        return False
+    if "text/event-stream" not in request.headers.get("accept", "").lower():
+        return False
+    return _session_elicitation(request.app).get(session_id, False)
+
+
+def _elicit_text_result(text: str) -> dict[str, Any]:
+    return {"content": [{"type": "text", "text": text}], "isError": True}
+
+
+async def _elicit_interrupt(
+    app: Any,
+    call: CallState,
+    entry: Any,
+    name: str,
+    timeout: float,
+    interrupt: ToolInterrupt,
+) -> dict[str, Any]:
+    """GH-224: ask the user through ``elicitation/create`` and fold the answer
+    back. Runs inside the SSE-mode worker. Every path that cannot elicit ends
+    with today's interrupt isError (the same object JSON mode sends)."""
+    # Phase move body -> wait is refused after a disconnect: no entry, no frame.
+    if call.disconnected:
+        logger.info("mcp elicitation skipped, client gone tool=%s", name)
+        return _interrupt_result(name, interrupt)
+    # SI-4: an auth interrupt never elicits (runner.py's substring test,
+    # case-insensitive as the action gate applies it).
+    if "auth" in str(interrupt.reason).lower():
+        return _interrupt_result(name, interrupt)
+    requested = convert_schema(interrupt.response_schema)
+    if requested is None:
+        logger.info("mcp elicitation schema not convertible tool=%s", name)
+        return _interrupt_result(name, interrupt)
+    params: dict[str, Any] = {
+        "message": safe_line_text(str(interrupt.message), max_len=TITLE_TEXT_MAX_LEN)
+        or _MCP_INTERRUPT_FALLBACK,
+        "requestedSchema": requested,
+    }
+    if _version_at_least(call.version, _ELICITATION_FORM_MODE_VERSION):
+        params["mode"] = "form"
+    request_id = secrets.token_urlsafe(16)
+    try:
+        wire = dumps_strict(
+            {"jsonrpc": "2.0", "id": request_id, "method": "elicitation/create", "params": params}
+        )
+    except (ValueError, TypeError):
+        logger.info("mcp elicitation request not serializable tool=%s", name)
+        return _interrupt_result(name, interrupt)
+    table = _pending_table(app)
+    future = table.add(request_id, call.owner, call.session_id, call.call_id, call.rpc_id)
+    if future is None:
+        logger.info("mcp elicitation refused, too many pending tool=%s", name)
+        return _interrupt_result(name, interrupt)
+    call.request_id = request_id
+    call.phase = "wait"
+    call.put(sse_data(wire))
+    try:
+        reply = await asyncio.wait_for(future, app.state.settings.mcp_elicitation_timeout_seconds)
+    except asyncio.TimeoutError:
+        # MCP cancellation: tell the client its form is no longer wanted
+        # before the final response ends the stream.
+        call.put(
+            sse_data(
+                dumps_strict(
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "notifications/cancelled",
+                        "params": {"requestId": request_id},
+                    }
+                )
+            )
+        )
+        return _elicit_text_result(MCP_ELICIT_NO_ANSWER)
+    except ElicitationDisconnected:
+        logger.info("mcp elicitation abandoned, client gone tool=%s", name)
+        return _elicit_text_result(MCP_ELICIT_CANCELLED)
+    except ElicitationCancelled:
+        return _elicit_text_result(MCP_ELICIT_CANCELLED)
+    finally:
+        table.discard(request_id)
+    # The phase flips in the same step the accept is taken (no await between).
+    call.phase = "resume"
+    if "error" in reply:
+        return _elicit_text_result(MCP_ELICIT_ERROR)
+    result = reply.get("result")
+    action = result.get("action") if isinstance(result, dict) else None
+    if action == "decline":
+        return _elicit_text_result(MCP_ELICIT_DECLINED)
+    if action == "cancel":
+        return _elicit_text_result(MCP_ELICIT_CANCELLED)
+    if action != "accept" or not isinstance(result, dict):
+        return _elicit_text_result(MCP_ELICIT_INVALID)
+    content = result.get("content")
+    if content is None:
+        content = {}
+    if not validate_content(requested, content):
+        return _elicit_text_result(MCP_ELICIT_INVALID)
+    handler = interrupt.resume_handler
+    if handler is None:
+        # User content never goes through _finish_tool_result / emits coercion.
+        if entry.decl.emits_types:
+            return _elicit_text_result(MCP_ELICIT_NO_HANDLER_EMITS)
+        # The envelope agent/loop.py folds for a handler-less resume. The
+        # reason is tool-authored; sanitized like today's interrupt log.
+        try:
+            body = dumps_strict(
+                {"interrupt": sanitize_text(str(interrupt.reason)), "user_response": content}
+            )
+        except (ValueError, TypeError):
+            logger.error("mcp elicitation content not serializable tool=%s", name)
+            return _elicit_text_result("tool output not serializable")
+        if len(body) > _ELICIT_CONTENT_MAX_CHARS:
+            return _elicit_text_result(MCP_ELICIT_TOO_LARGE)
+        return {"content": [{"type": "text", "text": body}], "isError": False}
+    try:
+        artifact = await asyncio.wait_for(handler({"status": None, "payload": content}), timeout)
+    except ToolInterrupt:
+        logger.info("mcp elicitation re-raised, answering with the first interrupt tool=%s", name)
+        return _interrupt_result(name, interrupt)
+    except Exception as exc:
+        return _tool_failure(exc, name, entry, timeout, resumed=True)
+    return _finish_tool_result(entry, name, artifact)
+
+
+async def _open_answer_stream(
+    request: Request,
+    message: dict[str, Any],
+    identity: Identity,
+    owner: str,
+    session_id: str,
+    version: str,
+    base_headers: dict[str, str],
+) -> StreamingResponse | None:
+    """GH-224 SSE answer mode for ``tools/call``. Admits the call against its
+    own budget (``_answer_streams()``, never the GET budget); ``None`` (budget
+    full) means: answer in JSON mode, never 429."""
+    app = request.app
+    streams = _answer_streams(app)
+    await _prune_get_streams(streams)
+    if len(streams) >= _MAX_ANSWER_STREAMS or count_for_owner(
+        streams, owner
+    ) >= _max_answer_streams_per_identity(app):
+        params = message.get("params")
+        tool = params.get("name") if isinstance(params, dict) else None
+        # SI-2: only a registry-resolved name is logged, never caller text.
+        known = isinstance(tool, str) and app.state.registry.get(tool) is not None
+        logger.info("mcp answer stream budget full, JSON fallback tool=%s", tool if known else "-")
+        return None
+    forwarded = forwarding.parse_header(request.headers.get(forwarding.HEADER_NAME))
+    request_task = asyncio.current_task()
+    assert request_task is not None
+    call = CallState(uuid.uuid4().hex, session_id, owner, version)
+    table = _pending_table(app)
+    request_id = message.get("id")
+    call.rpc_id = request_id
+
+    def _free() -> None:
+        # Idempotent, sync, event-loop thread. Only reached once no work runs.
+        streams.pop(call.call_id, None)
+        table.drop_call(call.call_id)
+        if call.anchor is not None and not call.anchor.done():
+            call.anchor.cancel()
+
+    async def release() -> None:
+        call.ended = True
+        if not call.delivered:
+            # The response cycle is over without the final frame (Starlette
+            # cancelled the body task while the generator sat suspended at a
+            # yield, so its own `finally` has not run): same as a disconnect.
+            call.disconnected = True
+            table.drop_call(call.call_id)
+        if call.worker is None or call.worker.done():
+            _free()
+
+    def _worker_done(_task: "asyncio.Task[None]") -> None:
+        if call.ended or request_task.done():
+            _free()
+
+    async def _anchor(worker: "asyncio.Task[None]") -> None:
+        await asyncio.wait({request_task, worker})
+
+    async def _sse_worker() -> None:
+        identity_token = bind_identity(identity)
+        credentials_token = forwarding.bind(forwarded)
+        try:
+            try:
+                response = await _dispatch(app, message, call)
+                if response is None:
+                    response = _error(None, _INVALID_REQUEST, "invalid request")
+                frame = dumps_strict(_writable_response(response))
+            except Exception as exc:
+                # SI-2: class name and frame locations only, never str(exc).
+                logger.error(
+                    "mcp stream response failed error_type=%s frames=%s",
+                    type(exc).__name__,
+                    frame_locations(exc),
+                )
+                safe_id = request_id if _is_writable(request_id) else None
+                frame = dumps_strict(_error(safe_id, _INTERNAL_ERROR, "internal error"))
+            call.put(sse_data(frame), final=True)
+        finally:
+            unbind_identity(identity_token)
+            forwarding.unbind(credentials_token)
+
+    async def stream() -> AsyncIterator[bytes]:
+        final_sent = False
+        try:
+            worker = asyncio.create_task(_sse_worker())
+            call.worker = worker
+            call.anchor = asyncio.create_task(_anchor(worker))
+            slot = streams.get(call.call_id)
+            if slot is not None:
+                slot.owning_task = call.anchor
+            worker.add_done_callback(_worker_done)
+            while True:
+                getter = asyncio.ensure_future(call.queue.get())
+                try:
+                    await asyncio.wait(
+                        {getter, worker},
+                        timeout=sse_mod.STREAM_HEARTBEAT_SECONDS,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    if not getter.done():
+                        getter.cancel()
+                if not getter.done() or getter.cancelled():
+                    if worker.done() and call.queue.empty():
+                        # The worker ended (e.g. a leaked CancelledError)
+                        # without its final frame: end the stream here.
+                        logger.error("mcp stream worker ended without a response")
+                        final_sent = True
+                        call.delivered = True
+                        safe_id = request_id if _is_writable(request_id) else None
+                        yield sse_data(dumps_strict(_error(safe_id, _INTERNAL_ERROR, "internal error")))
+                        return
+                    if worker.done():
+                        continue
+                    if call.phase == "wait" and call.request_id is not None:
+                        if _session_alive(_sessions(app), session_id, owner) is None:
+                            table.fail(call.request_id, ElicitationCancelled())
+                    yield HEARTBEAT
+                    continue
+                frame, final = getter.result()
+                if final:
+                    final_sent = True
+                    call.delivered = True
+                yield frame
+                if final:
+                    return
+        finally:
+            if not final_sent:
+                call.disconnected = True
+                if call.request_id is not None:
+                    table.fail(call.request_id, ElicitationDisconnected())
+
+    streams[call.call_id] = StreamSlot(owner=owner, owning_task=request_task, release=release)
+    headers = {**SSE_HEADERS, **base_headers}
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers=headers,
+        background=BackgroundTask(release),
+    )
+
 
 
 @router.post("/", include_in_schema=False)
@@ -1213,7 +1619,38 @@ async def mcp_post(
         base_headers = {_PROTOCOL_VERSION_HEADER: fallback}
 
     if _is_jsonrpc_response(message):
+        # GH-224: only after require_identity and the owner-checked
+        # _session_alive above (live_version is None for a session-less POST).
+        if live_version is not None and presented_session is not None:
+            if not _pending_table(request.app).resolve(
+                message.get("id"), owner, presented_session, message
+            ):
+                logger.info("mcp client response ignored")
         return Response(status_code=202, headers=base_headers)
+
+    if (
+        message.get("method") == "notifications/cancelled"
+        and live_version is not None
+        and presented_session is not None
+    ):
+        # GH-224: the protocol's cancel channel for a parked SSE-mode tools/call.
+        cancelled = message.get("params")
+        if isinstance(cancelled, dict):
+            _pending_table(request.app).cancel_call(
+                cancelled.get("requestId"), owner, presented_session
+            )
+
+    if (
+        message.get("method") == "tools/call"
+        and presented_session is not None
+        and live_version is not None
+        and _elicitation_trigger(request, presented_session, live_version)
+    ):
+        streamed = await _open_answer_stream(
+            request, message, identity, owner, presented_session, live_version, base_headers
+        )
+        if streamed is not None:
+            return streamed
 
     # Per-call forwarded credentials are request-scoped: bind around dispatch
     # (synchronous, same task as the tool invoke) and unbind in finally.
@@ -1238,7 +1675,7 @@ async def mcp_post(
         if presented_session is not None:
             replaced = sessions.get(presented_session)
             if replaced is not None and replaced[1] == owner:
-                sessions.pop(presented_session, None)
+                _remove_session(sessions, presented_session)
         _evict_identity_lru(sessions, owner, _max_sessions_per_identity(request.app))
         session_id = uuid.uuid4().hex
         negotiated_ver = response["result"].get("protocolVersion")
@@ -1247,6 +1684,7 @@ async def mcp_post(
             owner,  # bound to the caller
             negotiated_ver if negotiated_ver in SUPPORTED_PROTOCOL_VERSIONS else "2025-03-26",
         )
+        sessions.elicitation[session_id] = _declares_form_elicitation(message)
         _prune_sessions(sessions)
         headers[_SESSION_ID_HEADER] = session_id
         # P6-00: override the response version header with the negotiated
@@ -1416,7 +1854,7 @@ async def mcp_delete(
         sessions = _sessions(request.app)
         rec = sessions.get(session_id)
         if rec is not None and rec[1] == _identity_key(identity):
-            sessions.pop(session_id, None)
+            _remove_session(sessions, session_id)
     return Response(status_code=204)
 
 

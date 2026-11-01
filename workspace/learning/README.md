@@ -118,7 +118,7 @@ Entries ordered by LRN number.
 | LRN-112 | Monotonic clock value fed to datetime.fromtimestamp() as if it were epoch time | [LRN-112](LRN-112-monotonic-clock-epoch-confusion.md) |
 | LRN-113 | New abstractmethod on public ABC breaks external subclasses | [LRN-113](LRN-113-public-abc-new-abstractmethod.md) |
 | LRN-114 | Non-total content extraction crashes AG-UI SSE stream without terminal frame | [LRN-114](LRN-114-non-total-sse-validation-crash.md) |
-| LRN-115 | AG-UI _capabilities() fail-closed tier="none" default is intentional — do not "align" it to spec's tier="core" | [LRN-115](LRN-115-agui-capabilities-fail-closed-tier-none-default.md) |
+| LRN-115 | AG-UI _capabilities() fail-closed tier="none" default is intentional — do not "align" it to spec's tier="core | [LRN-115](LRN-115-agui-capabilities-fail-closed-tier-none-default.md) |
 | LRN-116 | MCP tools/call bypasses generator tool dispatch, breaking long-running Tier-1 tools | [LRN-116](LRN-116-mcp-tools-call-bypasses-generator-dispatch.md) |
 | LRN-117 | Allowlist must cover LLM system-prompt teaching surface | [LRN-117](LRN-117-allowlist-must-cover-llm-teaching-surface.md) |
 | LRN-118 | DESIGN.md MCP version-header rule stale after transport split | [LRN-118](LRN-118-protocol-doc-behavior-drift.md) |
@@ -571,3 +571,6 @@ Entries ordered by LRN number.
 | LRN-572 | Test listed under Reads rewritten without declaring scope | [LRN-572](LRN-572-undeclared-test-rewrite-scope.md) |
 | LRN-573 | DESIGN.md left stale after protocol rule change | [LRN-573](LRN-573-design-doc-stale-after-protocol-rule.md) |
 | LRN-574 | Resume handler drops protocol cancelled status | [LRN-574](LRN-574-resume-cancelled-status-dropped.md) |
+| LRN-575 | Schema converter silently drops unsupported property constraints | [LRN-575](LRN-575-converter-drops-constraints.md) |
+| LRN-576 | Tool-call shortcut return path bypasses outputSchema fold helper | [LRN-576](LRN-576-shortcut-return-bypasses-fold.md) |
+| LRN-577 | Schema converter ignores unknown top-level keywords | [LRN-577](LRN-577-converter-toplevel-keywords-dropped.md) |

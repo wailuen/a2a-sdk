@@ -2,7 +2,8 @@
 
 Every route in this SDK that holds an open ``text/event-stream`` admits it
 against a bounded budget before the ``StreamingResponse`` is ever constructed:
-``GET /mcp`` and ``GET /mcp/sse`` (routes/mcp.py), ``POST /v1/message:stream``
+``GET /mcp`` and ``GET /mcp/sse`` (routes/mcp.py), ``POST /mcp`` in SSE answer
+mode (routes/mcp.py, GH-224), ``POST /v1/message:stream``
 and ``GET``/``POST /v1/tasks/{id}:subscribe`` (routes/a2a.py), and ``POST /ag-ui/run``
 (routes/ag_ui.py, which admits against the A2A budget). The server is
 single-process by design (DESIGN.md §2), so those streams all contend for one
@@ -28,7 +29,9 @@ per-task cap — never called it, so its slots kept the ``""`` placeholder and
 ``count_for_task`` could neither cap nor count them.
 
 What is NOT shared, deliberately: the two budgets are separate tables
-(``app.state.mcp_get_streams`` vs ``app.state.a2a_streams``). They bound
+(``app.state.mcp_get_streams`` vs ``app.state.a2a_streams``), and MCP's
+POST answer-mode streams use a third (``app.state.mcp_answer_streams``) so they
+cannot push ``GET /mcp`` to 429. They bound
 different transports with different defaults; merging them would be a behaviour
 change, not a deduplication.
 """
@@ -58,8 +61,14 @@ __all__ = [
 class StreamSlot:
     """One admitted stream's bookkeeping entry.
 
-    ``owning_task`` is the ASGI request task, and it is the ONLY liveness fact
-    ``prune_finished`` keys on — never elapsed wall-clock time. A live stream
+    ``owning_task`` starts as the ASGI request task, and it is the ONLY liveness
+    fact ``prune_finished`` keys on — never elapsed wall-clock time. It may be
+    rewritten once, before any other await, to a liveness anchor task that stays
+    not-done until every task doing work under the slot has ended (MCP SSE
+    answer mode, GH-224: a worker can outlive the request). A ``release`` reached
+    while that work still runs may defer, as long as it frees everything once
+    ``owning_task`` is done, which is the only time ``prune_finished`` calls it.
+    A live stream
     whose ``send()`` is backpressured, or whose heartbeat sleep overshoots under
     exactly the event-loop congestion these caps exist to bound, would age out
     of a TTL-based reaper while still open and defeat the cap.
@@ -117,7 +126,7 @@ def slot_table(app: Any, attr: str) -> "OrderedDict[str, StreamSlot]":
 
 
 async def prune_finished(streams: "OrderedDict[str, StreamSlot]") -> None:
-    """Layer-3 backstop: reclaim every slot whose owning ASGI request task has
+    """Layer-3 backstop: reclaim every slot whose owning task has
     finished, by invoking the slot's OWN ``release``.
 
     A bare generator ``finally`` is not a lifecycle hook and a response

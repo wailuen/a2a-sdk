@@ -236,6 +236,36 @@ bound either way. `status` must be the protocol literal (`"resolved"` /
 `"cancelled"`), with the decision in `payload.decision` (see protocols.md). Without a `resume_handler`, the raw user response is
 folded back to the model as the tool result.
 
+### Interrupts over MCP (elicitation)
+
+Over MCP a `ToolInterrupt` normally ends the call with an `isError` reply.
+When the client declared the `elicitation` capability (2025-06-18 or newer) and
+accepts `text/event-stream`, the SDK sends the user an `elicitation/create`
+form instead, and the answer reaches your `resume_handler` as
+`{"status": None, "payload": <form content>}`, the same shape as an A2A data
+resume. To elicit, `response_schema` must be a flat object of primitives:
+string (with `minLength`, `maxLength`, `format` of email, uri, date or
+date-time), number or integer (with `minimum`, `maximum`), boolean, or a string
+`enum`. Nested objects, arrays, `$ref` and unions do not elicit (a plain
+`Optional[x]` and a pydantic `Enum` do). So do not these: `pattern`, `const`
+(a one-value `Literal`), `exclusiveMinimum` / `exclusiveMaximum` (pydantic
+`gt` / `lt`), `multipleOf`, `examples`, and non-string enums (a `Literal[1, 2]`
+or an int `Enum`). Use `ge` / `le` for number bounds. A `None` or empty
+(`{}`) schema asks a form with no fields.
+
+If the user accepts and the interrupt has a `resume_handler`, its return value
+becomes the tool result. With no `resume_handler`, the result is the text
+`{"interrupt": <reason>, "user_response": <content>}`, the same shape the A2A
+and AG-UI loop folds back. A tool that declares `emits` and has no
+`resume_handler` ends with a fixed `isError` instead: its output must come from
+your code, never straight from what the user typed. If your `resume_handler`
+raises another `ToolInterrupt`, MCP answers with the first interrupt's
+`isError`. A field whose name looks like a secret (token,
+password, api key, secret, credential and similar) never elicits, and neither
+does an interrupt whose `reason` contains "auth": credentials are never asked
+through elicitation. In all those cases the call falls back to the plain
+`isError` reply.
+
 ## Loop policies
 
 Per task: max 20 turns, 600s deadline (interrupt-suspended), 200k token

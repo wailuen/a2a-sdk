@@ -281,6 +281,17 @@ class BaseAgentSettings(BaseSettings):
         default=None, ge=1, alias="AGENT_SDK_MAX_MCP_SESSIONS_PER_IDENTITY"
     )
 
+    # GH-224: how long a POST /mcp tools/call in SSE answer mode waits for the
+    # user's reply to an `elicitation/create` before ending with an isError.
+    # Independent of the tool's own timeout.
+    mcp_elicitation_timeout_seconds: float = Field(
+        default=300.0,
+        gt=0,
+        le=86400,
+        allow_inf_nan=False,
+        alias="AGENT_SDK_MCP_ELICITATION_TIMEOUT_SECONDS",
+    )
+
     # RT-001 (A2A stream admission cap follow-up): routes/a2a.py's per-identity
     # cap on concurrent open message:stream/tasks:subscribe connections is
     # keyed the same way as max_mcp_streams_per_identity above — see that

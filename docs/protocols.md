@@ -212,6 +212,50 @@ never `RUN_ERROR`.
   `GET /mcp` with an `Mcp-Session-Id` applies the same checks as `POST`: over
   64 characters → 400; unknown, expired or other-owner session → 404 (same
   static body for all three 404 cases). No header → 200 SSE, as before.
+- Elicitation (GH-224): a tool's `ToolInterrupt` can ask the user a question
+  mid-call over `POST /mcp`. It is used only when all three hold: the
+  session's `initialize` declared `capabilities.elicitation` (`{}` counts as
+  form mode; only `url` does not), the negotiated version is 2025-06-18 or
+  newer, and the `tools/call` `Accept` header includes `text/event-stream`.
+  The call is then answered as an SSE stream: an `elicitation/create` request
+  (with `"mode": "form"` at 2025-11-25), then exactly one JSON-RPC response for
+  the `tools/call` id. The client answers with a JSON-RPC response on
+  `POST /mcp` carrying the same `Mcp-Session-Id`. Outcomes: `accept` validates
+  `content` against the form shown and folds it into the `resume_handler` as
+  `{"status": None, "payload": content}` (the A2A data-resume shape, so
+  action_gate works); without a handler the content is returned as JSON text in the envelope the
+  A2A/AG-UI loop folds for a handler-less resume,
+  `{"interrupt": <reason>, "user_response": <content>}` (reason sanitized,
+  `isError` false; over 8192 characters it is a fixed `isError` instead, never
+  cut). A tool that declares `emits` and has no `resume_handler` gets a fixed
+  `isError` (`The user's answer cannot be returned for this tool.`): its
+  `outputSchema` would need typed `structuredContent`, and user-typed content
+  never becomes typed output without passing through tool code. If the handler
+  raises a second `ToolInterrupt`, the reply is the first interrupt's `isError`.
+  `decline`, `cancel`, an error response, invalid content, a timeout or a
+  deleted session each end with a fixed `isError`. A client may also send
+  `notifications/cancelled` with the `requestId` of the waiting `tools/call`
+  (same session and identity): the call ends with the cancel `isError` and
+  its slot and pending entry are freed (still `202`). On a timeout the server
+  first sends `notifications/cancelled` for its own `elicitation/create` id on
+  the stream, then the final response. A JSON-RPC response whose id, session
+  and identity match a pending `elicitation/create` resolves it; any other
+  response is ignored (`202`). The wait is bounded by
+  `AGENT_SDK_MCP_ELICITATION_TIMEOUT_SECONDS` (default 300); heartbeat comments
+  keep the stream open and touch the session. At most 8 requests wait per
+  session. When elicitation cannot be used (auth-reason interrupt, a schema
+  that is not flat primitives, a secret-like field name, the cap, a full stream
+  budget) the call keeps today's `isError` reply; in an already-open stream it
+  is the single `data:` event. The stream has its own budget, separate from the
+  `GET` stream budget: a global cap and a per-identity cap of half the
+  per-identity `GET` cap. A full answer budget falls back to the JSON reply
+  (one info log line with the tool name), never 429, so busy tool calls cannot
+  make `GET /mcp` return 429. A client disconnect during the wait is seen at once on a
+  server that reports ASGI `spec_version` 2.3 (uvicorn HTTP); on 2.4 or newer
+  it is seen at the next heartbeat or at the timeout, and the slot is freed
+  when the worker ends. A started tool body or approved action always runs to
+  its end. Claude.ai web does not declare elicitation, so it keeps the
+  `isError` reply. The legacy `/mcp/sse` transport is unchanged.
 - `tools/call` for an unknown or Tier 2 tool returns JSON-RPC `-32602`
   (invalid params) with the fixed message `tool not found`; the requested
   name is never echoed. An unknown MCP *method* still returns `-32601`.
@@ -219,10 +263,15 @@ never `RUN_ERROR`.
 - **Nesting depth (GH-250).** Every JSON ingress parses with `loads_strict`, which refuses input nested deeper than 64 levels (arrays and objects counted together). The input is valid JSON, but the answer keeps the parse-error code with its own fixed text, `nesting too deep`, apart from the malformed-JSON text: `POST /mcp` and `POST /mcp/messages` answer `-32700` `nesting too deep` (the second one on the session's SSE channel, as for any parse error); `POST /v1/message:send` and `:stream` answer HTTP 400 with `-32700` `nesting too deep`; `POST /ag-ui/run` ends the run with `RUN_ERROR` `nesting too deep` (code `validation`). Malformed JSON keeps `parse error` (MCP), `request body is not valid JSON` (A2A) and `malformed RunAgentInput body` (AG-UI). The text never echoes the body. The JSON-RPC envelope uses about 3 levels, so MCP tool `arguments` have about 61 levels left.
 - A `POST /mcp` body that is a JSON-RPC response (`id` plus `result` or
   `error`, no `method`) returns `202 Accepted` with an empty body, after the
-  auth, origin and session checks. Requests still get `application/json`.
+  auth, origin and session checks. Requests get `application/json`, except a
+  `tools/call` in elicitation SSE answer mode (see the Elicitation bullet; GH-224,
+  ruling https://github.com/wailuen/a2a-sdk/issues/224#issuecomment-6556270463). A response whose id, session and identity match a
+  pending `elicitation/create` resolves it.
 - **Concurrent-stream cap.** `GET /mcp` and the legacy `GET /mcp/sse` both
   hold an indefinite `text/event-stream` and share one admission budget —
-  global, then per-identity (`AGENT_SDK_MAX_MCP_STREAMS_PER_IDENTITY`). At
+  global, then per-identity (`AGENT_SDK_MAX_MCP_STREAMS_PER_IDENTITY`).
+  `POST /mcp` SSE answer mode (GH-224) is admitted against its own separate
+  budget and falls back to JSON when full, never 429. At
   capacity the server returns **429 + `Retry-After: 5`** instead of opening
   the stream, and never evicts an existing one. This is a deliberate
   deviation from the spec's two-outcome rule for `GET /mcp`
