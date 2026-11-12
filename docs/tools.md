@@ -160,7 +160,8 @@ async def dispatch(inp: DispatchInput) -> KpiCard | TimeSeriesChart:
 
 `current_identity()` returns the caller's frozen `Identity` inside a tool or a
 `SourceAdapter` method, or `None` outside a request. It never carries tokens or
-headers.
+headers. Admin try-tool (`POST /admin/api/tools/{name}/try`) binds the admin
+key's identity and any `X-Agent-Credentials` forwarded credentials, like MCP.
 
 ```python
 from agent_sdk.auth import current_identity
@@ -168,6 +169,12 @@ from agent_sdk.auth import current_identity
 who = current_identity()
 owner = who.principal_key if who else "anonymous"
 ```
+
+`Identity.label` is display text only. For an OAuth caller it comes from the
+IdP claim (`preferred_username`, else `email`) when sign-in is on, and is
+otherwise `oauth:<client_id[:8]>`. The DCR `client_name` is chosen by the
+client and is never used as a label. `Identity.user` is the identity of record
+for a signed-in person; never decide access from the label.
 
 ## Errors
 

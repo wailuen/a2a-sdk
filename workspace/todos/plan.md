@@ -87,6 +87,7 @@ Fix 5 protocol conformance bugs surfaced by downstream agents after the 0.4.0 re
 | W68 [x] ✅ 2026-10-26 (GH-268 test helpers, GH-269 AG-UI text scrub + console caps, GH-270 A2UI reserved data_types + catalog, GH-271 A2A echo/mimeType/docs, GH-272 failed-bearer 429 challenge, GH-273 MCP session version, GH-274 example/tests/registry; /sdk-autoloop cycle 3, archived by hand) | completed/w068-gh-issues.md | G | 7 | — |
 | W69 [x] ✅ 2026-10-30 (GH-275 enum/Literal errors name the allowed values; archived by hand) | completed/w069-gh-issues.md | G | 1 | — |
 | W70 [x] ✅ 2026-11-01 (GH-224 MCP elicitation for ToolInterrupt: SSE answer mode, pending table, schema converter; archived by hand) | completed/w070-gh-issues.md | G | 1 | — |
+| W71 [x] ✅ 2026-11-12 (GH-276 admin try binds identity + forwarded creds, GH-277 OAuth label never from client_name, GH-278 runner resume at archive, GH-279 frozen wave file + dangling-depends; archived by hand) | completed/w071-gh-issues.md | G | 4 | — |
 
 ## Dependency graph
 

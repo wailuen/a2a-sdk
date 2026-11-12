@@ -464,6 +464,14 @@ class OAuthTokenStore:
             # under a different client_id (pitchbook RT-OA-002, kept).
             return None
 
+        # GH-277: families minted before the fix carry the DCR client_name as
+        # label; a client-chosen name is never a display label. Read before the
+        # tombstone write so a failing lookup leaves the presented token usable.
+        client = self.get_client(client_id) or {}
+        label = record.get("label")
+        if label is not None and label == client.get("client_name"):
+            label = None
+
         record["rotated"] = True
         record["rotated_at"] = _now()
         self._store.set(NS_OAUTH_REFRESH, token_hash, json.dumps(record))
@@ -473,7 +481,7 @@ class OAuthTokenStore:
             client_id=str(record.get("client_id") or ""),
             scope=str(record.get("scope") or ""),
             audience=str(record.get("audience") or self.canonical_resource),
-            label=record.get("label"),
+            label=label,
             family_id=family_id or None,
             user=record.get("user"),
             family_expires_at=float(family_cap) if family_cap is not None else None,

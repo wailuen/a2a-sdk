@@ -16,6 +16,7 @@ export const meta = {
 // ─── args ─────────────────────────────────────────────────────────────────────
 // args.waveFile    : path to the active wave file
 // args.today       : ISO date string for plan.md timestamps (the sandbox bans Date)
+// args.resumeAt    : optional "archive" (null counts as absent); skips straight to the archive gates even with open todos
 // args.agentBudget : optional positive override of the per-wave agent-call ceiling
 // args.autoFileSdkIssues : optional boolean (default false); true files still-open SDK candidates
 //                    on wailuen/a2a-sdk at codify (deduped, capped at 10, redacted)
@@ -44,6 +45,8 @@ if (missingArgs.length > 0) {
 }
 const WAVE_FILE = normalizedArgs.waveFile
 const TODAY     = normalizedArgs.today
+const RESUME_AT = normalizedArgs.resumeAt
+if (RESUME_AT !== undefined && RESUME_AT !== null && RESUME_AT !== 'archive') throw new Error('invalid arg — resumeAt (allowed: archive)')
 const WAVE_BASENAME = WAVE_FILE.split('/').pop()
 const WAVE_ID_FROM_FILE = (WAVE_BASENAME.match(/^w\d+/) || [WAVE_BASENAME])[0]
 
@@ -76,7 +79,7 @@ const PYTEST = '$(test -x .venv/bin/python && echo .venv/bin/python || echo pyth
 // Filled verbatim from the preflight script's JSON (see PREFLIGHT_PY below).
 const PREFLIGHT_SCHEMA = {
   type: 'object',
-  required: ['ok', 'error', 'scopePaths', 'todoFacts'],
+  required: ['ok', 'error', 'freezeHash', 'scopePaths', 'todoFacts'],
   additionalProperties: false,
   properties: {
     ok:                  { type: 'boolean' },
@@ -87,15 +90,16 @@ const PREFLIGHT_SCHEMA = {
     dirtyPathCount:      { type: 'integer' },
     behindCount:         { type: 'integer' },
     lrnNext:             { type: 'integer' },
+    freezeHash: { type: 'string', pattern: '^[0-9a-f]{64}$' },
     scopePaths:          { type: 'array', items: { type: 'string' }, description: 'The JSON list printed by the scope scan, unmodified' },
     todoFacts: {
       type: 'array',
       description: 'The JSON list printed by the todo scan, unmodified',
       items: {
         type: 'object',
-        required: ['id', 'dependsText', 'held'],
+        required: ['id', 'dependsText', 'held', 'done', 'skip'],
         additionalProperties: false,
-        properties: { id: { type: 'string' }, dependsText: { type: 'array', items: { type: 'string' } }, held: { type: 'boolean' } },
+        properties: { id: { type: 'string' }, dependsText: { type: 'array', items: { type: 'string' } }, held: { type: 'boolean' }, done: { type: 'boolean' }, skip: { type: 'boolean' } },
       },
     },
   },
@@ -480,7 +484,9 @@ const SCOPE_SCAN_PY = [
 
 // Deterministic todo facts, read from the wave file itself (never from the model's relay of it):
 // per todo id, the raw text after each "Depends:" and whether an unreleased HUMAN GATE marker
-// holds it. Todos marked [~] are skipped, matching the scope scan.
+// holds it, whether it is already ticked [x] (done) and whether it is marked [~] (skip). Every
+// todo is listed, [~] ones included, so a [~] Depends: target can be told apart from a missing id;
+// consumers drop skip todos. [x] todos keep their paths in scope.
 const TODO_SCAN_PY = [
   'import json,re,sys',
   'TODO=re.compile(r"^\\s*[-*+]\\s*\\[(.)\\]\\s*"+chr(96)+r"([^"+chr(96)+r"]+)"+chr(96))',
@@ -488,20 +494,60 @@ const TODO_SCAN_PY = [
   'REL=re.compile(r"^\\s*(?:[-*+]\\s*)?(?:\\*\\*)?Release(?:\\*\\*)?\\s*:(?:\\*\\*)?[^\\n]*https://github\\.com/[\\w.-]+/[\\w.-]+/issues/\\d+",re.I|re.M)',
   'out=[]; cur=None',
   'def flush():',
-  '    if cur is None or cur["skip"]: return',
+  '    if cur is None: return',
   '    body="".join(cur["lines"])',
   '    dep=[m.group(1).strip() for l in cur["lines"] for m in [re.search(r"Depends:(?:\\*\\*)?\\s*(.*)$",l,re.I)] if m]',
-  '    out.append({"id":cur["id"],"dependsText":dep,"held":bool(GATE.search(body)) and not REL.search(body)})',
+  '    out.append({"id":cur["id"],"dependsText":dep,"held":bool(GATE.search(body)) and not REL.search(body),"done":cur["done"],"skip":cur["skip"]})',
   'for l in open(sys.argv[1],encoding="utf-8"):',
   '    m=TODO.match(l)',
   '    if m:',
-  '        flush(); cur={"id":m.group(2).strip(),"skip":m.group(1)=="~","lines":[]}; continue',
+  '        flush(); cur={"id":m.group(2).strip(),"skip":m.group(1)=="~","done":m.group(1).lower()=="x","lines":[]}; continue',
   '    if re.match(r"\\s*#{1,6}\\s",l):',
   '        flush(); cur=None; continue',
   '    if cur is not None: cur["lines"].append(l)',
   'flush()',
   'print(json.dumps(out))',
 ].join('\n')
+
+// Fingerprint of the wave file's structure, computed by this script and never by the model: per
+// todo (in file order, [~] included) its id, its "‖ group" label, its skip flag, its Depends:
+// lines and whether an unreleased HUMAN GATE holds it (same expression as TODO_SCAN_PY). The
+// [ ]/[x] tick and Creates:/Modifies: lines are left out, so the runner's own and sanctioned
+// edits do not change it. Same todo-line and block rules as TODO_SCAN_PY.
+const FREEZE_SCAN_PY = [
+  'import hashlib,json,re,sys',
+  'TODO=re.compile(r"^\\s*[-*+]\\s*\\[(.)\\]\\s*"+chr(96)+r"([^"+chr(96)+r"]+)"+chr(96))',
+  'GRP=re.compile(chr(8214)+r"\\s*group\\s*:\\s*([^\\s"+chr(96)+r"]+)")',
+  'GATE=re.compile(r"^\\s*(?:[-*+]\\s*)?(?:\\*\\*)?HUMAN GATE(?:\\*\\*)?\\s*:",re.M)',
+  'REL=re.compile(r"^\\s*(?:[-*+]\\s*)?(?:\\*\\*)?Release(?:\\*\\*)?\\s*:(?:\\*\\*)?[^\\n]*https://github\\.com/[\\w.-]+/[\\w.-]+/issues/\\d+",re.I|re.M)',
+  'out=[]; cur=None',
+  'def flush():',
+  '    if cur is None: return',
+  '    body="".join(cur["lines"])',
+  '    dep=[m.group(1).strip() for l in cur["lines"] for m in [re.search(r"Depends:(?:\\*\\*)?\\s*(.*)$",l,re.I)] if m]',
+  '    out.append([cur["id"],cur["grp"],cur["skip"],dep,bool(GATE.search(body)) and not REL.search(body)])',
+  'for l in open(sys.argv[1],encoding="utf-8"):',
+  '    m=TODO.match(l)',
+  '    if m:',
+  '        flush(); g=GRP.search(l); cur={"id":m.group(2).strip(),"grp":g.group(1) if g else "","skip":m.group(1)=="~","lines":[]}; continue',
+  '    if re.match(r"\\s*#{1,6}\\s",l):',
+  '        flush(); cur=None; continue',
+  '    if cur is not None: cur["lines"].append(l)',
+  'flush()',
+  'print(json.dumps({"ok":True,"hash":hashlib.sha256(json.dumps(out,sort_keys=True).encode()).hexdigest(),"todoCount":len(out)}))',
+].join('\n')
+
+const FREEZE_SCHEMA = {
+  type: 'object',
+  required: ['ok', 'hash', 'todoCount'],
+  additionalProperties: false,
+  properties: {
+    ok:        { type: 'boolean' },
+    hash:      { type: 'string', pattern: '^[0-9a-f]{64}$' },
+    todoCount: { type: 'integer' },
+    error:     { type: 'string' },
+  },
+}
 
 function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'" }
 
@@ -641,6 +687,132 @@ SCOPE_RESCAN_SCHEMA.properties.rows = {
 // comes from TODO_SCAN_PY (a script reading the wave file), stamped on each group by parseWave.
 function groupIsHeld(g) {
   return g.held === true
+}
+
+// Every live todo the scan found is ticked [x] ([~] todos are ignored): a re-run after a blocked
+// archive, where only the archive gates are left.
+function allTodosDone(facts) {
+  const live = facts.filter(function(f) { return f.skip !== true })
+  return live.length > 0 && live.every(function(f) { return f.done === true })
+}
+
+// Deferred notes a previous run left that mean "do not archive yet": a round budget ran out with
+// open critical/high findings, a redteam never gave a verdict, or a fix loop stopped on a red
+// gate. A note counts as resolved only when a line starts with "Resolved:" (optionally
+// "Resolved <date>:") followed by text. -medium-low.md notes never block. Read by this script,
+// never judged by a model; an unreadable note counts as unresolved.
+const RESUME_NOTES_PY = [
+  'import json,os,re,sys',
+  'D="workspace/todos/deferred"',
+  'ids=[i for i in sys.argv[1:] if re.fullmatch(r"[A-Za-z0-9._-]+",i)]',
+  'BLOCK=re.compile(r"-(?:budget-exhausted|rt-null-budget|rt-mismatch-budget|tests-red(?:-[^/]*)?|gate-null-[^/]*)\\.md$")',
+  'RES=re.compile(r"^\\s*(?:[-*]\\s*)?(?:\\*\\*)?Resolved(?:\\s+\\d{4}-\\d{2}-\\d{2})?\\s*:(?:\\*\\*)?\\s*\\S",re.I)',
+  'out=[]',
+  'try: names=sorted(os.listdir(D))',
+  'except OSError: names=[]',
+  'for n in names:',
+  '    if not any(n.startswith(i+"-") for i in ids) or not BLOCK.search(n): continue',
+  '    try: resolved=any(RES.match(l) for l in open(os.path.join(D,n),encoding="utf-8"))',
+  '    except (OSError,UnicodeError): resolved=False',
+  '    if not resolved: out.append(n)',
+  'print(json.dumps({"ok":True,"blocking":out}))',
+].join('\n')
+
+const RESUME_NOTES_SCHEMA = {
+  type: 'object',
+  required: ['ok', 'blocking'],
+  additionalProperties: false,
+  properties: {
+    ok:       { type: 'boolean' },
+    blocking: { type: 'array', items: { type: 'string' } },
+    error:    { type: 'string' },
+  },
+}
+
+const HEX64 = /^[0-9a-f]{64}$/
+
+// Fingerprint of the wave file as it stands now; null unless the relay is trustworthy.
+async function readFreezeHash(label) {
+  const r = await callAgent(
+    'Run this command at the repo root exactly as written (do not edit it) and return the JSON\n' +
+    'object it prints, field for field. If it fails to run, set ok=false, hash to 64 zeros,\n' +
+    'todoCount to 0 and put its error text in error.\n\n' +
+    'python3 - ' + shq(WAVE_FILE) + " <<'FREEZE_SCAN'\n" + FREEZE_SCAN_PY + '\nFREEZE_SCAN',
+    { schema: FREEZE_SCHEMA, label: label, phase: lastDispatchedPhase, effort: 'low' }
+  )
+  if (r && r.ok === true && typeof r.hash === 'string' && HEX64.test(r.hash) &&
+      Number.isInteger(r.todoCount) && r.todoCount >= 0) return r.hash
+  return null
+}
+
+// The wave file is frozen once the preflight baseline is taken. Returns the error result that
+// stops the run, or null when the file still matches. Unknown is never unchanged.
+async function checkFreeze(label) {
+  const h = await readFreezeHash(label)
+  if (h === null) {
+    log('ERROR: wave-file freeze check ' + label + ' returned no trustworthy hash — stopping the run (freeze-check-failed)')
+    return { error: 'freeze-check-failed', waveId: wave.waveId, check: label }
+  }
+  if (h !== wave.freezeHash) {
+    log('ERROR: wave file changed since the run started (caught at ' + label + ') — stopping the run (wave-file-changed). ' +
+        'Edits to todos, ‖ group labels, Depends: lines or [~] marks are not allowed mid-run; re-run /wave ' + wave.waveId + '.')
+    return { error: 'wave-file-changed', waveId: wave.waveId, check: label }
+  }
+  return null
+}
+
+// Unresolved blocking notes of this wave. known=false when the relay is not trustworthy: unknown
+// is never "no notes".
+async function resumeBlockingNotes() {
+  const ids = uniq([WAVE_ID_FROM_FILE, wave.waveId].filter(function(i) { return typeof i === 'string' && /^[A-Za-z0-9._-]+$/.test(i) }))
+  const r = await callAgent(
+    'Run this command at the repo root exactly as written (do not edit it) and return the JSON\n' +
+    'object it prints, field for field. If it fails to run, set ok=false, blocking to [] and put its error text in error.\n\n' +
+    'python3 - ' + ids.map(shq).join(' ') + " <<'RESUME_NOTES'\n" + RESUME_NOTES_PY + '\nRESUME_NOTES',
+    { schema: RESUME_NOTES_SCHEMA, label: 'resume:notes', phase: 'Archive', effort: 'low' }
+  )
+  const known = r && r.ok === true && Array.isArray(r.blocking) &&
+    r.blocking.every(function(n) { return typeof n === 'string' && /^[A-Za-z0-9._-]+\.md$/.test(n) })
+  return known ? { known: true, blocking: r.blocking } : { known: false, blocking: [] }
+}
+
+async function holdGroup(hg, phaseName) {
+  failedGroups.add(hg.label)
+  heldGroups.add(hg.label)
+  deliverablesBlocked = true
+  protocolBlocked = true
+  log('HUMAN GATE — group ' + hg.label + ' held: a todo carries the HUMAN GATE marker and no Release: line citing a GitHub issue URL')
+  await deferNote(
+    wave.waveId + '-group-' + hg.label + '-held.md',
+    'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '), group (' + hg.label + '),\n' +
+    'reason: a todo in this group carries a HUMAN GATE marker with no `Release:` line citing a GitHub issue URL,\n' +
+    'so the group was not dispatched and its dependents are pruned.\n' +
+    'Instruction: "Record the approval in a GitHub issue, add `Release: <issue URL>` to the todo, ' +
+    'then re-run /wave ' + wave.waveId + '."',
+    'defer:held:' + hg.label, phaseName
+  )
+}
+
+// Todo ids a Depends: text names, in every form deriveGroupDeps resolves: inside backticks (any
+// id-shaped token with a digit, hyphen or not: `P1b`, `GH-12`) or bare (an uppercase-led token
+// with a hyphen and a digit: P0-01, GH-152-A). Bare hyphen-free words (W4, v2) are prose and
+// are not checked; backticked paths and names without a digit are not ids. A Depends: text that
+// names another wave (W0, w070: "P0-04 (W0 complete)", the older files' form) refers to todos
+// outside this file, so its bare ids are not checked; backticked ids always are.
+function dependsIdTokens(text) {
+  const out = []
+  const bare = String(text).replace(/`([^`]*)`/g, function(_m, tok) {
+    const id = tok.trim()
+    if (/^[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*$/.test(id) && /\d/.test(id)) out.push(id)
+    return ' '
+  })
+  if (/\b[Ww]\d+\b/.test(bare)) return out
+  const re = /(?<![A-Za-z0-9_\/.-])[A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+(?!\.?[A-Za-z0-9_\/-])/g
+  let m
+  while ((m = re.exec(bare)) !== null) {
+    if (/\d/.test(m[0])) out.push(m[0])
+  }
+  return out
 }
 
 // Group deps derived from each todo's Depends: text as read by TODO_SCAN_PY, unioned with the
@@ -836,8 +1008,17 @@ let unitBudgetBlocked      = false   // unit round budget exhausted with survivi
 let phaseBudgetBlocked     = false   // phase round budget exhausted with surviving critical/high findings
 let redteamUnknownBlocked  = false   // a redteam never returned a trustworthy verdict
 let implementBlocked       = false   // an implement agent died twice on the same todo
+let resumeBlocked          = false   // the archive-only resume refused: unresolved blocking note, or unverifiable notes
+let resumeBlockedNotes     = []      // names of the unresolved blocking notes behind it
 let deliverablesBlocked    = false   // a group's Creates: deliverables are missing/unverified, or a group is held at a HUMAN GATE
 let totalTodos             = 0
+let planRound              = 0
+let pRound                 = 0
+let lrnCount               = 0
+const completedGroups = new Set()
+const failedGroups = new Set()    // deliverables missing at the gate, or held at a HUMAN GATE
+const heldGroups = new Set()
+const prunedGroups = new Set()    // transitively depend on a failed group; never dispatched
 let sdkCandidatesCount     = 0
 const allHighFindings      = []      // critical/high findings → Codify
 
@@ -846,11 +1027,13 @@ phase('Parse')
 
 async function runPreflight(label) {
   const pf = await callAgent(
-    'Run the three commands below at the repo root exactly as written (do not edit them).\n' +
-    'Return the JSON object the first one prints, field for field, set scopePaths to the\n' +
-    'JSON list the second one prints, unmodified, and set todoFacts to the JSON list the third\n' +
-    'one prints, unmodified. If a command fails to run, set ok=false and\n' +
+    'Run the four commands below at the repo root, in the order written, exactly as written (do not edit them).\n' +
+    'Return the JSON object the PREFLIGHT command prints, field for field, set freezeHash to the\n' +
+    '"hash" the FREEZE_SCAN command prints, unmodified, set scopePaths to the JSON list the\n' +
+    'SCOPE_SCAN command prints, unmodified, and set todoFacts to the JSON list the TODO_SCAN\n' +
+    'command prints, unmodified. If a command fails to run, set ok=false and\n' +
     'put its error text in error.\n\n' +
+    'python3 - ' + shq(WAVE_FILE) + " <<'FREEZE_SCAN'\n" + FREEZE_SCAN_PY + '\nFREEZE_SCAN\n\n' +
     'python3 - ' + shq(WAVE_FILE) + " <<'PREFLIGHT'\n" + PREFLIGHT_PY + '\nPREFLIGHT\n\n' +
     'python3 - ' + shq(WAVE_FILE) + " <<'SCOPE_SCAN'\n" + SCOPE_SCAN_PY + '\nSCOPE_SCAN\n\n' +
     'python3 - ' + shq(WAVE_FILE) + " <<'TODO_SCAN'\n" + TODO_SCAN_PY + '\nTODO_SCAN',
@@ -859,8 +1042,10 @@ async function runPreflight(label) {
   // Unknown state is never "nothing found": a failed or malformed preflight stops the wave.
   const wellFormed = pf && pf.ok === true &&
     Array.isArray(pf.scopePaths) && Array.isArray(pf.otherActiveWaves) &&
+    typeof pf.freezeHash === 'string' && /^[0-9a-f]{64}$/.test(pf.freezeHash) &&
     Array.isArray(pf.todoFacts) && pf.todoFacts.every(function(f) {
-      return f && typeof f.id === 'string' && typeof f.held === 'boolean' &&
+      return f && typeof f.id === 'string' && typeof f.held === 'boolean' && typeof f.done === 'boolean' &&
+        typeof f.skip === 'boolean' &&
         Array.isArray(f.dependsText) && f.dependsText.every(function(d) { return typeof d === 'string' })
     }) &&
     ['completedFileExists', 'templateDirExists'].every(function(k) { return typeof pf[k] === 'boolean' }) &&
@@ -915,20 +1100,66 @@ async function parseWave(pf, label) {
   // a todo the scan found that the model's groups lack means Parse dropped text.
   const modelIds = new Set()
   w.groups.forEach(function(g) { g.todos.forEach(function(t) { modelIds.add(t && t.id) }) })
-  const unseen = pf.todoFacts.map(function(f) { return f.id }).filter(function(id) { return !modelIds.has(id) })
+  const unseen = pf.todoFacts.filter(function(f) { return !f.skip }).map(function(f) { return f.id }).filter(function(id) { return !modelIds.has(id) })
   if (unseen.length > 0) {
     log('ERROR: wave ' + w.waveId + ' Parse is missing ' + unseen.length + ' todo(s) the deterministic todo scan found: ' +
         unseen.join(', ') + ' — aborting rather than running with dropped Depends:/HUMAN GATE text. Re-run.')
     return { error: 'todo-scan-mismatch', waveId: w.waveId, missed: unseen }
   }
+  // A todo that will still be dispatched must not name an id missing from the file or marked [~]
+  // in its Depends: text; [x] targets count as met. See dependsIdTokens for the forms checked.
+  if (RESUME_AT !== 'archive') {
+    const known = new Set(pf.todoFacts.map(function(f) { return f.id }))
+    const skipped = new Set(pf.todoFacts.filter(function(f) { return f.skip }).map(function(f) { return f.id }))
+    const dangling = []
+    pf.todoFacts.filter(function(f) { return !f.skip && !f.done }).forEach(function(f) {
+      f.dependsText.forEach(function(text) {
+        dependsIdTokens(text).forEach(function(id) {
+          if ((!known.has(id) || skipped.has(id)) && dangling.indexOf(id) === -1) dangling.push(id)
+        })
+      })
+    })
+    if (dangling.length > 0) {
+      log('ERROR: wave ' + w.waveId + ' has Depends: id(s) that match no live todo in the file (missing or marked [~]): ' +
+          dangling.join(', ') + ' — aborting before any implementer runs. Fix the Depends: line.')
+      return { error: 'dangling-depends', waveId: w.waveId, dangling: dangling }
+    }
+  }
+  // The runner enforces [~] itself: a skip todo the model left in a group is dropped here, and a
+  // group it empties goes with it (with its label in every groupDeps list).
+  const skipIds = new Set(pf.todoFacts.filter(function(f) { return f.skip }).map(function(f) { return f.id }))
+  if (skipIds.size > 0) {
+    const emptied = new Set()
+    w.groups = w.groups.filter(function(g) {
+      const before = g.todos.length
+      g.todos = g.todos.filter(function(t) {
+        const drop = t && skipIds.has(t.id)
+        if (drop) log('Todo ' + t.id + ' is marked [~] — dropped from group ' + g.label + ', not dispatched')
+        return !drop
+      })
+      if (before > 0 && g.todos.length === 0) { emptied.add(g.label); return false }
+      return true
+    })
+    if (w.groupDeps) {
+      emptied.forEach(function(label) { delete w.groupDeps[label] })
+      Object.keys(w.groupDeps).forEach(function(k) {
+        w.groupDeps[k] = (w.groupDeps[k] || []).filter(function(d) { return !emptied.has(d) })
+      })
+    }
+  }
   w.todoFacts   = pf.todoFacts
-  const heldIds = new Set(pf.todoFacts.filter(function(f) { return f.held }).map(function(f) { return f.id }))
+  w.freezeHash  = pf.freezeHash
+  const liveFacts = pf.todoFacts.filter(function(f) { return !f.skip })
+  const heldIds = new Set(liveFacts.filter(function(f) { return f.held }).map(function(f) { return f.id }))
+  const doneIds = new Set(liveFacts.filter(function(f) { return f.done }).map(function(f) { return f.id }))
   w.groupDeps   = deriveGroupDeps(w)
   for (const g of w.groups) {
     g.creates  = uniq(g.creates)
     g.modifies = uniq(g.modifies)
     g.scope    = uniq(g.creates.concat(g.modifies))
     g.held     = g.todos.some(function(t) { return heldIds.has(t && t.id) })
+    g.todos.forEach(function(t) { if (t) t.done = doneIds.has(t.id) })
+    g.done     = g.todos.length > 0 && g.todos.every(function(t) { return t && t.done === true })
   }
   // The scan is the ground truth for which paths exist on Creates:/Modifies: lines; a path
   // the read missed would silently narrow every gate keyed off allScope.
@@ -941,7 +1172,7 @@ async function parseWave(pf, label) {
     return { error: 'scope-scan-mismatch', waveId: w.waveId, missed: missed }
   }
   w.allScope = uniq(w.allScope.concat(scanned))
-  if (w.allScope.length === 0) {
+  if (w.allScope.length === 0 && !allTodosDone(pf.todoFacts)) {
     log('ERROR: wave ' + w.waveId + ' has no Creates: AND no Modifies: paths — aborting ' +
         '(truly empty scope is a harness bug, not a clean wave)')
     return { error: 'empty-scope', waveId: w.waveId }
@@ -1022,6 +1253,47 @@ log('Wave ' + wave.waveId + ': ' + wave.groups.length + ' group(s), ' +
     wave.allScope.length + ' scope path(s) (' + wave.allCreates.length + ' create / ' +
     wave.allModifies.length + ' modify), lrnNext=' + lrnBase + ', agent budget=' + AGENT_CALL_BUDGET)
 
+// Resume at archive: every todo is already ticked [x] (a re-run after a blocked archive), or the
+// caller forced it. Plan review, implement, redteam, protocol audit and codify are skipped; HUMAN
+// GATE holds still block the archive.
+if (RESUME_AT === 'archive' || allTodosDone(preflight.todoFacts)) {
+  log('Resuming at archive (' + (RESUME_AT === 'archive' ? 'args.resumeAt' : 'every todo is already done') +
+      ') — skipping plan review, implement, redteam, protocol audit and codify')
+  preflight.todoFacts.filter(function(f) { return f.skip !== true && f.done === true }).forEach(function(f) {
+    log('Todo ' + f.id + ' already done [x] — skipped, not re-implemented')
+  })
+  for (const hg of wave.groups.filter(groupIsHeld)) await holdGroup(hg, 'Archive')
+  // Fail closed: the resume skips every review gate, so it must not archive over what those gates
+  // left behind. Unresolved blocking notes and missing Creates: deliverables both refuse it.
+  const notes = await resumeBlockingNotes()
+  const unheld = wave.groups.filter(function(g) { return !groupIsHeld(g) })
+  const missingOnResume = await checkDeliverables(unheld, 0, 'deliv:resume')
+  const incomplete = unheld.filter(function(g) { return (missingOnResume[g.label] || []).length > 0 })
+  if (!notes.known || notes.blocking.length > 0 || incomplete.length > 0) {
+    resumeBlocked = true
+    protocolBlocked = true
+    if (!notes.known) {
+      log('Archive SKIPPED — wave ' + wave.waveId + ': the deferred-note check returned no trustworthy result (unknown is not clean). Re-run /wave ' + wave.waveId + '.')
+    }
+    if (notes.blocking.length > 0) {
+      resumeBlockedNotes = notes.blocking
+      log('Archive SKIPPED — wave ' + wave.waveId + ': unresolved blocking note(s) in workspace/todos/deferred/: ' + notes.blocking.join(', ') +
+          '. Fix the findings, add a line starting "Resolved:" to each note, then re-run /wave ' + wave.waveId + '.')
+    }
+    if (incomplete.length > 0) {
+      deliverablesBlocked = true
+      for (const g of incomplete) {
+        failedGroups.add(g.label)
+        log('Archive SKIPPED — group ' + g.label + ' INCOMPLETE — missing deliverable(s): ' + missingOnResume[g.label].join(', ') + '. Re-run /wave ' + wave.waveId + ' after they exist.')
+      }
+    }
+    return buildResult()
+  }
+  const resumed = await runArchive()
+  if (resumed) return resumed
+  return buildResult()
+}
+
 // ─── phase 1: todos redteam ───────────────────────────────────────────────────
 phase('Todos Redteam')
 
@@ -1058,7 +1330,6 @@ const ANNOTATION_RULES =
   'Match each todo by its backticked ID on the checkbox line (e.g. `- [ ] `P1-01` ...`). Put new lines\n' +
   'right after the last indented field of that todo block. Preserve all other whitespace and structure.'
 
-let planRound = 0
 let planClean = false
 let planEdited = false
 let lastPlanIssues = null   // last trustworthy review with issues; null if every round was unknown
@@ -1308,10 +1579,6 @@ async function finalScopeRescan(name, phaseName) {
 
 // Tier-based execution: a tier is every group whose external deps are complete; groups in a
 // tier run in parallel (the planner groups conflicting todos together).
-const completedGroups = new Set()
-const failedGroups = new Set()    // deliverables missing at the gate, or held at a HUMAN GATE
-const heldGroups = new Set()
-const prunedGroups = new Set()    // transitively depend on a failed group; never dispatched
 const remainingGroups = wave.groups.slice()
 const CLOCK_SCHEMA = {
   type: 'object',
@@ -1358,23 +1625,12 @@ function pruneDependents() {
 }
 
 while (remainingGroups.length > 0) {
+  const frozenTier = await checkFreeze('freeze:tier' + (tierNo + 1))
+  if (frozenTier) return frozenTier
   const heldNow = remainingGroups.filter(groupIsHeld)
   for (const hg of heldNow) {
     remainingGroups.splice(remainingGroups.indexOf(hg), 1)
-    failedGroups.add(hg.label)
-    heldGroups.add(hg.label)
-    deliverablesBlocked = true
-    protocolBlocked = true
-    log('HUMAN GATE — group ' + hg.label + ' held: a todo carries the HUMAN GATE marker and no Release: line citing a GitHub issue URL')
-    await deferNote(
-      wave.waveId + '-group-' + hg.label + '-held.md',
-      'Include: wave ID (' + wave.waveId + '), date (' + TODAY + '), group (' + hg.label + '),\n' +
-      'reason: a todo in this group carries a HUMAN GATE marker with no `Release:` line citing a GitHub issue URL,\n' +
-      'so the group was not dispatched and its dependents are pruned.\n' +
-      'Instruction: "Record the approval in a GitHub issue, add `Release: <issue URL>` to the todo, ' +
-      'then re-run /wave ' + wave.waveId + '."',
-      'defer:held:' + hg.label, 'Implement'
-    )
+    await holdGroup(hg, 'Implement')
   }
   const prunedEarly = pruneDependents()
   if (prunedEarly.length > 0) {
@@ -1409,15 +1665,26 @@ while (remainingGroups.length > 0) {
     const idx = remainingGroups.findIndex(function(g) { return g.label === rg.label })
     if (idx !== -1) remainingGroups.splice(idx, 1)
   }
-  totalTodos += readyGroups.reduce(function(n, g) { return n + g.todos.length }, 0)
-  if (readyGroups.length > 1) {
-    log('Implementing ' + readyGroups.length + ' groups in parallel: ' + readyGroups.map(function(g) { return g.label }).join(', '))
+  // A todo ticked [x] was done in an earlier run: never dispatched again (its side effects would
+  // repeat). A group whose todos are all done dispatches nothing but still faces the deliverable gate.
+  const doneReady = readyGroups.filter(function(g) { return g.done === true })
+  const dispatchReady = readyGroups.filter(function(g) { return g.done !== true })
+  const openTodos = function(g) { return g.todos.filter(function(t) { return !(t && t.done === true) }) }
+  totalTodos += dispatchReady.reduce(function(n, g) { return n + openTodos(g).length }, 0)
+  if (dispatchReady.length > 1) {
+    log('Implementing ' + dispatchReady.length + ' groups in parallel: ' + dispatchReady.map(function(g) { return g.label }).join(', '))
   }
+  doneReady.forEach(function(g) {
+    log('Group ' + g.label + ': all todos done — no implementer dispatched')
+    g.todos.forEach(function(t) { log('Todo ' + t.id + ' already done [x] — skipped, not re-implemented') })
+  })
 
-  await parallel(readyGroups.map(function(group) {
+  await parallel(dispatchReady.map(function(group) {
     return function() {
-      log('Implementing group ' + group.label + ' (' + group.todos.length + ' todo(s))')
-      return parallel(group.todos.map(function(todo) {
+      const open = openTodos(group)
+      group.todos.filter(function(t) { return t && t.done === true }).forEach(function(t) { log('Todo ' + t.id + ' already done [x] — skipped, not re-implemented') })
+      log('Implementing group ' + group.label + ' (' + open.length + ' todo(s))')
+      return parallel(open.map(function(todo) {
         return function() { return implementTodo(todo) }
       }))
     }
@@ -1426,7 +1693,11 @@ while (remainingGroups.length > 0) {
     throw new Error('agent-call budget exceeded (' + AGENT_CALL_BUDGET + ' calls) for this wave')
   }
   tierNo++
-  const missingByGroup = await checkDeliverables(readyGroups, implementStartSec, 'deliv:tier' + tierNo)
+  const missingByGroup = await checkDeliverables(dispatchReady, implementStartSec, 'deliv:tier' + tierNo)
+  if (doneReady.length > 0) {
+    // since 0: a pattern Creates: path made in an earlier run passes when any matching file exists.
+    Object.assign(missingByGroup, await checkDeliverables(doneReady, 0, 'deliv:tier' + tierNo + ':done'))
+  }
   const failedNow = readyGroups.filter(function(g) { return (missingByGroup[g.label] || []).length > 0 })
   for (const rg of readyGroups) {
     if (failedNow.indexOf(rg) === -1) completedGroups.add(rg.label)
@@ -1974,7 +2245,6 @@ phase('Phase Redteam')
 
 // On a single-group wave the union scope IS the group's scope, which Unit Redteam just
 // cleared with the same machinery; only multi-group waves have a cross-group surface.
-let pRound = 0
 if (wave.groups.length === 1) {
   log('Phase Redteam skipped — single-group wave (' + wave.groups[0].label + '): Unit Redteam already reviewed this exact scope ' +
       'with the same review dimensions; no cross-group interaction surface exists.')
@@ -2166,6 +2436,7 @@ for (const f of allHighFindings) {
 
 // Only individual LRN capture is capped; the SDK issue scan still sees every finding.
 const lrnCandidates = toCodeify.slice(0, MAX_LRN_PER_WAVE)
+lrnCount = lrnCandidates.length
 if (toCodeify.length > MAX_LRN_PER_WAVE) {
   const overflowLrnCandidates = toCodeify.slice(MAX_LRN_PER_WAVE)
   log('WARNING: ' + toCodeify.length + ' critical/high finding(s) — capping LRN capture at ' +
@@ -2329,8 +2600,12 @@ if (registryCandidates.length > 0) {
   if (!registered) log('WARNING: component registration returned null — candidates were not registered')
 }
 
+async function runArchive() {
 // ─── phase 7: archive ─────────────────────────────────────────────────────────
 phase('Archive')
+
+const frozen = await checkFreeze('freeze:pre-archive')
+if (frozen) return frozen
 
 // The suite must be green before the wave is marked complete; unknown is not green.
 const preArchiveGate = await runGate('gate:pre-archive', 'Archive')
@@ -2501,30 +2776,39 @@ if (protocolBlocked) {
          !archiveCheck.rowPresent ? 'no plan.md row naming ' + waveFileTag : null].filter(Boolean).join('; ')) +
       '. Finish the archive by hand, then re-run /wave ' + wave.waveId + ' to confirm.')
   } else {
-    log('Wave ' + wave.waveId + ' archived — ' + lrnCandidates.length + ' LRN(s) captured')
+    log('Wave ' + wave.waveId + ' archived — ' + lrnCount + ' LRN(s) captured')
+  }
+}
+}
+
+function buildResult() {
+  return {
+    waveId:                wave.waveId,
+    totalTodos:            totalTodos,
+    lrnsCaptured:          lrnCount,
+    cNnnRegistered:        registryCandidates.length,
+    sdkCandidates:         sdkCandidatesCount,
+    groupsExecuted:        wave.groups.length,
+    planReviewRounds:      planRound,
+    phaseRedteamRounds:    pRound,
+    exhausted:             pRound >= PHASE_MAX_ROUNDS,
+    protocolBlocked:       protocolBlocked,
+    testsRed:              testsRed,
+    testsBlockedArchive:   testsBlockedArchive,
+    fixLoopTestsBlocked:   fixLoopTestsBlocked,
+    implementBlocked:      implementBlocked,
+    deliverablesBlocked:   deliverablesBlocked,
+    resumeBlocked:         resumeBlocked,
+    resumeBlockedNotes:    resumeBlockedNotes,
+    failedGroups:          Array.from(failedGroups),
+    prunedGroups:          Array.from(prunedGroups),
+    archivePlanRowMissing: archivePlanRowMissing,
+    unitBudgetBlocked:     unitBudgetBlocked,
+    phaseBudgetBlocked:    phaseBudgetBlocked,
+    redteamUnknownBlocked: redteamUnknownBlocked,
   }
 }
 
-return {
-  waveId:                wave.waveId,
-  totalTodos:            totalTodos,
-  lrnsCaptured:          lrnCandidates.length,
-  cNnnRegistered:        registryCandidates.length,
-  sdkCandidates:         sdkCandidatesCount,
-  groupsExecuted:        wave.groups.length,
-  planReviewRounds:      planRound,
-  phaseRedteamRounds:    pRound,
-  exhausted:             pRound >= PHASE_MAX_ROUNDS,
-  protocolBlocked:       protocolBlocked,
-  testsRed:              testsRed,
-  testsBlockedArchive:   testsBlockedArchive,
-  fixLoopTestsBlocked:   fixLoopTestsBlocked,
-  implementBlocked:      implementBlocked,
-  deliverablesBlocked:   deliverablesBlocked,
-  failedGroups:          Array.from(failedGroups),
-  prunedGroups:          Array.from(prunedGroups),
-  archivePlanRowMissing: archivePlanRowMissing,
-  unitBudgetBlocked:     unitBudgetBlocked,
-  phaseBudgetBlocked:    phaseBudgetBlocked,
-  redteamUnknownBlocked: redteamUnknownBlocked,
-}
+const archived = await runArchive()
+if (archived) return archived
+return buildResult()

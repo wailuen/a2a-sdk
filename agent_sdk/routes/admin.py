@@ -38,8 +38,11 @@ from pydantic import BaseModel
 
 from ..agent.loop import safe_validation_message
 from ..agent.registry import ToolInputValidationError
+from ..auth.context import bind_identity, unbind_identity
+from ..auth.identity import Identity
 from ..auth.middleware import AuthRuntime, _prm_challenge, require_admin, unauth_rate_limit
 from ..common.redact import frame_locations, safe_line_text, sanitize_text
+from ..credentials import forwarding
 from ..credentials.fields import CredentialField, validate_credential_url
 from ..credentials.store import NS_BEDROCK, NS_MODEL, NS_OAUTH_IDP, RESERVED_NAMESPACES, CredentialStore
 from ..models.errors import AgentError, ErrorCategory
@@ -569,19 +572,29 @@ def _safe_result(result: Any) -> Any:
     return jsonable_encoder(result)
 
 
-@router.post("/admin/api/tools/{name}/try", dependencies=[Depends(require_admin)])
+@router.post("/admin/api/tools/{name}/try")
 async def try_tool(
     name: str,
     request: Request,
+    identity: Identity = Depends(require_admin),
     arguments: dict[str, Any] = Body(default_factory=dict),
 ) -> dict[str, Any]:
     """Direct entry.invoke (admin only). Tool failures return safe error
-    shapes (AgentError.public(); validation errors stripped of inputs)."""
+    shapes (AgentError.public(); validation errors stripped of inputs).
+
+    Binds the admin key's Identity (``current_identity()``) and the
+    ``X-Agent-Credentials`` forwarded credentials around ``invoke_any``, as MCP
+    ``tools/call`` does; both are unbound in ``finally`` on every exit (GH-276).
+    """
     registry = request.app.state.registry
     entry = registry.get(name)
     if entry is None:
         raise HTTPException(status_code=404, detail="unknown tool")
     timeout = _TRY_TIMEOUTS.get(entry.tier, _TRY_TIMEOUTS[2])
+    # GH-276: bind the admin identity and forwarded credentials around the
+    # invoke (as routes/mcp.py does); unbound in the finally below.
+    fwd_token = forwarding.bind(forwarding.parse_header(request.headers.get(forwarding.HEADER_NAME)))
+    identity_token = bind_identity(identity)
     try:
         # RT-001/LRN-116: dispatch through the shared ToolEntry.invoke_any()
         # helper (registry.py) rather than re-implementing the is_generator
@@ -643,6 +656,9 @@ async def try_tool(
             "ok": False,
             "error": {"category": "internal", "message": "tool raised an unexpected error"},
         }
+    finally:
+        unbind_identity(identity_token)
+        forwarding.unbind(fwd_token)
     return {"ok": True, "result": _safe_result(result)}
 
 

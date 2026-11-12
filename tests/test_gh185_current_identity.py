@@ -567,3 +567,220 @@ async def test_ag_ui_concurrent_resumers_winner_identity_kept(app):
         assert resumed == winners
         for c in (a, root, root2):
             await c.aclose()
+
+
+# ── GH-276: admin try-tool binds identity + forwarded credentials ──
+
+import base64  # noqa: E402
+
+from agent_sdk import CredentialField  # noqa: E402
+from agent_sdk.credentials import forwarding as _fwd  # noqa: E402
+from agent_sdk.models.errors import AgentError, ErrorCategory  # noqa: E402
+
+try_tools = ToolSet()
+try_seen: list[Any] = []
+try_runs: list[str] = []
+
+
+class TryProbeSource(SourceAdapter):
+    source_name = "tryprobe"
+    _no_http = True
+    allowed_hosts: list[str] = []
+
+
+@try_tools.tool(tier=1)
+async def try_who(inp: NoInput) -> dict[str, Any]:
+    """Record the caller identity."""
+    try_runs.append("try_who")
+    try_seen.append(current_identity())
+    return {"ok": True}
+
+
+@try_tools.tool(tier=1)
+async def try_cred(inp: NoInput, *, src: TryProbeSource) -> dict[str, Any]:
+    """Read the forwarded credential through the adapter."""
+    try_runs.append("try_cred")
+    return {"value": src.credential("api_key")}
+
+
+@try_tools.tool(tier=1)
+async def try_cred_opt(inp: NoInput, *, src: TryProbeSource) -> dict[str, Any]:
+    """Read the credential, None when absent."""
+    try_runs.append("try_cred_opt")
+    return {"value": src.credential_or_none("api_key")}
+
+
+@try_tools.tool(tier=1)
+async def try_fail(inp: NoInput) -> dict[str, Any]:
+    """Record the caller identity, then raise AgentError."""
+    try_runs.append("try_fail")
+    try_seen.append(current_identity())
+    raise AgentError(ErrorCategory.VALIDATION, "nope", source="x")
+
+
+@try_tools.tool(tier=1)
+async def try_slow(inp: NoInput) -> dict[str, Any]:
+    """Record the caller identity, then hang."""
+    try_runs.append("try_slow")
+    try_seen.append(current_identity())
+    await asyncio.sleep(5)
+    return {"ok": True}
+
+
+@pytest.fixture
+def try_app(tmp_path):
+    try_seen.clear()
+    try_runs.clear()
+    settings = BaseAgentSettings(
+        DEV_MODE=True, DATA_DIR=str(tmp_path / "data"), AGENT_NAME="try-agent"
+    )
+    agent = Agent(
+        settings=settings,
+        persona="try",
+        skills_dir=Path(__file__).parent.parent / "agent_sdk" / "example" / "skills",
+        toolsets=[try_tools],
+        model_client=IdentityAwareModel(),
+    )
+    agent.register_source(
+        TryProbeSource, credentials=[CredentialField(name="api_key", label="API key")]
+    )
+    built = agent.build_app()
+    yield built
+    built.state.credential_store.close()
+
+
+def _try_client(app, token, **headers):
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {token}", **headers},
+    )
+
+
+class _BindSpy:
+    """Records bind tokens and the tokens passed to unbind, seen from inside
+    the request's own context (the test task never sees a leak: ASGITransport
+    runs the app in a copied context)."""
+
+    def __init__(self, monkeypatch):
+        import agent_sdk.routes.admin as admin_mod
+
+        self.bound: dict[str, list[Any]] = {"identity": [], "fwd": []}
+        self.unbound: dict[str, list[Any]] = {"identity": [], "fwd": []}
+        real = {
+            "identity": (admin_mod.bind_identity, admin_mod.unbind_identity),
+            "fwd": (_fwd.bind, _fwd.unbind),
+        }
+
+        def wrap_bind(kind):
+            def bind(value):
+                tok = real[kind][0](value)
+                self.bound[kind].append(tok)
+                return tok
+
+            return bind
+
+        def wrap_unbind(kind):
+            def unbind(tok):
+                self.unbound[kind].append(tok)
+                return real[kind][1](tok)
+
+            return unbind
+
+        monkeypatch.setattr(admin_mod, "bind_identity", wrap_bind("identity"))
+        monkeypatch.setattr(admin_mod, "unbind_identity", wrap_unbind("identity"))
+        monkeypatch.setattr(_fwd, "bind", wrap_bind("fwd"))
+        monkeypatch.setattr(_fwd, "unbind", wrap_unbind("fwd"))
+
+    def assert_balanced(self, runs: int):
+        for kind in ("identity", "fwd"):
+            assert len(self.bound[kind]) == runs
+            assert len(self.unbound[kind]) == runs
+            for tok in self.bound[kind]:
+                assert sum(1 for u in self.unbound[kind] if u is tok) == 1
+
+
+async def test_admin_try_binds_admin_identity(try_app, monkeypatch):
+    spy = _BindSpy(monkeypatch)
+    async with try_app.router.lifespan_context(try_app):
+        _, tok = try_app.state.auth.api_keys.mint("root", admin=True)
+        async with _try_client(try_app, tok) as c:
+            r = await c.post("/admin/api/tools/try_who/try", json={})
+            assert r.status_code == 200 and r.json()["ok"] is True
+            r = await c.post("/admin/api/tools/try_who/try", json={})
+        assert len(try_seen) == 2
+        for ident in try_seen:
+            assert ident.kind == "api_key" and ident.admin is True and ident.label == "root"
+        spy.assert_balanced(2)
+
+
+async def test_admin_try_unbinds_on_agent_error_and_timeout(try_app, monkeypatch):
+    import agent_sdk.routes.admin as admin_mod
+
+    monkeypatch.setattr(admin_mod, "_TRY_TIMEOUTS", {1: 0.05, 2: 0.05})
+    spy = _BindSpy(monkeypatch)
+    async with try_app.router.lifespan_context(try_app):
+        _, tok = try_app.state.auth.api_keys.mint("root", admin=True)
+        async with _try_client(
+            try_app, tok, **{"X-Agent-Credentials": _hdr("FWD")}
+        ) as c:
+            r = await c.post("/admin/api/tools/try_fail/try", json={})
+            assert r.json()["ok"] is False and r.json()["error"]["category"] == "validation"
+            spy.assert_balanced(1)
+            r = await c.post("/admin/api/tools/try_slow/try", json={})
+            assert r.json()["error"]["category"] == "timeout"
+            spy.assert_balanced(2)
+            await c.post("/admin/api/tools/try_who/try", json={})
+        assert [i.label for i in try_seen] == ["root"] * 3
+        spy.assert_balanced(3)
+
+
+def _hdr(value: str) -> str:
+    return base64.b64encode(json.dumps({"tryprobe": {"api_key": value}}).encode()).decode()
+
+
+@pytest.mark.parametrize("who", ["none", "bad", "nonadmin"])
+async def test_admin_try_rejected_never_binds_or_runs(try_app, monkeypatch, who):
+    import agent_sdk.routes.admin as admin_mod
+
+    calls: list[Any] = []
+    real_id, real_fw = admin_mod.bind_identity, admin_mod.forwarding.bind
+    monkeypatch.setattr(
+        admin_mod, "bind_identity", lambda i: (calls.append(i), real_id(i))[1]
+    )
+    monkeypatch.setattr(
+        admin_mod.forwarding, "bind", lambda c: (calls.append(c), real_fw(c))[1]
+    )
+    async with try_app.router.lifespan_context(try_app):
+        if who == "none":
+            tok, want = None, 401
+        elif who == "bad":
+            tok, want = "not-a-real-key", 401
+        else:
+            _, tok = try_app.state.auth.api_keys.mint("plain")
+            want = 403
+        headers = {"Authorization": f"Bearer {tok}"} if tok else {}
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=try_app), base_url="http://test", headers=headers
+        ) as c:
+            r = await c.post("/admin/api/tools/try_who/try", json={})
+            assert r.status_code == want
+    assert calls == []
+    assert try_runs == []
+
+
+async def test_admin_try_forwarded_credentials_via_adapter(try_app, monkeypatch):
+    spy = _BindSpy(monkeypatch)
+    async with try_app.router.lifespan_context(try_app):
+        _, tok = try_app.state.auth.api_keys.mint("root", admin=True)
+        async with _try_client(try_app, tok) as c:
+            r = await c.post(
+                "/admin/api/tools/try_cred/try",
+                json={},
+                headers={"X-Agent-Credentials": _hdr("FWD-1")},
+            )
+            assert r.json()["result"] == {"value": "FWD-1"}
+            spy.assert_balanced(1)
+            r = await c.post("/admin/api/tools/try_cred_opt/try", json={})
+            assert r.json()["result"] == {"value": None}
+            spy.assert_balanced(2)

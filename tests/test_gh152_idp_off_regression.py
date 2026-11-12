@@ -95,3 +95,33 @@ def test_idp_off_dcr_flood_keeps_consented_client_without_tokens(tmp_path):
     for _ in range(MAX_CLIENTS + 5):
         oauth.register_client([CB])
     assert oauth.get_client(org["client_id"]) is not None
+
+
+GOLDEN_TOKEN_BODY = '{"access_token":"A","token_type":"Bearer","expires_in":3600,"refresh_token":"R"}'
+
+
+async def test_idp_off_token_response_shape_unchanged(client):
+    """GH-277: the label change touches no token-response byte."""
+    cid = await _register(client)
+    from urllib.parse import parse_qs, urlparse
+
+    from tests.test_gh152_idp_authorize_flow import pkce
+    verifier, challenge = pkce()
+    _, key = client.app.state.auth.api_keys.mint("adm2", admin=True)
+    r = await client.post("/oauth/authorize", content=urlencode({
+        "client_id": cid, "redirect_uri": CB, "response_type": "code",
+        "code_challenge": challenge, "code_challenge_method": "S256", "state": "st", "api_key": key,
+    }), headers=FORM)
+    code = parse_qs(urlparse(r.headers["location"]).query)["code"][0]
+    t = await client.post("/oauth/token", content=urlencode({
+        "grant_type": "authorization_code", "code": code, "client_id": cid,
+        "redirect_uri": CB, "code_verifier": verifier,
+    }), headers=FORM)
+    assert t.status_code == 200
+    body = t.json()
+    assert isinstance(body["access_token"], str) and body["access_token"]
+    assert isinstance(body["refresh_token"], str) and body["refresh_token"]
+    assert t.text.replace(body["access_token"], "A").replace(body["refresh_token"], "R") == GOLDEN_TOKEN_BODY
+    assert t.headers["content-type"] == "application/json"
+    assert t.headers["cache-control"] == "no-store"
+    assert t.headers["pragma"] == "no-cache"

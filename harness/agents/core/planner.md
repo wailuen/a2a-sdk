@@ -41,7 +41,7 @@ Read in this order:
   - Tests: tests/<path>
   - Reuses: C-NNN
   - SI: SI-N
-  - Depends: P0-01
+  - Depends: `P0-01`
   - AC: <FR-N acceptance criteria>
 ```
 
@@ -59,7 +59,12 @@ Read in this order:
   covered by an SI, list it and add a matching AC that pins it as a regression
   test. `/redteam` fails closed on SIs; planning them in keeps the loop
   proactive, not reactive
-- `Depends:` = todo IDs that must complete first
+- `Depends:` = todo IDs that must complete first, each written in backticks and separated
+  by commas, as in the template above; `(none)` is allowed. The runner stops with
+  `dangling-depends` when a todo still to run names an id (backticked, or bare with a hyphen
+  such as P0-01) that is missing from the file or marked `[~]`; an `[x]` target counts as met.
+  The wave file is frozen once a run starts (todo ids, `‖ group:` labels, `Depends:` lines,
+  `[~]` marks and `HUMAN GATE:` holds); finish edits first
 - `HUMAN GATE:` = optional explicit marker line on a todo that needs a human decision
   before it may run (e.g. `- HUMAN GATE: owner sign-off on the schema change`). The
   runner holds the todo's group and prunes its dependents until a release line is

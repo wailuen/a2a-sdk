@@ -1134,8 +1134,7 @@ async def oauth_token(request: Request) -> JSONResponse:
         )
         if meta is None:
             return _token_error("invalid_grant", "code is invalid, expired, or used")
-        client = store.get_client(client_id) or {}
-        label = meta.get("label") or client.get("client_name")
+        label = meta.get("label")
         pair = store.mint_token_pair(
             client_id=meta["client_id"],
             scope=meta["scope"],

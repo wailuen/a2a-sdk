@@ -41,20 +41,27 @@ const fs = require('fs')
 const wfPath = process.argv[2], scenarioPath = process.argv[3]
 const scenario = JSON.parse(fs.readFileSync(scenarioPath, 'utf8'))
 const calls = [], logs = [], phases = [], counters = {}
+function liveHash() {
+  const p = require('child_process').spawnSync('python3', ['-', scenario.freezeFile], { input: scenario.freezeScript, encoding: 'utf8' })
+  return JSON.parse(p.stdout).hash
+}
 function respond(label) {
   for (const rule of scenario.rules) {
     if (new RegExp(rule.match).test(label)) {
       const n = counters[rule.match] = (counters[rule.match] || 0) + 1
+      if (rule.write && n === 1) fs.writeFileSync(rule.write[0], rule.write[1])
       const r = rule.responses[Math.min(n, rule.responses.length) - 1]
       if (r === '__THROW__') throw new Error('agent crashed')
-      return JSON.parse(JSON.stringify(r))
+      let text = JSON.stringify(r)
+      if (text.indexOf('__FREEZE__') !== -1) text = text.split('__FREEZE__').join(liveHash())
+      return JSON.parse(text)
     }
   }
   throw new Error('no scripted response for label ' + label)
 }
 global.agent = async function(prompt, opts) {
   opts = opts || {}
-  calls.push({ label: opts.label || '', agentType: opts.agentType || null, effort: opts.effort || null, prompt: prompt })
+  calls.push({ label: opts.label || '', phase: opts.phase || null, agentType: opts.agentType || null, effort: opts.effort || null, prompt: prompt })
   return respond(opts.label || '')
 }
 global.parallel = async function(thunks) {
@@ -76,17 +83,19 @@ new AsyncFunction(body)().then(function(result) { out({ result: result }) },
 PF = {
     "ok": True, "error": "", "wrongRunnerForRepoLayout": False, "completedFileExists": False,
     "templateDirExists": False, "otherActiveWaves": [], "dirtyPathCount": 0, "behindCount": 0,
-    "lrnNext": 7, "scopePaths": ["src/tools/a.py"],
+    "lrnNext": 7, "scopePaths": ["src/tools/a.py"], "freezeHash": "a" * 64,
 }
 
 
+def _py_const_script(wf: Path, name: str) -> str:
+    m = re.search(r"const %s = (\[[\s\S]*?\]\.join\('\\n'\))" % name, wf.read_text())
+    assert m, name
+    return subprocess.run(["node", "-e", "console.log(" + m.group(1) + ")"], capture_output=True, text=True,
+                          check=True).stdout
+
+
 def _todo_scan_script(wf: Path) -> str:
-    js = (
-        "const s=require('fs').readFileSync(process.argv[1],'utf8');"
-        "const m=s.match(/const TODO_SCAN_PY = (\\[[\\s\\S]*?\\]\\.join\\('\\\\n'\\))/);"
-        "console.log(eval(m[1]))"
-    )
-    return subprocess.run(["node", "-e", js, str(wf)], capture_output=True, text=True, check=True).stdout
+    return _py_const_script(wf, "TODO_SCAN_PY")
 
 
 def facts_for(wv: dict, wf: Path, tmp_path: Path) -> list:
@@ -152,13 +161,16 @@ def scan_reply(wv: dict, *extra: tuple[str, str | None, str]) -> dict:
 
 
 def run(rules: list | None = None, *, pf: dict | None = None, wv: dict | None = None,
-        args: object = None, wf: Path = WC, tmp_path: Path, no_date: bool = False) -> dict:
+        args: object = None, wf: Path = WC, tmp_path: Path, no_date: bool = False,
+        live_file: Path | None = None) -> dict:
     wv_default = wv or wave()
     pf_final = dict(pf or PF)
     if "todoFacts" not in pf_final:
         pf_final["todoFacts"] = facts_for(wv_default, wf, tmp_path)
     defaults = [
         ("^parse:preflight", [pf_final]),
+        ("^freeze:", [{"ok": True, "hash": "a" * 64, "todoCount": 1}]),
+        ("^resume:notes$", [{"ok": True, "blocking": []}]),
         ("^clock:", [{"now": 2000000000.0}]),
         ("^parse(:replan)?$", [wv_default]),
         ("^deliv:", [{"ok": True, "checked": [g["label"] for g in wv_default["groups"]], "missing": []}]),
@@ -175,8 +187,12 @@ def run(rules: list | None = None, *, pf: dict | None = None, wv: dict | None = 
     scenario = {
         "args": args if args is not None else {"waveFile": "workspace/todos/active/w010-x.md", "today": "2026-10-20"},
         "deleteDate": no_date,
-        "rules": [{"match": m, "responses": r} for m, r in (rules or []) + defaults],
+        "rules": [{"match": r[0], "responses": r[1], **({"write": [str(r[2][0]), r[2][1]]} if len(r) > 2 else {})}
+                  for r in (rules or []) + defaults],
     }
+    if live_file is not None:
+        scenario["freezeFile"] = str(live_file)
+        scenario["freezeScript"] = _py_const_script(wf, "FREEZE_SCAN_PY")
     sc = tmp_path / "scenario.json"
     sc.write_text(json.dumps(scenario))
     runner = tmp_path / "runner.js"
@@ -1227,8 +1243,8 @@ def test_deps_and_hold_come_from_the_wave_file_not_the_model_relay(tmp_path: Pat
     a = group("A", ["src/tools/a.py"])
     b = group("B", ["src/tools/b.py"])
     wv = wave([a, b], {"A": [], "B": []})
-    facts = [{"id": "A-1", "dependsText": [], "held": True},
-             {"id": "B-1", "dependsText": ["A-1"], "held": False}]
+    facts = [{"id": "A-1", "dependsText": [], "held": True, "done": False, "skip": False},
+             {"id": "B-1", "dependsText": ["A-1"], "held": False, "done": False, "skip": False}]
     out = run(wv=wv, pf=dict(PF, todoFacts=facts), wf=wf, tmp_path=tmp_path)
     ls = labels(out)
     assert "impl:A-1" not in ls and "impl:B-1" not in ls
@@ -1238,21 +1254,24 @@ def test_deps_and_hold_come_from_the_wave_file_not_the_model_relay(tmp_path: Pat
 
 @pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
 def test_todo_found_by_scan_but_missing_from_parse_aborts(tmp_path: Path, wf: Path) -> None:
-    facts = [{"id": "A-1", "dependsText": [], "held": False}, {"id": "Z-9", "dependsText": [], "held": False}]
+    facts = [{"id": "A-1", "dependsText": [], "held": False, "done": False, "skip": False},
+             {"id": "Z-9", "dependsText": [], "held": False, "done": False, "skip": False}]
     out = run(pf=dict(PF, todoFacts=facts), wf=wf, tmp_path=tmp_path)
     assert out["result"] == {"error": "todo-scan-mismatch", "waveId": "w010", "missed": ["Z-9"]}
     assert "impl:A-1" not in labels(out)
 
 
 @pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
-@pytest.mark.parametrize("bad", [{"id": "A-1", "held": False}, {"id": "A-1", "dependsText": [1], "held": False},
-                                 {"id": "A-1", "dependsText": [], "held": "yes"}])
+@pytest.mark.parametrize("bad", [{"id": "A-1", "held": False, "done": False, "skip": False}, {"id": "A-1", "dependsText": [1], "held": False, "done": False, "skip": False},
+                                 {"id": "A-1", "dependsText": [], "held": "yes", "done": False, "skip": False},
+                                 {"id": "A-1", "dependsText": [], "held": False},
+                                 {"id": "A-1", "dependsText": [], "held": False, "done": "yes", "skip": False}])
 def test_malformed_todo_facts_stop_before_parse(tmp_path: Path, wf: Path, bad: dict) -> None:
     out = run(pf=dict(PF, todoFacts=[bad]), wf=wf, tmp_path=tmp_path)
     assert out["result"]["error"] == "preflight-failed" and labels(out) == ["parse:preflight"]
 
 
-def test_todo_scan_script_reads_depends_hold_and_skips_marked_todos(tmp_path: Path) -> None:
+def test_todo_scan_script_reads_depends_hold_and_flags_marked_todos(tmp_path: Path) -> None:
     md = tmp_path / "w.md"
     md.write_text(
         "# Wave\n**Depends:** WAVE-0\n\n## G1\n"
@@ -1260,15 +1279,18 @@ def test_todo_scan_script_reads_depends_hold_and_skips_marked_todos(tmp_path: Pa
         "- [ ] `B-1` second ‖ group:B\n  - **Depends:** A-1, `C-2`\n  - HUMAN GATE: owner sign-off\n"
         "- [ ] `C-2` third\n  - HUMAN GATE: x\n  - Release: https://github.com/wailuen/a2a-sdk/issues/208\n"
         "- [~] `D-3` skipped\n  - HUMAN GATE: y\n"
+        "- [x] `E-4` already done\n"
         "\n## G2\n  - Depends: STRAY\n", encoding="utf-8")
     script = tmp_path / "todo_scan.py"
     script.write_text(_todo_scan_script(WC), encoding="utf-8")
     got = json.loads(subprocess.run([sys.executable, str(script), str(md)], capture_output=True, text=True,
                                     check=True).stdout)
     assert got == [
-        {"id": "A-1", "dependsText": ["(none)"], "held": False},
-        {"id": "B-1", "dependsText": ["A-1, `C-2`"], "held": True},
-        {"id": "C-2", "dependsText": [], "held": False},
+        {"id": "A-1", "dependsText": ["(none)"], "held": False, "done": False, "skip": False},
+        {"id": "B-1", "dependsText": ["A-1, `C-2`"], "held": True, "done": False, "skip": False},
+        {"id": "C-2", "dependsText": [], "held": False, "done": False, "skip": False},
+        {"id": "D-3", "dependsText": [], "held": True, "done": False, "skip": True},
+        {"id": "E-4", "dependsText": [], "held": False, "done": True, "skip": False},
     ]
 
 
@@ -1630,3 +1652,816 @@ def test_candidate_logic_matches_across_runners() -> None:
         req = re.search(r"required: \['id'[^\]]*\]", block).group(0)
         assert "'quote'" in req and "id:" in block and "quote:" in block
         assert "wailuen/a2a-sdk" in text and "autoFileSdkIssues" in text.split("normalizedArgs")[0]
+
+
+# ─── resume: [x] todos are done, not re-implemented (GH-278) ──────────────────
+
+def fact(tid: str, *, done: bool = False, held: bool = False, deps: list[str] | None = None) -> dict:
+    return {"id": tid, "dependsText": deps or [], "held": held, "done": done, "skip": False}
+
+
+def with_facts(*facts: dict, scope: list[str] | None = None) -> dict:
+    return dict(PF, todoFacts=list(facts), scopePaths=scope if scope is not None else ["src/tools/a.py"])
+
+
+def impl_labels(out: dict) -> list[str]:
+    return [l for l in labels(out) if l.startswith("impl:")]
+
+
+ARCHIVE_ONLY_FORBIDDEN = ("impl:", "rt:", "proto:", "plan:", "debug:", "defer:todos", "sdk:", "codify", "registry:")
+
+
+def done_dep_wave() -> dict:
+    g2 = group("G2", ["src/tools/g2.py"], ["GH-278"])
+    g3 = group("G3", ["src/tools/g3.py"], ["GH-279"])
+    return wave([g2, g3], {"G2": [], "G3": []})
+
+
+DONE_DEP_FACTS = (fact("GH-278", done=True), fact("GH-279", deps=["GH-278"]))
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_done_todo_is_never_dispatched_open_one_is(tmp_path: Path, wf: Path) -> None:
+    wv = wave([group("G", ["src/tools/a.py"], ["G-1", "G-2"])])
+    out = run(wv=wv, pf=with_facts(fact("G-1", done=True), fact("G-2")), wf=wf, tmp_path=tmp_path)
+    assert impl_labels(out) == ["impl:G-2"]
+    assert logged(out, "G-1") and logged(out, "skipped")
+    assert out["result"]["totalTodos"] == 1
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("args_extra,open_todo", [({}, False), ({"resumeAt": "archive"}, True)])
+def test_resume_runs_only_the_archive_gates(tmp_path: Path, wf: Path, args_extra: dict, open_todo: bool) -> None:
+    wv = wave([group("G", ["src/tools/a.py"], ["G-1", "G-2"])])
+    facts = with_facts(fact("G-1", done=True), fact("G-2", done=not open_todo))
+    args = dict({"waveFile": "workspace/todos/active/w010-x.md", "today": "2026-10-20"}, **args_extra)
+    out = run(wv=wv, pf=facts, args=args, wf=wf, tmp_path=tmp_path)
+    ls = labels(out)
+    assert "error" not in out and "error" not in out["result"], out
+    assert not [l for l in ls if l.startswith(ARCHIVE_ONLY_FORBIDDEN) or (l.startswith("deliv:") and l != "deliv:resume")]
+    assert ls.index("gate:pre-archive") < ls.index("gate:archive-commit") < ls.index("archive")
+    assert not logged(out, "empty-scope") and out["result"]["totalTodos"] == 0
+    assert not out["result"]["protocolBlocked"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_all_done_wave_with_no_declared_paths_does_not_abort_empty_scope(tmp_path: Path, wf: Path) -> None:
+    wv = wave([group("G", [])])
+    out = run(wv=wv, pf=dict(with_facts(fact("G-1", done=True)), scopePaths=[]), wf=wf, tmp_path=tmp_path)
+    assert out["result"].get("error") is None and "archive" in labels(out)
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_bad_resume_at_fails_fast_without_echo(tmp_path: Path, wf: Path) -> None:
+    out = run(args={"waveFile": "workspace/todos/active/w010-x.md", "today": "x", "resumeAt": "bogus"},
+              wf=wf, tmp_path=tmp_path)
+    assert "resumeAt (allowed: archive)" in out["error"]
+    assert "bogus" not in json.dumps(out)
+    assert out["calls"] == []
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_forced_resume_with_open_todo_does_not_implement(tmp_path: Path, wf: Path) -> None:
+    out = run(args={"waveFile": "workspace/todos/active/w010-x.md", "today": "x", "resumeAt": "archive"},
+              wf=wf, tmp_path=tmp_path)
+    assert impl_labels(out) == [] and "archive" in labels(out)
+
+
+def test_resume_at_guard_lines_are_identical_in_every_runner() -> None:
+    def guard(p: Path) -> list[str]:
+        return [l for l in p.read_text(encoding="utf-8").splitlines() if "RESUME_AT" in l and "normalizedArgs" in l
+                or "resumeAt (allowed: archive)" in l]
+    base = guard(RUNNERS[0])
+    assert len(base) == 2
+    for p in list(RUNNERS) + WAVE_CYCLE_COPIES:
+        assert guard(p) == base, p
+
+
+def test_wave_cycle_copies_are_byte_identical() -> None:
+    assert len(WAVE_CYCLE_COPIES) >= 2
+    first = WAVE_CYCLE_COPIES[0].read_bytes()
+    for p in WAVE_CYCLE_COPIES[1:]:
+        assert p.read_bytes() == first, p
+
+
+def test_done_call_site_exists_in_every_runner() -> None:
+    for p in RUNNERS + WAVE_CYCLE_COPIES:
+        assert "checkDeliverables(doneReady, 0, 'deliv:tier' + tierNo + ':done')" in p.read_text(encoding="utf-8"), p
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_preflight_schema_requires_done_boolean(wf: Path) -> None:
+    src = wf.read_text(encoding="utf-8")
+    block = src[src.index("todoFacts: {"):src.index("const WAVE_SCHEMA")]
+    assert "required: ['id', 'dependsText', 'held', 'done', 'skip']" in block
+    assert "done: { type: 'boolean' }" in block
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("bad", [{"id": "A-1", "dependsText": [], "held": False},
+                                 {"id": "A-1", "dependsText": [], "held": False, "done": "yes", "skip": False}])
+def test_missing_or_non_boolean_done_fails_closed_at_parse(tmp_path: Path, wf: Path, bad: dict) -> None:
+    out = run(pf=dict(PF, todoFacts=[bad]), wf=wf, tmp_path=tmp_path)
+    assert out["result"]["error"] == "preflight-failed"
+    assert labels(out) == ["parse:preflight"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_done_group_unblocks_dependent_and_is_gated_and_redteamed(tmp_path: Path, wf: Path) -> None:
+    out = run(wv=done_dep_wave(), pf=with_facts(*DONE_DEP_FACTS, scope=["src/tools/g2.py", "src/tools/g3.py"]), wf=wf, tmp_path=tmp_path)
+    ls = labels(out)
+    assert impl_labels(out) == ["impl:GH-279"]
+    assert ls.index("deliv:tier1:done") < ls.index("impl:GH-279")
+    assert '"since":0' in call(out, "deliv:tier1:done")["prompt"]
+    assert '"G2"' in call(out, "deliv:tier1:done")["prompt"] and '"G3"' not in call(out, "deliv:tier1:done")["prompt"]
+    assert "deliv:tier1" not in ls or '"G2"' not in call(out, "deliv:tier1")["prompt"]
+    assert logged(out, "Group G2: all todos done — no implementer dispatched")
+    assert any(l.startswith("rt:unit:G2") for l in ls) and any(l.startswith("rt:unit:G3") for l in ls)
+    assert not logged(out, "unresolvable group dependency")
+    assert not [l for l in ls if l.startswith("defer:circ-dep")]
+    assert "archive" in ls
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("gate", [{"ok": True, "checked": ["G2"], "missing": [{"label": "G2", "paths": ["src/tools/g2.py"]}]}, None])
+def test_done_group_with_missing_file_fails_and_prunes_dependent(tmp_path: Path, wf: Path, gate: object) -> None:
+    out = run([("^deliv:tier1:done", [gate])], wv=done_dep_wave(), pf=with_facts(*DONE_DEP_FACTS, scope=["src/tools/g2.py", "src/tools/g3.py"]), wf=wf, tmp_path=tmp_path)
+    ls = labels(out)
+    assert "impl:GH-279" not in ls and "archive" not in ls
+    assert out["result"]["failedGroups"] == ["G2"] and out["result"]["prunedGroups"] == ["G3"]
+    assert "src/tools/g2.py" in call(out, "defer:incomplete:G2")["prompt"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_mixed_group_keeps_the_fresh_gate_and_no_done_call(tmp_path: Path, wf: Path) -> None:
+    wv = wave([group("G", ["workspace/learning/LRN-NNN.md"], ["G-1", "G-2"])])
+    out = run(wv=wv, pf=with_facts(fact("G-1", done=True), fact("G-2"), scope=["workspace/learning/LRN-NNN.md"]), wf=wf, tmp_path=tmp_path)
+    assert "deliv:tier1:done" not in labels(out)
+    assert '"since":2000000000' in call(out, "deliv:tier1")["prompt"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_pattern_creates_passes_for_done_group_but_not_for_mixed_group(tmp_path: Path, wf: Path) -> None:
+    import os
+    import time
+
+    (tmp_path / "workspace/learning").mkdir(parents=True)
+    old = time.time() - 1000
+    (tmp_path / "workspace/learning/LRN-001.md").write_text("x")
+    os.utime(tmp_path / "workspace/learning/LRN-001.md", (old, old))
+    groups = {"D": ["workspace/learning/LRN-NNN.md"]}
+    done_run = _py(_gate_script(wf), tmp_path, json.dumps({"since": 0, "groups": groups}))
+    assert done_run["missing"] == []
+    mixed_run = _py(_gate_script(wf), tmp_path, json.dumps({"since": time.time() - 100, "groups": groups}))
+    assert mixed_run["missing"] == [{"label": "D", "paths": groups["D"]}]
+
+
+HUMAN_FACTS = (fact("G-1", done=True, held=True),)
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("args_extra", [{}, {"resumeAt": "archive"}])
+def test_held_todo_blocks_archive_on_resume_paths(tmp_path: Path, wf: Path, args_extra: dict) -> None:
+    args = dict({"waveFile": "workspace/todos/active/w010-x.md", "today": "2026-10-20"}, **args_extra)
+    out = run(wv=wave([group("G", ["src/tools/a.py"])]), pf=with_facts(*HUMAN_FACTS), args=args, wf=wf, tmp_path=tmp_path)
+    ls = labels(out)
+    assert logged(out, "HUMAN GATE — group G held")
+    assert "Write workspace/todos/deferred/w010-group-G-held.md" in call(out, "defer:held:G")["prompt"]
+    assert "archive" not in ls
+    r = out["result"]
+    assert r["deliverablesBlocked"] and r["protocolBlocked"]
+    assert not [l for l in ls if l.startswith(("impl:", "rt:"))]
+
+
+# ─── [x] stays in scope: the three scope readers agree (C-067) ────────────────
+
+def _node_const(wf: Path, pattern: str) -> str:
+    src = wf.read_text(encoding="utf-8")
+    scan = re.search(r"const SCOPE_SCAN_PY = (\[.*?\n\])\.join\('\\n'\)", src, re.S).group(0)
+    rule = re.search(r"const PATH_RULE_PY = [^\n]*\n", src).group(0)
+    per = re.search(r"const TODO_SCOPE_SCAN_PY = PATH_RULE_PY .*?\]\.join\('\\n'\)", src, re.S).group(0)
+    js = scan + "\n" + rule + per + "\nprocess.stdout.write(" + pattern + ")"
+    return subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True).stdout
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_done_todo_paths_stay_in_scope_and_all_scope_readers_agree(tmp_path: Path, wf: Path) -> None:
+    import importlib.util
+
+    md = tmp_path / "w.md"
+    md.write_text(
+        "# Wave w010\n\n## G1\n"
+        "- [x] `A-1` done\n  - Creates: `src/tools/done.py`\n  - Modifies: `src/tools/done_mod.py`\n"
+        "- [ ] `B-1` open\n  - Creates: `src/tools/open.py`\n"
+        "- [~] `C-1` skipped\n  - Creates: `src/tools/skipped.py`\n", encoding="utf-8")
+    flat = tmp_path / "flat.py"
+    flat.write_text(_node_const(wf, "SCOPE_SCAN_PY"), encoding="utf-8")
+    per = tmp_path / "per.py"
+    per.write_text(_node_const(wf, "TODO_SCOPE_SCAN_PY"), encoding="utf-8")
+    flat_paths = json.loads(subprocess.run([sys.executable, str(flat), str(md)], capture_output=True, text=True, check=True).stdout)
+    rows = json.loads(subprocess.run([sys.executable, str(per), str(md)], capture_output=True, text=True, check=True).stdout)
+    spec = importlib.util.spec_from_file_location("wave_scope_under_test", REPO_ROOT / "harness" / "wave_scope.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    creates, modifies = mod.extract_wave_scope(md.read_text(encoding="utf-8"))
+    expected = ["src/tools/done.py", "src/tools/done_mod.py", "src/tools/open.py"]
+    assert flat_paths == expected
+    assert sorted({r["path"] for r in rows}) == expected
+    assert sorted(set(creates) | set(modifies)) == expected
+    assert {r["todoId"] for r in rows if r["path"] == "src/tools/done.py"} == {"A-1"}
+
+
+# ─── frozen wave file and Depends: checks (GH-279) ───────────────────────────
+
+BASE_MD = (
+    "# Wave w010\n\n"
+    "- [ ] `A-1` first ‖ group:A\n  - Creates: `src/tools/a.py`\n  - Depends: (none)\n"
+    "- [ ] `B-1` second ‖ group:B\n  - Creates: `src/tools/b.py`\n  - Depends: `A-1`\n"
+)
+DONE_MD = BASE_MD.replace("[ ]", "[x]")
+FREEZE_OK = {"ok": True, "hash": "__FREEZE__", "todoCount": 2}
+BAD_FREEZE_RELAYS = [
+    None,
+    {"ok": False, "hash": "a" * 64, "todoCount": 2, "error": "boom"},
+    {"ok": True, "todoCount": 2},
+    {"ok": True, "hash": "XYZ", "todoCount": 2},
+    {"ok": True, "hash": "A" * 64, "todoCount": 2},
+    {"ok": True, "hash": "a" * 64, "todoCount": -1},
+]
+NEW_TODO = "- [ ] `C-1` extra ‖ group:A\n  - Depends: (none)\n"
+EDITS = {
+    "human-gate": lambda md: md.replace("  - Depends: (none)\n", "  - Depends: (none)\n  - HUMAN GATE: sign-off\n", 1),
+    "new-todo": lambda md: md + NEW_TODO,
+    "depends": lambda md: md.replace("Depends: `A-1`", "Depends: (none)"),
+}
+LIVE_ARGS = {"waveFile": "workspace/todos/active/w010-x.md", "today": "2026-10-20"}
+
+
+def md_facts(wf: Path, tmp_path: Path, md: str) -> list:
+    f = tmp_path / "scan-md.md"
+    f.write_text(md, encoding="utf-8")
+    script = tmp_path / "todo_scan.py"
+    script.write_text(_todo_scan_script(wf), encoding="utf-8")
+    return json.loads(subprocess.run([sys.executable, str(script), str(f)], capture_output=True, text=True,
+                                     check=True).stdout)
+
+
+def frun(wf: Path, tmp_path: Path, md: str, rules: list | None = None, *, wv: dict | None = None,
+         args: dict | None = None) -> dict:
+    live = tmp_path / "live-w010.md"
+    live.write_text(md, encoding="utf-8")
+    pf = dict(PF, todoFacts=md_facts(wf, tmp_path, md), freezeHash="__FREEZE__")
+    rules = list(rules or []) + [("^parse:preflight$", [pf]), ("^freeze:", [FREEZE_OK])]
+    return run(rules, pf=pf, wv=wv or two_dep_groups(), args=args or LIVE_ARGS, wf=wf, tmp_path=tmp_path,
+               live_file=live)
+
+
+def live_path(tmp_path: Path) -> Path:
+    return tmp_path / "live-w010.md"
+
+
+def no_capture_agent(out: dict) -> None:
+    assert not [l for l in labels(out) if l.startswith("freeze:capture")]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("edit", sorted(EDITS))
+def test_edit_between_tiers_stops_with_wave_file_changed(tmp_path: Path, wf: Path, edit: str) -> None:
+    mutated = EDITS[edit](BASE_MD)
+    out = frun(wf, tmp_path, BASE_MD, [("^impl:A-1$", ["done"], (live_path(tmp_path), mutated))])
+    assert out["result"]["error"] == "wave-file-changed"
+    assert "impl:A-1" in labels(out) and "impl:B-1" not in labels(out)
+    assert labels(out)[-1] == "freeze:tier2"
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("md,bad", [
+    (BASE_MD.replace("Depends: `A-1`", "Depends: `Z-9`"), "Z-9"),
+    (BASE_MD + "- [~] `S-1` skipped ‖ group:S\n", None),
+])
+def test_depends_on_unknown_or_skipped_id_is_dangling(tmp_path: Path, wf: Path, md: str, bad: str | None) -> None:
+    if bad is None:
+        md = md.replace("Depends: `A-1`", "Depends: `S-1`")
+        bad = "S-1"
+    out = frun(wf, tmp_path, md)
+    assert out["result"] == {"error": "dangling-depends", "waveId": "w010", "dangling": [bad]}
+    assert labels(out) == ["parse:preflight", "parse"]
+    assert logged(out, bad)
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_depends_on_done_todo_counts_as_met(tmp_path: Path, wf: Path) -> None:
+    out = frun(wf, tmp_path, BASE_MD.replace("[ ] `A-1`", "[x] `A-1`"))
+    assert "error" not in out["result"], out["result"]
+    assert impl_labels(out) == ["impl:B-1"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_depends_ids_must_be_todo_shaped_so_backticked_paths_in_comments_pass(tmp_path: Path, wf: Path) -> None:
+    md = BASE_MD.replace("Depends: `A-1`", "Depends: `A-1` (same `docs/tools.md`), (see `MCP_SUFFIX`)")
+    out = frun(wf, tmp_path, md)
+    assert "error" not in out["result"], out["result"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_archive_step_edit_does_not_trip_the_freeze(tmp_path: Path, wf: Path) -> None:
+    out = frun(wf, tmp_path, BASE_MD, [("^gate:archive-commit$", [ARCH_OK], (live_path(tmp_path), ""))])
+    assert "error" not in out["result"] and "archive" in labels(out)
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_scope_adopted_by_rescan_does_not_trip_the_freeze(tmp_path: Path, wf: Path) -> None:
+    wv = two_dep_groups()
+    mutated = BASE_MD.replace("  - Depends: `A-1`\n", "  - Modifies: `src/tools/late.py`\n  - Depends: `A-1`\n")
+    reply = scan_reply(wv, ("src/tools/late.py", "B-1", "modify"))
+    out = frun(wf, tmp_path, BASE_MD, [("^scan:scope:", [reply], (live_path(tmp_path), mutated))], wv=wv)
+    assert "error" not in out["result"] and "archive" in labels(out)
+    assert "src/tools/late.py" in call(out, "gate:archive-commit")["prompt"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_implementer_tick_does_not_trip_the_freeze(tmp_path: Path, wf: Path) -> None:
+    ticked = BASE_MD.replace("[ ] `A-1`", "[x] `A-1`")
+    out = frun(wf, tmp_path, BASE_MD, [("^impl:A-1$", ["done"], (live_path(tmp_path), ticked))])
+    assert "error" not in out["result"] and "impl:B-1" in labels(out) and "freeze:tier2" in labels(out)
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_plan_review_fix_before_the_last_reparse_does_not_trip_the_freeze(tmp_path: Path, wf: Path) -> None:
+    fixed = BASE_MD.replace("Depends: `A-1`", "Depends: `A-1` (after A)") + "  - SI: SI-1\n"
+    out = frun(wf, tmp_path, BASE_MD, [("^rt:todos:", [SLICE_PLAN, CLEAN_PLAN]),
+                                       ("^plan:fix:r1$", ["done"], (live_path(tmp_path), fixed))])
+    assert "error" not in out["result"], out["result"]
+    assert "parse:preflight:replan" in labels(out) and "impl:B-1" in labels(out)
+    no_capture_agent(out)
+
+
+def test_planner_copies_are_byte_identical() -> None:
+    paths = [REPO_ROOT / "harness" / "agents" / "core" / "planner.md",
+             REPO_ROOT / ".claude" / "agents" / "core" / "planner.md",
+             REPO_ROOT / "template" / ".claude" / "agents" / "core" / "planner.md"]
+    paths = [p for p in paths if p.exists()]
+    assert len(paths) >= 2 and len({p.read_bytes() for p in paths}) == 1
+    text = paths[0].read_text()
+    assert "backticks" in text and "`(none)`" in text
+    assert re.search(r"^\s*- Depends: `P0-01`$", text, re.M) and "\\`" not in text
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_all_done_or_skipped_wave_with_done_dep_on_skipped_todo_still_archives(tmp_path: Path, wf: Path) -> None:
+    md = ("# Wave w010\n\n- [x] `A-1` first ‖ group:A\n  - Creates: `src/tools/a.py`\n  - Depends: `S-1`\n"
+          "- [~] `S-1` skipped ‖ group:S\n")
+    out = frun(wf, tmp_path, md, wv=wave())
+    assert "error" not in out["result"], out["result"]
+    ls = labels(out)
+    assert ls.index("freeze:pre-archive") < ls.index("gate:pre-archive") < ls.index("archive")
+    assert not logged(out, "dangling")
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_skipped_todo_is_scanned_but_never_dispatched_nor_a_parse_mismatch(tmp_path: Path, wf: Path) -> None:
+    md = BASE_MD + "- [~] `S-1` skipped ‖ group:S\n  - HUMAN GATE: x\n"
+    facts = md_facts(wf, tmp_path, md)
+    assert {"id": "S-1", "dependsText": [], "held": True, "done": False, "skip": True} in facts
+    out = frun(wf, tmp_path, md)
+    assert "error" not in out["result"], out["result"]
+    assert "impl:S-1" not in labels(out) and not out["result"]["failedGroups"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_preflight_schema_requires_skip_boolean_and_missing_skip_fails_closed(tmp_path: Path, wf: Path) -> None:
+    text = wf.read_text()
+    block = text[text.index("const PREFLIGHT_SCHEMA"):text.index("const WAVE_SCHEMA")]
+    assert "required: ['id', 'dependsText', 'held', 'done', 'skip']" in block
+    assert "skip: { type: 'boolean' }" in block
+    out = run(pf=dict(PF, todoFacts=[{"id": "A-1", "dependsText": [], "held": False, "done": False}]),
+              wf=wf, tmp_path=tmp_path)
+    assert out["result"]["error"] == "preflight-failed" and labels(out) == ["parse:preflight"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("bad", BAD_FREEZE_RELAYS)
+def test_unreadable_freeze_before_a_tier_stops_with_freeze_check_failed(tmp_path: Path, wf: Path, bad: object) -> None:
+    out = run([("^freeze:tier1$", [bad])], wf=wf, tmp_path=tmp_path)
+    assert out["result"]["error"] == "freeze-check-failed"
+    assert labels(out)[-1] == "freeze:tier1"
+    assert not [l for l in labels(out) if l.startswith(("impl:", "gate:", "rt:unit", "archive"))]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("bad", BAD_FREEZE_RELAYS)
+def test_unreadable_freeze_before_pre_archive_stops_before_the_gate(tmp_path: Path, wf: Path, bad: object) -> None:
+    out = run([("^freeze:pre-archive$", [bad])], wf=wf, tmp_path=tmp_path)
+    assert out["result"]["error"] == "freeze-check-failed"
+    assert labels(out)[-1] == "freeze:pre-archive"
+    assert "gate:pre-archive" not in labels(out) and "archive" not in labels(out)
+    assert not logged(out, "a" * 64)
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("bad", [{"missing": True}, "XYZ", "A" * 64, "a" * 63, 5])
+def test_bad_freeze_hash_in_the_first_preflight_stops_at_parse(tmp_path: Path, wf: Path, bad: object) -> None:
+    pf = {k: v for k, v in PF.items() if k != "freezeHash"}
+    if not (isinstance(bad, dict) and bad.get("missing")):
+        pf["freezeHash"] = bad
+    out = run(pf=pf, wf=wf, tmp_path=tmp_path)
+    assert out["result"]["error"] == "preflight-failed" and labels(out) == ["parse:preflight"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("bad", [{"missing": True}, "XYZ", "A" * 64])
+def test_bad_freeze_hash_in_the_replan_preflight_stops_at_parse(tmp_path: Path, wf: Path, bad: object) -> None:
+    pf = {k: v for k, v in PF.items() if k != "freezeHash"}
+    pf["todoFacts"] = facts_for(wave(), wf, tmp_path)
+    if not (isinstance(bad, dict) and bad.get("missing")):
+        pf["freezeHash"] = bad
+    out = run([("^rt:todos:", [SLICE_PLAN, CLEAN_PLAN]), ("^parse:preflight:replan$", [pf])], wf=wf, tmp_path=tmp_path)
+    assert out["result"]["error"] == "preflight-failed"
+    ls = labels(out)
+    assert ls[-1] == "parse:preflight:replan" and not [l for l in ls if l.startswith(("impl:", "gate:", "archive"))]
+
+
+def _real_wave_text() -> str:
+    for p in sorted((REPO_ROOT / "workspace" / "todos" / "completed").glob("*.md")):
+        lines = p.read_text(encoding="utf-8").split("\n")
+        idx = next((i for i, l in enumerate(lines) if re.match(r"\s*[-*+]\s*\[.\]\s*`", l)), None)
+        if idx is None or "‖ group:" not in lines[idx]:
+            continue
+        j = idx + 1
+        while j < len(lines) and not re.match(r"\s*(?:[-*+]\s*\[.\]|#{1,6}\s)", lines[j]):
+            if "Depends:" in lines[j]:
+                return "\n".join(lines)
+            j += 1
+    raise AssertionError("no completed wave file with a grouped todo carrying Depends:")
+
+
+def _first_todo_idx(lines: list[str]) -> int:
+    return next(i for i, l in enumerate(lines) if re.match(r"\s*[-*+]\s*\[.\]\s*`", l))
+
+
+def _freeze_hash(tmp_path: Path, text: str) -> str:
+    script = tmp_path / "freeze_scan.py"
+    script.write_text(_py_const_script(WC, "FREEZE_SCAN_PY"), encoding="utf-8")
+    md = tmp_path / "freeze-wave.md"
+    md.write_text(text, encoding="utf-8")
+    got = json.loads(subprocess.run([sys.executable, str(script), str(md)], capture_output=True, text=True,
+                                    check=True).stdout)
+    assert got["ok"] is True and re.fullmatch(r"[0-9a-f]{64}", got["hash"]) and got["todoCount"] > 0
+    return got["hash"]
+
+
+def _mutate(text: str, how: str) -> str:
+    lines = text.split("\n")
+    i = _first_todo_idx(lines)
+    if how == "tick":
+        lines[i] = re.sub(r"\[(.)\]", lambda m: "[ ]" if m.group(1) == "x" else "[x]", lines[i], count=1)
+    elif how == "modifies":
+        lines.insert(i + 1, "  - Modifies: `src/new_path.py`")
+    elif how == "new-todo":
+        lines.insert(i + 1, "- [ ] `ZZ-99` brand new todo")
+    elif how == "depends":
+        k = next(n for n in range(i + 1, len(lines)) if "Depends:" in lines[n])
+        lines[k] = lines[k].replace("Depends:", "Depends: `ZZ-98`,", 1)
+    elif how == "group":
+        lines[i] = re.sub(r"‖ group:\S+", "‖ group:ZZ", lines[i], count=1)
+    elif how == "skip":
+        lines[i] = re.sub(r"\[.\]", "[~]", lines[i], count=1)
+    elif how == "gate":
+        lines.insert(i + 1, "  - HUMAN GATE: owner sign-off")
+    elif how == "gate-released":
+        lines.insert(i + 1, "  - HUMAN GATE: owner sign-off")
+        lines.insert(i + 2, "  - Release: https://github.com/wailuen/a2a-sdk/issues/1")
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize("how", ["tick", "modifies"])
+def test_freeze_hash_ignores_ticks_and_modifies_lines(tmp_path: Path, how: str) -> None:
+    text = _real_wave_text()
+    assert _freeze_hash(tmp_path, _mutate(text, how)) == _freeze_hash(tmp_path, text)
+
+
+@pytest.mark.parametrize("how", ["new-todo", "depends", "group", "skip", "gate"])
+def test_freeze_hash_changes_with_structure(tmp_path: Path, how: str) -> None:
+    text = _real_wave_text()
+    first = re.sub(r"\[.\]", "[ ]", text.split("\n")[_first_todo_idx(text.split("\n"))], count=1)
+    assert first and _freeze_hash(tmp_path, _mutate(text, how)) != _freeze_hash(tmp_path, text)
+
+
+def test_existing_completed_wave_files_still_parse_without_dangling(tmp_path: Path) -> None:
+    scanned = 0
+    for p in sorted((REPO_ROOT / "workspace" / "todos" / "completed").glob("*.md")):
+        facts = md_facts(WC, tmp_path, p.read_text(encoding="utf-8"))
+        live = [f for f in facts if not f["skip"]]
+        if not live:
+            continue
+        scanned += 1
+        wv = wave([{"label": "G", "creates": ["src/tools/a.py"], "modifies": [],
+                    "todos": [todo(f["id"]) for f in live]}], {"G": []})
+        out = run(pf=dict(PF, todoFacts=[dict(f, done=False) for f in facts]), wv=wv, tmp_path=tmp_path)
+        assert out["result"].get("error") != "dangling-depends", (p.name, out["result"])
+    assert scanned >= 20
+
+
+def test_freeze_source_is_identical_across_runners() -> None:
+    def parts(wf: Path) -> tuple:
+        t = wf.read_text()
+        schema = re.search(r"const FREEZE_SCHEMA = \{[\s\S]*?\n\}\n", t).group(0)
+        prop = re.search(r"freezeHash:\s*(\{[^\n]*\})", t).group(1)
+        return _py_const_script(wf, "FREEZE_SCAN_PY"), schema, prop
+
+    got = [parts(wf) for wf in RUNNERS + WAVE_CYCLE_COPIES]
+    assert len(set(got)) == 1
+    assert "'^[0-9a-f]{64}$'" in got[0][2] and "additionalProperties: false" in got[0][1]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("edit", sorted(EDITS))
+def test_baseline_belongs_to_the_consumed_preflight_no_plan_edit(tmp_path: Path, wf: Path, edit: str) -> None:
+    out = frun(wf, tmp_path, BASE_MD, [("^rt:todos:", [CLEAN_PLAN], (live_path(tmp_path), EDITS[edit](BASE_MD)))])
+    assert out["result"]["error"] == "wave-file-changed"
+    assert labels(out)[-1] == "freeze:tier1" and not impl_labels(out)
+    no_capture_agent(out)
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("edit", sorted(EDITS))
+def test_baseline_belongs_to_the_replan_preflight_when_plan_was_edited(tmp_path: Path, wf: Path, edit: str) -> None:
+    out = frun(wf, tmp_path, BASE_MD, [("^rt:todos:", [SLICE_PLAN, CLEAN_PLAN]),
+                                       ("^parse:replan$", [two_dep_groups()], (live_path(tmp_path), EDITS[edit](BASE_MD)))])
+    assert "parse:preflight:replan" in labels(out)
+    assert out["result"]["error"] == "wave-file-changed"
+    assert labels(out)[-1] == "freeze:tier1" and not impl_labels(out)
+    no_capture_agent(out)
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("edit", sorted(EDITS))
+@pytest.mark.parametrize("resume", ["auto", "arg"])
+def test_resume_paths_check_the_freeze_before_the_pre_archive_gate(tmp_path: Path, wf: Path, edit: str, resume: str) -> None:
+    md = DONE_MD if resume == "auto" else BASE_MD
+    args = LIVE_ARGS if resume == "auto" else dict(LIVE_ARGS, resumeAt="archive")
+    out = frun(wf, tmp_path, md, [("^parse$", [two_dep_groups()], (live_path(tmp_path), EDITS[edit](md)))], args=args)
+    assert out["result"]["error"] == "wave-file-changed"
+    assert labels(out)[-1] == "freeze:pre-archive"
+    assert "gate:pre-archive" not in labels(out) and "archive" not in labels(out)
+    no_capture_agent(out)
+
+
+# ─── w071 review follow-ups ──────────────────────────────────────────────────
+
+RESUME_KINDS = ["auto", "arg"]
+
+
+def resume_case(kind: str) -> tuple[dict, dict]:
+    """(preflight, args) that take the archive-only resume path either automatically or by args.resumeAt."""
+    if kind == "auto":
+        return with_facts(fact("G-1", done=True)), dict(LIVE_ARGS)
+    return with_facts(fact("G-1", done=True), fact("G-2")), dict(LIVE_ARGS, resumeAt="archive")
+
+
+RESUME_WV = wave([group("G", ["src/tools/a.py"], ["G-1"])])
+
+
+def resume_run(wf: Path, tmp_path: Path, kind: str, rules: list | None = None) -> dict:
+    pf, args = resume_case(kind)
+    wv = RESUME_WV if kind == "auto" else wave([group("G", ["src/tools/a.py"], ["G-1", "G-2"])])
+    return run(rules, wv=wv, pf=pf, args=args, wf=wf, tmp_path=tmp_path)
+
+
+SKIPPED_LINE = "already done [x] — skipped, not re-implemented"
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_all_done_group_logs_each_done_todo_by_id(tmp_path: Path, wf: Path) -> None:
+    out = run(wv=done_dep_wave(), pf=with_facts(*DONE_DEP_FACTS, scope=["src/tools/g2.py", "src/tools/g3.py"]),
+              wf=wf, tmp_path=tmp_path)
+    assert logged(out, "Todo GH-278 " + SKIPPED_LINE)
+    assert not logged(out, "Todo GH-279 " + SKIPPED_LINE)
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("kind", RESUME_KINDS)
+def test_resume_logs_each_done_todo_by_id(tmp_path: Path, wf: Path, kind: str) -> None:
+    out = resume_run(wf, tmp_path, kind)
+    assert logged(out, "Todo G-1 " + SKIPPED_LINE)
+    assert not logged(out, "Todo G-2 " + SKIPPED_LINE)
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_null_resume_at_means_absent(tmp_path: Path, wf: Path) -> None:
+    out = run(args=dict(LIVE_ARGS, resumeAt=None), wf=wf, tmp_path=tmp_path)
+    assert "error" not in out and "impl:A-1" in labels(out) and "archive" in labels(out)
+    assert not logged(out, "Resuming at archive")
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_held_note_is_tagged_with_the_phase_that_runs_it(tmp_path: Path, wf: Path) -> None:
+    held = with_facts(fact("G-1", done=True, held=True))
+    resumed = run(wv=RESUME_WV, pf=held, args=LIVE_ARGS, wf=wf, tmp_path=tmp_path)
+    assert call(resumed, "defer:held:G")["phase"] == "Archive"
+    tier = run(wv=wave([group("G", ["src/tools/a.py"], ["G-1"])]), pf=with_facts(fact("G-1", held=True)),
+               args=LIVE_ARGS, wf=wf, tmp_path=tmp_path)
+    assert call(tier, "defer:held:G")["phase"] == "Implement"
+
+
+# ── archive-only resume fails closed (GH-278 ruling addendum) ──
+
+NOTE = "w010-group-A-budget-exhausted.md"
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("kind", RESUME_KINDS)
+def test_resume_refused_while_a_blocking_note_is_unresolved(tmp_path: Path, wf: Path, kind: str) -> None:
+    out = resume_run(wf, tmp_path, kind, [("^resume:notes$", [{"ok": True, "blocking": [NOTE]}])])
+    ls = labels(out)
+    assert "resume:notes" in ls and "w010" in call(out, "resume:notes")["prompt"]
+    assert not [l for l in ls if l in ("gate:pre-archive", "gate:archive-commit", "archive") or l.startswith("freeze:")]
+    r = out["result"]
+    assert r["protocolBlocked"] is True and r["resumeBlockedNotes"] == [NOTE]
+    assert logged(out, "Archive SKIPPED") and logged(out, NOTE)
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("kind", RESUME_KINDS)
+@pytest.mark.parametrize("bad", [None, {"ok": False, "blocking": [], "error": "boom"}, {"ok": True},
+                                 {"ok": True, "blocking": "x.md"}, {"ok": True, "blocking": ["../../etc/passwd"]}])
+def test_untrustworthy_note_check_blocks_the_resume(tmp_path: Path, wf: Path, kind: str, bad: object) -> None:
+    out = resume_run(wf, tmp_path, kind, [("^resume:notes$", [bad])])
+    assert "archive" not in labels(out) and "gate:pre-archive" not in labels(out)
+    assert out["result"]["protocolBlocked"] is True
+    assert logged(out, "Archive SKIPPED")
+    assert not logged(out, "etc/passwd")
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("kind", RESUME_KINDS)
+def test_resume_with_no_blocking_note_archives(tmp_path: Path, wf: Path, kind: str) -> None:
+    out = resume_run(wf, tmp_path, kind)
+    assert "archive" in labels(out) and out["result"]["resumeBlockedNotes"] == []
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_normal_paths_never_run_the_resume_checks(tmp_path: Path, wf: Path) -> None:
+    ls = labels(run(wf=wf, tmp_path=tmp_path))
+    assert "resume:notes" not in ls and "deliv:resume" not in ls
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("kind", RESUME_KINDS)
+@pytest.mark.parametrize("gate", [{"ok": True, "checked": ["G"], "missing": [{"label": "G", "paths": ["src/tools/a.py"]}]}, None])
+def test_resume_runs_the_deliverable_gate_and_blocks_on_missing_files(tmp_path: Path, wf: Path, kind: str, gate: object) -> None:
+    out = resume_run(wf, tmp_path, kind, [("^deliv:resume$", [gate])])
+    ls = labels(out)
+    assert '"since":0' in call(out, "deliv:resume")["prompt"]
+    assert not [l for l in ls if l in ("gate:pre-archive", "gate:archive-commit", "archive")]
+    r = out["result"]
+    assert r["deliverablesBlocked"] and r["protocolBlocked"] and r["failedGroups"] == ["G"]
+    assert logged(out, "Archive SKIPPED")
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("kind", RESUME_KINDS)
+def test_resume_freeze_check_runs_right_before_the_pre_archive_gate(tmp_path: Path, wf: Path, kind: str) -> None:
+    ls = labels(resume_run(wf, tmp_path, kind))
+    assert ls.index("freeze:pre-archive") + 1 == ls.index("gate:pre-archive")
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_freeze_check_follows_held_notes_on_resume_and_precedes_the_gate_on_every_path(tmp_path: Path, wf: Path) -> None:
+    held = run(wv=RESUME_WV, pf=with_facts(fact("G-1", done=True, held=True)), args=LIVE_ARGS, wf=wf, tmp_path=tmp_path)
+    ls = labels(held)
+    assert ls.index("defer:held:G") < ls.index("freeze:pre-archive")
+    assert ls.index("freeze:pre-archive") + 1 == ls.index("gate:pre-archive")
+    normal = labels(run(wf=wf, tmp_path=tmp_path))
+    assert normal.index("freeze:pre-archive") + 1 == normal.index("gate:pre-archive")
+
+
+def _notes_script(wf: Path) -> str:
+    return _py_const_script(wf, "RESUME_NOTES_PY")
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_resume_notes_script_lists_only_unresolved_blocking_notes_of_this_wave(tmp_path: Path, wf: Path) -> None:
+    d = tmp_path / "workspace" / "todos" / "deferred"
+    d.mkdir(parents=True)
+    files = {
+        "w010-group-A-budget-exhausted.md": "findings\n",
+        "w010-phase-rt-null-budget.md": "findings\n",
+        "w010-group-B-rt-mismatch-budget.md": "- finding\nResolved\n",
+        "w010-group-A-tests-red-r2.md": "findings\nnot Resolved: yet\n",
+        "w010-group-C-budget-exhausted.md": "findings\nResolved 2026-11-12: all findings fixed\n",
+        "w010-group-D-budget-exhausted.md": "findings\n- **Resolved:** fixed in abc123\n",
+        "w010-group-E-budget-exhausted.md": "findings\nResolved:\n",
+        "w010-group-A-medium-low.md": "findings\n",
+        "w010-group-A-held.md": "findings\n",
+        "w010-proto-tests-red.md": "findings\n",
+        "w010-group-A-gate-null-r3.md": "findings\n",
+        "w011-group-A-budget-exhausted.md": "other wave\n",
+        "w0100-group-A-budget-exhausted.md": "other wave\n",
+    }
+    for name, text in files.items():
+        (d / name).write_text(text, encoding="utf-8")
+    got = _py(_notes_script(wf), tmp_path, "w010")
+    assert got["ok"] is True
+    assert sorted(got["blocking"]) == ["w010-group-A-budget-exhausted.md", "w010-group-A-gate-null-r3.md",
+                                       "w010-group-A-tests-red-r2.md",
+                                       "w010-group-B-rt-mismatch-budget.md", "w010-group-E-budget-exhausted.md",
+                                       "w010-phase-rt-null-budget.md", "w010-proto-tests-red.md"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_resume_notes_script_without_deferred_dir_is_clean(tmp_path: Path, wf: Path) -> None:
+    assert _py(_notes_script(wf), tmp_path, "w010") == {"ok": True, "blocking": []}
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_resume_notes_script_treats_an_unreadable_note_as_blocking(tmp_path: Path, wf: Path) -> None:
+    d = tmp_path / "workspace" / "todos" / "deferred"
+    d.mkdir(parents=True)
+    (d / "w010-group-A-budget-exhausted.md").write_bytes(b"\xff\xfe\x00bad")
+    assert _py(_notes_script(wf), tmp_path, "w010")["blocking"] == ["w010-group-A-budget-exhausted.md"]
+
+
+# ── the runner enforces [~] on the model's groups ──
+
+SKIP_FACT = {"id": "S-1", "dependsText": [], "held": False, "done": False, "skip": True}
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_runner_drops_skip_todos_the_model_put_in_a_group(tmp_path: Path, wf: Path) -> None:
+    wv = wave([group("A", ["src/tools/a.py"], ["A-1", "S-1"])])
+    out = run(wv=wv, pf=with_facts(fact("A-1"), SKIP_FACT), wf=wf, tmp_path=tmp_path)
+    assert impl_labels(out) == ["impl:A-1"]
+    assert out["result"]["totalTodos"] == 1
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_group_left_empty_by_skip_is_dropped_and_does_not_block_dependents(tmp_path: Path, wf: Path) -> None:
+    wv = wave([group("A", ["src/tools/a.py"]), group("S", [], ["S-1"]), group("B", ["src/tools/b.py"])],
+              {"A": [], "S": [], "B": ["S"]})
+    out = run(wv=wv, pf=with_facts(fact("A-1"), SKIP_FACT, fact("B-1"), scope=["src/tools/a.py", "src/tools/b.py"]),
+              wf=wf, tmp_path=tmp_path)
+    assert sorted(impl_labels(out)) == ["impl:A-1", "impl:B-1"]
+    assert "impl:S-1" not in labels(out) and not logged(out, "unresolvable group dependency")
+    assert out["result"]["groupsExecuted"] == 2 and not out["result"]["failedGroups"]
+
+
+# ── Depends: ids in every format the resolver accepts ──
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("text,bad", [
+    ("A-1, Z-9", ["Z-9"]),
+    ("A-1 (after Y-8), Z-9", ["Y-8", "Z-9"]),
+    ("`A-1`, `T9`", ["T9"]),
+    ("`A-1`, `GH278`", ["GH278"]),
+    ("`A-1`, GH-12", ["GH-12"]),
+])
+def test_dangling_depends_covers_unbackticked_and_hyphen_free_ids(tmp_path: Path, wf: Path, text: str, bad: list) -> None:
+    out = frun(wf, tmp_path, BASE_MD.replace("Depends: `A-1`", "Depends: " + text))
+    assert out["result"] == {"error": "dangling-depends", "waveId": "w010", "dangling": bad}
+    assert labels(out) == ["parse:preflight", "parse"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+@pytest.mark.parametrize("text", [
+    "A-1 (W0 complete)", "A-1, see docs/tools.md", "A-1 (same `agent_sdk/app.py`), `MCP_SUFFIX`",
+    "(none)", "A-1.", "A-1 and the v2 api", "A-1 (utf-8 text)", "A-1, P0-04 (W0 complete)", "W4 complete (P4-06), A-1",
+])
+def test_dependency_prose_around_a_known_id_is_not_dangling(tmp_path: Path, wf: Path, text: str) -> None:
+    out = frun(wf, tmp_path, BASE_MD.replace("Depends: `A-1`", "Depends: " + text))
+    assert "error" not in out["result"], out["result"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_backticked_id_stays_checked_next_to_a_wave_reference(tmp_path: Path, wf: Path) -> None:
+    out = frun(wf, tmp_path, BASE_MD.replace("Depends: `A-1`", "Depends: `A-1`, `Z-9` (W0 complete)"))
+    assert out["result"]["dangling"] == ["Z-9"]
+
+
+@pytest.mark.parametrize("wf", RUNNERS, ids=RUNNER_IDS)
+def test_hyphen_free_known_ids_resolve_and_order(tmp_path: Path, wf: Path) -> None:
+    md = ("# Wave w010\n\n- [ ] `T1` first ‖ group:A\n  - Creates: `src/tools/a.py`\n  - Depends: (none)\n"
+          "- [ ] `T2` second ‖ group:B\n  - Creates: `src/tools/b.py`\n  - Depends: `T1`\n")
+    wv = wave([group("A", ["src/tools/a.py"], ["T1"]), group("B", ["src/tools/b.py"], ["T2"])], {"A": [], "B": []})
+    out = frun(wf, tmp_path, md, wv=wv)
+    assert "error" not in out["result"], out["result"]
+    assert impl_labels(out) == ["impl:T1", "impl:T2"] or labels(out).index("impl:T1") < labels(out).index("impl:T2")
+
+
+@pytest.mark.parametrize("how,same", [("gate", False), ("gate-released", True)])
+def test_freeze_hash_tracks_the_held_flag_not_the_marker_text(tmp_path: Path, how: str, same: bool) -> None:
+    text = _real_wave_text()
+    assert (_freeze_hash(tmp_path, _mutate(text, how)) == _freeze_hash(tmp_path, text)) is same
+
+
+def test_releasing_a_gate_changes_the_freeze_hash(tmp_path: Path) -> None:
+    text = _real_wave_text()
+    assert _freeze_hash(tmp_path, _mutate(text, "gate")) != _freeze_hash(tmp_path, _mutate(text, "gate-released"))
+
+
+def test_planner_example_depends_is_in_the_form_the_runner_checks() -> None:
+    for p in [REPO_ROOT / "harness" / "agents" / "core" / "planner.md",
+              REPO_ROOT / ".claude" / "agents" / "core" / "planner.md",
+              REPO_ROOT / "template" / ".claude" / "agents" / "core" / "planner.md"]:
+        if p.exists():
+            assert re.search(r"^\s*- Depends: `P0-01`$", p.read_text(), re.M), p

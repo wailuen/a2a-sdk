@@ -107,6 +107,12 @@
 | C-114 | run_with_request_context (bind identity + forwarded credentials inside the worker task) | agent_sdk/auth/context.py (or agent_sdk/common/) | planned |
 | C-115 | ShieldedStreamWorker / anchor_slot (phased shielded worker + liveness anchor + last-of-two slot release) | agent_sdk/common/admission.py (beside StreamSlot; today hand-written in agent_sdk/routes/mcp.py SSE answer mode) | planned |
 | C-116 | Raw-ASGI concurrent stream test driver | agent_sdk/testing/ (or tests/ helper module) | planned |
+| C-117 | TODO_SCAN_PY (per-todo facts: id, skip/done, held, dependsText/dependsIds; PREFLIGHT_SCHEMA relay; needs cross-runner parity test) | harness/workflows/wave-cycle.js + .claude/workflows/sdk-wave.js (+ .claude/ and template/.claude/ mirrors) | present |
+| C-118 | WAVE_FILE_FREEZE (FREEZE_SCAN_PY + FREEZE_SCHEMA + readFreezeHash: hash of todo id, group label, [~] flag, Depends: lines; checked before each tier and gate:pre-archive; fail closed freeze-check-failed / wave-file-changed; one exemption list for runner-made edits) | harness/workflows/wave-cycle.js + .claude/workflows/sdk-wave.js (+ .claude/ and template/.claude/ mirrors) | present |
+| C-119 | RESUME_AT_ARCHIVE path (auto/forced resume straight to pre-archive gate, archive-commit gate, archive when all todos [x]/[~]) | harness/workflows/wave-cycle.js + .claude/workflows/sdk-wave.js (+ mirrors) | present |
+| C-120 | oauth_display_label(meta, client_id) (IdP claim label, else oauth:<client_id[:8]>, never client_name; for token endpoint, rotate_refresh, verify()) | agent_sdk/auth/oauth_tokens.py | planned |
+| C-121 | DEPENDS_ID_SCAN / dangling-depends validator (backticked Depends: ids; (none)/empty valid, [x] met, unknown or [~] dangling; replaces deriveGroupDeps substring match) | TODO_SCAN_PY in harness/workflows/wave-cycle.js + .claude/workflows/sdk-wave.js; Python reference beside harness/wave_scope.py | present |
+| C-122 | assert_no_request_context_bound (test helper: current_identity() None and forwarding ContextVar empty after request, incl. 401/403, AgentError, timeout) | tests/ (conftest or shared helper module) | planned |
 
 ## Descriptions
 
